@@ -825,29 +825,37 @@ fn symbolic_value_for_type(
         MirLayout::Unit if descriptor.is_canonical_ffi_unit() => {
             Ok((SymbolicValue::Unit, Vec::new()))
         }
-        MirLayout::Scalar => match descriptor.abi {
-            MirAbiClass::Integer {
-                bits: 32 | 64,
-                signed: true,
-            } => {
-                let MirAbiClass::Integer { bits, .. } = descriptor.abi else {
-                    unreachable!()
-                };
-                let symbol = Int::new_const(name);
-                Ok((
-                    SymbolicValue::Int(symbol.clone()),
-                    vec![int_range_constraint(&symbol, bits)],
-                ))
+        MirLayout::Scalar => {
+            if !descriptor.is_canonical_copy_scalar(true) {
+                return Err(format!(
+                    "MIR verifier scalar TypeDesc '{}' is outside the complete Copy scalar shape",
+                    ty.as_str()
+                ));
             }
-            MirAbiClass::Bool => Ok((SymbolicValue::Bool(Bool::new_const(name)), Vec::new())),
-            MirAbiClass::Float { bits: 32 | 64 } => {
-                Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()))
+            match descriptor.abi {
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } => {
+                    let MirAbiClass::Integer { bits, .. } = descriptor.abi else {
+                        unreachable!()
+                    };
+                    let symbol = Int::new_const(name);
+                    Ok((
+                        SymbolicValue::Int(symbol.clone()),
+                        vec![int_range_constraint(&symbol, bits)],
+                    ))
+                }
+                MirAbiClass::Bool => Ok((SymbolicValue::Bool(Bool::new_const(name)), Vec::new())),
+                MirAbiClass::Float { bits: 32 | 64 } => {
+                    Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()))
+                }
+                abi => Err(format!(
+                    "MIR verifier ABI {:?} is outside the checked scalar contract",
+                    abi
+                )),
             }
-            abi => Err(format!(
-                "MIR verifier ABI {:?} is outside the checked scalar contract",
-                abi
-            )),
-        },
+        }
         MirLayout::Tuple(elements) => {
             let mut values = Vec::with_capacity(elements.len());
             let mut constraints = Vec::new();
@@ -4906,11 +4914,11 @@ fn symbolic_zero_for_type(
         MirAbiClass::Integer {
             bits: 32 | 64,
             signed: true,
-        } if descriptor.layout == MirLayout::Scalar => Ok(SymbolicValue::Int(Int::from_i64(0))),
-        MirAbiClass::Bool if descriptor.layout == MirLayout::Scalar => {
+        } if descriptor.is_canonical_copy_scalar(false) => Ok(SymbolicValue::Int(Int::from_i64(0))),
+        MirAbiClass::Bool if descriptor.is_canonical_copy_scalar(false) => {
             Ok(SymbolicValue::Bool(Bool::from_bool(false)))
         }
-        MirAbiClass::Float { bits: 32 | 64 } if descriptor.layout == MirLayout::Scalar => {
+        MirAbiClass::Float { bits: 32 | 64 } if descriptor.is_canonical_copy_scalar(true) => {
             Ok(SymbolicValue::Opaque { ty: ty.clone() })
         }
         _ => Err(format!(
@@ -6240,6 +6248,10 @@ fn symbolic_matches_type(
     let Some(descriptor) = catalog.get(ty) else {
         return false;
     };
+    if matches!(descriptor.layout, MirLayout::Scalar) && !descriptor.is_canonical_copy_scalar(true)
+    {
+        return false;
+    }
     match (&descriptor.layout, &descriptor.abi, value) {
         (_, _, SymbolicValue::Unit) if descriptor.is_canonical_ffi_unit() => true,
         (
@@ -6767,6 +6779,36 @@ mod tests {
             &catalog,
             &unit_id,
             &super::SymbolicValue::Unit,
+        ));
+    }
+
+    #[test]
+    fn verifier_symbolic_scalar_shape_requires_primitive_identity() {
+        let source = "func main() -> i64 { 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mut catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+            .expect("scalar TypeDesc catalog");
+        let i64_id = checked
+            .resolved_types()
+            .iter()
+            .find_map(|(id, ty)| {
+                matches!(ty, ResolvedType::Primitive(PrimitiveType::I64)).then_some(id.clone())
+            })
+            .expect("i64 TypeDesc identity");
+        let descriptor = catalog.get(&i64_id).expect("i64 TypeDesc").clone();
+        assert!(descriptor.is_canonical_copy_scalar(false));
+        let mut forged = descriptor;
+        forged.kind = crate::core::mir::types::MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i64_id.clone(), forged);
+
+        assert!(super::symbolic_value_for_type(&catalog, &i64_id, "x").is_err());
+        assert!(super::symbolic_zero_for_type(&catalog, &i64_id).is_err());
+        assert!(!super::symbolic_matches_type(
+            &catalog,
+            &i64_id,
+            &super::SymbolicValue::Int(z3::ast::Int::from_i64(0)),
         ));
     }
 
