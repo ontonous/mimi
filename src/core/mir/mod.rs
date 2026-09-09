@@ -37,6 +37,12 @@ pub(crate) fn validate_ffi_symbol_matches_callee(
     callee: &NodeId,
     symbol: &str,
 ) -> Result<(), String> {
+    if !callee.0.starts_with("extern:C:") {
+        return Err(format!(
+            "extern callee '{}' is outside the canonical C ABI",
+            callee.0
+        ));
+    }
     let Some((_, owner_tail)) = callee.0.rsplit_once("/function:") else {
         return Err(format!(
             "extern callee '{}' is not a canonical extern function identity",

@@ -12098,6 +12098,55 @@ func main() -> i64 { foreign(1 as i64); 0 }
                 .contains("symbol disagrees with canonical extern callee")),
             "{errors:?}"
         );
+
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let instruction_id = program
+            .ffi_calls()
+            .keys()
+            .next()
+            .cloned()
+            .expect("FFI receipt");
+        let original_callee = program
+            .ffi_calls()
+            .get(&instruction_id)
+            .expect("FFI receipt")
+            .callee
+            .clone();
+        let rust_callee = NodeId(original_callee.0.replacen("extern:C:", "extern:Rust:", 1));
+        let mut functions = program.functions().clone();
+        let main = functions
+            .get_mut(&NodeId("function:main".into()))
+            .expect("main MIR");
+        let call = main
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| instruction.id == instruction_id)
+            .expect("extern call");
+        if let MirInstructionKind::Call { callee, .. } = &mut call.kind {
+            *callee = ResolvedCallee::Extern(rust_callee.clone());
+        }
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .callee = rust_callee;
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("non-C extern owners must fail at MIR admission");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("outside the canonical C ABI")),
+            "{errors:?}"
+        );
     }
 
     #[test]
