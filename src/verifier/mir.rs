@@ -952,12 +952,7 @@ fn set_element_sort(
             element.as_str()
         )
     })?;
-    if descriptor.ownership != MirOwnership::Copy
-        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.layout != MirLayout::Scalar
-    {
+    if !descriptor.is_canonical_copy_scalar(false) {
         return Err(format!(
             "MIR verifier Set element '{}' is outside the Copy scalar contract",
             element.as_str()
@@ -1089,12 +1084,7 @@ fn value_scalar_kind(
     let descriptor = catalog
         .get(&info.ty)
         .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", info.ty.as_str()))?;
-    if descriptor.layout != MirLayout::Scalar
-        || descriptor.ownership != MirOwnership::Copy
-        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
-    {
+    if !descriptor.is_canonical_copy_scalar(false) {
         return Err(format!(
             "MIR verifier value '{}' is outside the Copy scalar TypeDesc/glue contract",
             value
@@ -1683,8 +1673,8 @@ fn eval_instruction(
                     let descriptor = catalog
                         .get(&result_ty)
                         .ok_or_else(|| "MIR float const result TypeDesc is absent".to_string())?;
-                    if !matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
-                        || descriptor.layout != MirLayout::Scalar
+                    if !descriptor.is_canonical_copy_scalar(true)
+                        || !matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
                     {
                         return Err("MIR float const literal disagrees with TypeDesc ABI".into());
                     }
@@ -3227,6 +3217,13 @@ fn ensure_copy_value(
     let descriptor = catalog
         .get(&info.ty)
         .ok_or_else(|| format!("MIR value '{}' TypeDesc is absent", value))?;
+    if matches!(descriptor.layout, MirLayout::Scalar) && !descriptor.is_canonical_copy_scalar(true)
+    {
+        return Err(format!(
+            "MIR value '{}' is outside the complete Copy scalar TypeDesc contract",
+            value
+        ));
+    }
     if descriptor.ownership != MirOwnership::Copy
         || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
         || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
@@ -6783,7 +6780,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_symbolic_scalar_shape_requires_primitive_identity() {
+    fn verifier_scalar_value_consumers_require_complete_shape() {
         let source = "func main() -> i64 { 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
@@ -6810,6 +6807,21 @@ mod tests {
             &i64_id,
             &super::SymbolicValue::Int(z3::ast::Int::from_i64(0)),
         ));
+        assert!(super::set_element_sort(&catalog, &i64_id).is_err());
+
+        let program = MirProgram::from_checked_program(&checked).expect("scalar MIR");
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.values.values().any(|value| value.ty == i64_id))
+            .expect("scalar MIR function");
+        let value = function
+            .values
+            .iter()
+            .find_map(|(value, info)| (info.ty == i64_id).then_some(value))
+            .expect("scalar MIR value");
+        assert!(super::value_scalar_kind(function, &catalog, value).is_err());
+        assert!(super::ensure_copy_value(function, &catalog, value).is_err());
     }
 
     #[test]
