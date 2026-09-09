@@ -1354,6 +1354,14 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
         "import graph receipt must be deterministic"
     );
     let manifest = parse_route_receipt_manifest(&first.stdout);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+        &String::from_utf8_lossy(&first.stdout),
+    )
+    .expect("import graph receipt must round-trip through the public API");
+    assert_eq!(
+        manifest_receipt, checked,
+        "import graph receipt round-trip changed the checked receipt"
+    );
     assert_eq!(
         manifest.get("schema").map(String::as_str),
         Some(checked.schema)
