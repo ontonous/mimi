@@ -171,6 +171,12 @@ impl CanonicalMirFfiRuntime {
             .zip(&descriptor.parameter_conversions)
             .enumerate()
         {
+            if !conversion.is_supported_argument() {
+                return Err(format!(
+                    "canonical FFI argument {index} ABI conversion from {:?} to {:?} is unsupported",
+                    conversion.from, conversion.to
+                ));
+            }
             if scalar_abi_class(scalar) != conversion.to {
                 return Err(format!(
                     "canonical FFI argument {index} conversion target {:?} disagrees with declaration ABI {:?}",
@@ -183,6 +189,12 @@ impl CanonicalMirFfiRuntime {
             .result_conversion
             .as_ref()
             .ok_or_else(|| "canonical FFI result has no conversion receipt".to_owned())?;
+        if !result_conversion.is_supported_result() {
+            return Err(format!(
+                "canonical FFI result ABI conversion from {:?} to {:?} is unsupported",
+                result_conversion.from, result_conversion.to
+            ));
+        }
         if scalar_abi_class(&descriptor.result) != result_conversion.from {
             return Err(
                 "canonical FFI result conversion source disagrees with declaration ABI".into(),
@@ -366,6 +378,12 @@ fn apply_argument_conversion(
 ) -> Result<Value, String> {
     use crate::core::mir::types::MirAbiClass;
 
+    if !conversion.is_supported_argument() {
+        return Err(format!(
+            "canonical MIR FFI argument conversion from {:?} to {:?} is unsupported",
+            conversion.from, conversion.to
+        ));
+    }
     if conversion.from == conversion.to {
         return match (conversion.from, value) {
             (
@@ -442,6 +460,12 @@ fn apply_result_conversion(
     let Some(conversion) = conversion else {
         return Ok(value);
     };
+    if !conversion.is_supported_result() {
+        return Err(format!(
+            "canonical MIR FFI result conversion from {:?} to {:?} is unsupported",
+            conversion.from, conversion.to
+        ));
+    }
     if conversion.from == conversion.to {
         return Ok(value);
     }
@@ -840,6 +864,48 @@ mod tests {
         runtime
             .validate_descriptor(&call, &[Value::Int(1)])
             .expect("predicates must use MIR-side conversion endpoints");
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_unsupported_conversion_before_library_load() {
+        use crate::core::mir::types::MirAbiClass;
+
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut argument_call = descriptor("labs", CanonicalFfiScalarType::I64);
+        argument_call.parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Bool,
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        };
+        let error = runtime
+            .call(&argument_call, &[Value::Int(1)])
+            .expect_err("unsupported argument conversion must fail at descriptor preflight");
+        assert!(error
+            .to_string()
+            .contains("argument 0 ABI conversion from Bool to Integer"));
+        assert!(runtime.loaded_libs.is_empty());
+
+        let mut result_call = descriptor("labs", CanonicalFfiScalarType::I64);
+        result_call.result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Bool,
+        });
+        let error = runtime
+            .call(&result_call, &[Value::Int(1)])
+            .expect_err("unsupported result conversion must fail before the foreign call");
+        assert!(
+            error
+                .to_string()
+                .contains("result ABI conversion from Integer")
+                && error.to_string().contains("to Bool"),
+            "{error}"
+        );
+        assert!(runtime.loaded_libs.is_empty());
     }
 
     #[test]

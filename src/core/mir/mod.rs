@@ -1272,6 +1272,77 @@ pub struct MirFfiAbiConversion {
 }
 
 impl MirFfiAbiConversion {
+    fn canonical_identity(abi: types::MirAbiClass) -> bool {
+        matches!(
+            abi,
+            types::MirAbiClass::Unit
+                | types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                }
+                | types::MirAbiClass::Bool
+                | types::MirAbiClass::Float { bits: 64 }
+        )
+    }
+
+    /// Whether this receipt describes one of the physical argument conversions
+    /// admitted by the scalar C FFI island. Keeping this independent from a
+    /// TypeDesc catalog lets the AST-free bytecode descriptor preflight reject
+    /// a hand-built conversion before it loads or calls a foreign symbol.
+    pub(crate) fn is_supported_argument(self) -> bool {
+        if self.from == self.to {
+            return Self::canonical_identity(self.from);
+        }
+        matches!(
+            (self.from, self.to),
+            (
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                },
+                types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                }
+            ) | (
+                types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                },
+                types::MirAbiClass::Float { bits: 64 }
+            )
+        )
+    }
+
+    /// Whether this receipt describes one of the physical result conversions
+    /// admitted by the scalar C FFI island. Result conversion is the inverse
+    /// direction of argument widening, so its non-identity set is deliberately
+    /// different from [`Self::is_supported_argument`].
+    pub(crate) fn is_supported_result(self) -> bool {
+        if self.from == self.to {
+            return Self::canonical_identity(self.from);
+        }
+        matches!(
+            (self.from, self.to),
+            (
+                types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                },
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                }
+            ) | (
+                types::MirAbiClass::Float { bits: 64 },
+                types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                }
+            )
+        )
+    }
+
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
         desc.layout == types::MirLayout::Scalar
             && desc.ownership == types::MirOwnership::Copy
