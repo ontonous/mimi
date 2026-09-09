@@ -1919,6 +1919,81 @@ fn canonical_mir_multi_module_consumers_reject_unsupported_helpers_without_fallb
 }
 
 #[test]
+fn canonical_mir_multi_module_consumer_option_order_is_stable() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-mir-consumer-option-order-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create consumer option-order directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write consumer option-order entry");
+
+    for command in ["run", "build", "verify"] {
+        let run = |flag_first: bool| {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if flag_first {
+                invocation.arg("--mir").arg(&main);
+            } else {
+                invocation.arg(&main).arg("--mir");
+            }
+            invocation
+                .output()
+                .unwrap_or_else(|error| panic!("{command} option-order MIR failure: {error}"))
+        };
+        let flag_first = run(true);
+        let path_first = run(false);
+        for output in [&flag_first, &path_first] {
+            assert!(
+                !output.status.success(),
+                "{command} must reject unsupported imported helpers"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{command} emitted output before canonical rejection: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("MIR lowering failed (2 errors)")
+                    && stderr.contains("function:bad_a/")
+                    && stderr.contains("function:bad_b/")
+                    && stderr.contains("Copy scalar"),
+                "{command} option order lost a canonical lowering diagnostic: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy")
+                    && !stderr.contains("flow_ast")
+                    && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+                "{command} option order leaked a compatibility route or receipt: {stderr}"
+            );
+        }
+        assert_eq!(flag_first.status.code(), path_first.status.code());
+        assert_eq!(flag_first.stdout, path_first.stdout);
+        assert_eq!(
+            flag_first.stderr, path_first.stderr,
+            "{command} option order changed the canonical failure classification"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
