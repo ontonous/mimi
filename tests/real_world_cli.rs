@@ -2066,6 +2066,86 @@ fn canonical_mir_multi_module_consumer_failures_repeat_byte_identically() {
 }
 
 #[test]
+fn canonical_mir_receipt_source_scope_and_all_classify_imported_failure_distinctly() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-source-scope-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create source-scope failure directory");
+    fs::write(
+        dir.join("bad.mimi"),
+        "pub func bad(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write unsupported imported helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use bad;\nfunc main() -> i32 { println(bad([\"x\"])); 0 }\n",
+    )
+    .expect("write source-scope failure entry");
+
+    let run = |include_all: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--receipt");
+        if include_all {
+            command.arg("--all");
+        }
+        command
+            .output()
+            .expect("spawn source-scope receipt failure")
+    };
+    let source_scope = run(false);
+    let all_scope = run(true);
+    for output in [&source_scope, &all_scope] {
+        assert!(
+            !output.status.success(),
+            "unsupported imported call must fail closed"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failure emitted a partial manifest: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "source-scope receipt failure leaked an invalid route or manifest: {stderr}"
+        );
+    }
+    let source_stderr = String::from_utf8_lossy(&source_scope.stderr);
+    assert!(
+        source_stderr.contains("MIR validation failed") && source_stderr.contains("function:main"),
+        "source-scope failure lost its validation-stage classification: {source_stderr}"
+    );
+    assert!(
+        !source_stderr.contains("function:bad/node:expr.index"),
+        "source-scope failure lowered an imported helper unexpectedly: {source_stderr}"
+    );
+    let all_stderr = String::from_utf8_lossy(&all_scope.stderr);
+    assert!(
+        all_stderr.contains("MIR lowering failed")
+            && all_stderr.contains("function:bad/node:expr.index"),
+        "--all failure lost its imported-helper lowering classification: {all_stderr}"
+    );
+    assert!(
+        !all_stderr.contains("MIR validation failed"),
+        "--all failure regressed to source-scope validation: {all_stderr}"
+    );
+    assert_eq!(source_scope.status.code(), all_scope.status.code());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
