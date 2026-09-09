@@ -2258,6 +2258,101 @@ fn canonical_mir_consumers_require_complete_import_graph_after_source_scope_insp
 }
 
 #[test]
+fn canonical_mir_multi_failure_aggregate_is_consumer_invariant() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-multi-failure-consumer-invariant-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-failure consumer directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write multi-failure consumer entry");
+
+    let binary = dir.join("consumer-output");
+    let invocations = [
+        ("mir", "MIR inspection input rejected"),
+        ("run", "canonical MIR build error"),
+        ("build", "canonical MIR build error"),
+        ("verify", "canonical MIR verifier input rejected"),
+    ];
+    let mut outputs = Vec::new();
+    for (consumer, stage) in invocations {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg(consumer);
+        if consumer == "mir" {
+            command.arg(&main).arg("--all").arg("--receipt");
+        } else {
+            command.arg(&main).arg("--mir");
+            if consumer == "build" {
+                command.arg("-o").arg(&binary);
+            }
+        }
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("spawn multi-failure {consumer}: {error}"));
+        assert!(
+            !output.status.success(),
+            "{consumer} unexpectedly accepted both unsupported helpers"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{consumer} emitted partial output before rejecting both helpers: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(stage)
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.matches("Copy scalar").count() == 2
+                && !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains("flow_ast")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "{consumer} changed the multi-failure aggregate or leaked a fallback: {stderr}"
+        );
+        let bad_a = stderr
+            .find("function:bad_a/")
+            .expect("bad_a diagnostic identity");
+        let bad_b = stderr
+            .find("function:bad_b/")
+            .expect("bad_b diagnostic identity");
+        assert!(
+            bad_a < bad_b,
+            "{consumer} changed stable helper error ordering: {stderr}"
+        );
+        let aggregate = stderr
+            .find("MIR lowering failed")
+            .map(|index| stderr[index..].to_owned())
+            .expect("canonical lowering aggregate");
+        outputs.push((consumer, aggregate));
+    }
+    let expected = &outputs[0].1;
+    for (consumer, aggregate) in &outputs[1..] {
+        assert_eq!(
+            aggregate, expected,
+            "{consumer} changed the canonical multi-failure aggregate"
+        );
+    }
+    fs::remove_file(&binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
