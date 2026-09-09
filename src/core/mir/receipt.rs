@@ -235,6 +235,44 @@ impl CanonicalMirRouteReceipt {
         Ok(entries)
     }
 
+    /// Parse and reconstitute a validated route receipt from its manifest.
+    ///
+    /// The conversion is deliberately versioned and lossless for the public
+    /// receipt fields. A caller that needs to compare a CLI snapshot with a
+    /// checked API receipt can therefore round-trip through one canonical
+    /// value validator instead of duplicating digest or owner parsing.
+    pub fn from_manifest(text: &str) -> Result<Self, String> {
+        let entries = Self::parse_manifest(text)?;
+        let profile = entries
+            .get("profile")
+            .cloned()
+            .ok_or_else(|| "invalid MIR route manifest: missing field 'profile'".to_string())?;
+        let digest = |field: &str| {
+            entries
+                .get(field)
+                .cloned()
+                .ok_or_else(|| format!("invalid MIR route manifest: missing field '{field}'"))
+        };
+        let root_owners = entries
+            .get("root_owners")
+            .ok_or_else(|| "invalid MIR route manifest: missing field 'root_owners'".to_string())?
+            .split(',')
+            .filter(|owner| !owner.is_empty())
+            .map(|owner| NodeId(owner.to_owned()))
+            .collect();
+        Ok(Self {
+            schema: MIR_ROUTE_RECEIPT_SCHEMA,
+            profile,
+            mir_digest: digest("mir_digest")?,
+            type_desc_digest: digest("type_desc_digest")?,
+            abi_digest: digest("abi_digest")?,
+            ffi_digest: digest("ffi_digest")?,
+            ownership_digest: digest("ownership_digest")?,
+            flow_transition_digest: digest("flow_transition_digest")?,
+            root_owners,
+        })
+    }
+
     fn manifest_value(&self, field: &str) -> Option<String> {
         Some(match field {
             "schema" => self.schema.to_owned(),
@@ -665,5 +703,32 @@ mod tests {
                 .expect_err("manifest value drift must fail closed");
             assert_eq!(error, expected, "unexpected diagnostic for {field}");
         }
+    }
+
+    #[test]
+    fn route_receipt_manifest_round_trips_to_the_same_receipt() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+        assert_eq!(
+            CanonicalMirRouteReceipt::from_manifest(&manifest),
+            Ok(receipt)
+        );
+    }
+
+    #[test]
+    fn route_receipt_manifest_rejects_an_old_header_with_a_stable_hint() {
+        let receipt = valid_receipt();
+        let manifest = receipt
+            .manifest_text()
+            .expect("valid receipt manifest")
+            .replacen(
+                MIR_ROUTE_RECEIPT_MANIFEST_HEADER,
+                "mimi-mir-route-manifest-v0",
+                1,
+            );
+        assert_eq!(
+            CanonicalMirRouteReceipt::from_manifest(&manifest),
+            Err("invalid MIR route manifest: expected header 'mimi-mir-route-manifest-v1'".into())
+        );
     }
 }
