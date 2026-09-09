@@ -152,6 +152,44 @@ impl CanonicalMirRouteReceipt {
         }
         Ok(())
     }
+
+    /// Render the validated receipt as the stable, line-oriented manifest
+    /// shared by the CLI and evidence consumers.  Keeping field lookup beside
+    /// the public field-order constant prevents a frontend or CLI edit from
+    /// silently reordering or omitting a receipt value.
+    pub fn manifest_text(&self) -> Result<String, String> {
+        self.validate()
+            .map_err(|error| format!("invalid MIR route receipt: {error}"))?;
+        let mut text = String::from(MIR_ROUTE_RECEIPT_MANIFEST_HEADER);
+        text.push('\n');
+        for field in MIR_ROUTE_RECEIPT_MANIFEST_FIELDS {
+            let value = self
+                .manifest_value(field)
+                .expect("every declared manifest field has a value");
+            writeln!(text, "{field}={value}").expect("String write");
+        }
+        Ok(text)
+    }
+
+    fn manifest_value(&self, field: &str) -> Option<String> {
+        Some(match field {
+            "schema" => self.schema.to_owned(),
+            "profile" => self.profile.clone(),
+            "mir_digest" => self.mir_digest.clone(),
+            "type_desc_digest" => self.type_desc_digest.clone(),
+            "abi_digest" => self.abi_digest.clone(),
+            "ffi_digest" => self.ffi_digest.clone(),
+            "ownership_digest" => self.ownership_digest.clone(),
+            "flow_transition_digest" => self.flow_transition_digest.clone(),
+            "root_owners" => self
+                .root_owners
+                .iter()
+                .map(|owner| owner.0.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => return None,
+        })
+    }
 }
 
 fn canonical_mir_text(program: &MirProgram) -> String {
@@ -356,5 +394,52 @@ mod tests {
         let mut receipt = valid_receipt();
         receipt.root_owners[1] = receipt.root_owners[0].clone();
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn route_receipt_manifest_uses_declared_field_order_and_values() {
+        let receipt = valid_receipt();
+        let text = receipt.manifest_text().expect("valid receipt manifest");
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines.first().copied(),
+            Some(MIR_ROUTE_RECEIPT_MANIFEST_HEADER)
+        );
+        let fields = lines[1..]
+            .iter()
+            .map(|line| line.split_once('=').expect("manifest key/value").0)
+            .collect::<Vec<_>>();
+        assert_eq!(fields, MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.to_vec());
+        assert_eq!(lines[1], "schema=mimi-mir-route-receipt-v1");
+        assert_eq!(lines[2], "profile=test-v1");
+        for line in &lines[3..9] {
+            let (_, value) = line.split_once('=').expect("digest key/value");
+            assert_eq!(value.len(), 64);
+            assert!(value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        }
+        assert_eq!(lines[9], "root_owners=function:main,function:z");
+    }
+
+    #[test]
+    fn route_receipt_manifest_rejects_unsafe_profile_and_owner_without_partial_output() {
+        let mut receipt = valid_receipt();
+        receipt.profile = "bad=profile".into();
+        let error = receipt
+            .manifest_text()
+            .expect_err("unsafe profile rejection");
+        assert_eq!(
+            error,
+            "invalid MIR route receipt: route receipt profile is empty or not manifest-safe"
+        );
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners[0] = NodeId("function:bad,owner".into());
+        let error = receipt.manifest_text().expect_err("unsafe owner rejection");
+        assert_eq!(
+            error,
+            "invalid MIR route receipt: route receipt root owner is empty or not manifest-safe"
+        );
     }
 }

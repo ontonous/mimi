@@ -5,7 +5,6 @@
 //! emitter when MIR lowering is incomplete.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::{is_production, resolve_path};
@@ -119,31 +118,5 @@ fn route_receipt_manifest(
     program: &mimi::core::mir::reference::MirProgram,
 ) -> Result<String, String> {
     let receipt = program.route_receipt("cli-mir-v1");
-    receipt
-        .validate()
-        .map_err(|error| format!("invalid MIR route receipt: {error}"))?;
-    let mut text = String::from(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER);
-    text.push('\n');
-    writeln!(text, "schema={}", receipt.schema).expect("String write");
-    writeln!(text, "profile={}", receipt.profile).expect("String write");
-    writeln!(text, "mir_digest={}", receipt.mir_digest).expect("String write");
-    writeln!(text, "type_desc_digest={}", receipt.type_desc_digest).expect("String write");
-    writeln!(text, "abi_digest={}", receipt.abi_digest).expect("String write");
-    writeln!(text, "ffi_digest={}", receipt.ffi_digest).expect("String write");
-    writeln!(text, "ownership_digest={}", receipt.ownership_digest).expect("String write");
-    writeln!(
-        text,
-        "flow_transition_digest={}",
-        receipt.flow_transition_digest
-    )
-    .expect("String write");
-    text.push_str("root_owners=");
-    for (index, owner) in receipt.root_owners.iter().enumerate() {
-        if index != 0 {
-            text.push(',');
-        }
-        text.push_str(owner.0.as_str());
-    }
-    text.push('\n');
-    Ok(text)
+    receipt.manifest_text()
 }
