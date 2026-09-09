@@ -2513,6 +2513,80 @@ fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
 }
 
 #[test]
+fn scalar_ffi_symbol_safety_precedes_shape_conflict_across_direct_consumers() {
+    const SOURCE: &str = r#"
+extern "C" {
+    func foreign_i64(value: i64) -> i64;
+    func foreign_i32(value: i32) -> i32;
+}
+func main() -> i64 {
+    let left = foreign_i64(1 as i64);
+    let right = foreign_i32(2 as i32);
+    left + (right as i64)
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed declaration-shape fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("mixed declaration-shape fixture materialization");
+    assert_eq!(
+        canonical.ffi_calls().len(),
+        2,
+        "fixture must contain two FFI calls"
+    );
+    let mut receipts = canonical.ffi_calls().clone();
+    for receipt in receipts.values_mut() {
+        receipt.symbol = "foreign symbol".into();
+    }
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(receipts);
+
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must run symbol preflight before shape aggregation");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("FFI symbol is not manifest-safe"),
+        "{reference_error}"
+    );
+
+    let bytecode_errors = compile_mir_program(&forged)
+        .expect_err("bytecode must run symbol preflight before shape aggregation");
+    assert!(
+        bytecode_errors
+            .first()
+            .is_some_and(|error| error.message.contains("FFI symbol is not manifest-safe")),
+        "{bytecode_errors:?}"
+    );
+
+    let native_errors = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native must run receipt preflight before shape aggregation");
+    assert!(
+        native_errors
+            .first()
+            .is_some_and(|error| error.message.contains("FFI symbol is not manifest-safe")),
+        "{native_errors:?}"
+    );
+
+    let capability_errors = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject the malformed symbol");
+    assert!(
+        capability_errors
+            .iter()
+            .any(|error| error.contains("FFI symbol is not manifest-safe")),
+        "{capability_errors:?}"
+    );
+
+    let verifier_error = crate::verifier::verify_mir(&forged, "shape-order".into())
+        .expect_err("public verifier must reject the malformed symbol");
+    assert!(
+        verifier_error.contains("FFI symbol 'foreign symbol' is not manifest-safe"),
+        "{verifier_error}"
+    );
+}
+
+#[test]
 fn scalar_ffi_predicate_receipt_is_validated_before_consumers() {
     const SOURCE: &str = r#"
 extern "C" { func predicate_shape(value: i64) -> i64; }

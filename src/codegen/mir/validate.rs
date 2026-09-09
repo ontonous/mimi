@@ -21,15 +21,15 @@ impl<'a> NativeMirValidator<'a> {
     }
 
     pub(super) fn validate(mut self) -> Result<(), Vec<NativeMirError>> {
-        for message in
-            crate::core::mir::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
-        {
-            self.errors.push(NativeMirError::new("ffi", message));
-        }
         for message in crate::core::mir::validate_ffi_receipt_table(
             self.program.functions(),
             self.program.ffi_calls(),
         ) {
+            self.errors.push(NativeMirError::new("ffi", message));
+        }
+        for message in
+            crate::core::mir::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
+        {
             self.errors.push(NativeMirError::new("ffi", message));
         }
         for function in self.program.functions().values() {

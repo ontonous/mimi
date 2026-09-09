@@ -293,14 +293,14 @@ pub(crate) fn verify_ffi_program(
         ));
     }
     if let Some(message) =
-        crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls())
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
             .into_iter()
             .next()
     {
         return Err(format!("canonical MIR verifier {message}"));
     }
     if let Some(message) =
-        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+        crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls())
             .into_iter()
             .next()
     {

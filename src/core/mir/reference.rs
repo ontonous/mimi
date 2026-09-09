@@ -5318,14 +5318,14 @@ impl<'a> MirReferenceInterpreter<'a> {
         queues: &[MirSessionQueueInput],
     ) -> Result<MirExecutionObservation, MirExecutionError> {
         if let Some(message) =
-            super::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
+            super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
                 .into_iter()
                 .next()
         {
             return Err(self.error(owner, message));
         }
         if let Some(message) =
-            super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
+            super::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
                 .into_iter()
                 .next()
         {
