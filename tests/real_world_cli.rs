@@ -1294,10 +1294,13 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
     fs::create_dir_all(&dir).expect("create import graph fixture directory");
     let helper = dir.join("helper.mimi");
     fs::write(&helper, "pub func imported_value() -> i32 { 41 }\n").expect("write imported helper");
+    let helper_two = dir.join("helper_two.mimi");
+    fs::write(&helper_two, "pub func imported_value_two() -> i32 { 1 }\n")
+        .expect("write second imported helper");
     let main = dir.join("main.mimi");
     fs::write(
         &main,
-        "use helper;\nfunc main() -> i32 { imported_value() }\n",
+        "use helper;\nuse helper_two;\nfunc main() -> i32 { imported_value() + imported_value_two() }\n",
     )
     .expect("write import graph entry");
 
@@ -1388,6 +1391,7 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
     let root_owners = manifest.get("root_owners").expect("root owners field");
     assert!(root_owners.contains("function:main"));
     assert!(root_owners.contains("function:imported_value"));
+    assert!(root_owners.contains("function:imported_value_two"));
     assert_eq!(
         manifest.len(),
         mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
