@@ -393,6 +393,15 @@ pub(super) fn native_variant_abi_with_generic_result(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
+    if descriptor.abi == MirAbiClass::Aggregate
+        && descriptor.ownership == MirOwnership::Copy
+        && !descriptor.has_canonical_copy_noop_metadata()
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "Copy variant TypeDesc is outside the complete no-op metadata contract",
+        ));
+    }
     let payload_types = if moving {
         native_non_copy_variant_payload_type(catalog, ty)?;
         match &descriptor.layout {

@@ -2885,6 +2885,71 @@ func main() -> i32 {
     }
 
     #[test]
+    fn native_generic_variant_abi_requires_complete_copy_metadata() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic heterogeneous Result fallback projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let source_ty = contract.source_ty.clone();
+        let descriptor = program
+            .type_catalog()
+            .get(&source_ty)
+            .expect("generic Result TypeDesc")
+            .clone();
+        assert_eq!(
+            descriptor.ownership,
+            crate::core::mir::types::MirOwnership::Copy
+        );
+        super::native_variant_abi_with_generic_result(
+            program.type_catalog(),
+            &source_ty,
+            false,
+            true,
+        )
+        .expect("canonical generic Result variant ABI");
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(source_ty.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => {
+                    forged.drop_plan =
+                        Some(crate::core::mir::types::MirDropGluePlan { fields: Vec::new() })
+                }
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(source_ty.clone(), forged);
+            let error =
+                super::native_variant_abi_with_generic_result(&catalog, &source_ty, false, true)
+                    .expect_err("forged generic Result metadata must fail native variant ABI");
+            assert!(
+                format!("{error:?}").contains("complete no-op metadata contract"),
+                "unexpected native variant ABI error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bytecode_option_i32_unwrap_none_matches_reference_trap() {
         let program = canonical_program(
             "func main() -> i32 { let value: Option<i32> = None; value.unwrap() }",
