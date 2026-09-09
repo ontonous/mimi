@@ -1658,7 +1658,7 @@ impl<'a> CapabilityGate<'a> {
                 ));
                 return;
             };
-            for message in crate::core::mir::validate_ffi_call_contract_receipt(
+            let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt(
                 self.program.type_catalog(),
                 function,
                 instruction_id,
@@ -1666,15 +1666,14 @@ impl<'a> CapabilityGate<'a> {
                 result,
                 arguments,
                 contract,
-            ) {
+            );
+            for message in &receipt_errors {
                 self.error(format!("{subject} {message}"));
             }
+            if !receipt_errors.is_empty() {
+                return;
+            }
             if result.is_none() {
-                if contract.result_conversion.is_some() {
-                    self.error(format!(
-                        "{subject} extern result ABI conversion receipt is present for a unit call"
-                    ));
-                }
                 self.error(format!(
                     "{subject} extern call has no canonical result value identity"
                 ));
