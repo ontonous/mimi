@@ -2623,13 +2623,20 @@ impl<'a> NativeMirValidator<'a> {
         if allow_unit_result && desc.is_canonical_ffi_unit() {
             return;
         }
+        if !desc.is_canonical_ffi_scalar() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI value '{}' has unsupported canonical ABI metadata: outside the complete canonical scalar TypeDesc contract",
+                    value,
+                ),
+            ));
+            return;
+        }
         // Keep the validator on the same physical family map as declaration,
         // metadata, and value checks.  The receipt gate still owns semantic
         // conversion admission; this is only the native scalar shape guard.
-        if native_ffi_scalar_shape(desc.abi).is_none()
-            || desc.layout != MirLayout::Scalar
-            || desc.ownership != MirOwnership::Copy
-        {
+        if native_ffi_scalar_shape(desc.abi).is_none() {
             self.errors.push(NativeMirError::new(
                 subject,
                 format!(
@@ -2893,6 +2900,74 @@ impl<'a> NativeMirValidator<'a> {
                     "CFG edge argument type disagrees with block parameter",
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::mir::reference::MirProgram;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn canonical_program(source: &str) -> MirProgram {
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    #[test]
+    fn ffi_scalar_value_requires_complete_copy_metadata() {
+        let program = canonical_program("func main() -> i64 { 1 }");
+        let owner = crate::core::NodeId("function:main".into());
+        let function = program.functions().get(&owner).expect("main MIR");
+        let scalar_id = function.result.clone();
+        let value = function
+            .values
+            .values()
+            .find(|value| value.ty == scalar_id)
+            .expect("scalar MIR value")
+            .id
+            .clone();
+
+        let mut validator = NativeMirValidator::new(&program);
+        validator.validate_ffi_scalar_value(function, &value, "canonical FFI", false);
+        assert!(validator.errors.is_empty(), "{:#?}", validator.errors);
+
+        let descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("scalar TypeDesc")
+            .clone();
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(scalar_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => {
+                    forged.drop_plan =
+                        Some(crate::core::mir::types::MirDropGluePlan { fields: Vec::new() })
+                }
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(scalar_id.clone(), forged);
+            let forged_program =
+                MirProgram::with_type_catalog(program.functions().clone(), catalog)
+                    .expect("forged scalar catalog remains structurally valid");
+            let forged_function = forged_program.functions().get(&owner).expect("main MIR");
+            let mut validator = NativeMirValidator::new(&forged_program);
+            validator.validate_ffi_scalar_value(forged_function, &value, "forged FFI", false);
+            assert!(
+                validator.errors.iter().any(|error| error
+                    .message
+                    .contains("complete canonical scalar TypeDesc contract")),
+                "unexpected forged FFI diagnostics: {:?}",
+                validator.errors
+            );
         }
     }
 }
