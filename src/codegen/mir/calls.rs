@@ -1352,6 +1352,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         for (index, (argument, conversion)) in
             arguments.iter().zip(parameter_conversions).enumerate()
         {
+            if !conversion.is_supported_argument() {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!(
+                        "FFI parameter {index} ABI conversion from {:?} to {:?} is unsupported",
+                        conversion.from, conversion.to
+                    ),
+                ));
+            }
             let value = self.value(argument, subject)?;
             let actual_type = self.value_desc(argument, subject)?;
             if actual_type.abi != conversion.from {
@@ -1372,36 +1381,71 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )?;
             values.push(value.into());
         }
+        // Check the result-side receipt before building the foreign call.  A
+        // malformed endpoint must never be discovered only after the call
+        // has already produced an observable side effect.
+        let result_conversion = if let Some(result) = result {
+            let actual_type = self.value_desc(result, subject)?;
+            if actual_type.abi == MirAbiClass::Unit {
+                match result_conversion {
+                    Some(conversion)
+                        if conversion.from == MirAbiClass::Unit
+                            && conversion.to == MirAbiClass::Unit => {}
+                    Some(_) => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "unit MIR result has a non-unit FFI conversion receipt",
+                        ));
+                    }
+                    None => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "unit MIR result has no FFI conversion receipt",
+                        ));
+                    }
+                }
+                None
+            } else {
+                let conversion = result_conversion.ok_or_else(|| {
+                    NativeMirError::new(subject, "non-unit FFI result has no conversion receipt")
+                })?;
+                if !conversion.is_supported_result() {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!(
+                            "FFI result ABI conversion from {:?} to {:?} is unsupported",
+                            conversion.from, conversion.to
+                        ),
+                    ));
+                }
+                if conversion.to != actual_type.abi {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!(
+                            "FFI result ABI conversion receipt ends at {:?}, MIR result is {:?}",
+                            conversion.to, actual_type.abi
+                        ),
+                    ));
+                }
+                Some((result, conversion))
+            }
+        } else {
+            if result_conversion.is_some() {
+                return Err(NativeMirError::new(
+                    subject,
+                    "unit MIR call has an FFI result conversion receipt",
+                ));
+            }
+            None
+        };
         let call = self
             .generator
             .builder
             .build_call(function, &values, "mir_ffi_call")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let Some(result) = result else {
+        let Some((result, conversion)) = result_conversion else {
             return Ok(());
         };
-        let actual_type = self.value_desc(result, subject)?;
-        if actual_type.abi == MirAbiClass::Unit {
-            if result_conversion.is_some_and(|conversion| conversion.from != MirAbiClass::Unit) {
-                return Err(NativeMirError::new(
-                    subject,
-                    "unit MIR result has a non-unit FFI conversion receipt",
-                ));
-            }
-            return Ok(());
-        }
-        let conversion = result_conversion.ok_or_else(|| {
-            NativeMirError::new(subject, "non-unit FFI result has no conversion receipt")
-        })?;
-        if conversion.to != actual_type.abi {
-            return Err(NativeMirError::new(
-                subject,
-                format!(
-                    "FFI result ABI conversion receipt ends at {:?}, MIR result is {:?}",
-                    conversion.to, actual_type.abi
-                ),
-            ));
-        }
         let value = call_try_basic_value(&call)
             .ok_or_else(|| NativeMirError::new(subject, "non-unit FFI call returned void"))?;
         let value =
@@ -1418,6 +1462,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
         name: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if !native_ffi_value_matches(&value, from) {
+            return Err(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI conversion source ABI {:?} disagrees with the native LLVM value",
+                    from
+                ),
+            ));
+        }
         if from == to {
             return Ok(value);
         }
@@ -1598,5 +1651,76 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("FFI ABI conversion from {from:?} to {to:?} is unsupported"),
             )),
         }
+    }
+}
+
+fn native_ffi_value_matches<'ctx>(value: &BasicValueEnum<'ctx>, abi: MirAbiClass) -> bool {
+    match (abi, value) {
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            BasicValueEnum::IntValue(value),
+        ) => value.get_type().get_bit_width() == 32,
+        (
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            BasicValueEnum::IntValue(value),
+        ) => value.get_type().get_bit_width() == 64,
+        (MirAbiClass::Bool, BasicValueEnum::IntValue(value)) => {
+            value.get_type().get_bit_width() == 1
+        }
+        (MirAbiClass::Float { bits: 64 }, BasicValueEnum::FloatValue(value)) => {
+            value.get_type().get_bit_width() == 64
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_ffi_value_matches;
+    use crate::core::mir::types::MirAbiClass;
+    use inkwell::context::Context;
+    use inkwell::values::BasicValueEnum;
+
+    #[test]
+    fn native_ffi_value_shape_matches_receipt_endpoint() {
+        let context = Context::create();
+        let i32_value: BasicValueEnum<'_> = context.i32_type().const_zero().into();
+        let i64_value: BasicValueEnum<'_> = context.i64_type().const_zero().into();
+        let bool_value: BasicValueEnum<'_> = context.bool_type().const_zero().into();
+        let f64_value: BasicValueEnum<'_> = context.f64_type().const_zero().into();
+
+        assert!(native_ffi_value_matches(
+            &i32_value,
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            }
+        ));
+        assert!(!native_ffi_value_matches(
+            &i32_value,
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            }
+        ));
+        assert!(native_ffi_value_matches(
+            &i64_value,
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            }
+        ));
+        assert!(native_ffi_value_matches(&bool_value, MirAbiClass::Bool));
+        assert!(native_ffi_value_matches(
+            &f64_value,
+            MirAbiClass::Float { bits: 64 }
+        ));
+        assert!(!native_ffi_value_matches(&f64_value, MirAbiClass::Bool));
     }
 }

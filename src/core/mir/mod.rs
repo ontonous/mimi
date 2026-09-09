@@ -1481,6 +1481,12 @@ pub(crate) fn validate_ffi_call_contract_receipt(
             ));
         }
         if let Some(receipt_conversion) = contract.parameter_conversions.get(index) {
+            if !receipt_conversion.is_supported_argument() {
+                errors.push(format!(
+                    "extern call FFI parameter {index} ABI conversion from {:?} to {:?} is unsupported",
+                    receipt_conversion.from, receipt_conversion.to
+                ));
+            }
             let expected =
                 MirFfiAbiConversion::for_argument(type_catalog, &argument_value.ty, declared_type);
             if expected.as_ref() != Some(receipt_conversion) {
@@ -1505,6 +1511,14 @@ pub(crate) fn validate_ffi_call_contract_receipt(
         }
         let expected =
             MirFfiAbiConversion::for_result(type_catalog, &value.ty, &contract.result_type);
+        if let Some(receipt_conversion) = contract.result_conversion.as_ref() {
+            if !receipt_conversion.is_supported_result() {
+                errors.push(format!(
+                    "extern call FFI result ABI conversion from {:?} to {:?} is unsupported",
+                    receipt_conversion.from, receipt_conversion.to
+                ));
+            }
+        }
         if contract.result_conversion.as_ref() != expected.as_ref() {
             errors.push(
                 "extern call FFI result ABI conversion receipt disagrees with MIR result".into(),
