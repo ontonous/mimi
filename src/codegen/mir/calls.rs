@@ -1615,37 +1615,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 }
 
 fn native_ffi_value_matches<'ctx>(value: &BasicValueEnum<'ctx>, abi: MirAbiClass) -> bool {
-    match (native_ffi_scalar_shape(abi), value) {
-        (Some(NativeFfiScalarShape::SignedInteger(bits)), BasicValueEnum::IntValue(value)) => {
-            value.get_type().get_bit_width() == bits as u32
-        }
-        (Some(NativeFfiScalarShape::Bool), BasicValueEnum::IntValue(value)) => {
-            value.get_type().get_bit_width() == 1
-        }
-        (Some(NativeFfiScalarShape::Float(bits)), BasicValueEnum::FloatValue(value)) => {
-            value.get_type().get_bit_width() == bits as u32
-        }
-        _ => false,
-    }
+    native_ffi_basic_type_matches(&value.get_type(), abi)
 }
 
 fn native_ffi_metadata_type_matches<'ctx>(
     value: BasicMetadataTypeEnum<'ctx>,
     abi: MirAbiClass,
 ) -> bool {
-    match (native_ffi_scalar_shape(abi), value) {
-        (
-            Some(NativeFfiScalarShape::SignedInteger(bits)),
-            BasicMetadataTypeEnum::IntType(value),
-        ) => value.get_bit_width() == bits as u32,
-        (Some(NativeFfiScalarShape::Bool), BasicMetadataTypeEnum::IntType(value)) => {
-            value.get_bit_width() == 1
-        }
-        (Some(NativeFfiScalarShape::Float(bits)), BasicMetadataTypeEnum::FloatType(value)) => {
-            value.get_bit_width() == bits as u32
-        }
-        _ => false,
-    }
+    let value = match value {
+        BasicMetadataTypeEnum::IntType(value) => BasicTypeEnum::IntType(value),
+        BasicMetadataTypeEnum::FloatType(value) => BasicTypeEnum::FloatType(value),
+        _ => return false,
+    };
+    native_ffi_basic_type_matches(&value, abi)
 }
 
 fn native_ffi_basic_type_matches<'ctx>(value: &BasicTypeEnum<'ctx>, abi: MirAbiClass) -> bool {
