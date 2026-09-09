@@ -2636,14 +2636,11 @@ impl<'a> NativeMirValidator<'a> {
         {
             return;
         }
-        if !matches!(
-            desc.abi,
-            MirAbiClass::Integer {
-                bits: 32 | 64,
-                signed: true,
-            } | MirAbiClass::Bool
-                | MirAbiClass::Float { bits: 64 }
-        ) || desc.layout != MirLayout::Scalar
+        // Keep the validator on the same physical family map as declaration,
+        // metadata, and value checks.  The receipt gate still owns semantic
+        // conversion admission; this is only the native scalar shape guard.
+        if native_ffi_scalar_shape(desc.abi).is_none()
+            || desc.layout != MirLayout::Scalar
             || desc.ownership != MirOwnership::Copy
         {
             self.errors.push(NativeMirError::new(
