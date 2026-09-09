@@ -1533,6 +1533,87 @@ fn canonical_mir_cli_all_receipt_multi_module_failure_is_import_order_stable() {
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_multi_module_failures_are_sorted_and_atomic() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-multi-failures-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-failure directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let a_first = dir.join("main_a_first.mimi");
+    fs::write(
+        &a_first,
+        "use bad_a;\nuse bad_b;\nfunc main() -> i32 { 0 }\n",
+    )
+    .expect("write first-order entry");
+    let b_first = dir.join("main_b_first.mimi");
+    fs::write(
+        &b_first,
+        "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n",
+    )
+    .expect("write second-order entry");
+
+    let run = |main: &Path| {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn multi-failure receipt")
+    };
+    let a_first_output = run(&a_first);
+    let b_first_output = run(&b_first);
+    for output in [&a_first_output, &b_first_output] {
+        assert!(
+            !output.status.success(),
+            "unsupported imported helpers must fail closed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failure emitted a partial manifest"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.contains("Copy scalar"),
+            "multi-module failure lost one of its canonical lowering diagnostics: {stderr}"
+        );
+        assert!(
+            !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "multi-module failure claimed a receipt manifest: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "multi-module failure fell back to legacy: {stderr}"
+        );
+    }
+    assert_eq!(
+        a_first_output.stderr, b_first_output.stderr,
+        "import declaration order changed the sorted canonical failures"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
