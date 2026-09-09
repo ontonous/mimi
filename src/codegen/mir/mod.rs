@@ -355,9 +355,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
                     let MirInstructionKind::Call {
-                        result,
                         callee: ResolvedCallee::Extern(_),
-                        arguments,
                         ..
                     } = &instruction.kind
                     else {
@@ -373,43 +371,16 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                                     "extern call has no canonical FFI receipt",
                                 )
                             })?;
-                    if receipt.abi != "C" {
-                        return Err(NativeMirError::new(
-                            instruction.id.as_str(),
-                            format!(
-                                "FFI ABI '{}' is outside the canonical native C ABI",
-                                receipt.abi
-                            ),
-                        ));
-                    }
-                    if receipt.parameter_types.len() != arguments.len()
-                        || receipt.result.as_ref() != result.as_ref()
-                    {
-                        return Err(NativeMirError::new(
-                            instruction.id.as_str(),
-                            "FFI receipt declaration identities disagree with the native call",
-                        ));
-                    }
-                    if let Some((existing_arguments, existing_result)) =
-                        declarations.get(&receipt.symbol)
-                    {
-                        if existing_arguments != &receipt.parameter_types
-                            || existing_result != &receipt.result_type
-                        {
-                            return Err(NativeMirError::new(
-                                instruction.id.as_str(),
-                                format!(
-                                    "FFI symbol '{}' is used with incompatible declaration TypeDescs",
-                                    receipt.symbol
-                                ),
-                            ));
-                        }
-                    } else {
-                        declarations.insert(
-                            receipt.symbol.clone(),
-                            (receipt.parameter_types.clone(), receipt.result_type.clone()),
-                        );
-                    }
+                    // `compile_mir_native` has already run the shared
+                    // receipt gate and native admission validator.  At this
+                    // point the receipt is trusted as the canonical
+                    // declaration identity; this loop only collects the
+                    // physical LLVM signatures needed by the emitter.
+                    declarations
+                        .entry(receipt.symbol.clone())
+                        .or_insert_with(|| {
+                            (receipt.parameter_types.clone(), receipt.result_type.clone())
+                        });
                 }
             }
         }
