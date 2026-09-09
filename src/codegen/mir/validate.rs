@@ -26,6 +26,12 @@ impl<'a> NativeMirValidator<'a> {
         {
             self.errors.push(NativeMirError::new("ffi", message));
         }
+        for message in crate::core::mir::validate_ffi_receipt_table(
+            self.program.functions(),
+            self.program.ffi_calls(),
+        ) {
+            self.errors.push(NativeMirError::new("ffi", message));
+        }
         for function in self.program.functions().values() {
             let symbol = match mir_symbol(&function.owner) {
                 Ok(symbol) => symbol,

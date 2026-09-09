@@ -5315,6 +5315,13 @@ impl<'a> MirReferenceInterpreter<'a> {
         {
             return Err(self.error(owner, message));
         }
+        if let Some(message) =
+            super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
+                .into_iter()
+                .next()
+        {
+            return Err(self.error(owner, message));
+        }
         self.output.borrow_mut().clear();
         *self.next_session_handle.borrow_mut() = 1;
         self.session_peers.borrow_mut().clear();

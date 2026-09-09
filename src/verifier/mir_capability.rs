@@ -31,6 +31,11 @@ pub fn validate_mir_capabilities(program: &MirProgram) -> Result<(), Vec<String>
     for message in crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls()) {
         gate.error(message);
     }
+    for message in
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+    {
+        gate.error(message);
+    }
     gate.validate();
     if gate.errors.is_empty() {
         Ok(())

@@ -299,6 +299,13 @@ pub(crate) fn verify_ffi_program(
     {
         return Err(format!("canonical MIR verifier {message}"));
     }
+    if let Some(message) =
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+            .into_iter()
+            .next()
+    {
+        return Err(format!("canonical MIR verifier {message}"));
+    }
     for function in program.functions().values() {
         for block in function.blocks.values() {
             for instruction in &block.instructions {

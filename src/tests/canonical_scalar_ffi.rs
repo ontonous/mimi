@@ -2221,6 +2221,58 @@ func main() -> i64 { receipt_guard(1 as i64) }
         "{verifier_error}"
     );
 
+    let orphan_instruction =
+        crate::core::mir::MirInstructionId::new("inst:call:orphan").expect("instruction id");
+    let mut orphan_receipts = canonical.ffi_calls().clone();
+    let mut orphan_receipt = orphan_receipts
+        .values()
+        .next()
+        .cloned()
+        .expect("receipt-guard call-site receipt");
+    orphan_receipt.instruction = orphan_instruction.clone();
+    orphan_receipts.insert(orphan_instruction, orphan_receipt);
+    let mut orphan = canonical.clone();
+    orphan.replace_ffi_calls_for_test_only(orphan_receipts);
+    let reference_error = MirReferenceInterpreter::new(&orphan)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject an orphaned FFI receipt");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("orphaned from a MIR extern call"),
+        "{reference_error}"
+    );
+    let bytecode_error =
+        compile_mir_program(&orphan).expect_err("bytecode must reject an orphaned FFI receipt");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error.message.contains("orphaned") || error.message.contains("absent from its caller")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&orphan)
+        .expect_err("native admission must reject an orphaned FFI receipt");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains("orphaned from a MIR extern call")),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&orphan)
+        .expect_err("capability gate must reject an orphaned FFI receipt");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains("orphaned from a MIR extern call")),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&orphan, "orphan-ffi-receipt".into())
+        .expect_err("direct verifier must reject an orphaned FFI receipt");
+    assert!(
+        verifier_error.contains("orphaned from a MIR extern call"),
+        "{verifier_error}"
+    );
+
     let mut forged_receipts = canonical.ffi_calls().clone();
     forged_receipts
         .get_mut(&instruction_id)

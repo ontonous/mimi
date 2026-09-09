@@ -1340,6 +1340,44 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     errors
 }
 
+/// Validate that every checker-owned FFI receipt is attached to an actual
+/// extern MIR call. The canonical `MirProgram` constructor already enforces
+/// this relation, but consumers also need the check because tests and
+/// diagnostics may deliberately bypass construction to probe fail-closed
+/// behavior. An orphaned receipt must never be silently ignored by a backend
+/// that scans calls rather than the receipt table.
+pub(crate) fn validate_ffi_receipt_table(
+    functions: &BTreeMap<NodeId, MirFunction>,
+    ffi_calls: &BTreeMap<MirInstructionId, MirFfiCallContract>,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    for function in functions.values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                if matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: ResolvedCallee::Extern(_),
+                        ..
+                    }
+                ) {
+                    seen.insert(instruction.id.clone());
+                }
+            }
+        }
+    }
+    ffi_calls
+        .keys()
+        .filter(|instruction| !seen.contains(*instruction))
+        .map(|instruction| {
+            format!(
+                "extern call FFI receipt '{}' is orphaned from a MIR extern call",
+                instruction
+            )
+        })
+        .collect()
+}
+
 /// Validate that every call-site using one C symbol agrees on its declared
 /// ABI shape. A symbol has one physical declaration in native code and one
 /// libffi call interface in bytecode; accepting divergent receipt declarations
