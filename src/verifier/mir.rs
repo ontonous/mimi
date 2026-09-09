@@ -822,7 +822,7 @@ fn symbolic_value_for_type(
         ));
     }
     match &descriptor.layout {
-        MirLayout::Unit if descriptor.abi == MirAbiClass::Unit => {
+        MirLayout::Unit if descriptor.is_canonical_ffi_unit() => {
             Ok((SymbolicValue::Unit, Vec::new()))
         }
         MirLayout::Scalar => match descriptor.abi {
@@ -4877,7 +4877,7 @@ fn symbolic_zero_for_type(
         });
     }
     match &descriptor.layout {
-        MirLayout::Unit if descriptor.abi == MirAbiClass::Unit => {
+        MirLayout::Unit if descriptor.is_canonical_ffi_unit() => {
             return Ok(SymbolicValue::Unit);
         }
         MirLayout::Tuple(elements) => {
@@ -6241,7 +6241,7 @@ fn symbolic_matches_type(
         return false;
     };
     match (&descriptor.layout, &descriptor.abi, value) {
-        (MirLayout::Unit, MirAbiClass::Unit, SymbolicValue::Unit) => true,
+        (_, _, SymbolicValue::Unit) if descriptor.is_canonical_ffi_unit() => true,
         (
             MirLayout::Scalar,
             MirAbiClass::Integer {
@@ -6733,11 +6733,42 @@ fn contract_binary(
 #[cfg(test)]
 mod tests {
     use super::verify_program;
+    use crate::core::ir::{PrimitiveType, ResolvedType};
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use crate::core::mir::types::MirOwnership;
     use crate::core::mir::MirInstructionKind;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn verifier_symbolic_unit_shape_requires_copy_ownership() {
+        let source = "func main() { }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mut catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+            .expect("unit TypeDesc catalog");
+        let unit_id = checked
+            .resolved_types()
+            .iter()
+            .find_map(|(id, ty)| {
+                matches!(ty, ResolvedType::Primitive(PrimitiveType::Unit)).then_some(id.clone())
+            })
+            .expect("unit TypeDesc identity");
+        let descriptor = catalog.get(&unit_id).expect("unit TypeDesc").clone();
+        assert!(descriptor.is_canonical_ffi_unit());
+        let mut forged = descriptor;
+        forged.ownership = MirOwnership::Move;
+        catalog.replace_for_test_only(unit_id.clone(), forged);
+
+        assert!(super::symbolic_zero_for_type(&catalog, &unit_id).is_err());
+        assert!(!super::symbolic_matches_type(
+            &catalog,
+            &unit_id,
+            &super::SymbolicValue::Unit,
+        ));
+    }
 
     #[test]
     fn verifier_and_reference_oracle_consume_the_same_canonical_mir() {
