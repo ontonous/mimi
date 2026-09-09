@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral, ResolvedType, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
-use super::types::{MirAbiClass, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
+use super::types::{
+    MirAbiClass, MirFfiScalarKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
+};
 use super::{
     MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
     MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirProjection,
@@ -4949,12 +4951,8 @@ impl<'a> MirReferenceInterpreter<'a> {
             if descriptor.layout != MirLayout::Scalar
                 || descriptor.ownership != MirOwnership::Copy
                 || !matches!(
-                    descriptor.abi,
-                    MirAbiClass::Integer {
-                        bits: 32 | 64,
-                        signed: true
-                    } | MirAbiClass::Bool
-                        | MirAbiClass::Float { bits: 64 }
+                    descriptor.abi.canonical_ffi_scalar_kind(),
+                    Some(kind) if kind != MirFfiScalarKind::Unit
                 )
             {
                 return Err(self.error(
@@ -4993,12 +4991,8 @@ impl<'a> MirReferenceInterpreter<'a> {
             } else if descriptor.layout != MirLayout::Scalar
                 || descriptor.ownership != MirOwnership::Copy
                 || !matches!(
-                    descriptor.abi,
-                    MirAbiClass::Integer {
-                        bits: 32 | 64,
-                        signed: true
-                    } | MirAbiClass::Bool
-                        | MirAbiClass::Float { bits: 64 }
+                    descriptor.abi.canonical_ffi_scalar_kind(),
+                    Some(kind) if kind != MirFfiScalarKind::Unit
                 )
             {
                 return Err(self.error(
@@ -5024,24 +5018,15 @@ impl<'a> MirReferenceInterpreter<'a> {
             .and_then(|value| function.values.get(value))
             .and_then(|info| self.program.type_catalog().get(&info.ty))
             .map(|desc| &desc.abi);
-        let valid = match (abi, actual) {
-            (
-                Some(MirAbiClass::Integer {
-                    bits: 32,
-                    signed: true,
-                }),
-                MirRuntimeValue::Int(n),
-            ) => i32::try_from(*n).is_ok(),
-            (
-                Some(MirAbiClass::Integer {
-                    bits: 64,
-                    signed: true,
-                }),
-                MirRuntimeValue::Int(_),
-            )
-            | (Some(MirAbiClass::Bool), MirRuntimeValue::Bool(_))
-            | (Some(MirAbiClass::Float { bits: 64 }), MirRuntimeValue::FloatBits(_)) => true,
-            (Some(MirAbiClass::Unit), MirRuntimeValue::Unit) => true,
+        let kind = abi
+            .copied()
+            .and_then(MirAbiClass::canonical_ffi_scalar_kind);
+        let valid = match (kind, actual) {
+            (Some(MirFfiScalarKind::I32), MirRuntimeValue::Int(n)) => i32::try_from(*n).is_ok(),
+            (Some(MirFfiScalarKind::I64), MirRuntimeValue::Int(_))
+            | (Some(MirFfiScalarKind::Bool), MirRuntimeValue::Bool(_))
+            | (Some(MirFfiScalarKind::F64), MirRuntimeValue::FloatBits(_))
+            | (Some(MirFfiScalarKind::Unit), MirRuntimeValue::Unit) => true,
             (None, MirRuntimeValue::Unit) => expected.is_none(),
             _ => false,
         };
