@@ -2450,6 +2450,16 @@ func main() -> i64 { receipt_guard(1 as i64) }
             .contains("symbol disagrees with canonical extern callee"),
         "{reference_error}"
     );
+    let table_errors = crate::core::mir::validate_ffi_receipt_table(
+        wrong_symbol.functions(),
+        wrong_symbol.ffi_calls(),
+    );
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("symbol disagrees with canonical extern callee")),
+        "{table_errors:?}"
+    );
     let bytecode_error = compile_mir_program(&wrong_symbol)
         .expect_err("bytecode must reject a safe but mismatched FFI symbol");
     assert!(
@@ -2484,6 +2494,21 @@ func main() -> i64 { receipt_guard(1 as i64) }
     assert!(
         verifier_error.contains("symbol disagrees with canonical extern callee"),
         "{verifier_error}"
+    );
+
+    let mut wrong_abi_receipts = wrong_symbol.ffi_calls().clone();
+    wrong_abi_receipts
+        .values_mut()
+        .next()
+        .expect("receipt-guard call-site receipt")
+        .abi = "Rust".into();
+    let table_errors =
+        crate::core::mir::validate_ffi_receipt_table(wrong_symbol.functions(), &wrong_abi_receipts);
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("outside the canonical C ABI")),
+        "{table_errors:?}"
     );
 
     let mut forged_receipts = canonical.ffi_calls().clone();

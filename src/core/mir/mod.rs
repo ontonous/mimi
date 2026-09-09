@@ -1521,6 +1521,19 @@ pub(crate) fn validate_ffi_receipt_table(
                     contract.callee.0, instruction, actual_callee.0
                 ));
             }
+            if contract.abi != "C" {
+                errors.push(format!(
+                    "extern call FFI receipt ABI '{}' is outside the canonical C ABI",
+                    contract.abi
+                ));
+            }
+            if canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
+                if let Err(message) =
+                    validate_ffi_symbol_matches_callee(actual_callee, &contract.symbol)
+                {
+                    errors.push(message);
+                }
+            }
             if contract.arguments != *actual_arguments {
                 errors.push(format!(
                     "extern call FFI receipt arguments disagree with MIR instruction '{}' arguments",
