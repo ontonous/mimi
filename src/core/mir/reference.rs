@@ -5009,11 +5009,6 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ),
                 ));
             }
-        } else if receipt.result_conversion.is_some() {
-            return Err(self.error(
-                &function.owner,
-                "extern call FFI result ABI conversion receipt is present for a unit call",
-            ));
         }
         Ok(receipt)
     }
