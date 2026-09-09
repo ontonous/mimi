@@ -1962,7 +1962,8 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         };
-        if descriptor.ownership != MirOwnership::Copy
+        if descriptor.session_protocol.is_some()
+            || descriptor.ownership != MirOwnership::Copy
             || descriptor.needs_drop_glue
             || descriptor.needs_clone_glue
             || descriptor.glue
@@ -2049,6 +2050,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
             || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.session_protocol.is_some()
             || descriptor.ownership != MirOwnership::Copy
             || descriptor.needs_drop_glue
             || descriptor.needs_clone_glue
@@ -2122,6 +2124,7 @@ impl MirTypeCatalog {
             ));
         }
         if descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.session_protocol.is_some()
             || descriptor.ownership != MirOwnership::Copy
             || descriptor.needs_drop_glue
             || descriptor.needs_clone_glue
@@ -11727,6 +11730,72 @@ mod tests {
             .validate_flat_copy_variant(&result_id)
             .expect_err("mixed Result payload ABI must fail closed");
         assert!(error.contains("mixed payload ABI"), "{error}");
+    }
+
+    #[test]
+    fn flat_copy_aggregate_contracts_reject_forged_protocol_metadata() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let tuple_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![i32_id.clone(), i32_id.clone()]))
+            .expect("tuple");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(i32_id.clone()))
+            .expect("option");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        let mut forged_tuple = catalog.get(&tuple_id).expect("tuple descriptor").clone();
+        forged_tuple.session_protocol = Some(i32_id.clone());
+        catalog.replace_for_test_only(tuple_id.clone(), forged_tuple);
+        let tuple_error = catalog
+            .validate_flat_copy_tuple(&tuple_id)
+            .expect_err("flat Copy tuple must reject forged protocol metadata");
+        assert!(
+            tuple_error.contains("flat Copy tuple contract"),
+            "{tuple_error}"
+        );
+
+        let mut forged_option = catalog.get(&option_id).expect("Option descriptor").clone();
+        forged_option.session_protocol = Some(i32_id);
+        catalog.replace_for_test_only(option_id.clone(), forged_option);
+        let option_error = catalog
+            .validate_flat_copy_variant(&option_id)
+            .expect_err("flat Copy variant must reject forged protocol metadata");
+        assert!(
+            option_error.contains("canonical no-op glue"),
+            "{option_error}"
+        );
+    }
+
+    #[test]
+    fn flat_copy_record_contract_rejects_forged_protocol_metadata() {
+        let source =
+            "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; if p.y { 0 } else { 1 } }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let mut catalog = MirTypeCatalog::from_checked_program(&program).expect("catalog");
+        let (point_id, field_ty) = catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, fields } if nominal.as_str().ends_with("Point") => {
+                    Some((id.clone(), fields.first().expect("Point field").ty.clone()))
+                }
+                _ => None,
+            })
+            .expect("Point record contract");
+
+        let mut forged = catalog.get(&point_id).expect("Point descriptor").clone();
+        forged.session_protocol = Some(field_ty);
+        catalog.replace_for_test_only(point_id.clone(), forged);
+        let error = catalog
+            .validate_flat_copy_record(&point_id)
+            .expect_err("flat Copy record must reject forged protocol metadata");
+        assert!(error.contains("flat Copy record contract"), "{error}");
     }
 
     #[test]
