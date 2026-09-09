@@ -3966,67 +3966,76 @@ impl<'a> FunctionEmitter<'a> {
                     .validate_reference_type(ty)
                     .map(|_| ())
             }
-            MirAbiClass::Aggregate => match &desc.layout {
-                MirLayout::Tuple(elements) => {
-                    if desc.ownership != MirOwnership::Copy
-                        && (desc.glue.move_out != MirGlueKind::Aggregate
-                            || desc.glue.clone != MirGlueKind::Aggregate
-                            || desc.glue.drop != MirGlueKind::Aggregate
-                            || desc.drop_plan.is_none())
-                    {
-                        return Err(format!(
+            MirAbiClass::Aggregate => {
+                if desc.ownership == MirOwnership::Copy && !desc.has_canonical_copy_noop_metadata()
+                {
+                    return Err(format!(
+                        "type '{}' has Copy aggregate metadata outside the canonical no-op contract",
+                        ty.as_str()
+                    ));
+                }
+                match &desc.layout {
+                    MirLayout::Tuple(elements) => {
+                        if desc.ownership != MirOwnership::Copy
+                            && (desc.glue.move_out != MirGlueKind::Aggregate
+                                || desc.glue.clone != MirGlueKind::Aggregate
+                                || desc.glue.drop != MirGlueKind::Aggregate
+                                || desc.drop_plan.is_none())
+                        {
+                            return Err(format!(
                             "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
                             ty.as_str(),
                             desc.ownership
                         ));
-                    }
-                    for element in elements {
-                        self.supported_type(element)?;
-                    }
-                    Ok(())
-                }
-                MirLayout::Record { fields, .. } => {
-                    if desc.ownership != MirOwnership::Copy
-                        && (desc.glue.move_out != MirGlueKind::Aggregate
-                            || desc.glue.clone != MirGlueKind::Aggregate
-                            || desc.glue.drop != MirGlueKind::Aggregate
-                            || desc.drop_plan.is_none())
-                    {
-                        return Err(format!(
-                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
-                            ty.as_str(),
-                            desc.ownership
-                        ));
-                    }
-                    for field in fields {
-                        self.supported_type(&field.ty)?;
-                    }
-                    Ok(())
-                }
-                MirLayout::Option { variants, .. }
-                | MirLayout::Result { variants, .. }
-                | MirLayout::Enum { variants, .. } => {
-                    if desc.ownership != MirOwnership::Copy {
-                        for operation in [
-                            crate::core::mir::types::MirGlueOperation::MoveOut,
-                            crate::core::mir::types::MirGlueOperation::Clone,
-                            crate::core::mir::types::MirGlueOperation::Drop,
-                        ] {
-                            self.program.type_catalog().validate_glue(ty, operation)?;
                         }
+                        for element in elements {
+                            self.supported_type(element)?;
+                        }
+                        Ok(())
                     }
-                    for variant in variants {
-                        for field in &variant.fields {
+                    MirLayout::Record { fields, .. } => {
+                        if desc.ownership != MirOwnership::Copy
+                            && (desc.glue.move_out != MirGlueKind::Aggregate
+                                || desc.glue.clone != MirGlueKind::Aggregate
+                                || desc.glue.drop != MirGlueKind::Aggregate
+                                || desc.drop_plan.is_none())
+                        {
+                            return Err(format!(
+                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
+                            ty.as_str(),
+                            desc.ownership
+                        ));
+                        }
+                        for field in fields {
                             self.supported_type(&field.ty)?;
                         }
+                        Ok(())
                     }
-                    Ok(())
+                    MirLayout::Option { variants, .. }
+                    | MirLayout::Result { variants, .. }
+                    | MirLayout::Enum { variants, .. } => {
+                        if desc.ownership != MirOwnership::Copy {
+                            for operation in [
+                                crate::core::mir::types::MirGlueOperation::MoveOut,
+                                crate::core::mir::types::MirGlueOperation::Clone,
+                                crate::core::mir::types::MirGlueOperation::Drop,
+                            ] {
+                                self.program.type_catalog().validate_glue(ty, operation)?;
+                            }
+                        }
+                        for variant in variants {
+                            for field in &variant.fields {
+                                self.supported_type(&field.ty)?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    layout => Err(format!(
+                        "aggregate layout {:?} is not in the canonical bytecode slice",
+                        layout
+                    )),
                 }
-                layout => Err(format!(
-                    "aggregate layout {:?} is not in the canonical bytecode slice",
-                    layout
-                )),
-            },
+            }
             _ => Err(format!(
                 "type '{}' has unsupported ABI {:?}",
                 ty.as_str(),
@@ -4721,7 +4730,9 @@ mod tests {
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
-    use crate::core::mir::types::{MirGlueKind, MirLayout, MirTypeKind};
+    use crate::core::mir::types::{
+        MirDropGluePlan, MirGlueKind, MirLayout, MirOwnership, MirTypeKind,
+    };
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::instr::CanonicalFfiScalarType;
@@ -4777,6 +4788,52 @@ mod tests {
         let checked = crate::core::check_program(&file)
             .map_err(|errors| DifferentialHarnessError::Check(format!("{errors:?}")))?;
         Ok((file, checked))
+    }
+
+    #[test]
+    fn bytecode_supported_type_rejects_forged_copy_aggregate_metadata() {
+        let source = include_str!("../../../tests/fixtures/mir_native_record_copy.mimi");
+        let (_, checked) = parse_and_check(source).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let record_id = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (matches!(descriptor.layout, MirLayout::Record { .. })
+                    && descriptor.ownership == MirOwnership::Copy)
+                    .then(|| ty.clone())
+            })
+            .expect("Copy record TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&record_id)
+            .expect("Copy record descriptor")
+            .clone();
+        assert!(descriptor.has_canonical_copy_noop_metadata());
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(record_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => forged.drop_plan = Some(MirDropGluePlan { fields: Vec::new() }),
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(record_id.clone(), forged);
+            let forged_program =
+                MirProgram::with_type_catalog(program.functions().clone(), catalog)
+                    .expect("forged catalog remains structurally valid");
+            let errors = compile_mir_program(&forged_program)
+                .expect_err("forged Copy aggregate metadata must fail bytecode admission");
+            assert!(
+                errors.iter().any(|error| error
+                    .message
+                    .contains("Copy aggregate metadata outside the canonical no-op contract")),
+                "unexpected errors: {errors:?}"
+            );
+        }
     }
 
     fn canonical_program_text(mir: &MirProgram) -> String {
