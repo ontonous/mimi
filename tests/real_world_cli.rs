@@ -1614,6 +1614,88 @@ fn canonical_mir_cli_all_receipt_multi_module_failures_are_sorted_and_atomic() {
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_multi_module_failure_repeats_byte_identically() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-multi-repeat-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-repeat failure directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write repeated-failure entry");
+
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn repeated multi-failure receipt")
+    };
+    let outputs = (0..3).map(|_| run()).collect::<Vec<_>>();
+    for output in &outputs {
+        assert!(
+            !output.status.success(),
+            "unsupported imported helpers must fail closed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failure emitted a partial manifest"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.contains("Copy scalar"),
+            "repeated failure lost one of its canonical lowering diagnostics: {stderr}"
+        );
+        assert!(
+            !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "repeated failure claimed a receipt manifest: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "repeated failure fell back to legacy: {stderr}"
+        );
+    }
+    for pair in outputs.windows(2) {
+        assert_eq!(
+            pair[0].status.code(),
+            pair[1].status.code(),
+            "repeated failure exit code changed"
+        );
+        assert_eq!(
+            pair[0].stdout, pair[1].stdout,
+            "repeated failure stdout changed"
+        );
+        assert_eq!(
+            pair[0].stderr, pair[1].stderr,
+            "repeated failure stderr changed"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
