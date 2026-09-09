@@ -731,6 +731,34 @@ mod tests {
     }
 
     #[test]
+    fn route_receipt_manifest_rejects_future_version_and_field_extensions() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+
+        let future_header = manifest.replacen(
+            MIR_ROUTE_RECEIPT_MANIFEST_HEADER,
+            "mimi-mir-route-manifest-v2",
+            1,
+        );
+        assert_eq!(
+            CanonicalMirRouteReceipt::from_manifest(&future_header),
+            Err("invalid MIR route manifest: expected header 'mimi-mir-route-manifest-v1'".into())
+        );
+
+        for insertion in [1, 5, 10] {
+            let mut rows = manifest.lines().map(str::to_owned).collect::<Vec<_>>();
+            rows.insert(insertion, "future_field=reserved".into());
+            let error = CanonicalMirRouteReceipt::parse_manifest(&rows.join("\n"))
+                .expect_err("future fields require an explicit schema version");
+            let row = insertion.saturating_sub(1);
+            assert_eq!(
+                error,
+                format!("invalid MIR route manifest: unknown field 'future_field' at row {row}")
+            );
+        }
+    }
+
+    #[test]
     fn route_receipt_manifest_enforces_field_completeness_and_empty_owner_round_trip() {
         let receipt = valid_receipt();
         let manifest = receipt.manifest_text().expect("valid receipt manifest");
