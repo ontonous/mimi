@@ -135,6 +135,31 @@ pub enum MirFfiScalarKind {
     Unit,
 }
 
+impl MirFfiScalarKind {
+    /// Return the canonical MIR ABI class represented by this scalar kind.
+    /// Keeping the inverse of `MirAbiClass::canonical_ffi_scalar_kind` here
+    /// prevents physical adapters from maintaining their own ABI spelling.
+    pub(crate) fn abi_class(self) -> MirAbiClass {
+        match self {
+            Self::I32 => MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            Self::I64 => MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            Self::Bool => MirAbiClass::Bool,
+            Self::F64 => MirAbiClass::Float { bits: 64 },
+            Self::Unit => MirAbiClass::Unit,
+        }
+    }
+
+    pub(crate) fn is_unit(self) -> bool {
+        matches!(self, Self::Unit)
+    }
+}
+
 impl MirAbiClass {
     /// Stable, backend-independent spelling used by canonical receipts and
     /// identity digests. This must not depend on Rust's `Debug` formatting.

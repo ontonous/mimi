@@ -318,11 +318,8 @@ fn scalar_ffi_type(
         ));
     }
     match descriptor.abi.canonical_ffi_scalar_kind() {
-        Some(crate::core::mir::types::MirFfiScalarKind::I32) => Ok(CanonicalFfiScalarType::I32),
-        Some(crate::core::mir::types::MirFfiScalarKind::I64) => Ok(CanonicalFfiScalarType::I64),
-        Some(crate::core::mir::types::MirFfiScalarKind::Bool) => Ok(CanonicalFfiScalarType::Bool),
-        Some(crate::core::mir::types::MirFfiScalarKind::F64) => Ok(CanonicalFfiScalarType::F64),
-        Some(crate::core::mir::types::MirFfiScalarKind::Unit) | None => Err(format!(
+        Some(kind) if !kind.is_unit() => Ok(CanonicalFfiScalarType::from_mir_kind(kind)),
+        _ => Err(format!(
             "canonical FFI '{}' {} ABI {:?} is outside the scalar bytecode island",
             instruction, role, descriptor.abi
         )),

@@ -1651,7 +1651,7 @@ mod tests {
         native_ffi_basic_type_matches, native_ffi_metadata_type_matches, native_ffi_scalar_shape,
         native_ffi_value_matches, NativeFfiScalarShape,
     };
-    use crate::core::mir::types::MirAbiClass;
+    use crate::core::mir::types::{MirAbiClass, MirFfiScalarKind};
     use inkwell::context::Context;
     use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
     use inkwell::values::BasicValueEnum;
@@ -1692,6 +1692,30 @@ mod tests {
         ] {
             assert_eq!(native_ffi_scalar_shape(abi), None);
         }
+    }
+
+    #[test]
+    fn native_ffi_shape_maps_every_mir_kind_without_admitting_unit() {
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::I32),
+            Some(NativeFfiScalarShape::SignedInteger(32))
+        );
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::I64),
+            Some(NativeFfiScalarShape::SignedInteger(64))
+        );
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::Bool),
+            Some(NativeFfiScalarShape::Bool)
+        );
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::F64),
+            Some(NativeFfiScalarShape::Float(64))
+        );
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::Unit),
+            None
+        );
     }
 
     #[test]

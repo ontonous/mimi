@@ -537,20 +537,7 @@ fn ffi_type(scalar: &CanonicalFfiScalarType) -> Result<FfiType, String> {
 }
 
 fn scalar_abi_class(scalar: &CanonicalFfiScalarType) -> crate::core::mir::types::MirAbiClass {
-    use crate::core::mir::types::MirAbiClass;
-    match scalar {
-        CanonicalFfiScalarType::I32 => MirAbiClass::Integer {
-            bits: 32,
-            signed: true,
-        },
-        CanonicalFfiScalarType::I64 => MirAbiClass::Integer {
-            bits: 64,
-            signed: true,
-        },
-        CanonicalFfiScalarType::Bool => MirAbiClass::Bool,
-        CanonicalFfiScalarType::F64 => MirAbiClass::Float { bits: 64 },
-        CanonicalFfiScalarType::Unit => MirAbiClass::Unit,
-    }
+    scalar.abi_class()
 }
 
 // SAFETY: the caller must supply a live C function pointer, matching CIF,
@@ -653,6 +640,23 @@ mod tests {
         assert!(
             apply_result_conversion(Value::Int(i32::MAX as i64 + 1), Some(&i64_to_i32)).is_err()
         );
+    }
+
+    #[test]
+    fn canonical_ffi_scalar_type_round_trips_mir_kind_and_abi() {
+        use crate::core::mir::types::MirFfiScalarKind;
+
+        for (kind, scalar) in [
+            (MirFfiScalarKind::I32, CanonicalFfiScalarType::I32),
+            (MirFfiScalarKind::I64, CanonicalFfiScalarType::I64),
+            (MirFfiScalarKind::Bool, CanonicalFfiScalarType::Bool),
+            (MirFfiScalarKind::F64, CanonicalFfiScalarType::F64),
+            (MirFfiScalarKind::Unit, CanonicalFfiScalarType::Unit),
+        ] {
+            assert_eq!(CanonicalFfiScalarType::from_mir_kind(kind), scalar);
+            assert_eq!(scalar.mir_kind(), kind);
+            assert_eq!(scalar.abi_class(), kind.abi_class());
+        }
     }
 
     #[test]

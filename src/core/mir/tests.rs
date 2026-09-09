@@ -77,6 +77,16 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
     ] {
         assert_eq!(abi.canonical_ffi_scalar_kind(), None);
     }
+
+    for kind in [
+        MirFfiScalarKind::I32,
+        MirFfiScalarKind::I64,
+        MirFfiScalarKind::Bool,
+        MirFfiScalarKind::F64,
+        MirFfiScalarKind::Unit,
+    ] {
+        assert_eq!(kind.abi_class().canonical_ffi_scalar_kind(), Some(kind));
+    }
 }
 
 #[test]

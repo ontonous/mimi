@@ -1859,6 +1859,32 @@ pub enum CanonicalFfiScalarType {
     Unit,
 }
 
+impl CanonicalFfiScalarType {
+    pub(crate) fn from_mir_kind(kind: crate::core::mir::types::MirFfiScalarKind) -> Self {
+        match kind {
+            crate::core::mir::types::MirFfiScalarKind::I32 => Self::I32,
+            crate::core::mir::types::MirFfiScalarKind::I64 => Self::I64,
+            crate::core::mir::types::MirFfiScalarKind::Bool => Self::Bool,
+            crate::core::mir::types::MirFfiScalarKind::F64 => Self::F64,
+            crate::core::mir::types::MirFfiScalarKind::Unit => Self::Unit,
+        }
+    }
+
+    pub(crate) fn mir_kind(&self) -> crate::core::mir::types::MirFfiScalarKind {
+        match self {
+            Self::I32 => crate::core::mir::types::MirFfiScalarKind::I32,
+            Self::I64 => crate::core::mir::types::MirFfiScalarKind::I64,
+            Self::Bool => crate::core::mir::types::MirFfiScalarKind::Bool,
+            Self::F64 => crate::core::mir::types::MirFfiScalarKind::F64,
+            Self::Unit => crate::core::mir::types::MirFfiScalarKind::Unit,
+        }
+    }
+
+    pub(crate) fn abi_class(&self) -> crate::core::mir::types::MirAbiClass {
+        self.mir_kind().abi_class()
+    }
+}
+
 /// One checker-owned scalar FFI call descriptor for AST-free bytecode.
 /// Descriptors are per MIR call receipt, so an Op index cannot silently reuse
 /// a symbol with a different argument or result ABI.

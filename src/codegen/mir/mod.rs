@@ -471,6 +471,16 @@ enum NativeFfiScalarShape {
 }
 
 impl NativeFfiScalarShape {
+    fn from_mir_kind(kind: crate::core::mir::types::MirFfiScalarKind) -> Option<Self> {
+        match kind {
+            crate::core::mir::types::MirFfiScalarKind::I32 => Some(Self::SignedInteger(32)),
+            crate::core::mir::types::MirFfiScalarKind::I64 => Some(Self::SignedInteger(64)),
+            crate::core::mir::types::MirFfiScalarKind::Bool => Some(Self::Bool),
+            crate::core::mir::types::MirFfiScalarKind::F64 => Some(Self::Float(64)),
+            crate::core::mir::types::MirFfiScalarKind::Unit => None,
+        }
+    }
+
     fn llvm_type<'ctx>(self, context: &'ctx Context) -> BasicTypeEnum<'ctx> {
         match self {
             Self::SignedInteger(32) => context.i32_type().into(),
@@ -492,17 +502,7 @@ impl NativeFfiScalarShape {
 /// the checker-owned receipt remains responsible for deciding whether a call
 /// is eligible for the island at all.
 fn native_ffi_scalar_shape(abi: MirAbiClass) -> Option<NativeFfiScalarShape> {
-    match abi.canonical_ffi_scalar_kind()? {
-        crate::core::mir::types::MirFfiScalarKind::I32 => {
-            Some(NativeFfiScalarShape::SignedInteger(32))
-        }
-        crate::core::mir::types::MirFfiScalarKind::I64 => {
-            Some(NativeFfiScalarShape::SignedInteger(64))
-        }
-        crate::core::mir::types::MirFfiScalarKind::Bool => Some(NativeFfiScalarShape::Bool),
-        crate::core::mir::types::MirFfiScalarKind::F64 => Some(NativeFfiScalarShape::Float(64)),
-        crate::core::mir::types::MirFfiScalarKind::Unit => None,
-    }
+    NativeFfiScalarShape::from_mir_kind(abi.canonical_ffi_scalar_kind()?)
 }
 
 struct NativeMirFunctionEmitter<'a, 'ctx> {
