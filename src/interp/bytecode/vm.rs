@@ -2737,6 +2737,14 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(count as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "record construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, count, register_count
+                        )));
+                    }
                     let type_name_str = match &proto.constants.get(type_name as usize) {
                         Some(ConstValue::Str(s)) => {
                             if s.is_empty() {
@@ -2776,6 +2784,14 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(count as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "record move construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, count, register_count
+                        )));
+                    }
                     let type_name_str = match &proto.constants.get(type_name as usize) {
                         Some(ConstValue::Str(s)) => {
                             if s.is_empty() {
