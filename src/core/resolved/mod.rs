@@ -810,6 +810,47 @@ pub(crate) fn resolve_zonked_signature(
     }
 }
 
+/// Resolve one checker-owned extern declaration for a call-site name from a
+/// resolved extern block directory. Keep the map-level implementation here
+/// so semantic body lowering and `CheckedProgram` consumers share identical
+/// zero/one/many cardinality and deterministic identity diagnostics.
+pub(crate) fn resolve_extern_func_signature_for_call<'a>(
+    extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
+    name: &str,
+    argc: usize,
+) -> Result<Option<&'a ResolvedExternFunc>, String> {
+    let mut matches = extern_blocks
+        .values()
+        .flat_map(|block| {
+            block
+                .signatures
+                .iter()
+                .filter(|signature| signature.name == name)
+                .map(move |signature| (block, signature))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_block, left), (right_block, right)| {
+        left_block
+            .node_id
+            .cmp(&right_block.node_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    match matches.as_slice() {
+        [] => Ok(None),
+        [(_, signature)] => Ok(Some(*signature)),
+        _ => {
+            let identities = matches
+                .iter()
+                .map(|(block, signature)| format!("{}:{}", block.node_id.0, signature.node_id.0))
+                .collect::<Vec<_>>();
+            Err(format!(
+                "extern call '{}' ({} arguments) has ambiguous checker-owned declaration identity: {:?}",
+                name, argc, identities
+            ))
+        }
+    }
+}
+
 impl CheckedProgram {
     /// 0.36.48: number of method-level generic params declared by a trait
     /// method (0 for plain methods like `is_empty`, 1 for `map<U>`).
@@ -1680,39 +1721,7 @@ impl CheckedProgram {
         name: &str,
         argc: usize,
     ) -> Result<Option<&ResolvedExternFunc>, String> {
-        let mut matches = self
-            .extern_blocks
-            .values()
-            .flat_map(|block| {
-                block
-                    .signatures
-                    .iter()
-                    .filter(|signature| signature.name == name)
-                    .map(move |signature| (block, signature))
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by(|(left_block, left), (right_block, right)| {
-            left_block
-                .node_id
-                .cmp(&right_block.node_id)
-                .then_with(|| left.node_id.cmp(&right.node_id))
-        });
-        match matches.as_slice() {
-            [] => Ok(None),
-            [(_, signature)] => Ok(Some(*signature)),
-            _ => {
-                let identities = matches
-                    .iter()
-                    .map(|(block, signature)| {
-                        format!("{}:{}", block.node_id.0, signature.node_id.0)
-                    })
-                    .collect::<Vec<_>>();
-                Err(format!(
-                    "extern call '{}' ({} arguments) has ambiguous checker-owned declaration identity: {:?}",
-                    name, argc, identities
-                ))
-            }
-        }
+        resolve_extern_func_signature_for_call(&self.extern_blocks, name, argc)
     }
 
     pub fn type_schemes(&self) -> &HashMap<NodeId, TypeScheme> {

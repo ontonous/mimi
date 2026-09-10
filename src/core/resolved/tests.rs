@@ -1563,7 +1563,7 @@ extern "C" { func c_abs(x: i32) -> i32 }
 func main() -> i32 { c_abs(1) }
 "#,
     );
-    let mut program = CheckedProgram::from_checked_file(&file).expect("IR");
+    let mut program = crate::core::check_program(&file).expect("check");
     let mut duplicate = program
         .extern_blocks()
         .values()
@@ -1589,6 +1589,11 @@ func main() -> i32 { c_abs(1) }
     let verifier_error = crate::verifier::verify_ffi_checked(&program)
         .expect_err("verifier must reject same-named merged declarations");
     assert!(verifier_error.contains("ambiguous checker-owned declaration identity"));
+    let lowering_errors = crate::core::ir::lower::lower_checked_function_bodies(&file, &program)
+        .expect_err("semantic lowering must reject same-named merged declarations");
+    assert!(lowering_errors.iter().any(|error| error
+        .message
+        .contains("ambiguous checker-owned declaration identity")));
 }
 
 #[test]

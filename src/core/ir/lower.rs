@@ -20,8 +20,8 @@ use crate::core::resolved::{
     expr_kind, expr_sibling_role, expr_sibling_roles, impl_method_owner, impl_qualified_name,
     interpolation_role, map_entry_role, map_entry_roles, match_arm_role, match_arm_roles,
     nested_function_owner, pattern_kind, pattern_sibling_role, pattern_sibling_roles,
-    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, stmt_sibling_roles, type_kind,
-    NodeIdBuilder,
+    resolve_extern_func_signature_for_call, stable_id_fragment, stmt_anchor, stmt_kind,
+    stmt_sibling_role, stmt_sibling_roles, type_kind, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -2781,20 +2781,24 @@ impl BodyLowerer<'_> {
             if !type_arguments.is_empty() {
                 return self.unsupported(node_id, "generic arguments on extern call");
             }
-            let candidates = self
-                .extern_blocks
-                .values()
-                .flat_map(|block| block.signatures.iter())
-                .filter(|function| function.name == site.callee)
-                .collect::<Vec<_>>();
-            let [function] = candidates.as_slice() else {
-                return Err(vec![ResolvedBodyError::new(
-                    node_id.clone(),
-                    format!(
-                        "extern call '{}' does not resolve to exactly one declaration",
-                        site.callee
-                    ),
-                )]);
+            let function = match resolve_extern_func_signature_for_call(
+                self.extern_blocks,
+                &site.callee,
+                arguments.len(),
+            ) {
+                Ok(Some(function)) => function,
+                Ok(None) => {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "extern call '{}' does not resolve to exactly one declaration",
+                            site.callee
+                        ),
+                    )]);
+                }
+                Err(message) => {
+                    return Err(vec![ResolvedBodyError::new(node_id.clone(), message)]);
+                }
             };
             let arity_valid = if function.variadic {
                 arguments.len() >= function.parameter_ids.len()
