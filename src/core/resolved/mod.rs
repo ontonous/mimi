@@ -851,6 +851,46 @@ pub(crate) fn resolve_extern_func_signature_for_call<'a>(
     }
 }
 
+/// Resolve one checker-owned extern signature identity from a resolved block
+/// directory. A malformed merged directory can duplicate a signature id in
+/// one or several blocks; expose that cardinality instead of letting a
+/// consumer's first-match lookup choose an ABI or symbol nondeterministically.
+pub(crate) fn resolve_extern_func_for_signature<'a>(
+    extern_blocks: &'a HashMap<NodeId, ResolvedExternBlock>,
+    signature_id: &NodeId,
+) -> Result<Option<&'a ResolvedExternFunc>, String> {
+    let mut matches = extern_blocks
+        .values()
+        .flat_map(|block| {
+            block
+                .signatures
+                .iter()
+                .filter(|signature| signature.node_id == *signature_id)
+                .map(move |signature| (block, signature))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_block, left), (right_block, right)| {
+        left_block
+            .node_id
+            .cmp(&right_block.node_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    match matches.as_slice() {
+        [] => Ok(None),
+        [(_, signature)] => Ok(Some(*signature)),
+        _ => {
+            let identities = matches
+                .iter()
+                .map(|(block, signature)| format!("{}:{}", block.node_id.0, signature.node_id.0))
+                .collect::<Vec<_>>();
+            Err(format!(
+                "extern declaration '{}' has ambiguous checker-owned signature identity: {:?}",
+                signature_id.0, identities
+            ))
+        }
+    }
+}
+
 impl CheckedProgram {
     /// 0.36.48: number of method-level generic params declared by a trait
     /// method (0 for plain methods like `is_empty`, 1 for `map<U>`).
@@ -1722,6 +1762,16 @@ impl CheckedProgram {
         argc: usize,
     ) -> Result<Option<&ResolvedExternFunc>, String> {
         resolve_extern_func_signature_for_call(&self.extern_blocks, name, argc)
+    }
+
+    /// Resolve one checker-owned extern signature identity with explicit
+    /// zero/one/many cardinality. Consumers must use this when starting from
+    /// a canonical `ResolvedCallee::Extern` node id.
+    pub fn extern_func_for_signature(
+        &self,
+        signature_id: &NodeId,
+    ) -> Result<Option<&ResolvedExternFunc>, String> {
+        resolve_extern_func_for_signature(&self.extern_blocks, signature_id)
     }
 
     pub fn type_schemes(&self) -> &HashMap<NodeId, TypeScheme> {

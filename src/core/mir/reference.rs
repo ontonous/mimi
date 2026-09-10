@@ -3068,19 +3068,25 @@ fn materialize_ffi_call_contracts(
                         continue;
                     }
                 };
-                let Some(signature) = declaration
-                    .signatures
-                    .iter()
-                    .find(|signature| signature.node_id == *callee)
-                else {
-                    errors.push(super::MirValidationError {
-                        subject: instruction.id.to_string(),
-                        message: format!(
-                            "extern call '{}' has no checker-owned declaration identity",
-                            callee.0
-                        ),
-                    });
-                    continue;
+                let signature = match program.extern_func_for_signature(callee) {
+                    Ok(Some(signature)) => signature,
+                    Ok(None) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern call '{}' has no checker-owned declaration identity",
+                                callee.0
+                            ),
+                        });
+                        continue;
+                    }
+                    Err(message) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                        continue;
+                    }
                 };
                 let unsupported = if declaration.no_panic {
                     Some("no_panic FFI protection")

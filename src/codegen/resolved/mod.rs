@@ -4996,13 +4996,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ResolvedCallee::Extern(callee_id) => {
                         // 0.32.26: Extern FFI call — look up the wrapper function
                         // by name (declared by legacy emitter in step 1) and call it.
-                        let ext_name = self.program.extern_blocks().values()
-                            .flat_map(|block| block.signatures.iter())
-                            .find(|sig| sig.node_id == *callee_id)
-                            .map(|sig| sig.name.as_str())
-                            .ok_or_else(|| CompileError::LlvmError(format!(
-                                "resolved extern callee '{callee_id:?}' not found in any extern block"
-                            )))?;
+                        let signature = self
+                            .program
+                            .extern_func_for_signature(callee_id)
+                            .map_err(CompileError::LlvmError)?
+                            .ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "resolved extern callee '{callee_id:?}' not found in any extern block"
+                                ))
+                            })?;
+                        let ext_name = signature.name.as_str();
                         // 0.34.35b (M-001): wrapper 显式命名 `{name}.extern_wrapper`，
                         // 必须经 extern_wrapper_fns map 查找——module.get_function(声明名)
                         // 现会命中 extern 原符号（跳过 wrapper 的 ABI 参数转换）。

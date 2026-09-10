@@ -1549,6 +1549,10 @@ func main() -> i32 { c_abs(1) }
         .extern_block_for_signature(&signature_id)
         .expect_err("duplicate checker-owned block must fail closed");
     assert!(error.contains("ambiguous checker-owned ABI blocks"));
+    let signature_error = program
+        .extern_func_for_signature(&signature_id)
+        .expect_err("duplicate checker-owned signatures must fail closed");
+    assert!(signature_error.contains("ambiguous checker-owned signature identity"));
     assert!(!crate::core::mir::is_scalar_ffi_candidate(&program));
     let boundary = crate::core::mir::scalar_ffi_boundary_reason(&program)
         .expect("ambiguous declaration identity must explain the route boundary");
@@ -1594,6 +1598,37 @@ func main() -> i32 { c_abs(1) }
     assert!(lowering_errors.iter().any(|error| error
         .message
         .contains("ambiguous checker-owned declaration identity")));
+}
+
+#[test]
+fn checked_program_extern_signature_identity_rejects_duplicate_entries() {
+    let file = parse(
+        r#"
+extern "C" { func c_abs(x: i32) -> i32 }
+func main() -> i32 { c_abs(1) }
+"#,
+    );
+    let mut program = crate::core::check_program(&file).expect("check");
+    let block_id = program
+        .extern_blocks()
+        .keys()
+        .next()
+        .cloned()
+        .expect("extern block");
+    let mut block = program
+        .extern_blocks()
+        .get(&block_id)
+        .expect("extern block")
+        .clone();
+    let signature_id = block.signatures[0].node_id.clone();
+    block.signatures.push(block.signatures[0].clone());
+    program.extern_blocks.insert(block_id, block);
+
+    let error = program
+        .extern_func_for_signature(&signature_id)
+        .expect_err("duplicate signature entries must fail closed");
+    assert!(error.contains("ambiguous checker-owned signature identity"));
+    assert!(error.contains(&signature_id.0));
 }
 
 #[test]
