@@ -143,9 +143,11 @@ fn materialize_canonical_ffi_bindings(
     for (function, proto) in functions.iter().enumerate() {
         for (pc, op) in proto.code.iter().enumerate() {
             let Op::CallCanonicalExtern {
+                rd,
                 extern_idx,
                 instruction,
-                ..
+                args_base,
+                argc,
             } = op
             else {
                 continue;
@@ -205,6 +207,9 @@ fn materialize_canonical_ffi_bindings(
                 pc: pc as u32,
                 extern_idx: *extern_idx,
                 instruction: *instruction,
+                rd: *rd,
+                args_base: *args_base,
+                argc: *argc,
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
             });
@@ -12098,6 +12103,68 @@ func main() -> i32 {
             error.to_string().contains("pc") && error.to_string().contains("out of range"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_call_operands() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let original = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+
+        let mut forged = original.clone();
+        let binding = forged.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let pc = binding.pc as usize;
+        if let Op::CallCanonicalExtern { rd, .. } =
+            &mut std::sync::Arc::make_mut(&mut forged).functions[function_idx].code[pc]
+        {
+            *rd = rd.wrapping_add(1);
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let error = BytecodeVM::new(forged)
+            .run_value()
+            .expect_err("forged result register must fail before loading");
+        assert!(error.to_string().contains("result register"), "{error}");
+
+        let mut forged = original.clone();
+        let binding = forged.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let pc = binding.pc as usize;
+        if let Op::CallCanonicalExtern { args_base, .. } =
+            &mut std::sync::Arc::make_mut(&mut forged).functions[function_idx].code[pc]
+        {
+            *args_base = args_base.wrapping_add(1);
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let error = BytecodeVM::new(forged)
+            .run_value()
+            .expect_err("forged argument base register must fail before loading");
+        assert!(
+            error.to_string().contains("argument base register"),
+            "{error}"
+        );
+
+        let mut forged = original;
+        let binding = forged.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let pc = binding.pc as usize;
+        if let Op::CallCanonicalExtern { argc, .. } =
+            &mut std::sync::Arc::make_mut(&mut forged).functions[function_idx].code[pc]
+        {
+            *argc = argc.wrapping_add(1);
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let error = BytecodeVM::new(forged)
+            .run_value()
+            .expect_err("forged argument count must fail before loading");
+        assert!(error.to_string().contains("argument count"), "{error}");
     }
 
     #[test]

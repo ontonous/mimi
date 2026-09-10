@@ -1867,6 +1867,12 @@ pub(crate) struct CanonicalFfiBinding {
     pub(crate) pc: u32,
     pub(crate) extern_idx: u16,
     pub(crate) instruction: ConstIdx,
+    /// The complete register-window operands emitted for this call site.
+    /// Keeping them here prevents a mutable public instruction table from
+    /// changing the value flow of a checker-owned FFI call after compilation.
+    pub(crate) rd: Reg,
+    pub(crate) args_base: Reg,
+    pub(crate) argc: u16,
     pub(crate) instruction_text: String,
     pub(crate) descriptor: CanonicalFfiDescriptor,
 }

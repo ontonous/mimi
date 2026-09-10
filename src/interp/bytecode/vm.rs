@@ -315,9 +315,11 @@ impl BytecodeVM {
         for (function_idx, proto) in self.program.functions.iter().enumerate() {
             for (pc, op) in proto.code.iter().enumerate() {
                 let Op::CallCanonicalExtern {
+                    rd,
                     extern_idx,
                     instruction,
-                    ..
+                    args_base,
+                    argc,
                 } = op
                 else {
                     continue;
@@ -331,6 +333,24 @@ impl BytecodeVM {
                             proto.name
                         ))
                     })?;
+                if binding.rd != *rd {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} result register {rd} disagrees with compiler binding register {}",
+                        proto.name, binding.rd
+                    )));
+                }
+                if binding.args_base != *args_base {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} argument base register {args_base} disagrees with compiler binding register {}",
+                        proto.name, binding.args_base
+                    )));
+                }
+                if binding.argc != *argc {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} argument count {argc} disagrees with compiler binding count {}",
+                        proto.name, binding.argc
+                    )));
+                }
                 if binding.extern_idx != *extern_idx {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} descriptor index {extern_idx} disagrees with compiler binding index {}",
