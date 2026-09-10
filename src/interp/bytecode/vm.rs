@@ -587,7 +587,7 @@ impl BytecodeVM {
             match self.exec_loop() {
                 Ok(v) => break Ok(v),
                 Err(e) => {
-                    if self.absorb_flow_fault(&e) {
+                    if self.absorb_flow_fault(&e)? {
                         continue;
                     }
                     break Err(self.enrich_error(e));
@@ -625,7 +625,7 @@ impl BytecodeVM {
             match self.exec_loop() {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if self.absorb_flow_fault(&e) {
+                    if self.absorb_flow_fault(&e)? {
                         continue;
                     }
                     return Err(self.enrich_error(e));
@@ -640,18 +640,23 @@ impl BytecodeVM {
     /// register and all frames up to and including the transition are
     /// popped, so execution resumes at the caller with the Fault value.
     ///
-    /// Returns false when the error should propagate:
+    /// Returns `Ok(false)` when the error should propagate:
     /// - no flow transition on the stack
     /// - the panic already happened in Fault (no re-absorption)
     /// - the error is a programming error, not a runtime panic
-    fn absorb_flow_fault(&mut self, e: &InterpError) -> bool {
+    ///
+    /// Returns an error when a malformed transition frame points its return
+    /// value outside the caller frame.  The helper owns the final writeback
+    /// after truncating the transition stack, so it must validate that target
+    /// before mutating the stack.
+    fn absorb_flow_fault(&mut self, e: &InterpError) -> Result<bool, InterpError> {
         let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
-            return false;
+            return Ok(false);
         };
         let (flow_name, transition_name, from_state, persistent) = {
             let ctx = self.stack[idx].flow_tx.as_ref().expect("checked above");
             if ctx.from_state == "Fault" {
-                return false;
+                return Ok(false);
             }
             (
                 ctx.flow_name.clone(),
@@ -675,10 +680,10 @@ impl BytecodeVM {
             })
         });
         if !declared_faultable {
-            return false;
+            return Ok(false);
         }
         if !is_runtime_panic(e) {
-            return false;
+            return Ok(false);
         }
         // Draft = the transition's `self` (register 0) — mutated in place by
         // the body. Non-transactional (all flows, since @transactional was
@@ -704,12 +709,39 @@ impl BytecodeVM {
         }
         shadow_persistent_into_fault(&mut fault, &restored, &persistent);
         let return_reg = self.stack[idx].return_reg;
+        if let Some(rd) = return_reg {
+            let caller_idx = idx.checked_sub(1).ok_or_else(|| {
+                InterpError::new(
+                    "flow fault absorption frame has a return register but no caller frame",
+                )
+            })?;
+            let caller = self
+                .stack
+                .get(caller_idx)
+                .ok_or_else(|| InterpError::new("flow fault absorption caller frame is missing"))?;
+            if (rd as usize) >= caller.regs.len() {
+                return Err(InterpError::new(format!(
+                    "flow fault absorption return register {} is outside caller frame with {} register(s)",
+                    rd,
+                    caller.regs.len()
+                )));
+            }
+        }
         let popped = self.stack.len() - idx;
         self.stack.truncate(idx);
         self.depth = self.depth.saturating_sub(popped);
         if let Some(rd) = return_reg {
             if let Some(frame) = self.stack.last_mut() {
-                frame.regs[rd as usize] = fault;
+                // The caller target was validated above. Keep the checked
+                // access here as a second invariant guard at the mutation
+                // boundary in case stack layout changes in a future refactor.
+                let Some(slot) = frame.regs.get_mut(rd as usize) else {
+                    return Err(InterpError::new(format!(
+                        "flow fault absorption return register {} disappeared from caller frame",
+                        rd
+                    )));
+                };
+                *slot = fault;
             }
         }
         // B-4 (Wave-2): the transition frame's callee (and with it the callee
@@ -721,7 +753,7 @@ impl BytecodeVM {
             frame.mutate_writebacks = None;
             frame.mutate_field_writebacks = None;
         }
-        true
+        Ok(true)
     }
 
     /// Take captured stdout (consumes the buffer, leaves empty string).
@@ -2557,7 +2589,7 @@ impl BytecodeVM {
                     // B-5/B-4: ensures failures route through the same-frame
                     // fault handlers and drop the caller's stale writebacks.
                     let contract_args = self.collect_contract_args(false);
-                    let mut_param_vals = self.collect_mut_param_vals();
+                    let mut_param_vals = self.collect_mut_param_vals()?;
                     match self.finish_return(
                         Value::Unit,
                         false,
@@ -5536,7 +5568,7 @@ impl BytecodeVM {
         // (and the caller write-back) `Unit`, producing a spurious E0808
         // "ensures condition failed: false" and/or a silent Unit write-back.
         let contract_args = self.collect_contract_args(is_early_return);
-        let mut_param_vals = self.collect_mut_param_vals();
+        let mut_param_vals = self.collect_mut_param_vals()?;
         // Move value out of register (frame is about to be popped — no clone needed).
         let v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
         self.finish_return(v, is_early_return, stop, contract_args, mut_param_vals)
@@ -5628,7 +5660,7 @@ impl BytecodeVM {
             self.set_reg(rd, v);
         }
         if !mut_param_vals.is_empty() {
-            self.apply_mutate_writeback(&mut_param_vals);
+            self.apply_mutate_writeback(&mut_param_vals)?;
         }
         Ok(None)
     }
@@ -5694,38 +5726,81 @@ impl BytecodeVM {
 
     /// Capture the current frame's final `mut` parameter values
     /// (before the frame is destroyed by pop).
-    fn collect_mut_param_vals(&self) -> Vec<Value> {
+    fn collect_mut_param_vals(&self) -> Result<Vec<Value>, InterpError> {
         let frame = self.cur_frame();
         let proto = &self.program.functions[frame.proto_idx as usize];
         if proto.mut_param_indices.is_empty() {
-            Vec::new()
+            Ok(Vec::new())
         } else {
             proto
                 .mut_param_indices
                 .iter()
-                .map(|&i| frame.regs[i as usize].clone())
+                .map(|&i| {
+                    frame.regs.get(i as usize).cloned().ok_or_else(|| {
+                        InterpError::new(format!(
+                            "function '{}' mutable parameter register {} is outside frame with {} register(s)",
+                            proto.name,
+                            i,
+                            frame.regs.len()
+                        ))
+                    })
+                })
                 .collect()
         }
     }
 
     /// Write captured `mut` parameter values back to the caller's
     /// registered target registers (mutate-parameter reference ABI).
-    fn apply_mutate_writeback(&mut self, vals: &[Value]) {
+    fn apply_mutate_writeback(&mut self, vals: &[Value]) -> Result<(), InterpError> {
         if let Some(caller) = self.stack.last_mut() {
             if let Some(targets) = caller.mutate_writebacks.take() {
+                if targets.len() != vals.len() {
+                    return Err(InterpError::new(format!(
+                        "mutate writeback target count {} disagrees with returned mutable parameter count {}",
+                        targets.len(),
+                        vals.len()
+                    )));
+                }
+                for &target in &targets {
+                    if (target as usize) >= caller.regs.len() {
+                        return Err(InterpError::new(format!(
+                            "mutate writeback target {} is outside caller frame with {} register(s)",
+                            target,
+                            caller.regs.len()
+                        )));
+                    }
+                }
                 for (val, &target) in vals.iter().zip(targets.iter()) {
-                    mimi_debug_assert!(
-                        (target as usize) < caller.regs.len(),
-                        "mutate writeback target {} out of bounds (len {})",
-                        target,
-                        caller.regs.len()
-                    );
-                    caller.regs[target as usize] = val.clone();
+                    // Targets were checked as a batch above, before any
+                    // writeback mutation occurs.
+                    let Some(slot) = caller.regs.get_mut(target as usize) else {
+                        return Err(InterpError::new(format!(
+                            "mutate writeback target {} disappeared from caller frame",
+                            target
+                        )));
+                    };
+                    *slot = val.clone();
                 }
             }
             // v0.34.13 (clause 6): payload member-level borrow — RecordSet
             // the final parameter value back into the caller's payload slot.
             if let Some(field_targets) = caller.mutate_field_writebacks.take() {
+                if field_targets.len() != vals.len() {
+                    return Err(InterpError::new(format!(
+                        "mutate field writeback target count {} disagrees with returned mutable parameter count {}",
+                        field_targets.len(),
+                        vals.len()
+                    )));
+                }
+                for &(obj_reg, _) in &field_targets {
+                    if (obj_reg as usize) >= caller.regs.len() {
+                        return Err(InterpError::new(format!(
+                            "mutate field writeback object register {} is outside caller frame with {} register(s)",
+                            obj_reg,
+                            caller.regs.len()
+                        )));
+                    }
+                }
                 for (val, (obj_reg, field)) in vals.iter().zip(field_targets.iter()) {
                     let obj = caller.regs.get_mut(*obj_reg as usize);
                     if let Some(Value::Record(_, fields)) = obj {
@@ -5734,6 +5809,7 @@ impl BytecodeVM {
                 }
             }
         }
+        Ok(())
     }
 
     /// B-4 (Wave-2): drop a frame's pending mutate writebacks (both register
