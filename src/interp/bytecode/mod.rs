@@ -2189,6 +2189,140 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_load_const_destination_register() {
+        expect_register_error(
+            |result| Op::LoadConst {
+                rd: result + 1,
+                idx: 0,
+            },
+            "load-const destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_load_unit_destination_register() {
+        expect_register_error(
+            |result| Op::LoadUnit { rd: result + 1 },
+            "load-unit destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_load_true_destination_register() {
+        expect_register_error(
+            |result| Op::LoadTrue { rd: result + 1 },
+            "load-true destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_load_false_destination_register() {
+        expect_register_error(
+            |result| Op::LoadFalse { rd: result + 1 },
+            "load-false destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_mov_registers() {
+        expect_register_error(
+            |result| Op::Mov {
+                rd: result,
+                rs: result + 1,
+            },
+            "mov source register",
+        );
+        expect_register_error(
+            |result| Op::Mov {
+                rd: result + 1,
+                rs: result,
+            },
+            "mov destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_move_registers() {
+        expect_register_error(
+            |result| Op::Move {
+                rd: result,
+                rs: result + 1,
+            },
+            "move source register",
+        );
+        expect_register_error(
+            |result| Op::Move {
+                rd: result + 1,
+                rs: result,
+            },
+            "move destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_clone_registers() {
+        expect_register_error(
+            |result| Op::Clone {
+                rd: result,
+                rs: result + 1,
+            },
+            "clone source register",
+        );
+        expect_register_error(
+            |result| Op::Clone {
+                rd: result + 1,
+                rs: result,
+            },
+            "clone destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_drop_source_register() {
+        expect_register_error(|result| Op::Drop { ra: result + 1 }, "drop source register");
+    }
+
+    #[test]
+    fn vm_rejects_forged_aggregate_drop_source_register() {
+        expect_register_error(
+            |result| Op::DropAggregate {
+                ra: result + 1,
+                arity: 0,
+            },
+            "aggregate drop source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_drop_source_register() {
+        expect_register_error(
+            |result| Op::DropVariant {
+                ra: result + 1,
+                shapes: 0,
+            },
+            "variant drop source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_deref_registers() {
+        expect_register_error(
+            |result| Op::DerefValue {
+                rd: result,
+                ra: result + 1,
+            },
+            "deref source register",
+        );
+        expect_register_error(
+            |result| Op::DerefValue {
+                rd: result + 1,
+                ra: result,
+            },
+            "deref destination register",
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {

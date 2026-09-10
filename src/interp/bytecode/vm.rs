@@ -913,19 +913,33 @@ impl BytecodeVM {
             match op {
                 // ── Constants & moves ──────────────────────────
                 Op::LoadConst { rd, idx } => {
+                    self.ensure_reg(rd, "load-const destination")?;
                     let val = self.load_const(proto, idx);
                     self.cur_frame_mut().regs[rd as usize] = val;
                 }
-                Op::LoadUnit { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Unit,
-                Op::LoadTrue { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Bool(true),
-                Op::LoadFalse { rd } => self.cur_frame_mut().regs[rd as usize] = Value::Bool(false),
+                Op::LoadUnit { rd } => {
+                    self.ensure_reg(rd, "load-unit destination")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Unit;
+                }
+                Op::LoadTrue { rd } => {
+                    self.ensure_reg(rd, "load-true destination")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Bool(true);
+                }
+                Op::LoadFalse { rd } => {
+                    self.ensure_reg(rd, "load-false destination")?;
+                    self.cur_frame_mut().regs[rd as usize] = Value::Bool(false);
+                }
                 Op::Mov { rd, rs } => {
+                    self.ensure_reg(rd, "mov destination")?;
+                    self.ensure_reg(rs, "mov source")?;
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
                     }
                 }
                 Op::Move { rd, rs } => {
+                    self.ensure_reg(rd, "move destination")?;
+                    self.ensure_reg(rs, "move source")?;
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         let value = std::mem::replace(&mut frame.regs[rs as usize], Value::Unit);
@@ -933,15 +947,19 @@ impl BytecodeVM {
                     }
                 }
                 Op::Clone { rd, rs } => {
+                    self.ensure_reg(rd, "clone destination")?;
+                    self.ensure_reg(rs, "clone source")?;
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
                     }
                 }
                 Op::Drop { ra } => {
+                    self.ensure_reg(ra, "drop source")?;
                     self.cur_frame_mut().regs[ra as usize] = Value::Unit;
                 }
                 Op::DropAggregate { ra, arity } => {
+                    self.ensure_reg(ra, "aggregate drop source")?;
                     let frame = self.cur_frame_mut();
                     let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
                     let valid_shape = match &value {
@@ -959,6 +977,7 @@ impl BytecodeVM {
                     // the MIR emitter already proved the TypeDesc schedule.
                 }
                 Op::DropVariant { ra, shapes } => {
+                    self.ensure_reg(ra, "variant drop source")?;
                     let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
                         Value::CanonicalVariant {
@@ -1031,6 +1050,8 @@ impl BytecodeVM {
                     // release every owned payload without a second type pass.
                 }
                 Op::DerefValue { rd, ra } => {
+                    self.ensure_reg(rd, "deref destination")?;
+                    self.ensure_reg(ra, "deref source")?;
                     let val = self.get_reg(ra).clone();
                     let inner = match &val {
                         Value::Shared(arc) => arc
