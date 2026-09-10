@@ -171,6 +171,19 @@ fn materialize_canonical_ffi_bindings(
                     ),
                 });
             }
+            if proto
+                .mut_param_indices
+                .iter()
+                .any(|index| *index >= proto.param_count)
+            {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} has a mutable parameter register outside {} parameter slot(s)",
+                        proto.param_count
+                    ),
+                });
+            }
             if (*rd as usize) >= register_count {
                 errors.push(MirBytecodeError {
                     function: NodeId(proto.name.clone()),
@@ -252,6 +265,7 @@ fn materialize_canonical_ffi_bindings(
                 argc: *argc,
                 param_count: proto.param_count,
                 register_count: proto.register_count,
+                mut_param_indices: proto.mut_param_indices.clone(),
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
             });
@@ -11961,6 +11975,20 @@ mod tests {
                     && error.message.contains("descriptor arity")),
             "{errors:?}"
         );
+
+        let mut forged_mut_params = bytecode.functions.clone();
+        forged_mut_params[main_idx].mut_param_indices =
+            vec![forged_mut_params[main_idx].param_count];
+        let errors =
+            super::materialize_canonical_ffi_bindings(&forged_mut_params, &bytecode.canonical_ffi)
+                .expect_err("a mutable parameter register outside the frame must fail");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("mutable parameter register")
+                    && error.message.contains("parameter slot")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -12382,7 +12410,7 @@ func main() -> i32 {
             .expect_err("a binding frame with fewer registers than parameters must fail");
         assert!(error.to_string().contains("parameter slot"), "{error}");
 
-        let mut forged_arity = original;
+        let mut forged_arity = original.clone();
         let binding = forged_arity.canonical_ffi_bindings[0].clone();
         let function_idx = binding.function as usize;
         let pc = binding.pc as usize;
@@ -12402,6 +12430,21 @@ func main() -> i32 {
             .run_value()
             .expect_err("a call arity differing from its descriptor must fail");
         assert!(error.to_string().contains("descriptor arity"), "{error}");
+
+        let mut forged_mut_params = original;
+        let binding = forged_mut_params.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let invalid_param_index = binding.param_count;
+        let forged = std::sync::Arc::make_mut(&mut forged_mut_params);
+        forged.functions[function_idx].mut_param_indices = vec![invalid_param_index];
+        forged.canonical_ffi_bindings[0].mut_param_indices = vec![invalid_param_index];
+        let error = BytecodeVM::new(forged_mut_params)
+            .run_value()
+            .expect_err("a mutable parameter register outside the frame must fail");
+        assert!(
+            error.to_string().contains("mutable parameter register"),
+            "{error}"
+        );
     }
 
     #[test]

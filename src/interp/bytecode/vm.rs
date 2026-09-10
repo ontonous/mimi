@@ -308,6 +308,26 @@ impl BytecodeVM {
                     proto.name, proto.param_count, proto.register_count
                 )));
             }
+            if binding
+                .mut_param_indices
+                .iter()
+                .any(|index| *index >= binding.param_count)
+            {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding for function '{}' has a mutable parameter register outside {} parameter slot(s) in its compiler frame snapshot",
+                    proto.name, binding.param_count
+                )));
+            }
+            if proto
+                .mut_param_indices
+                .iter()
+                .any(|index| *index >= proto.param_count)
+            {
+                return Err(InterpError::new(format!(
+                    "canonical FFI function '{}' has a mutable parameter register outside {} parameter slot(s) in its frame",
+                    proto.name, proto.param_count
+                )));
+            }
             let Some(op) = proto.code.get(binding.pc as usize) else {
                 return Err(InterpError::new(format!(
                     "canonical FFI binding manifest entry points to pc {} out of range in function '{}'",
@@ -391,6 +411,12 @@ impl BytecodeVM {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} register count {} disagrees with compiler binding count {}",
                         proto.name, proto.register_count, binding.register_count
+                    )));
+                }
+                if binding.mut_param_indices != proto.mut_param_indices {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} mutable parameter layout disagrees with compiler binding",
+                        proto.name
                     )));
                 }
                 if binding.extern_idx != *extern_idx {

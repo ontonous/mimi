@@ -1875,6 +1875,7 @@ pub(crate) struct CanonicalFfiBinding {
     pub(crate) argc: u16,
     pub(crate) param_count: u16,
     pub(crate) register_count: u16,
+    pub(crate) mut_param_indices: Vec<u16>,
     pub(crate) instruction_text: String,
     pub(crate) descriptor: CanonicalFfiDescriptor,
 }
