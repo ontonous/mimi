@@ -184,6 +184,41 @@ fn materialize_canonical_ffi_bindings(
                     ),
                 });
             }
+            if proto.has_requires == proto.requires_funcs.is_empty() {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} has inconsistent requires contract metadata (flag={}, functions={})",
+                        proto.has_requires,
+                        proto.requires_funcs.len()
+                    ),
+                });
+            }
+            if proto.has_ensures == proto.ensures_funcs.is_empty() {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} has inconsistent ensures contract metadata (flag={}, functions={})",
+                        proto.has_ensures,
+                        proto.ensures_funcs.len()
+                    ),
+                });
+            }
+            for (kind, contract_funcs) in [
+                ("requires", proto.requires_funcs.as_slice()),
+                ("ensures", proto.ensures_funcs.as_slice()),
+            ] {
+                for (index, &contract_func) in contract_funcs.iter().enumerate() {
+                    if contract_func as usize >= functions.len() {
+                        errors.push(MirBytecodeError {
+                            function: NodeId(proto.name.clone()),
+                            message: format!(
+                                "canonical FFI binding at pc {pc} {kind} contract function #{index} points to function {contract_func} outside the bytecode function table"
+                            ),
+                        });
+                    }
+                }
+            }
             if (*rd as usize) >= register_count {
                 errors.push(MirBytecodeError {
                     function: NodeId(proto.name.clone()),
@@ -266,6 +301,10 @@ fn materialize_canonical_ffi_bindings(
                 param_count: proto.param_count,
                 register_count: proto.register_count,
                 mut_param_indices: proto.mut_param_indices.clone(),
+                has_requires: proto.has_requires,
+                has_ensures: proto.has_ensures,
+                requires_funcs: proto.requires_funcs.clone(),
+                ensures_funcs: proto.ensures_funcs.clone(),
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
             });
@@ -11989,6 +12028,22 @@ mod tests {
                     && error.message.contains("parameter slot")),
             "{errors:?}"
         );
+
+        let mut forged_contracts = bytecode.functions.clone();
+        forged_contracts[main_idx].has_requires = true;
+        forged_contracts[main_idx].requires_funcs = vec![u32::MAX];
+        let errors =
+            super::materialize_canonical_ffi_bindings(&forged_contracts, &bytecode.canonical_ffi)
+                .expect_err("an out-of-range contract function must fail at construction");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("requires contract function")
+                    && error
+                        .message
+                        .contains("outside the bytecode function table")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -12431,7 +12486,7 @@ func main() -> i32 {
             .expect_err("a call arity differing from its descriptor must fail");
         assert!(error.to_string().contains("descriptor arity"), "{error}");
 
-        let mut forged_mut_params = original;
+        let mut forged_mut_params = original.clone();
         let binding = forged_mut_params.canonical_ffi_bindings[0].clone();
         let function_idx = binding.function as usize;
         let invalid_param_index = binding.param_count;
@@ -12443,6 +12498,26 @@ func main() -> i32 {
             .expect_err("a mutable parameter register outside the frame must fail");
         assert!(
             error.to_string().contains("mutable parameter register"),
+            "{error}"
+        );
+
+        let mut forged_contracts = original.clone();
+        let binding = forged_contracts.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let invalid_contract_func = u32::MAX;
+        let forged = std::sync::Arc::make_mut(&mut forged_contracts);
+        forged.functions[function_idx].has_requires = true;
+        forged.functions[function_idx].requires_funcs = vec![invalid_contract_func];
+        forged.canonical_ffi_bindings[0].has_requires = true;
+        forged.canonical_ffi_bindings[0].requires_funcs = vec![invalid_contract_func];
+        let error = BytecodeVM::new(forged_contracts)
+            .run_value()
+            .expect_err("an out-of-range contract function must fail before execution");
+        assert!(
+            error.to_string().contains("requires contract function")
+                && error
+                    .to_string()
+                    .contains("outside the bytecode function table"),
             "{error}"
         );
     }

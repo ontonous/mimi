@@ -328,6 +328,56 @@ impl BytecodeVM {
                     proto.name, proto.param_count
                 )));
             }
+            if binding.has_requires == binding.requires_funcs.is_empty() {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding for function '{}' has inconsistent requires contract metadata in its compiler frame snapshot",
+                    proto.name
+                )));
+            }
+            if binding.has_ensures == binding.ensures_funcs.is_empty() {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding for function '{}' has inconsistent ensures contract metadata in its compiler frame snapshot",
+                    proto.name
+                )));
+            }
+            for (kind, contract_funcs) in [
+                ("requires", binding.requires_funcs.as_slice()),
+                ("ensures", binding.ensures_funcs.as_slice()),
+            ] {
+                for (index, &contract_func) in contract_funcs.iter().enumerate() {
+                    if contract_func as usize >= self.program.functions.len() {
+                        return Err(InterpError::new(format!(
+                            "canonical FFI binding for function '{}' {kind} contract function #{index} points to function {contract_func} outside the bytecode function table",
+                            proto.name
+                        )));
+                    }
+                }
+            }
+            if proto.has_requires == proto.requires_funcs.is_empty() {
+                return Err(InterpError::new(format!(
+                    "canonical FFI function '{}' has inconsistent requires contract metadata in its frame",
+                    proto.name
+                )));
+            }
+            if proto.has_ensures == proto.ensures_funcs.is_empty() {
+                return Err(InterpError::new(format!(
+                    "canonical FFI function '{}' has inconsistent ensures contract metadata in its frame",
+                    proto.name
+                )));
+            }
+            for (kind, contract_funcs) in [
+                ("requires", proto.requires_funcs.as_slice()),
+                ("ensures", proto.ensures_funcs.as_slice()),
+            ] {
+                for (index, &contract_func) in contract_funcs.iter().enumerate() {
+                    if contract_func as usize >= self.program.functions.len() {
+                        return Err(InterpError::new(format!(
+                            "canonical FFI function '{}' {kind} contract function #{index} points to function {contract_func} outside the bytecode function table",
+                            proto.name
+                        )));
+                    }
+                }
+            }
             let Some(op) = proto.code.get(binding.pc as usize) else {
                 return Err(InterpError::new(format!(
                     "canonical FFI binding manifest entry points to pc {} out of range in function '{}'",
@@ -416,6 +466,16 @@ impl BytecodeVM {
                 if binding.mut_param_indices != proto.mut_param_indices {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} mutable parameter layout disagrees with compiler binding",
+                        proto.name
+                    )));
+                }
+                if binding.has_requires != proto.has_requires
+                    || binding.has_ensures != proto.has_ensures
+                    || binding.requires_funcs != proto.requires_funcs
+                    || binding.ensures_funcs != proto.ensures_funcs
+                {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} contract metadata disagrees with compiler binding",
                         proto.name
                     )));
                 }
