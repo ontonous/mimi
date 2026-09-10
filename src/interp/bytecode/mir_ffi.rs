@@ -73,7 +73,30 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
     ) -> Result<Value, crate::interp::InterpError> {
-        self.validate_descriptor(descriptor, args)
+        self.call_with_expected_caller(descriptor, args, None)
+    }
+
+    /// Execute a descriptor while binding it to the bytecode function that
+    /// issued the canonical call. The direct `call` helper remains useful for
+    /// focused runtime tests, but the VM has the actual frame owner and should
+    /// use this contextual entry point so a forged descriptor cannot rewrite
+    /// its caller provenance.
+    pub(crate) fn call_from_caller(
+        &mut self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+        expected_caller: &str,
+    ) -> Result<Value, crate::interp::InterpError> {
+        self.call_with_expected_caller(descriptor, args, Some(expected_caller))
+    }
+
+    fn call_with_expected_caller(
+        &mut self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+        expected_caller: Option<&str>,
+    ) -> Result<Value, crate::interp::InterpError> {
+        self.validate_descriptor(descriptor, args, expected_caller)
             .map_err(crate::interp::InterpError::new)?;
         let converted_args = self
             .convert_arguments(descriptor, args)
@@ -164,7 +187,16 @@ impl CanonicalMirFfiRuntime {
         &self,
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
+        expected_caller: Option<&str>,
     ) -> Result<(), String> {
+        if let Some(expected_caller) = expected_caller {
+            if descriptor.caller != expected_caller {
+                return Err(format!(
+                    "canonical MIR FFI descriptor caller '{}' disagrees with bytecode caller '{}'",
+                    descriptor.caller, expected_caller
+                ));
+            }
+        }
         if descriptor.abi != "C" {
             return Err(format!(
                 "canonical MIR FFI ABI '{}' is outside the C scalar island",
@@ -842,7 +874,7 @@ mod tests {
             right: Box::new(Expr::Int(0)),
         });
         runtime
-            .validate_descriptor(&call, &[Value::Int(1)])
+            .validate_descriptor(&call, &[Value::Int(1)], None)
             .expect("predicates must use MIR-side conversion endpoints");
     }
 
@@ -920,6 +952,19 @@ mod tests {
                 .contains("symbol disagrees with canonical extern callee"),
             "{error}"
         );
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_forged_caller_with_vm_context_before_loading() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let call = descriptor("labs", CanonicalFfiScalarType::I64);
+        let error = runtime
+            .call_from_caller(&call, &[Value::Int(1)], "function:other")
+            .expect_err("descriptor caller must match the executing bytecode frame");
+        assert!(error
+            .to_string()
+            .contains("descriptor caller 'function:main' disagrees with bytecode caller"));
         assert!(runtime.loaded_libs.is_empty());
     }
 

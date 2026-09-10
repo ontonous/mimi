@@ -1634,8 +1634,13 @@ impl BytecodeVM {
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
                     let result = if matches!(op, Op::CallCanonicalExtern { .. }) {
+                        let caller = self.program.functions[self.cur_frame().proto_idx as usize]
+                            .name
+                            .clone();
                         match self.program.canonical_ffi.get(extern_idx as usize) {
-                            Some(descriptor) => self.canonical_ffi_runtime.call(descriptor, &args),
+                            Some(descriptor) => self
+                                .canonical_ffi_runtime
+                                .call_from_caller(descriptor, &args, &caller),
                             None => Err(InterpError::new(format!(
                                 "canonical FFI descriptor index {extern_idx} out of range"
                             ))),
