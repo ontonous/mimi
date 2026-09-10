@@ -250,10 +250,15 @@ impl CanonicalMirFfiRuntime {
                 args.len()
             ));
         }
-        if !matches!(descriptor.result, CanonicalFfiScalarType::Unit)
-            && descriptor.result_id.is_none()
-        {
+        let result_is_unit = matches!(descriptor.result, CanonicalFfiScalarType::Unit);
+        if !result_is_unit && descriptor.result_id.is_none() {
             return Err("canonical FFI non-Unit result has no result identity".into());
+        }
+        if descriptor.result_id.is_none() && descriptor.result_conversion.is_some() {
+            return Err("canonical FFI result conversion has no result identity".into());
+        }
+        if descriptor.result_id.is_some() && descriptor.result_conversion.is_none() {
+            return Err("canonical FFI result identity has no conversion receipt".into());
         }
         if descriptor.parameter_conversions.len() != descriptor.arguments.len() {
             return Err("canonical FFI parameter conversion receipt arity mismatch".into());
@@ -281,20 +286,18 @@ impl CanonicalMirFfiRuntime {
                 ));
             }
         }
-        let result_conversion = descriptor
-            .result_conversion
-            .as_ref()
-            .ok_or_else(|| "canonical FFI result has no conversion receipt".to_owned())?;
-        if !result_conversion.is_supported_result() {
-            return Err(format!(
-                "canonical FFI result ABI conversion from {:?} to {:?} is unsupported",
-                result_conversion.from, result_conversion.to
-            ));
-        }
-        if scalar_abi_class(&descriptor.result) != result_conversion.from {
-            return Err(
-                "canonical FFI result conversion source disagrees with declaration ABI".into(),
-            );
+        if let Some(result_conversion) = descriptor.result_conversion.as_ref() {
+            if !result_conversion.is_supported_result() {
+                return Err(format!(
+                    "canonical FFI result ABI conversion from {:?} to {:?} is unsupported",
+                    result_conversion.from, result_conversion.to
+                ));
+            }
+            if scalar_abi_class(&descriptor.result) != result_conversion.from {
+                return Err(
+                    "canonical FFI result conversion source disagrees with declaration ABI".into(),
+                );
+            }
         }
         if descriptor.argument_ids.len() != args.len() {
             return Err("canonical FFI argument identity arity mismatch".into());
@@ -318,7 +321,12 @@ impl CanonicalMirFfiRuntime {
             &descriptor.argument_ids,
             &argument_abis,
             descriptor.result_id.as_ref(),
-            result_conversion.to,
+            descriptor
+                .result_conversion
+                .as_ref()
+                .map_or(crate::core::mir::types::MirAbiClass::Unit, |conversion| {
+                    conversion.to
+                }),
         )?;
         Ok(())
     }
@@ -750,6 +758,9 @@ mod tests {
         };
         let result_id = (!matches!(argument, CanonicalFfiScalarType::Unit))
             .then(|| crate::core::mir::MirValueId::new("ffi-test-result").expect("result id"));
+        let result_conversion = result_id
+            .as_ref()
+            .map(|_| crate::core::mir::MirFfiAbiConversion { from: abi, to: abi });
         CanonicalFfiDescriptor {
             caller: "function:main".into(),
             instruction: "ffi-test-call".into(),
@@ -762,7 +773,7 @@ mod tests {
                 to: abi,
             }],
             result: argument,
-            result_conversion: Some(crate::core::mir::MirFfiAbiConversion { from: abi, to: abi }),
+            result_conversion,
             argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
             requires: None,
             result_id,
@@ -981,6 +992,33 @@ mod tests {
         assert!(error
             .to_string()
             .contains("non-Unit result has no result identity"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_accepts_unit_without_result_identity_or_conversion() {
+        let runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.result = CanonicalFfiScalarType::Unit;
+        call.result_id = None;
+        call.result_conversion = None;
+        runtime
+            .validate_descriptor(&call, &[Value::Int(1)], None, None)
+            .expect("void FFI calls may omit a result identity and conversion receipt");
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_unit_conversion_without_result_identity() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.result = CanonicalFfiScalarType::Unit;
+        call.result_id = None;
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("Unit conversion receipts must bind a Unit result identity");
+        assert!(error
+            .to_string()
+            .contains("result conversion has no result identity"));
         assert!(runtime.loaded_libs.is_empty());
     }
 
