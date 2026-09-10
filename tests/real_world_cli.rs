@@ -3012,6 +3012,72 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
 }
 
 #[test]
+fn canonical_mir_alias_qualified_import_call_fails_closed_before_consumers() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-qualified-import-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create qualified import directory");
+    fs::write(dir.join("helper.mimi"), "pub func value() -> i32 { 42 }\n")
+        .expect("write qualified import helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use helper as left;\nfunc main() -> i32 { left::value() }\n",
+    )
+    .expect("write qualified import entry");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&main)
+        .output()
+        .expect("spawn default qualified import run");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&main)
+        .output()
+        .expect("spawn default qualified import build");
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--all")
+        .output()
+        .expect("spawn qualified import MIR inspection");
+
+    for (label, output) in [("run", &run), ("build", &build), ("mir", &mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label} unexpectedly accepted an alias-qualified import call:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label} emitted output before rejecting alias-qualified call: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("E0830") && stderr.contains("left.value"),
+            "{label} lost the explicit qualified-call boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{label} reopened a legacy route for alias-qualified import call: {stderr}"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
