@@ -1623,36 +1623,70 @@ impl BytecodeVM {
                     extern_idx,
                     args_base,
                     argc,
+                } => {
+                    let args: Vec<Value> = (0..argc)
+                        .map(|i| self.get_reg(args_base + i).clone())
+                        .collect();
+                    let result = self.call_extern_idx(extern_idx, args);
+                    match result {
+                        Ok(v) => self.set_reg(rd, v),
+                        Err(e) => {
+                            // Audit fixes #1/#2: stash the error and pop the top
+                            // handler (see CallBuiltin Err branch).
+                            if let Some(handler_pc) =
+                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
+                            {
+                                let frame = self.cur_frame_mut();
+                                frame.pending_fault = Some(e);
+                                frame.pc = handler_pc;
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
                 }
-                | Op::CallCanonicalExtern {
+                Op::CallCanonicalExtern {
                     rd,
                     extern_idx,
+                    instruction,
                     args_base,
                     argc,
                 } => {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    let result = if matches!(op, Op::CallCanonicalExtern { .. }) {
-                        let caller = self.program.functions[self.cur_frame().proto_idx as usize]
-                            .name
-                            .clone();
-                        match self.program.canonical_ffi.get(extern_idx as usize) {
-                            Some(descriptor) => self
-                                .canonical_ffi_runtime
-                                .call_from_caller(descriptor, &args, &caller),
-                            None => Err(InterpError::new(format!(
-                                "canonical FFI descriptor index {extern_idx} out of range"
-                            ))),
+                    let caller = self.program.functions[self.cur_frame().proto_idx as usize]
+                        .name
+                        .clone();
+                    let expected_instruction = match proto.constants.get(instruction as usize) {
+                        Some(crate::interp::bytecode::ConstValue::Str(value)) => value.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "canonical FFI instruction identity constant {instruction} is not a string"
+                            )))
                         }
-                    } else {
-                        self.call_extern_idx(extern_idx, args)
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "canonical FFI instruction identity constant {instruction} out of range"
+                            )))
+                        }
+                    };
+                    let result = match self.program.canonical_ffi.get(extern_idx as usize) {
+                        Some(descriptor) => self.canonical_ffi_runtime.call_from_context(
+                            descriptor,
+                            &args,
+                            &caller,
+                            &expected_instruction,
+                        ),
+                        None => Err(InterpError::new(format!(
+                            "canonical FFI descriptor index {extern_idx} out of range"
+                        ))),
                     };
                     match result {
                         Ok(v) => self.set_reg(rd, v),
                         Err(e) => {
-                            // Audit fixes #1/#2: stash the error and pop the top
-                            // handler (see CallBuiltin Err branch).
+                            // Keep canonical extern failures on the same fault
+                            // routing path as compatibility extern calls.
                             if let Some(handler_pc) =
                                 self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
                             {

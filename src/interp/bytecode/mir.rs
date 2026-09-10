@@ -2041,9 +2041,13 @@ impl<'a> FunctionEmitter<'a> {
                 rs: source,
             });
         }
+        let instruction_idx = self
+            .proto
+            .add_const(ConstValue::Str(instruction.as_str().to_owned()));
         self.proto.emit(Op::CallCanonicalExtern {
             rd,
             extern_idx,
+            instruction: instruction_idx,
             args_base,
             argc: arguments.len() as u16,
         });
@@ -11629,6 +11633,53 @@ func main() -> i64 {
             .run_value()
             .expect_err("forged ABI must be rejected before symbol execution");
         assert!(error.to_string().contains("outside the C scalar island"));
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_descriptor_index_before_loading() {
+        let source = r#"
+extern "C" {
+    func labs(x: i64) -> i64;
+    func llabs(x: i64) -> i64;
+}
+func main() -> i32 {
+    println(labs(42))
+    println(llabs(-3))
+    0
+}
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex FFI calls"))
+            .parse_file()
+            .expect("parse FFI calls");
+        let checked = crate::core::check_program(&file).expect("check FFI calls");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical FFI bytecode");
+        assert_eq!(bytecode.canonical_ffi.len(), 2);
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let main_idx = forged
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let mut changed = false;
+        for op in &mut forged.functions[main_idx].code {
+            if let Op::CallCanonicalExtern { extern_idx, .. } = op {
+                *extern_idx = if *extern_idx == 0 { 1 } else { 0 };
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "fixture must contain a canonical extern call");
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("a forged descriptor index must fail before loading");
+        assert!(
+            error.to_string().contains("descriptor instruction '"),
+            "{error}"
+        );
+        assert!(error
+            .to_string()
+            .contains("disagrees with bytecode instruction"));
     }
 
     #[test]

@@ -438,6 +438,10 @@ pub enum Op {
     CallCanonicalExtern {
         rd: Reg,
         extern_idx: u16,
+        /// Constant-pool index for the checker-owned MIR instruction identity.
+        /// The VM uses this alongside the current frame owner to prevent a
+        /// forged descriptor-table index from retargeting another call site.
+        instruction: ConstIdx,
         args_base: Reg,
         argc: u16,
     },

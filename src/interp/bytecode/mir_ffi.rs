@@ -73,7 +73,7 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
     ) -> Result<Value, crate::interp::InterpError> {
-        self.call_with_expected_caller(descriptor, args, None)
+        self.call_with_context(descriptor, args, None, None)
     }
 
     /// Execute a descriptor while binding it to the bytecode function that
@@ -87,16 +87,36 @@ impl CanonicalMirFfiRuntime {
         args: &[Value],
         expected_caller: &str,
     ) -> Result<Value, crate::interp::InterpError> {
-        self.call_with_expected_caller(descriptor, args, Some(expected_caller))
+        self.call_with_context(descriptor, args, Some(expected_caller), None)
     }
 
-    fn call_with_expected_caller(
+    /// Execute a descriptor while binding both checker-owned provenance
+    /// identities carried by the bytecode instruction.  The caller-only
+    /// helper remains useful for direct runtime tests; production VM calls
+    /// should provide the instruction identity as well.
+    pub(crate) fn call_from_context(
+        &mut self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+        expected_caller: &str,
+        expected_instruction: &str,
+    ) -> Result<Value, crate::interp::InterpError> {
+        self.call_with_context(
+            descriptor,
+            args,
+            Some(expected_caller),
+            Some(expected_instruction),
+        )
+    }
+
+    fn call_with_context(
         &mut self,
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
         expected_caller: Option<&str>,
+        expected_instruction: Option<&str>,
     ) -> Result<Value, crate::interp::InterpError> {
-        self.validate_descriptor(descriptor, args, expected_caller)
+        self.validate_descriptor(descriptor, args, expected_caller, expected_instruction)
             .map_err(crate::interp::InterpError::new)?;
         let converted_args = self
             .convert_arguments(descriptor, args)
@@ -188,12 +208,21 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
         expected_caller: Option<&str>,
+        expected_instruction: Option<&str>,
     ) -> Result<(), String> {
         if let Some(expected_caller) = expected_caller {
             if descriptor.caller != expected_caller {
                 return Err(format!(
                     "canonical MIR FFI descriptor caller '{}' disagrees with bytecode caller '{}'",
                     descriptor.caller, expected_caller
+                ));
+            }
+        }
+        if let Some(expected_instruction) = expected_instruction {
+            if descriptor.instruction != expected_instruction {
+                return Err(format!(
+                    "canonical MIR FFI descriptor instruction '{}' disagrees with bytecode instruction '{}'",
+                    descriptor.instruction, expected_instruction
                 ));
             }
         }
@@ -874,7 +903,7 @@ mod tests {
             right: Box::new(Expr::Int(0)),
         });
         runtime
-            .validate_descriptor(&call, &[Value::Int(1)], None)
+            .validate_descriptor(&call, &[Value::Int(1)], None, None)
             .expect("predicates must use MIR-side conversion endpoints");
     }
 
@@ -965,6 +994,24 @@ mod tests {
         assert!(error
             .to_string()
             .contains("descriptor caller 'function:main' disagrees with bytecode caller"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_forged_instruction_with_vm_context_before_loading() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let call = descriptor("labs", CanonicalFfiScalarType::I64);
+        let error = runtime
+            .call_from_context(
+                &call,
+                &[Value::Int(1)],
+                "function:main",
+                "instruction:other",
+            )
+            .expect_err("descriptor instruction must match the executing bytecode call site");
+        assert!(error.to_string().contains(
+            "descriptor instruction 'ffi-test-call' disagrees with bytecode instruction"
+        ));
         assert!(runtime.loaded_libs.is_empty());
     }
 

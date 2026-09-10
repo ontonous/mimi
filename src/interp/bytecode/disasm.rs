@@ -358,6 +358,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             extern_idx,
             args_base,
             argc,
+            ..
         } => {
             format!(
                 "{:04}  {:<16} r{} = extern[{}](r{}..r{})",
