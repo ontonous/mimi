@@ -1769,6 +1769,89 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_destructure_variant_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::DestructureVariantMove {
+            ra: result + 1,
+            base: result,
+            arity: 0,
+            variant_tag: 0,
+            shapes: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged variant-destructure source register must fail before access");
+        assert!(
+            error
+                .to_string()
+                .contains("variant destructure source register"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_destructure_tuple_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::DestructureTupleMove {
+            ra: result + 1,
+            base: result,
+            arity: 0,
+            shape: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged tuple-destructure source register must fail before access");
+        assert!(
+            error
+                .to_string()
+                .contains("tuple destructure source register"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {
