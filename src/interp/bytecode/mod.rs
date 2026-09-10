@@ -1480,6 +1480,45 @@ func main() -> i32 {
         );
     }
 
+    #[test]
+    fn vm_rejects_forged_mutate_setup_field_register_window() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::MutateSetupField {
+            regs_base: result,
+            count: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged mutate-field setup window must fail before target access");
+        assert!(
+            error
+                .to_string()
+                .contains("mutate field setup register window"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {

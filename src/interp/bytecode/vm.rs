@@ -1911,6 +1911,16 @@ impl BytecodeVM {
                 Op::MutateSetupField { regs_base, count } => {
                     // v0.34.13: each target = (obj_reg, field_name) in 2
                     // consecutive registers.
+                    let register_count = self.cur_frame().regs.len();
+                    let targets_span = (count as usize).checked_mul(2);
+                    let targets_end =
+                        targets_span.and_then(|span| (regs_base as usize).checked_add(span));
+                    if targets_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "mutate field setup register window base {} count {} exceeds frame with {} register(s)",
+                            regs_base, count, register_count
+                        )));
+                    }
                     let mut targets = Vec::with_capacity(count as usize);
                     let mut ok = true;
                     for i in 0..count {
