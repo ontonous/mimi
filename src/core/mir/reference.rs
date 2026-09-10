@@ -15,10 +15,10 @@ use super::types::{
     MirAbiClass, MirFfiScalarKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
 };
 use super::{
-    MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
-    MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirProjection,
-    MirSwitchArm, MirSwitchCase, MirTerminator, MirTransitionContract, MirTransitionEffect,
-    MirValueId,
+    MirAggregateKind, MirBlockId, MirFfiAbiConversion, MirFfiConversionKind, MirFunction,
+    MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
+    MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
+    MirTransitionContract, MirTransitionEffect, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,10 @@ pub struct MirExecutionObservation {
 /// symbol.  A caller therefore supplies an explicit host binding keyed by the
 /// checker-owned `MirFfiCallContract`.  This keeps the oracle AST-free and
 /// makes the external effect visible in differential tests instead of
-/// pretending that a symbol name has a built-in semantic meaning.
+/// pretending that a symbol name has a built-in semantic meaning.  The
+/// argument slice is already converted to the declaration ABI according to
+/// the receipt; the returned value must use the declaration result ABI and is
+/// converted back to the MIR result type by the reference executor.
 pub trait MirReferenceFfiResolver {
     fn call(
         &self,
@@ -5000,9 +5003,20 @@ impl<'a> MirReferenceInterpreter<'a> {
         actual: &MirRuntimeValue,
         role: &str,
     ) -> Result<(), MirExecutionError> {
-        let abi = expected
-            .and_then(|value| function.values.get(value))
-            .and_then(|info| self.program.type_catalog().get(&info.ty))
+        let expected_type =
+            expected.and_then(|value| function.values.get(value).map(|info| &info.ty));
+        self.validate_ffi_runtime_type(function, expected_type, actual, role)
+    }
+
+    fn validate_ffi_runtime_type(
+        &self,
+        function: &MirFunction,
+        expected_type: Option<&crate::core::ResolvedTypeId>,
+        actual: &MirRuntimeValue,
+        role: &str,
+    ) -> Result<(), MirExecutionError> {
+        let abi = expected_type
+            .and_then(|ty| self.program.type_catalog().get(ty))
             .map(|desc| &desc.abi);
         let kind = abi
             .copied()
@@ -5013,7 +5027,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             | (Some(MirFfiScalarKind::Bool), MirRuntimeValue::Bool(_))
             | (Some(MirFfiScalarKind::F64), MirRuntimeValue::FloatBits(_))
             | (Some(MirFfiScalarKind::Unit), MirRuntimeValue::Unit) => true,
-            (None, MirRuntimeValue::Unit) => expected.is_none(),
+            (None, MirRuntimeValue::Unit) => expected_type.is_none(),
             _ => false,
         };
         if valid {
@@ -5023,6 +5037,114 @@ impl<'a> MirReferenceInterpreter<'a> {
                 &function.owner,
                 format!("FFI {role} does not match the canonical scalar ABI {abi:?}: {actual:?}"),
             ))
+        }
+    }
+
+    fn convert_ffi_argument(
+        &self,
+        function: &MirFunction,
+        value: MirRuntimeValue,
+        conversion: &MirFfiAbiConversion,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let Some(kind) = conversion.kind() else {
+            return Err(self.error(
+                &function.owner,
+                format!(
+                    "canonical MIR FFI argument conversion from {:?} to {:?} is unsupported",
+                    conversion.from, conversion.to
+                ),
+            ));
+        };
+        match (kind, value) {
+            (MirFfiConversionKind::Identity { .. }, value) => Ok(value),
+            (
+                MirFfiConversionKind::SignedIntegerWiden { from_bits: 32, .. },
+                MirRuntimeValue::Int(value),
+            ) if i32::try_from(value).is_err() => {
+                Err(self.error(&function.owner, "canonical MIR FFI argument is outside i32"))
+            }
+            (MirFfiConversionKind::SignedIntegerWiden { .. }, MirRuntimeValue::Int(value)) => {
+                Ok(MirRuntimeValue::Int(value))
+            }
+            (
+                MirFfiConversionKind::SignedIntegerToFloat { from_bits: 32 },
+                MirRuntimeValue::Int(value),
+            ) if i32::try_from(value).is_err() => {
+                Err(self.error(&function.owner, "canonical MIR FFI argument is outside i32"))
+            }
+            (MirFfiConversionKind::SignedIntegerToFloat { .. }, MirRuntimeValue::Int(value)) => {
+                Ok(MirRuntimeValue::FloatBits((value as f64).to_bits()))
+            }
+            (kind, value) => Err(self.error(
+                &function.owner,
+                format!(
+                    "canonical MIR FFI argument conversion {:?} received {value:?}",
+                    kind
+                ),
+            )),
+        }
+    }
+
+    fn convert_ffi_result(
+        &self,
+        function: &MirFunction,
+        value: MirRuntimeValue,
+        conversion: Option<&MirFfiAbiConversion>,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let Some(conversion) = conversion else {
+            return Ok(value);
+        };
+        let Some(kind) = conversion.kind() else {
+            return Err(self.error(
+                &function.owner,
+                format!(
+                    "canonical MIR FFI result conversion from {:?} to {:?} is unsupported",
+                    conversion.from, conversion.to
+                ),
+            ));
+        };
+        match (kind, value) {
+            (MirFfiConversionKind::Identity { .. }, value) => Ok(value),
+            (
+                MirFfiConversionKind::SignedIntegerNarrow { to_bits: 32, .. },
+                MirRuntimeValue::Int(value),
+            ) => i32::try_from(value)
+                .map(|value| MirRuntimeValue::Int(i64::from(value)))
+                .map_err(|_| {
+                    self.error(&function.owner, "canonical MIR FFI result is outside i32")
+                }),
+            (
+                MirFfiConversionKind::FloatToSignedInteger { to_bits },
+                MirRuntimeValue::FloatBits(bits),
+            ) => {
+                let value = f64::from_bits(bits);
+                let (lower, upper) = match to_bits {
+                    32 => (i32::MIN as f64, (i32::MAX as f64) + 1.0),
+                    64 => (i64::MIN as f64, 9_223_372_036_854_775_808.0),
+                    _ => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
+                            ),
+                        ))
+                    }
+                };
+                if !value.is_finite() || value < lower || value >= upper {
+                    return Err(self.error(
+                        &function.owner,
+                        "canonical MIR FFI result is outside target integer range",
+                    ));
+                }
+                Ok(MirRuntimeValue::Int(value as i64))
+            }
+            (kind, value) => Err(self.error(
+                &function.owner,
+                format!(
+                    "canonical MIR FFI result conversion {:?} received {value:?}",
+                    kind
+                ),
+            )),
         }
     }
 
@@ -6696,6 +6818,23 @@ impl<'a> MirReferenceInterpreter<'a> {
                     for (value, actual) in arguments.iter().zip(&runtime_arguments) {
                         self.validate_ffi_runtime_value(function, Some(value), actual, "argument")?;
                     }
+                    let converted_arguments = runtime_arguments
+                        .iter()
+                        .zip(&receipt.parameter_conversions)
+                        .map(|(value, conversion)| {
+                            self.convert_ffi_argument(function, value.clone(), conversion)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (value, declared_type) in
+                        converted_arguments.iter().zip(&receipt.parameter_types)
+                    {
+                        self.validate_ffi_runtime_type(
+                            function,
+                            Some(declared_type),
+                            value,
+                            "declaration argument",
+                        )?;
+                    }
                     if let Some(condition) = receipt.requires.as_ref().filter(|_| self.verify_ffi) {
                         super::evaluate_ffi_requires(condition, |id| {
                             let index = arguments.iter().position(|value| value == id).ok_or_else(
@@ -6717,8 +6856,19 @@ impl<'a> MirReferenceInterpreter<'a> {
                         .map_err(|message| self.error(&function.owner, message.to_string()))?;
                     }
                     let output = resolver
-                        .call(receipt, &runtime_arguments)
+                        .call(receipt, &converted_arguments)
                         .map_err(|message| self.error(&function.owner, message))?;
+                    self.validate_ffi_runtime_type(
+                        function,
+                        Some(&receipt.result_type),
+                        &output,
+                        "result",
+                    )?;
+                    let output = self.convert_ffi_result(
+                        function,
+                        output,
+                        receipt.result_conversion.as_ref(),
+                    )?;
                     self.validate_ffi_runtime_value(function, result.as_ref(), &output, "result")?;
                     if let Some(condition) = receipt.ensures.as_ref().filter(|_| self.verify_ffi) {
                         super::evaluate_ffi_ensures(condition, |id| {

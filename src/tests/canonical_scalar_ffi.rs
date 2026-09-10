@@ -31,6 +31,14 @@ func main() -> i32 {
     0
 }
 "#;
+const MIXED_F64_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_expect_f64(double x) { return x == 7.0 ? 42 : -1; }
+"#;
+const MIXED_F64_SOURCE: &str = r#"
+extern "C" { func mir_ffi_expect_f64(x: f64) -> i64; }
+func main() -> i64 { mir_ffi_expect_f64(7 as i32) }
+"#;
 
 struct Oracle(Cell<i64>);
 
@@ -350,6 +358,95 @@ fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
         .expect("native mixed-width FFI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n7\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MIXED_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MIXED_F64_SOURCE)
+        .tokenize()
+        .expect("lex integer-to-float FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse integer-to-float FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check integer-to-float FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize integer-to-float FFI MIR");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("integer-to-float FFI receipt");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        }]
+    );
+
+    struct FloatOracle;
+    impl MirReferenceFfiResolver for FloatOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_expect_f64", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 7.0 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err("reference host binding did not receive f64 ABI argument".into()),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&FloatOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference integer-to-float FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference.output, "");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free integer-to-float FFI bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value()
+            .expect("bytecode integer-to-float FFI execution"),
+        Value::Int(42)
+    ));
+    assert_eq!(vm.stdout(), "");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f64");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native integer-to-float FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid integer-to-float LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MIXED_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native integer-to-float FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
     assert_eq!(native.stderr, "");
 }
 

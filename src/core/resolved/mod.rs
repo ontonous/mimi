@@ -9289,6 +9289,66 @@ fn build_canonical_function_signatures(
         }
     }
 
+    // Extern declarations are callable signatures without a ResolvedBody, so
+    // their ABI-only parameter types may never occur in expression_types (for
+    // example an `f64` declaration called with an i32 widening argument).  The
+    // canonical FFI receipt still needs those declaration TypeDescs.  Intern
+    // every extern parameter/result here while the resolved name catalog is
+    // available; otherwise MIR materialization would fail with a misleading
+    // "primitive type is absent" error before any backend can apply the
+    // checker-approved conversion receipt.
+    let mut resolve_extern_name = |name: &str| {
+        if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+            return Some(primitive);
+        }
+        resolve_nominal(&nominal_catalog, name)
+            .or_else(|| builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal))
+    };
+    let mut extern_blocks = program.extern_blocks.values().collect::<Vec<_>>();
+    extern_blocks.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for block in extern_blocks {
+        for signature in &block.signatures {
+            let mut declaration_types = signature
+                .typed_params
+                .iter()
+                .map(|(_, ty, _)| ("parameter", ty.clone()))
+                .collect::<Vec<_>>();
+            declaration_types.push((
+                "result",
+                signature
+                    .ret_type
+                    .clone()
+                    .unwrap_or_else(|| Type::Name("unit".into(), Vec::new())),
+            ));
+            for (role, ty) in declaration_types {
+                let zonked = match ZonkedTy::from_resolved(ty) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: extern '{}' {} type is not zonked: {error}",
+                                signature.name, role
+                            ),
+                            signature.span,
+                        ));
+                        continue;
+                    }
+                };
+                if let Err(error) =
+                    types.intern_zonked(&zonked, &capabilities, &mut resolve_extern_name)
+                {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: extern '{}' {} type is not canonical: {error}",
+                            signature.name, role
+                        ),
+                        signature.span,
+                    ));
+                }
+            }
+        }
+    }
+
     let mut transitions = program.transitions.values().collect::<Vec<_>>();
     transitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for transition in transitions {
