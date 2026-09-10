@@ -1516,6 +1516,88 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_update_record_register_window() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::UpdateRecord {
+            rd: result,
+            type_name: 0,
+            ra: result,
+            base: result + 1,
+            count: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged record-update source window must fail before source access");
+        assert!(
+            error.to_string().contains("record update register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_update_record_move_register_window() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::UpdateRecordMove {
+            rd: result,
+            type_name: 0,
+            ra: result,
+            base: result + 1,
+            count: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged record-move update source window must fail before source access");
+        assert!(
+            error
+                .to_string()
+                .contains("record move update register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {
