@@ -13,6 +13,7 @@ use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
 use crate::interp::ffi_runtime::{FfiClosureRunner, FfiRuntime};
 use crate::interp::value::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// A single function activation frame.
@@ -278,6 +279,16 @@ impl BytecodeVM {
                 "canonical FFI binding manifest is missing",
             ));
         }
+        let mut binding_by_site = BTreeMap::new();
+        for binding in bindings {
+            let site = (binding.function, binding.pc);
+            if binding_by_site.insert(site, binding).is_some() {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding manifest has duplicate call-site binding for function #{} pc {}",
+                    site.0, site.1
+                )));
+            }
+        }
         let mut references = vec![None; descriptors.len()];
         let mut call_count = 0usize;
 
@@ -292,11 +303,8 @@ impl BytecodeVM {
                     continue;
                 };
                 call_count += 1;
-                let binding = bindings
-                    .iter()
-                    .find(|binding| {
-                        binding.function == function_idx as FuncIdx && binding.pc == pc as u32
-                    })
+                let binding = binding_by_site
+                    .get(&(function_idx as FuncIdx, pc as u32))
                     .ok_or_else(|| {
                         InterpError::new(format!(
                             "canonical FFI call at function '{}' pc {pc} has no compiler binding",

@@ -12009,6 +12009,27 @@ func main() -> i32 {
     }
 
     #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_duplicate_compiler_binding_site() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let binding = forged.canonical_ffi_bindings[0].clone();
+        forged.canonical_ffi_bindings.push(binding);
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("duplicate compiler binding site must fail before loading");
+        assert!(
+            error.to_string().contains("duplicate call-site binding"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn canonical_scalar_ffi_missing_descriptor_never_uses_compatibility_runtime() {
         let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
         let file = Parser::new(Lexer::new(source).tokenize().unwrap())
