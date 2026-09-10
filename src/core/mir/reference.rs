@@ -12159,6 +12159,19 @@ func main() -> i64 {
         assert!(native_error
             .iter()
             .any(|error| error.message.contains("complete scalar endpoint contract")));
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("verifier capability gate must reject forged endpoint metadata");
+        assert!(capability_error
+            .iter()
+            .any(|error| error.contains("complete scalar endpoint contract")));
+
+        let verifier_error = crate::verifier::verify_mir(&forged, "forged-ffi-endpoint".into())
+            .expect_err("verifier must reject forged endpoint metadata");
+        assert!(
+            verifier_error.contains("complete scalar endpoint contract"),
+            "{verifier_error}"
+        );
     }
 
     #[test]
