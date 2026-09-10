@@ -11722,7 +11722,7 @@ func main() -> i32 {
         forged.functions[main_idx].constants[instruction_idx as usize] =
             ConstValue::Str(second_instruction);
         let error = BytecodeVM::new(bytecode)
-            .run_value()
+            .call_function(main_idx as u32, &[])
             .expect_err("a forged instruction identity must fail before loading");
         assert!(
             error.to_string().contains("descriptor index 0 instruction"),

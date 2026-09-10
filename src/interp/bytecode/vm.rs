@@ -4745,6 +4745,13 @@ impl BytecodeVM {
         func_idx: FuncIdx,
         args: &[Value],
     ) -> Result<Value, InterpError> {
+        // Actor/spawn workers and embedders can enter the VM through this
+        // public API without going through `run`/`run_value`.  Validate once
+        // at that fresh entry boundary as well; nested calls inherit the
+        // already-validated program from their enclosing execution.
+        if self.stack.is_empty() {
+            self.validate_canonical_ffi_program()?;
+        }
         // H-14: snapshot for residual-frame cleanup on failure.
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -4773,6 +4780,9 @@ impl BytecodeVM {
         args: &[Value],
         source_state: Value,
     ) -> Result<Value, InterpError> {
+        if self.stack.is_empty() {
+            self.validate_canonical_ffi_program()?;
+        }
         self.push_frame_wrap_ok(func_idx, args.to_vec(), None, source_state)?;
         let prev_stop = self.stop_depth;
         self.stop_depth = self.depth;
