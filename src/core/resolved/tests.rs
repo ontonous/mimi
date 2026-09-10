@@ -1517,6 +1517,46 @@ func main() -> i32 { c_abs(1, 2) }
 }
 
 #[test]
+fn checked_program_extern_block_identity_rejects_ambiguous_merged_blocks() {
+    let file = parse(
+        r#"
+extern "C" { func c_abs(x: i32) -> i32 }
+func main() -> i32 { c_abs(1) }
+"#,
+    );
+    let mut program = CheckedProgram::from_checked_file(&file).expect("IR");
+    let signature = program
+        .extern_func_signature("c_abs")
+        .expect("extern signature");
+    let signature_id = signature.node_id.clone();
+    assert!(program
+        .extern_block_for_signature(&signature_id)
+        .expect("unique block lookup")
+        .is_some());
+
+    let mut duplicate = program
+        .extern_blocks()
+        .values()
+        .next()
+        .expect("extern block")
+        .clone();
+    duplicate.node_id = NodeId("extern-block:duplicate".into());
+    program
+        .extern_blocks
+        .insert(duplicate.node_id.clone(), duplicate);
+
+    let error = program
+        .extern_block_for_signature(&signature_id)
+        .expect_err("duplicate checker-owned block must fail closed");
+    assert!(error.contains("ambiguous checker-owned ABI blocks"));
+    assert!(!crate::core::mir::is_scalar_ffi_candidate(&program));
+    assert_eq!(
+        crate::core::mir::scalar_ffi_boundary_reason(&program).as_deref(),
+        Some(error.as_str())
+    );
+}
+
+#[test]
 fn actor_method_signatures_are_materialised() {
     // 0.34.18c (§4.2): `with Io` effect clause removed; signature/params
     // assertions kept, effects assertions dropped (effects now always empty).

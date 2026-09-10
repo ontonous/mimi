@@ -1596,6 +1596,44 @@ impl CheckedProgram {
         &self.extern_blocks
     }
 
+    /// Resolve the checker-owned ABI block for one extern signature identity.
+    ///
+    /// A well-formed checked program has exactly one block containing a given
+    /// signature node.  Keep that cardinality explicit at the semantic
+    /// boundary: a malformed merged program must not let `HashMap` iteration
+    /// order choose one of several blocks and thereby alter route admission,
+    /// receipt materialization, or diagnostics.
+    pub fn extern_block_for_signature(
+        &self,
+        signature_id: &NodeId,
+    ) -> Result<Option<&ResolvedExternBlock>, String> {
+        let mut matches = self
+            .extern_blocks
+            .values()
+            .filter(|block| {
+                block
+                    .signatures
+                    .iter()
+                    .any(|signature| signature.node_id == *signature_id)
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        match matches.as_slice() {
+            [] => Ok(None),
+            [block] => Ok(Some(*block)),
+            _ => {
+                let block_ids = matches
+                    .iter()
+                    .map(|block| block.node_id.0.as_str())
+                    .collect::<Vec<_>>();
+                Err(format!(
+                    "extern declaration '{}' has ambiguous checker-owned ABI blocks: {:?}",
+                    signature_id.0, block_ids
+                ))
+            }
+        }
+    }
+
     pub fn backend_requirements(&self) -> &[CapabilityRequirement] {
         &self.backend_requirements
     }

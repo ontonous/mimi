@@ -31,12 +31,7 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
         let Some(declaration) = program.extern_func_signature(&site.callee) else {
             return false;
         };
-        let Some(block) = program.extern_blocks().values().find(|block| {
-            block
-                .signatures
-                .iter()
-                .any(|item| item.node_id == declaration.node_id)
-        }) else {
+        let Ok(Some(block)) = program.extern_block_for_signature(&declaration.node_id) else {
             return false;
         };
         if block.abi != "C"
@@ -95,16 +90,15 @@ pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
                 site.callee
             ));
         };
-        let Some(block) = program.extern_blocks().values().find(|block| {
-            block
-                .signatures
-                .iter()
-                .any(|item| item.node_id == declaration.node_id)
-        }) else {
-            return Some(format!(
-                "extern declaration '{}' has no checker-owned ABI block",
-                declaration.name
-            ));
+        let block = match program.extern_block_for_signature(&declaration.node_id) {
+            Ok(Some(block)) => block,
+            Ok(None) => {
+                return Some(format!(
+                    "extern declaration '{}' has no checker-owned ABI block",
+                    declaration.name
+                ));
+            }
+            Err(message) => return Some(message),
         };
         if block.abi != "C" {
             return Some(format!(

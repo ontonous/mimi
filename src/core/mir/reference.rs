@@ -3048,18 +3048,9 @@ fn materialize_ffi_call_contracts(
                 else {
                     continue;
                 };
-                let declaration_matches = program
-                    .extern_blocks()
-                    .values()
-                    .filter(|block| {
-                        block
-                            .signatures
-                            .iter()
-                            .any(|signature| signature.node_id == *callee)
-                    })
-                    .collect::<Vec<_>>();
-                let declaration = match declaration_matches.as_slice() {
-                    [] => {
+                let declaration = match program.extern_block_for_signature(callee) {
+                    Ok(Some(declaration)) => declaration,
+                    Ok(None) => {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message: format!(
@@ -3069,14 +3060,10 @@ fn materialize_ffi_call_contracts(
                         });
                         continue;
                     }
-                    [declaration] => *declaration,
-                    _ => {
+                    Err(message) => {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
-                            message: format!(
-                                "extern call '{}' has ambiguous checker-owned declaration identity",
-                                callee.0
-                            ),
+                            message,
                         });
                         continue;
                     }
