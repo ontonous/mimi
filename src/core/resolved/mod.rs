@@ -1677,6 +1677,38 @@ impl CheckedProgram {
         &self.extern_blocks
     }
 
+    /// Return checker-owned extern blocks in canonical identity order.
+    ///
+    /// The backing directory is a `HashMap` because node identity is the
+    /// lookup key, but compatibility consumers also materialize name-keyed
+    /// views from it.  Those views must never inherit process-dependent hash
+    /// iteration order: a malformed merged directory with duplicate names
+    /// should at least choose the same deterministic entry everywhere while
+    /// the identity-aware consumers report the structural ambiguity.
+    pub fn extern_blocks_sorted(&self) -> Vec<&ResolvedExternBlock> {
+        let mut blocks = self.extern_blocks.values().collect::<Vec<_>>();
+        blocks.sort_by(|left, right| {
+            left.node_id
+                .cmp(&right.node_id)
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        });
+        blocks
+    }
+
+    /// Return signatures inside one checker-owned extern block in canonical
+    /// identity order.  Normal checked output preserves declaration order;
+    /// sorting here also keeps compatibility projections deterministic for a
+    /// hand-built or merged `CheckedProgram` whose vector was rearranged.
+    pub fn extern_signatures_sorted(block: &ResolvedExternBlock) -> Vec<&ResolvedExternFunc> {
+        let mut signatures = block.signatures.iter().collect::<Vec<_>>();
+        signatures.sort_by(|left, right| {
+            left.node_id
+                .cmp(&right.node_id)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        signatures
+    }
+
     /// Resolve the checker-owned ABI block for one extern signature identity.
     ///
     /// A well-formed checked program has exactly one block containing a given
@@ -1734,14 +1766,9 @@ impl CheckedProgram {
     }
 
     pub fn extern_func_signature(&self, name: &str) -> Option<&ResolvedExternFunc> {
-        // Full audit 2026-08-05 (#13): same-named externs across blocks
-        // previously resolved by raw HashMap iteration order (nondeterministic
-        // `.find`). Blocks are visited in sorted node-id order instead.
-        let mut block_ids = self.extern_blocks.keys().collect::<Vec<_>>();
-        block_ids.sort();
-        block_ids
+        self.extern_blocks_sorted()
             .into_iter()
-            .flat_map(|id| self.extern_blocks[id].signatures.iter())
+            .flat_map(Self::extern_signatures_sorted)
             .find(|sig| sig.name == name)
     }
 
@@ -7053,8 +7080,10 @@ fn collect_program_call_sites(
     let mut extern_entries = extern_blocks.values().collect::<Vec<_>>();
     extern_entries.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for block in extern_entries {
-        for sig in &block.signatures {
-            extern_info.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
+        for sig in CheckedProgram::extern_signatures_sorted(block) {
+            extern_info
+                .entry(sig.name.clone())
+                .or_insert_with(|| (sig.params.len(), sig.ret.clone()));
         }
         // Keep names even if signature missing (defensive).
         for func in &block.funcs {
@@ -9514,7 +9543,7 @@ fn build_canonical_function_signatures(
     let mut extern_blocks = program.extern_blocks.values().collect::<Vec<_>>();
     extern_blocks.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for block in extern_blocks {
-        for signature in &block.signatures {
+        for signature in CheckedProgram::extern_signatures_sorted(block) {
             let mut declaration_types = signature
                 .typed_params
                 .iter()

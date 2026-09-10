@@ -399,27 +399,33 @@ impl Interpreter {
 
         let mut extern_funcs = std::collections::HashSet::new();
         let mut extern_abis = HashMap::new();
-        for block in program.extern_blocks().values() {
+        for block in program.extern_blocks_sorted() {
             for func in &block.funcs {
                 extern_funcs.insert(func.clone());
-                extern_abis.insert(func.clone(), block.abi.clone());
+                extern_abis
+                    .entry(func.clone())
+                    .or_insert_with(|| block.abi.clone());
             }
         }
         interp.resolved_extern_funcs = Some(extern_funcs);
         interp.resolved_extern_abis = Some(extern_abis);
         let mut extern_signatures = HashMap::new();
         let mut extern_params = HashMap::new();
-        for block in program.extern_blocks().values() {
-            for sig in &block.signatures {
-                extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
-                extern_params.insert(sig.name.clone(), sig.params.clone());
+        for block in program.extern_blocks_sorted() {
+            for sig in crate::core::CheckedProgram::extern_signatures_sorted(block) {
+                extern_signatures
+                    .entry(sig.name.clone())
+                    .or_insert_with(|| (sig.params.len(), sig.ret.clone()));
+                extern_params
+                    .entry(sig.name.clone())
+                    .or_insert_with(|| sig.params.clone());
             }
         }
         interp.resolved_extern_signatures = Some(extern_signatures);
         interp.resolved_extern_params = Some(extern_params);
         let mut extern_no_panic = std::collections::HashSet::new();
         let mut extern_unsafe = std::collections::HashSet::new();
-        for block in program.extern_blocks().values() {
+        for block in program.extern_blocks_sorted() {
             for func in &block.funcs {
                 if block.no_panic {
                     extern_no_panic.insert(func.clone());

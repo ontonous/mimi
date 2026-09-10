@@ -33,11 +33,9 @@ pub(crate) fn resolved_extern_funcs(
     checked: &mimi::core::CheckedProgram,
 ) -> Result<Vec<ast::ExternFunc>, String> {
     let mut symbols = std::collections::HashSet::new();
-    let mut blocks = checked.extern_blocks().values().collect::<Vec<_>>();
-    blocks.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
     let mut funcs = Vec::new();
-    for block in blocks {
-        for signature in &block.signatures {
+    for block in checked.extern_blocks_sorted() {
+        for signature in mimi::core::CheckedProgram::extern_signatures_sorted(block) {
             if !symbols.insert(signature.name.clone()) {
                 return Err(format!(
                     "component extern symbol '{}' is declared more than once",

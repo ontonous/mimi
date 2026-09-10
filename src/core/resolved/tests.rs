@@ -1632,6 +1632,83 @@ func main() -> i32 { c_abs(1) }
 }
 
 #[test]
+fn checked_program_extern_compatibility_directories_use_stable_order() {
+    let file = parse(
+        r#"
+extern "C" {
+    func c_abs(x: i32) -> i32
+    func c_neg(x: i32) -> i32
+}
+func main() -> i32 { 0 }
+"#,
+    );
+    let mut program = crate::core::check_program(&file).expect("check");
+    let block_id = program
+        .extern_blocks()
+        .keys()
+        .next()
+        .cloned()
+        .expect("extern block");
+    let mut block = program
+        .extern_blocks()
+        .get(&block_id)
+        .expect("extern block")
+        .clone();
+    block.signatures.reverse();
+    let mut signature_ids = block
+        .signatures
+        .iter()
+        .map(|signature| signature.node_id.clone())
+        .collect::<Vec<_>>();
+    signature_ids.sort();
+    assert_eq!(
+        crate::core::CheckedProgram::extern_signatures_sorted(&block)
+            .into_iter()
+            .map(|signature| signature.node_id.clone())
+            .collect::<Vec<_>>(),
+        signature_ids
+    );
+    program.extern_blocks.insert(block_id, block);
+
+    let mut duplicate = program
+        .extern_blocks()
+        .values()
+        .next()
+        .expect("extern block")
+        .clone();
+    duplicate.node_id = NodeId("extern-block:compatibility-duplicate".into());
+    duplicate.abi = "system".into();
+    duplicate.signatures[0].node_id = NodeId("extern-signature:compatibility-duplicate".into());
+    program
+        .extern_blocks
+        .insert(duplicate.node_id.clone(), duplicate);
+
+    let blocks = program.extern_blocks_sorted();
+    assert!(blocks
+        .windows(2)
+        .all(|pair| pair[0].node_id <= pair[1].node_id));
+    let expected_abi = blocks[0].abi.as_str();
+
+    let interp = crate::interp::Interpreter::from_checked(&program);
+    assert_eq!(interp.resolved_extern_abi("c_abs"), Some(expected_abi));
+
+    let mut verifier = crate::verifier::Verifier::new().expect("z3");
+    let _ = verifier.verify_checked(&program);
+    assert_eq!(verifier.checked_extern_abi("c_abs"), Some(expected_abi));
+
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "stable_extern_directory");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("component ABI registration must reject duplicate extern symbols");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("duplicate resolved extern symbol 'c_abs'")
+    }));
+}
+
+#[test]
 fn actor_method_signatures_are_materialised() {
     // 0.34.18c (§4.2): `with Io` effect clause removed; signature/params
     // assertions kept, effects assertions dropped (effects now always empty).

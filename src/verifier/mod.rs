@@ -229,8 +229,8 @@ fn verify_ffi_checked_with_source_hash(
     }
 
     let mut externs = std::collections::HashMap::new();
-    for block in program.extern_blocks().values() {
-        for signature in &block.signatures {
+    for block in program.extern_blocks_sorted() {
+        for signature in crate::core::CheckedProgram::extern_signatures_sorted(block) {
             let func_span = signature.span;
             let adapter_origin = crate::ast::AstOrigin::Desugared("verifier.extern_adapter");
             let func_meta = crate::ast::AstNodeMeta::inherited(func_span, adapter_origin);
@@ -312,8 +312,8 @@ fn verify_ffi_checked_with_source_hash(
         // C4 mock path: from CheckedProgram's extern signatures, no retained
         // surface body needed.
         let mut results: Vec<VerificationResult> = Vec::new();
-        for block in program.extern_blocks().values() {
-            for signature in &block.signatures {
+        for block in program.extern_blocks_sorted() {
+            for signature in crate::core::CheckedProgram::extern_signatures_sorted(block) {
                 if (signature.requires.is_some() || signature.ensures.is_some())
                     && called_contract_names.contains(&signature.name)
                 {

@@ -326,27 +326,33 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut extern_funcs = std::collections::HashSet::new();
         let mut extern_abis = std::collections::HashMap::new();
-        for block in program.extern_blocks().values() {
+        for block in program.extern_blocks_sorted() {
             for func in &block.funcs {
                 extern_funcs.insert(func.clone());
-                extern_abis.insert(func.clone(), block.abi.clone());
+                extern_abis
+                    .entry(func.clone())
+                    .or_insert_with(|| block.abi.clone());
             }
         }
         self.resolved_extern_funcs = Some(extern_funcs);
         self.resolved_extern_abis = Some(extern_abis);
         let mut extern_signatures = std::collections::HashMap::new();
         let mut extern_params = std::collections::HashMap::new();
-        for block in program.extern_blocks().values() {
-            for sig in &block.signatures {
-                extern_signatures.insert(sig.name.clone(), (sig.params.len(), sig.ret.clone()));
-                extern_params.insert(sig.name.clone(), sig.params.clone());
+        for block in program.extern_blocks_sorted() {
+            for sig in crate::core::CheckedProgram::extern_signatures_sorted(block) {
+                extern_signatures
+                    .entry(sig.name.clone())
+                    .or_insert_with(|| (sig.params.len(), sig.ret.clone()));
+                extern_params
+                    .entry(sig.name.clone())
+                    .or_insert_with(|| sig.params.clone());
             }
         }
         self.resolved_extern_signatures = Some(extern_signatures);
         self.resolved_extern_params = Some(extern_params);
         let mut extern_no_panic = std::collections::HashSet::new();
         let mut extern_unsafe = std::collections::HashSet::new();
-        for block in program.extern_blocks().values() {
+        for block in program.extern_blocks_sorted() {
             for func in &block.funcs {
                 if block.no_panic {
                     extern_no_panic.insert(func.clone());
@@ -475,12 +481,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let mut gen = crate::component::AbiGenerator::new();
             crate::component::register_core_runtime_abi(&mut gen);
+            let mut imported_externs = std::collections::HashSet::new();
             // 0.31.30+: scan user extern blocks and register as imports.
             // This makes the Component IR aware of user-declared extern
             // functions, enabling bindgen backends to generate complete
             // bindings that include both runtime exports and user imports.
-            for block in program.extern_blocks().values() {
-                for sig in &block.signatures {
+            for block in program.extern_blocks_sorted() {
+                for sig in crate::core::CheckedProgram::extern_signatures_sorted(block) {
+                    if !imported_externs.insert(sig.name.clone()) {
+                        return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                            crate::diagnostic::codes::E0402,
+                            format!(
+                                "duplicate resolved extern symbol '{}' while building component ABI",
+                                sig.name
+                            ),
+                            sig.span,
+                        )]);
+                    }
                     gen.import(&sig.name, |f| {
                         let mut builder = f;
                         for (pname, pty) in &sig.params {
