@@ -1115,6 +1115,35 @@ mod bench {
         assert!(error.contains(expected), "{error}");
     }
 
+    fn expect_unary_register_errors(build: impl Fn(instr::Reg, instr::Reg) -> Op, operation: &str) {
+        expect_register_error(
+            |result| build(result, result + 1),
+            &format!("{} source register", operation),
+        );
+        expect_register_error(
+            |result| build(result + 1, result),
+            &format!("{} destination register", operation),
+        );
+    }
+
+    fn expect_binary_register_errors(
+        build: impl Fn(instr::Reg, instr::Reg, instr::Reg) -> Op,
+        operation: &str,
+    ) {
+        expect_register_error(
+            |result| build(result, result + 1, result),
+            &format!("{} lhs source", operation),
+        );
+        expect_register_error(
+            |result| build(result, result, result + 1),
+            &format!("{} rhs source", operation),
+        );
+        expect_register_error(
+            |result| build(result + 1, result, result),
+            &format!("{} destination", operation),
+        );
+    }
+
     #[test]
     fn bench_fib25_bytecode() {
         // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
@@ -2320,6 +2349,37 @@ func main() -> i32 {
             },
             "deref destination register",
         );
+    }
+
+    #[test]
+    fn vm_rejects_forged_scalar_arithmetic_registers() {
+        expect_binary_register_errors(|rd, ra, rb| Op::AddInt { rd, ra, rb }, "add-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::SubInt { rd, ra, rb }, "sub-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::MulInt { rd, ra, rb }, "mul-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::DivInt { rd, ra, rb }, "div-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::ModInt { rd, ra, rb }, "mod-int");
+        expect_unary_register_errors(|rd, ra| Op::NegInt { rd, ra }, "neg-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::AddFloat { rd, ra, rb }, "add-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::SubFloat { rd, ra, rb }, "sub-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::MulFloat { rd, ra, rb }, "mul-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::DivFloat { rd, ra, rb }, "div-float");
+        expect_unary_register_errors(|rd, ra| Op::NegFloat { rd, ra }, "neg-float");
+        expect_unary_register_errors(|rd, ra| Op::IntToFloat { rd, ra }, "int-to-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::EqInt { rd, ra, rb }, "eq-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::NeInt { rd, ra, rb }, "ne-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::LtInt { rd, ra, rb }, "lt-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::GtInt { rd, ra, rb }, "gt-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::LeInt { rd, ra, rb }, "le-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::GeInt { rd, ra, rb }, "ge-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::EqFloat { rd, ra, rb }, "eq-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::LtFloat { rd, ra, rb }, "lt-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::GtFloat { rd, ra, rb }, "gt-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::LeFloat { rd, ra, rb }, "le-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::GeFloat { rd, ra, rb }, "ge-float");
+        expect_binary_register_errors(|rd, ra, rb| Op::Eq { rd, ra, rb }, "eq");
+        expect_binary_register_errors(|rd, ra, rb| Op::Ne { rd, ra, rb }, "ne");
+        expect_binary_register_errors(|rd, ra, rb| Op::PowInt { rd, ra, rb }, "pow-int");
+        expect_binary_register_errors(|rd, ra, rb| Op::PowFloat { rd, ra, rb }, "pow-float");
     }
 
     #[test]

@@ -1085,6 +1085,7 @@ impl BytecodeVM {
                 // Single frame borrow per op: reads + write happen inside one
                 // last_mut region to cut per-op boundary checks.
                 Op::AddInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "add-int")?;
                     // Read operands immutably so the float fallback can route
                     // through the ieee-aware `check_float` (audit fix #11: the
                     // old hardcoded NaN/Inf trap ignored frame.ieee_depth).
@@ -1115,6 +1116,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::SubInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "sub-int")?;
                     // Audit fix #11: ieee-aware float fallback (see AddInt).
                     let (a, b) = {
                         let frame = self.cur_frame();
@@ -1140,6 +1142,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::MulInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mul-int")?;
                     // Audit fix #11: ieee-aware float fallback (see AddInt).
                     let (a, b) = {
                         let frame = self.cur_frame();
@@ -1165,6 +1168,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::DivInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "div-int")?;
                     // Audit fix #11: ieee-aware float fallback (see AddInt). The
                     // float zero-divisor trap is suspended inside `ieee_float { }`
                     // (IEEE 754 x/0.0 = ±Inf), mirroring Op::DivFloat.
@@ -1200,6 +1204,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::ModInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mod-int")?;
                     // Audit fix #11: ieee-aware float fallback (see AddInt). The
                     // float zero-divisor trap is suspended inside `ieee_float { }`
                     // (IEEE 754 x % 0.0 = NaN), mirroring the DivFloat ruling.
@@ -1235,6 +1240,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = result;
                 }
                 Op::NegInt { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "neg-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match &frame.regs[ra as usize] {
                         Value::Float(a) => {
@@ -1269,6 +1275,7 @@ impl BytecodeVM {
 
                 // ── Float arithmetic ───────────────────────────
                 Op::AddFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "add-float")?;
                     let (a, b) = {
                         let frame = self.cur_frame();
                         (
@@ -1286,6 +1293,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::SubFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "sub-float")?;
                     let (a, b) = {
                         let frame = self.cur_frame();
                         (
@@ -1300,6 +1308,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::MulFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mul-float")?;
                     let (a, b) = {
                         let frame = self.cur_frame();
                         (
@@ -1312,6 +1321,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::DivFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "div-float")?;
                     let (a, b) = {
                         let frame = self.cur_frame();
                         (
@@ -1329,6 +1339,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::NegFloat { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "neg-float")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
@@ -1340,6 +1351,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Float(-a);
                 }
                 Op::IntToFloat { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "int-to-float")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1352,6 +1364,7 @@ impl BytecodeVM {
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "eq-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a == b,
@@ -1360,6 +1373,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::NeInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "ne-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a != b,
@@ -1368,6 +1382,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::LtInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "lt-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a < b,
@@ -1384,6 +1399,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::GtInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "gt-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a > b,
@@ -1396,6 +1412,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::LeInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "le-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a <= b,
@@ -1408,6 +1425,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::GeInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "ge-int")?;
                     let frame = self.cur_frame_mut();
                     let result = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Int(a), Value::Int(b)) => a >= b,
@@ -1420,6 +1438,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::EqFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "eq-float")?;
                     let frame = self.cur_frame_mut();
                     let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Float(a), Value::Float(b)) => (*a, *b),
@@ -1433,6 +1452,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(a == b);
                 }
                 Op::LtFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "lt-float")?;
                     let frame = self.cur_frame_mut();
                     let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Float(a), Value::Float(b)) => (*a, *b),
@@ -1446,6 +1466,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(a < b);
                 }
                 Op::GtFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "gt-float")?;
                     let frame = self.cur_frame_mut();
                     let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Float(a), Value::Float(b)) => (*a, *b),
@@ -1459,6 +1480,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(a > b);
                 }
                 Op::LeFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "le-float")?;
                     let frame = self.cur_frame_mut();
                     let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Float(a), Value::Float(b)) => (*a, *b),
@@ -1472,6 +1494,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(a <= b);
                 }
                 Op::GeFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "ge-float")?;
                     let frame = self.cur_frame_mut();
                     let (a, b) = match (&frame.regs[ra as usize], &frame.regs[rb as usize]) {
                         (Value::Float(a), Value::Float(b)) => (*a, *b),
@@ -1485,6 +1508,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(a >= b);
                 }
                 Op::Eq { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "eq")?;
                     let frame = self.cur_frame_mut();
                     let result = crate::interp::values_equal(
                         &frame.regs[ra as usize],
@@ -1493,6 +1517,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Bool(result);
                 }
                 Op::Ne { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "ne")?;
                     let frame = self.cur_frame_mut();
                     let result = !crate::interp::values_equal(
                         &frame.regs[ra as usize],
@@ -1669,6 +1694,7 @@ impl BytecodeVM {
                     frame.regs[rb as usize] = Value::Int(((v as u64) & (mask as u64)) as i64);
                 }
                 Op::PowInt { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "pow-int")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1691,6 +1717,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::PowFloat { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "pow-float")?;
                     let (a, b) = {
                         let frame = self.cur_frame();
                         (
@@ -5654,6 +5681,25 @@ impl BytecodeVM {
                 role, r, len
             )));
         }
+        Ok(())
+    }
+
+    fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
+        self.ensure_reg(rd, &format!("{} destination", operation))?;
+        self.ensure_reg(ra, &format!("{} source", operation))?;
+        Ok(())
+    }
+
+    fn ensure_binary_regs(
+        &self,
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+        operation: &str,
+    ) -> Result<(), InterpError> {
+        self.ensure_reg(rd, &format!("{} destination", operation))?;
+        self.ensure_reg(ra, &format!("{} lhs source", operation))?;
+        self.ensure_reg(rb, &format!("{} rhs source", operation))?;
         Ok(())
     }
 
