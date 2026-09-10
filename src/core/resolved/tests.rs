@@ -1676,12 +1676,19 @@ func main() -> i32 { 0 }
         .next()
         .expect("extern block")
         .clone();
-    duplicate.node_id = NodeId("extern-block:compatibility-duplicate".into());
+    let duplicate_key = NodeId("extern-block:compatibility-duplicate".into());
+    duplicate.node_id = program
+        .extern_blocks()
+        .values()
+        .next()
+        .expect("extern block")
+        .node_id
+        .clone();
     duplicate.abi = "system".into();
     duplicate.signatures[0].node_id = NodeId("extern-signature:compatibility-duplicate".into());
     program
         .extern_blocks
-        .insert(duplicate.node_id.clone(), duplicate);
+        .insert(duplicate_key.clone(), duplicate);
 
     let blocks = program.extern_blocks_sorted();
     assert!(blocks

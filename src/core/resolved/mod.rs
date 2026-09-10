@@ -1686,13 +1686,14 @@ impl CheckedProgram {
     /// should at least choose the same deterministic entry everywhere while
     /// the identity-aware consumers report the structural ambiguity.
     pub fn extern_blocks_sorted(&self) -> Vec<&ResolvedExternBlock> {
-        let mut blocks = self.extern_blocks.values().collect::<Vec<_>>();
-        blocks.sort_by(|left, right| {
+        let mut blocks = self.extern_blocks.iter().collect::<Vec<_>>();
+        blocks.sort_by(|(left_key, left), (right_key, right)| {
             left.node_id
                 .cmp(&right.node_id)
                 .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+                .then_with(|| left_key.cmp(right_key))
         });
-        blocks
+        blocks.into_iter().map(|(_, block)| block).collect()
     }
 
     /// Return signatures inside one checker-owned extern block in canonical
