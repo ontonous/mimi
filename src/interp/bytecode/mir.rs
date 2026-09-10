@@ -182,6 +182,24 @@ fn materialize_canonical_ffi_bindings(
                 });
                 continue;
             };
+            if descriptor.caller != proto.name {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI descriptor index {extern_idx} caller '{}' disagrees with emitted function '{}' at pc {pc}",
+                        descriptor.caller, proto.name
+                    ),
+                });
+            }
+            if descriptor.instruction != *instruction_text {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI descriptor index {extern_idx} instruction '{}' disagrees with emitted instruction '{}' at pc {pc}",
+                        descriptor.instruction, instruction_text
+                    ),
+                });
+            }
             bindings.push(CanonicalFfiBinding {
                 function: function as FuncIdx,
                 pc: pc as u32,
@@ -11747,6 +11765,40 @@ mod tests {
                 error
                     .message
                     .contains("is referenced by multiple emitted call sites")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_ffi_binding_materialization_rejects_descriptor_provenance_mismatch() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let functions = bytecode.functions.clone();
+
+        let mut forged_caller = bytecode.canonical_ffi.clone();
+        forged_caller[0].caller = "function:forged".into();
+        let errors = super::materialize_canonical_ffi_bindings(&functions, &forged_caller)
+            .expect_err("descriptor caller provenance must fail at bytecode construction");
+        assert!(
+            errors.iter().any(
+                |error| error.message.contains("caller") && error.message.contains("disagrees")
+            ),
+            "{errors:?}"
+        );
+
+        let mut forged_instruction = bytecode.canonical_ffi.clone();
+        forged_instruction[0].instruction = "instruction:forged".into();
+        let errors = super::materialize_canonical_ffi_bindings(&functions, &forged_instruction)
+            .expect_err("descriptor instruction provenance must fail at bytecode construction");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("instruction") && error.message.contains("disagrees")
             }),
             "{errors:?}"
         );
