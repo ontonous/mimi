@@ -15,6 +15,22 @@ use crate::interp::Value;
 
 const C_SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.c");
 const SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.mimi");
+const MIXED_WIDTH_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_widen_arg(int64_t x) { return x + 1; }
+int32_t mir_ffi_i32_result(int64_t x) { return (int32_t)x; }
+"#;
+const MIXED_WIDTH_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_widen_arg(x: i64) -> i64;
+    func mir_ffi_i32_result(x: i64) -> i32;
+}
+func main() -> i32 {
+    println(mir_ffi_widen_arg(41 as i32))
+    println(mir_ffi_i32_result(7 as i64))
+    0
+}
+"#;
 
 struct Oracle(Cell<i64>);
 
@@ -196,6 +212,145 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     assert_eq!(native.stdout, expected);
     assert_eq!(native.stderr, "");
     assert_eq!(mir.canonical_digest(), digest);
+}
+
+#[test]
+fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MIXED_WIDTH_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MIXED_WIDTH_SOURCE)
+        .tokenize()
+        .expect("lex mixed-width C ABI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse mixed-width C ABI fixture");
+    let checked = crate::core::check_program(&file).expect("check mixed-width C ABI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize mixed-width C ABI MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let mut receipts = mir.ffi_calls().values();
+    let widen = receipts
+        .find(|receipt| receipt.symbol == "mir_ffi_widen_arg")
+        .expect("widening FFI receipt");
+    assert_eq!(
+        widen.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        }]
+    );
+    let i32_result = mir
+        .ffi_calls()
+        .values()
+        .find(|receipt| receipt.symbol == "mir_ffi_i32_result")
+        .expect("i32-result FFI receipt");
+    assert_eq!(
+        i32_result.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        })
+    );
+
+    struct MixedWidthOracle;
+    impl MirReferenceFfiResolver for MixedWidthOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_widen_arg", [MirRuntimeValue::Int(value)]) => {
+                    if receipt.parameter_conversions.first().copied()
+                        != Some(crate::core::mir::MirFfiAbiConversion {
+                            from: MirAbiClass::Integer {
+                                bits: 32,
+                                signed: true,
+                            },
+                            to: MirAbiClass::Integer {
+                                bits: 64,
+                                signed: true,
+                            },
+                        })
+                    {
+                        return Err("widening receipt mismatch".into());
+                    }
+                    Ok(MirRuntimeValue::Int(value + 1))
+                }
+                ("mir_ffi_i32_result", [MirRuntimeValue::Int(value)]) => {
+                    if receipt.result_conversion
+                        != Some(crate::core::mir::MirFfiAbiConversion {
+                            from: MirAbiClass::Integer {
+                                bits: 32,
+                                signed: true,
+                            },
+                            to: MirAbiClass::Integer {
+                                bits: 32,
+                                signed: true,
+                            },
+                        })
+                    {
+                        return Err("i32-result receipt mismatch".into());
+                    }
+                    Ok(MirRuntimeValue::Int(*value))
+                }
+                _ => Err("unexpected mixed-width FFI call".into()),
+            }
+        }
+    }
+
+    let oracle = MixedWidthOracle;
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference mixed-width FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n7\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width FFI bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("bytecode mixed-width FFI execution"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "42\n7\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_width");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid mixed-width LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MIXED_WIDTH_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native mixed-width FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n7\n");
+    assert_eq!(native.stderr, "");
 }
 
 #[test]
