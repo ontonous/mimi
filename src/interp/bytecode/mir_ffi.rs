@@ -250,6 +250,11 @@ impl CanonicalMirFfiRuntime {
                 args.len()
             ));
         }
+        if !matches!(descriptor.result, CanonicalFfiScalarType::Unit)
+            && descriptor.result_id.is_none()
+        {
+            return Err("canonical FFI non-Unit result has no result identity".into());
+        }
         if descriptor.parameter_conversions.len() != descriptor.arguments.len() {
             return Err("canonical FFI parameter conversion receipt arity mismatch".into());
         }
@@ -743,6 +748,8 @@ mod tests {
             CanonicalFfiScalarType::F64 => crate::core::mir::types::MirAbiClass::Float { bits: 64 },
             CanonicalFfiScalarType::Unit => crate::core::mir::types::MirAbiClass::Unit,
         };
+        let result_id = (!matches!(argument, CanonicalFfiScalarType::Unit))
+            .then(|| crate::core::mir::MirValueId::new("ffi-test-result").expect("result id"));
         CanonicalFfiDescriptor {
             caller: "function:main".into(),
             instruction: "ffi-test-call".into(),
@@ -758,7 +765,7 @@ mod tests {
             result_conversion: Some(crate::core::mir::MirFfiAbiConversion { from: abi, to: abi }),
             argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
             requires: None,
-            result_id: None,
+            result_id,
             ensures: None,
         }
     }
@@ -960,6 +967,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("result identity overlaps an argument identity"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_non_unit_missing_result_identity_before_loading() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.result_id = None;
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("non-Unit FFI results must carry their MIR result identity");
+        assert!(error
+            .to_string()
+            .contains("non-Unit result has no result identity"));
         assert!(runtime.loaded_libs.is_empty());
     }
 
