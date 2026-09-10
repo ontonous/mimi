@@ -3567,7 +3567,7 @@ impl BytecodeVM {
                     };
                     let register_count = self.cur_frame().regs.len();
                     let captures_end = (captures_base as usize).checked_add(capture_count as usize);
-                    if captures_end.is_none_or(|end| end > register_count) {
+                    if captures_end.map_or(true, |end| end > register_count) {
                         return Err(InterpError::new(format!(
                             "closure capture register window base {} count {} exceeds frame with {} register(s)",
                             captures_base, capture_count, register_count
