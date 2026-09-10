@@ -176,6 +176,11 @@ impl CanonicalMirFfiRuntime {
         {
             return Err(format!("canonical MIR {message}"));
         }
+        crate::core::mir::validate_ffi_symbol_matches_callee(
+            &crate::core::NodeId(descriptor.callee.clone()),
+            &descriptor.symbol,
+        )
+        .map_err(|message| format!("canonical MIR {message}"))?;
         if descriptor.arguments.len() != args.len() {
             return Err(format!(
                 "canonical MIR FFI symbol '{}' expects {} arguments, got {}",
@@ -680,7 +685,7 @@ mod tests {
         CanonicalFfiDescriptor {
             caller: "function:main".into(),
             instruction: "ffi-test-call".into(),
-            callee: format!("extern:{symbol}"),
+            callee: format!("extern:C:test/function:{symbol}:0000000000000000"),
             symbol: symbol.into(),
             abi: "C".into(),
             arguments: vec![argument.clone()],
@@ -894,6 +899,27 @@ mod tests {
         assert!(error
             .to_string()
             .contains("result identity overlaps an argument identity"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_forged_manifest_safe_symbol_before_loading() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        // `abs` is a manifest-safe symbol, but the checker-owned callee
+        // identity is still the declaration for `labs`.  A physical runtime
+        // must not let a hand-built descriptor retarget the call merely by
+        // changing the symbol spelling.
+        call.symbol = "abs".into();
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("safe but mismatched symbol must fail identity preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("symbol disagrees with canonical extern callee"),
+            "{error}"
+        );
         assert!(runtime.loaded_libs.is_empty());
     }
 
