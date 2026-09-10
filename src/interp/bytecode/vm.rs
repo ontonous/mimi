@@ -1528,6 +1528,7 @@ impl BytecodeVM {
 
                 // ── Bitwise ────────────────────────────────────
                 Op::BitAnd { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "bit-and")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1544,6 +1545,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(a & b);
                 }
                 Op::BitOr { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "bit-or")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1560,6 +1562,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(a | b);
                 }
                 Op::BitXor { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "bit-xor")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1576,6 +1579,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(a ^ b);
                 }
                 Op::Shl { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "shl")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1599,6 +1603,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(r);
                 }
                 Op::Shr { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "shr")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1619,6 +1624,7 @@ impl BytecodeVM {
                 }
                 // ── i32 width-fidelity guards (0.34.34, SD-7 / L1) ──
                 Op::CheckI32 { rd, kind } => {
+                    self.ensure_reg(rd, "check-i32 register")?;
                     let v = match &self.cur_frame().regs[rd as usize] {
                         Value::Int(i) => *i,
                         other => {
@@ -1640,6 +1646,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::CheckI32DivRem { ra, rb } => {
+                    self.ensure_source_pair(ra, rb, "check-i32-div-rem")?;
                     let frame = self.cur_frame();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(i) => *i,
@@ -1668,6 +1675,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::WrapI32 { rd } => {
+                    self.ensure_reg(rd, "wrap-i32 register")?;
                     let frame = self.cur_frame_mut();
                     let v = match &frame.regs[rd as usize] {
                         Value::Int(i) => *i,
@@ -1681,6 +1689,7 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int((v as i32) as i64);
                 }
                 Op::MaskShiftAmt { rb, mask } => {
+                    self.ensure_reg(rb, "mask-shift-amt register")?;
                     let frame = self.cur_frame_mut();
                     let v = match &frame.regs[rb as usize] {
                         Value::Int(i) => *i,
@@ -1753,6 +1762,7 @@ impl BytecodeVM {
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::BitNot { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "bit-not")?;
                     let frame = self.cur_frame_mut();
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
@@ -1763,11 +1773,13 @@ impl BytecodeVM {
                     frame.regs[rd as usize] = Value::Int(!a);
                 }
                 Op::Not { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "not")?;
                     let frame = self.cur_frame_mut();
                     let v = &frame.regs[ra as usize];
                     frame.regs[rd as usize] = Value::Bool(!crate::interp::is_truthy(v));
                 }
                 Op::And { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "and")?;
                     let frame = self.cur_frame_mut();
                     if crate::interp::is_truthy(&frame.regs[ra as usize]) {
                         let b = crate::interp::is_truthy(&frame.regs[rb as usize]);
@@ -1777,6 +1789,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::Or { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "or")?;
                     let frame = self.cur_frame_mut();
                     if crate::interp::is_truthy(&frame.regs[ra as usize]) {
                         frame.regs[rd as usize] = Value::Bool(true);
@@ -1788,11 +1801,13 @@ impl BytecodeVM {
 
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "concat-str")?;
                     let frame = self.cur_frame_mut();
                     let result = format!("{}{}", frame.regs[ra as usize], frame.regs[rb as usize]);
                     frame.regs[rd as usize] = Value::String(Arc::new(result));
                 }
                 Op::StrAppend { ra, rb } => {
+                    self.ensure_source_pair(ra, rb, "str-append")?;
                     let suffix = self.get_reg(rb).to_string();
                     let target = self.get_reg_mut(ra);
                     match target {
@@ -4518,6 +4533,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::String(Arc::new(v.to_string())));
                 }
                 Op::Cast { rd, ra, target } => {
+                    self.ensure_unary_regs(rd, ra, "cast")?;
                     let v = self.get_reg(ra).clone();
                     // target: 0 = i64, 1 = f64, 2 = i32 (truncating wrap, 0.34.34)
                     let result = match target {
@@ -5698,6 +5714,12 @@ impl BytecodeVM {
         operation: &str,
     ) -> Result<(), InterpError> {
         self.ensure_reg(rd, &format!("{} destination", operation))?;
+        self.ensure_reg(ra, &format!("{} lhs source", operation))?;
+        self.ensure_reg(rb, &format!("{} rhs source", operation))?;
+        Ok(())
+    }
+
+    fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
         self.ensure_reg(ra, &format!("{} lhs source", operation))?;
         self.ensure_reg(rb, &format!("{} rhs source", operation))?;
         Ok(())

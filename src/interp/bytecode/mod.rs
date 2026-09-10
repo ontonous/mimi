@@ -1144,6 +1144,17 @@ mod bench {
         );
     }
 
+    fn expect_source_pair_errors(build: impl Fn(instr::Reg, instr::Reg) -> Op, operation: &str) {
+        expect_register_error(
+            |result| build(result + 1, result),
+            &format!("{} lhs source", operation),
+        );
+        expect_register_error(
+            |result| build(result, result + 1),
+            &format!("{} rhs source", operation),
+        );
+    }
+
     #[test]
     fn bench_fib25_bytecode() {
         // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
@@ -2380,6 +2391,38 @@ func main() -> i32 {
         expect_binary_register_errors(|rd, ra, rb| Op::Ne { rd, ra, rb }, "ne");
         expect_binary_register_errors(|rd, ra, rb| Op::PowInt { rd, ra, rb }, "pow-int");
         expect_binary_register_errors(|rd, ra, rb| Op::PowFloat { rd, ra, rb }, "pow-float");
+    }
+
+    #[test]
+    fn vm_rejects_forged_bitwise_logical_string_registers() {
+        expect_binary_register_errors(|rd, ra, rb| Op::BitAnd { rd, ra, rb }, "bit-and");
+        expect_binary_register_errors(|rd, ra, rb| Op::BitOr { rd, ra, rb }, "bit-or");
+        expect_binary_register_errors(|rd, ra, rb| Op::BitXor { rd, ra, rb }, "bit-xor");
+        expect_binary_register_errors(|rd, ra, rb| Op::Shl { rd, ra, rb }, "shl");
+        expect_binary_register_errors(|rd, ra, rb| Op::Shr { rd, ra, rb }, "shr");
+        expect_unary_register_errors(|rd, ra| Op::BitNot { rd, ra }, "bit-not");
+        expect_unary_register_errors(|rd, ra| Op::Not { rd, ra }, "not");
+        expect_binary_register_errors(|rd, ra, rb| Op::And { rd, ra, rb }, "and");
+        expect_binary_register_errors(|rd, ra, rb| Op::Or { rd, ra, rb }, "or");
+        expect_binary_register_errors(|rd, ra, rb| Op::ConcatStr { rd, ra, rb }, "concat-str");
+        expect_source_pair_errors(|ra, rb| Op::StrAppend { ra, rb }, "str-append");
+        expect_unary_register_errors(|rd, ra| Op::Cast { rd, ra, target: 0 }, "cast");
+        expect_register_error(
+            |result| Op::CheckI32 {
+                rd: result + 1,
+                kind: 0,
+            },
+            "check-i32 register",
+        );
+        expect_source_pair_errors(|ra, rb| Op::CheckI32DivRem { ra, rb }, "check-i32-div-rem");
+        expect_register_error(|result| Op::WrapI32 { rd: result + 1 }, "wrap-i32 register");
+        expect_register_error(
+            |result| Op::MaskShiftAmt {
+                rb: result + 1,
+                mask: 63,
+            },
+            "mask-shift-amt register",
+        );
     }
 
     #[test]
