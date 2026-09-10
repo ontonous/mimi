@@ -1082,6 +1082,30 @@ mod bench {
     use super::*;
     use std::time::Instant;
 
+    fn run_single_op(main: FunctionProto) -> Result<i64, String> {
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let mut vm = BytecodeVM::new(std::sync::Arc::new(prog));
+        vm.run().map_err(|e| e.to_string())
+    }
+
     #[test]
     fn bench_fib25_bytecode() {
         // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
@@ -1849,6 +1873,168 @@ func main() -> i32 {
                 .contains("tuple destructure source register"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn vm_rejects_forged_tuple_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::TupleGet {
+            rd: result,
+            ra: result + 1,
+            idx: 0,
+            contract: None,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged tuple projection source register must fail before access");
+        assert!(error.contains("tuple get source register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_tuple_projection_destination_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::TupleGet {
+            rd: result + 1,
+            ra: result,
+            idx: 0,
+            contract: None,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged tuple projection destination register must fail before write");
+        assert!(error.contains("tuple get destination register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_move_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let field = main.add_const_raw(ConstValue::Str("x".into()));
+        let result = main.alloc_reg();
+        main.emit(Op::RecordMoveGet {
+            rd: result,
+            ra: result + 1,
+            field,
+            contract: None,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged record projection source register must fail before access");
+        assert!(error.contains("record move get source register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_move_projection_destination_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let field = main.add_const_raw(ConstValue::Str("x".into()));
+        let result = main.alloc_reg();
+        main.emit(Op::RecordMoveGet {
+            rd: result + 1,
+            ra: result,
+            field,
+            contract: None,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged record projection destination register must fail before write");
+        assert!(
+            error.contains("record move get destination register"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let field = main.add_const_raw(ConstValue::Str("x".into()));
+        let result = main.alloc_reg();
+        main.emit(Op::RecordGet {
+            rd: result,
+            ra: result + 1,
+            field,
+            contract: None,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged record get source register must fail before access");
+        assert!(error.contains("record get source register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_move_drop_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::RecordMoveDropGet {
+            rd: result,
+            ra: result + 1,
+            field: 0,
+            contract: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged record move/drop source register must fail before access");
+        assert!(
+            error.contains("record move/drop get source register"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_move_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::VariantMoveGet {
+            rd: result,
+            ra: result + 1,
+            idx: 0,
+            variant_tag: 0,
+            shapes: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged variant projection source register must fail before access");
+        assert!(
+            error.contains("variant move get source register"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_move_projection_destination_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::VariantMoveGet {
+            rd: result + 1,
+            ra: result,
+            idx: 0,
+            variant_tag: 0,
+            shapes: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged variant projection destination register must fail before write");
+        assert!(
+            error.contains("variant move get destination register"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_projection_source_register() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::VariantGet {
+            rd: result,
+            ra: result + 1,
+            idx: 0,
+            variant_tag: 0,
+            shapes: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged variant get source register must fail before access");
+        assert!(error.contains("variant get source register"), "{error}");
     }
 
     #[test]

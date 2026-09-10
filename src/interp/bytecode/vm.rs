@@ -2680,6 +2680,8 @@ impl BytecodeVM {
                     idx,
                     contract,
                 } => {
+                    self.ensure_reg(rd, "tuple get destination")?;
+                    self.ensure_reg(ra, "tuple get source")?;
                     let shape = Self::tuple_projection_contract(proto, idx, contract)?;
                     let v = self.get_reg(ra).clone();
                     let elem = if let Some(shape) = shape.as_ref() {
@@ -2952,6 +2954,8 @@ impl BytecodeVM {
                     field,
                     contract,
                 } => {
+                    self.ensure_reg(rd, "record get destination")?;
+                    self.ensure_reg(ra, "record get source")?;
                     let (field_name, contract) =
                         Self::record_projection_contract(proto, field, contract)?;
                     // Borrow record, extract only the field value (avoid cloning entire record).
@@ -3031,6 +3035,8 @@ impl BytecodeVM {
                     field,
                     contract,
                 } => {
+                    self.ensure_reg(rd, "record move get destination")?;
+                    self.ensure_reg(ra, "record move get source")?;
                     let (field_name, contract) =
                         Self::record_projection_contract(proto, field, contract)?;
                     // Validate the complete canonical identity and shape before
@@ -3070,6 +3076,8 @@ impl BytecodeVM {
                     field,
                     contract,
                 } => {
+                    self.ensure_reg(rd, "record move/drop get destination")?;
+                    self.ensure_reg(ra, "record move/drop get source")?;
                     let (field_name, shape) =
                         Self::record_move_drop_projection_contract(proto, field, contract)?;
                     Self::validate_canonical_record_move_drop_projection(
@@ -4083,6 +4091,8 @@ impl BytecodeVM {
                     variant_tag,
                     shapes,
                 } => {
+                    self.ensure_reg(rd, "variant get destination")?;
+                    self.ensure_reg(ra, "variant get source")?;
                     let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
                         Value::CanonicalVariant {
@@ -4185,6 +4195,8 @@ impl BytecodeVM {
                     variant_tag,
                     shapes,
                 } => {
+                    self.ensure_reg(rd, "variant move get destination")?;
+                    self.ensure_reg(ra, "variant move get source")?;
                     let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
                         Value::CanonicalVariant {
@@ -5600,6 +5612,17 @@ impl BytecodeVM {
     }
 
     // ── Register access helpers (D8: centralized Value conversion) ──
+
+    fn ensure_reg(&self, r: Reg, role: &str) -> Result<(), InterpError> {
+        let len = self.cur_frame().regs.len();
+        if (r as usize) >= len {
+            return Err(InterpError::new(format!(
+                "{} register {} out of bounds (frame has {} register(s))",
+                role, r, len
+            )));
+        }
+        Ok(())
+    }
 
     pub(crate) fn get_reg(&self, r: Reg) -> &Value {
         let frame = self.cur_frame();
