@@ -161,6 +161,28 @@ fn materialize_canonical_ffi_bindings(
                 });
                 continue;
             };
+            let register_count = proto.register_count as usize;
+            if (*rd as usize) >= register_count {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} result register {rd} is outside function frame with {register_count} register(s)"
+                    ),
+                });
+            }
+            let args_end = (*args_base as usize).checked_add(*argc as usize);
+            let args_out_of_frame = match args_end {
+                Some(end) => end > register_count,
+                None => true,
+            };
+            if args_out_of_frame {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} argument register window base {args_base} count {argc} exceeds function frame with {register_count} register(s)"
+                    ),
+                });
+            }
             let descriptor_index = *extern_idx as usize;
             if let Some((previous_function, previous_pc)) = descriptor_references[descriptor_index]
             {
@@ -11807,6 +11829,66 @@ mod tests {
             errors.iter().any(|error| {
                 error.message.contains("instruction") && error.message.contains("disagrees")
             }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_ffi_binding_materialization_rejects_register_window_out_of_frame() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let main_idx = bytecode
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let call_idx = bytecode.functions[main_idx]
+            .code
+            .iter()
+            .position(|op| matches!(op, Op::CallCanonicalExtern { .. }))
+            .expect("canonical FFI call");
+
+        let mut forged_rd = bytecode.functions.clone();
+        let register_count = forged_rd[main_idx].register_count;
+        if let Op::CallCanonicalExtern { rd, .. } = &mut forged_rd[main_idx].code[call_idx] {
+            *rd = register_count;
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let errors = super::materialize_canonical_ffi_bindings(&forged_rd, &bytecode.canonical_ffi)
+            .expect_err("an out-of-frame result register must fail at construction");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("result register")
+                    && error.message.contains("outside function frame")),
+            "{errors:?}"
+        );
+
+        let mut forged_args = bytecode.functions.clone();
+        let register_count = forged_args[main_idx].register_count;
+        if let Op::CallCanonicalExtern {
+            args_base, argc, ..
+        } = &mut forged_args[main_idx].code[call_idx]
+        {
+            *args_base = register_count;
+            *argc = 1;
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let errors =
+            super::materialize_canonical_ffi_bindings(&forged_args, &bytecode.canonical_ffi)
+                .expect_err("an out-of-frame argument window must fail at construction");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("argument register window")
+                    && error.message.contains("exceeds function frame")),
             "{errors:?}"
         );
     }

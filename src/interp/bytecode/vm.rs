@@ -351,6 +351,24 @@ impl BytecodeVM {
                         proto.name, binding.argc
                     )));
                 }
+                let register_count = proto.register_count as usize;
+                if (*rd as usize) >= register_count {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} result register {rd} is outside function frame with {register_count} register(s)",
+                        proto.name
+                    )));
+                }
+                let args_end = (*args_base as usize).checked_add(*argc as usize);
+                let args_out_of_frame = match args_end {
+                    Some(end) => end > register_count,
+                    None => true,
+                };
+                if args_out_of_frame {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} argument register window base {args_base} count {argc} exceeds function frame with {register_count} register(s)",
+                        proto.name
+                    )));
+                }
                 if binding.param_count != proto.param_count {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} parameter count {} disagrees with compiler binding count {}",
