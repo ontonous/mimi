@@ -1204,6 +1204,41 @@ func main() -> i32 {
         assert_eq!(vm.run().unwrap(), 0);
     }
 
+    #[test]
+    fn vm_rejects_forged_new_closure_prototype_index() {
+        let source = r#"
+        func main() -> i32 {
+            let f = fn(x: i32) -> i32 { x + 1 }
+            f(41)
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let closure = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::NewClosure { proto, .. } => Some(proto),
+                _ => None,
+            })
+            .expect("lambda must emit a NewClosure instruction");
+        *closure = u32::MAX;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged closure prototype index must fail before capture access");
+        assert!(
+            error
+                .to_string()
+                .contains("closure prototype function #4294967295 out of range"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {

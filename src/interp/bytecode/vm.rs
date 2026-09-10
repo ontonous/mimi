@@ -3559,7 +3559,12 @@ impl BytecodeVM {
                     capture_count,
                 } => {
                     // Collect captured variables by name.
-                    let target_proto = &self.program.functions[proto_idx as usize];
+                    let Some(target_proto) = self.program.functions.get(proto_idx as usize) else {
+                        return Err(InterpError::new(format!(
+                            "closure prototype function #{} out of range",
+                            proto_idx
+                        )));
+                    };
                     let mut captured = std::collections::HashMap::new();
                     for i in 0..capture_count {
                         let reg = captures_base + i;
