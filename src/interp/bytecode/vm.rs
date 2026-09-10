@@ -351,6 +351,12 @@ impl BytecodeVM {
                         proto.name, binding.argc
                     )));
                 }
+                if binding.param_count != proto.param_count {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} parameter count {} disagrees with compiler binding count {}",
+                        proto.name, proto.param_count, binding.param_count
+                    )));
+                }
                 if binding.register_count != proto.register_count {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} register count {} disagrees with compiler binding count {}",

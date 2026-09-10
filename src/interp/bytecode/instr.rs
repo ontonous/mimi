@@ -1873,6 +1873,7 @@ pub(crate) struct CanonicalFfiBinding {
     pub(crate) rd: Reg,
     pub(crate) args_base: Reg,
     pub(crate) argc: u16,
+    pub(crate) param_count: u16,
     pub(crate) register_count: u16,
     pub(crate) instruction_text: String,
     pub(crate) descriptor: CanonicalFfiDescriptor,

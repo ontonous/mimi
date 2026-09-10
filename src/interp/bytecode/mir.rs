@@ -210,6 +210,7 @@ fn materialize_canonical_ffi_bindings(
                 rd: *rd,
                 args_base: *args_base,
                 argc: *argc,
+                param_count: proto.param_count,
                 register_count: proto.register_count,
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
@@ -12186,6 +12187,25 @@ func main() -> i32 {
             .run_value()
             .expect_err("forged function register count must fail before execution");
         assert!(error.to_string().contains("register count"), "{error}");
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_function_param_count() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let binding = bytecode.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        forged.functions[function_idx].param_count = binding.param_count.saturating_add(1);
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("forged function parameter count must fail before execution");
+        assert!(error.to_string().contains("parameter count"), "{error}");
     }
 
     #[test]
