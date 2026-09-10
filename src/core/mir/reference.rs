@@ -12110,6 +12110,58 @@ func main() -> i64 {
     }
 
     #[test]
+    fn forged_ffi_endpoint_metadata_is_rejected_by_every_direct_consumer() {
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let receipt = program.ffi_calls().values().next().expect("FFI receipt");
+        let scalar_id = receipt
+            .parameter_types
+            .first()
+            .expect("FFI parameter TypeDesc")
+            .clone();
+        let mut descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("scalar TypeDesc")
+            .clone();
+        descriptor.session_protocol = Some(scalar_id.clone());
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(scalar_id, descriptor);
+        let forged = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            catalog,
+            program.instances().clone(),
+            program.transitions().clone(),
+            program.ffi_calls().clone(),
+        )
+        .expect("MIR boundary retains a forged endpoint for consumer gates");
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("reference must reject forged endpoint metadata");
+        assert!(
+            reference_error
+                .to_string()
+                .contains("complete scalar endpoint contract"),
+            "{reference_error}"
+        );
+
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+            .expect_err("bytecode must reject forged endpoint metadata");
+        assert!(bytecode_error.iter().any(|error| {
+            error.message.contains("complete scalar endpoint contract")
+                || error.message.contains("complete Copy scalar shape")
+        }));
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native must reject forged endpoint metadata");
+        assert!(native_error
+            .iter()
+            .any(|error| error.message.contains("complete scalar endpoint contract")));
+    }
+
+    #[test]
     fn canonical_program_gate_rejects_orphaned_ffi_receipts() {
         let source =
             "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }";

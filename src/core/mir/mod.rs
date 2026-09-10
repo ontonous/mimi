@@ -1557,6 +1557,28 @@ fn validate_ffi_call_contract_receipt_with_options(
                 .into(),
         );
     }
+    if enforce_scalar_abi {
+        for (index, declared_type) in contract.parameter_types.iter().enumerate() {
+            if !type_catalog.is_canonical_ffi_endpoint(declared_type, false) {
+                errors.push(format!(
+                    "extern call FFI declaration parameter {index} TypeDesc is outside the complete scalar endpoint contract"
+                ));
+            }
+        }
+        let canonical_result = if result.is_some() {
+            type_catalog.is_canonical_ffi_endpoint(&contract.result_type, true)
+        } else {
+            type_catalog
+                .get(&contract.result_type)
+                .is_some_and(types::MirTypeDesc::is_canonical_ffi_unit)
+        };
+        if !canonical_result {
+            errors.push(
+                "extern call FFI declaration result TypeDesc is outside the complete scalar endpoint contract"
+                    .into(),
+            );
+        }
+    }
     for (index, (argument, declared_type)) in
         arguments.iter().zip(&contract.parameter_types).enumerate()
     {

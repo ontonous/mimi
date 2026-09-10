@@ -229,6 +229,81 @@ fn canonical_ffi_endpoint_predicate_rejects_forged_metadata() {
 }
 
 #[test]
+fn shared_ffi_receipt_gate_rejects_forged_endpoint_metadata() {
+    let checked = checked_program(
+        r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(1 as i64) }
+"#,
+    );
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("scalar FFI MIR");
+    let (instruction, receipt) = program
+        .ffi_calls()
+        .iter()
+        .next()
+        .expect("scalar FFI receipt");
+    let function = program
+        .functions()
+        .get(&receipt.caller)
+        .expect("caller MIR");
+    let call = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find(|candidate| candidate.id == *instruction)
+        .expect("extern call instruction");
+    let MirInstructionKind::Call {
+        callee: ResolvedCallee::Extern(callee),
+        result,
+        arguments,
+        ..
+    } = &call.kind
+    else {
+        panic!("fixture must contain an extern call");
+    };
+    let scalar_id = receipt
+        .parameter_types
+        .first()
+        .expect("parameter TypeDesc")
+        .clone();
+    let descriptor = program
+        .type_catalog()
+        .get(&scalar_id)
+        .expect("scalar TypeDesc")
+        .clone();
+
+    for mutation in 0..4 {
+        let mut forged = descriptor.clone();
+        match mutation {
+            0 => forged.session_protocol = Some(scalar_id.clone()),
+            1 => forged.needs_drop_glue = true,
+            2 => forged.drop_plan = Some(types::MirDropGluePlan { fields: Vec::new() }),
+            3 => forged.variant_drop_plan = Some(Vec::new()),
+            _ => unreachable!(),
+        }
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(scalar_id.clone(), forged);
+        let errors = validate_ffi_call_contract_receipt(
+            &catalog,
+            function,
+            instruction,
+            callee,
+            result.as_ref(),
+            arguments,
+            receipt,
+        );
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("declaration parameter 0 TypeDesc")
+                    && error.contains("complete scalar endpoint contract")
+            }),
+            "unexpected forged receipt diagnostics: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn materialized_call_result_presence_rejects_noncopy_unit() {
     let checked = checked_program(
         r#"
