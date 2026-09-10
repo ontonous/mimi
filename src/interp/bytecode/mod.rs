@@ -1320,6 +1320,40 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_call_indirect_callee_register() {
+        let source = r#"
+        func main() -> i32 {
+            let f = fn(x: i32) -> i32 { x + 1 }
+            f(41)
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let call = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::CallIndirect { callee, .. } => Some(callee),
+                _ => None,
+            })
+            .expect("lambda call must emit a CallIndirect instruction");
+        *call = register_count;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged indirect-call callee register must fail before closure access");
+        assert!(
+            error.to_string().contains("indirect call callee register"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {

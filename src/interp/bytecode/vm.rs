@@ -3651,6 +3651,12 @@ impl BytecodeVM {
                     argc,
                 } => {
                     let register_count = self.cur_frame().regs.len();
+                    if (callee as usize) >= register_count {
+                        return Err(InterpError::new(format!(
+                            "indirect call callee register {} exceeds frame with {} register(s)",
+                            callee, register_count
+                        )));
+                    }
                     let args_end = (args_base as usize).checked_add(argc as usize);
                     if args_end.map_or(true, |end| end > register_count) {
                         return Err(InterpError::new(format!(
