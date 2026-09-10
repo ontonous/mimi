@@ -351,6 +351,12 @@ impl BytecodeVM {
                         proto.name, binding.argc
                     )));
                 }
+                if binding.register_count != proto.register_count {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} register count {} disagrees with compiler binding count {}",
+                        proto.name, proto.register_count, binding.register_count
+                    )));
+                }
                 if binding.extern_idx != *extern_idx {
                     return Err(InterpError::new(format!(
                         "canonical FFI call at function '{}' pc {pc} descriptor index {extern_idx} disagrees with compiler binding index {}",
