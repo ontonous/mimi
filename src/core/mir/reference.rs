@@ -3048,21 +3048,38 @@ fn materialize_ffi_call_contracts(
                 else {
                     continue;
                 };
-                let declaration = program.extern_blocks().values().find(|block| {
-                    block
-                        .signatures
-                        .iter()
-                        .any(|signature| signature.node_id == *callee)
-                });
-                let Some(declaration) = declaration else {
-                    errors.push(super::MirValidationError {
-                        subject: instruction.id.to_string(),
-                        message: format!(
-                            "extern call '{}' has no checker-owned declaration identity",
-                            callee.0
-                        ),
-                    });
-                    continue;
+                let declaration_matches = program
+                    .extern_blocks()
+                    .values()
+                    .filter(|block| {
+                        block
+                            .signatures
+                            .iter()
+                            .any(|signature| signature.node_id == *callee)
+                    })
+                    .collect::<Vec<_>>();
+                let declaration = match declaration_matches.as_slice() {
+                    [] => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern call '{}' has no checker-owned declaration identity",
+                                callee.0
+                            ),
+                        });
+                        continue;
+                    }
+                    [declaration] => *declaration,
+                    _ => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern call '{}' has ambiguous checker-owned declaration identity",
+                                callee.0
+                            ),
+                        });
+                        continue;
+                    }
                 };
                 let Some(signature) = declaration
                     .signatures
