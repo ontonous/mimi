@@ -1155,6 +1155,24 @@ mod bench {
         );
     }
 
+    fn expect_ternary_source_errors(
+        build: impl Fn(instr::Reg, instr::Reg, instr::Reg) -> Op,
+        operation: &str,
+    ) {
+        expect_register_error(
+            |result| build(result + 1, result, result),
+            &format!("{} target source", operation),
+        );
+        expect_register_error(
+            |result| build(result, result + 1, result),
+            &format!("{} index source", operation),
+        );
+        expect_register_error(
+            |result| build(result, result, result + 1),
+            &format!("{} value source", operation),
+        );
+    }
+
     #[test]
     fn bench_fib25_bytecode() {
         // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
@@ -2423,6 +2441,89 @@ func main() -> i32 {
             },
             "mask-shift-amt register",
         );
+    }
+
+    #[test]
+    fn vm_rejects_forged_collection_registers() {
+        expect_register_error(
+            |result| Op::NewList {
+                rd: result + 1,
+                capacity: 0,
+            },
+            "new-list destination",
+        );
+        expect_source_pair_errors(|ra, rb| Op::ListPush { ra, rb }, "list-push");
+        expect_unary_register_errors(|rd, ra| Op::ListPop { rd, ra }, "list-pop");
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::ListGet {
+                rd,
+                ra,
+                rb,
+                contract: None,
+            },
+            "list-get",
+        );
+        expect_ternary_source_errors(|ra, rb, rc| Op::ListSet { ra, rb, rc }, "list-set");
+        expect_unary_register_errors(|rd, ra| Op::Len { rd, ra }, "len");
+
+        expect_register_error(
+            |result| Op::MirSetNew { rd: result + 1 },
+            "mir-set-new destination",
+        );
+        expect_unary_register_errors(|rd, ra| Op::MirSetSize { rd, ra }, "mir-set-size");
+        expect_unary_register_errors(|rd, ra| Op::MirSetIsEmpty { rd, ra }, "mir-set-is-empty");
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::MirSetContains { rd, ra, rb },
+            "mir-set-contains",
+        );
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::MirSetInsert { rd, ra, rb },
+            "mir-set-insert",
+        );
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::MirSetRemove { rd, ra, rb },
+            "mir-set-remove",
+        );
+        expect_unary_register_errors(|rd, ra| Op::MirSetToList { rd, ra }, "mir-set-to-list");
+        expect_unary_register_errors(
+            |rd, ra| Op::MirListLen {
+                rd,
+                ra,
+                contract: None,
+            },
+            "mir-list-len",
+        );
+        expect_unary_register_errors(
+            |rd, ra| Op::MirListReverse {
+                rd,
+                ra,
+                contract: None,
+            },
+            "mir-list-reverse",
+        );
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::MirListConcat {
+                rd,
+                ra,
+                rb,
+                contract: None,
+            },
+            "mir-list-concat",
+        );
+
+        expect_register_error(
+            |result| Op::NewMap { rd: result + 1 },
+            "new-map destination",
+        );
+        expect_register_error(
+            |result| Op::NewSet { rd: result + 1 },
+            "new-set destination",
+        );
+        expect_binary_register_errors(|rd, ra, rb| Op::MapGet { rd, ra, rb }, "map-get");
+        expect_ternary_source_errors(|ra, rb, rc| Op::MapSet { ra, rb, rc }, "map-set");
+        expect_binary_register_errors(|rd, ra, rb| Op::MapContains { rd, ra, rb }, "map-contains");
+        expect_source_pair_errors(|ra, rb| Op::SetAdd { ra, rb }, "set-add");
+        expect_binary_register_errors(|rd, ra, rb| Op::SetContains { rd, ra, rb }, "set-contains");
     }
 
     #[test]

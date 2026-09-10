@@ -2515,10 +2515,12 @@ impl BytecodeVM {
 
                 // ── Data structures ────────────────────────────
                 Op::NewList { rd, capacity } => {
+                    self.ensure_reg(rd, "new-list destination")?;
                     let list = Vec::with_capacity(capacity as usize);
                     self.set_reg(rd, Value::List(Arc::new(list)));
                 }
                 Op::ListPush { ra, rb } => {
+                    self.ensure_source_pair(ra, rb, "list-push")?;
                     let val = self.get_reg(rb).clone();
                     let list = self.get_reg_mut(ra);
                     match list {
@@ -2532,6 +2534,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::ListPop { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "list-pop")?;
                     // Ruling (a), audit fix #14: pop is IN-PLACE with write-back.
                     // Mutate the caller's list register directly (the register
                     // holds the bound list value), remove + return the last
@@ -2557,6 +2560,7 @@ impl BytecodeVM {
                     rb,
                     contract,
                 } => {
+                    self.ensure_binary_regs(rd, ra, rb, "list-get")?;
                     let canonical_shape = self.list_projection_contract(contract)?;
                     if let Some(shape) = canonical_shape.as_ref() {
                         Self::validate_canonical_list_projection(
@@ -2660,6 +2664,7 @@ impl BytecodeVM {
                     self.set_reg(rd, v);
                 }
                 Op::ListSet { ra, rb, rc } => {
+                    self.ensure_ternary_sources(ra, rb, rc, "list-set")?;
                     let idx_raw = self.get_int(rb)?;
                     // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
                     if idx_raw < 0 {
@@ -2691,6 +2696,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::Len { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "len")?;
                     let v = self.get_reg(ra);
                     let len = match v {
                         Value::List(l) => l.len(),
@@ -3275,9 +3281,11 @@ impl BytecodeVM {
                 // insert/remove therefore consume the source register and
                 // write the transformed value to the destination.
                 Op::MirSetNew { rd } => {
+                    self.ensure_reg(rd, "mir-set-new destination")?;
                     self.set_reg(rd, Value::Set(Vec::new()));
                 }
                 Op::MirSetSize { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "mir-set-size")?;
                     let size = match self.get_reg(ra) {
                         Value::Set(values) => values.len() as i64,
                         other => {
@@ -3290,6 +3298,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Int(size));
                 }
                 Op::MirSetIsEmpty { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "mir-set-is-empty")?;
                     let empty = match self.get_reg(ra) {
                         Value::Set(values) => values.is_empty(),
                         other => {
@@ -3302,6 +3311,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Bool(empty));
                 }
                 Op::MirSetContains { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mir-set-contains")?;
                     let needle = self.get_reg(rb).clone();
                     let contains = match self.get_reg(ra) {
                         Value::Set(values) => values.iter().any(|value| value == &needle),
@@ -3315,6 +3325,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Bool(contains));
                 }
                 Op::MirSetInsert { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mir-set-insert")?;
                     let needle = self.get_reg(rb).clone();
                     let value = {
                         let frame = self.cur_frame_mut();
@@ -3331,6 +3342,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Set(values));
                 }
                 Op::MirSetRemove { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mir-set-remove")?;
                     let needle = self.get_reg(rb).clone();
                     let value = {
                         let frame = self.cur_frame_mut();
@@ -3345,6 +3357,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Set(values));
                 }
                 Op::MirSetToList { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "mir-set-to-list")?;
                     let mut values = match self.get_reg(ra) {
                         Value::Set(values) => values.clone(),
                         other => {
@@ -3366,6 +3379,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::List(std::sync::Arc::new(values)));
                 }
                 Op::MirListLen { rd, ra, contract } => {
+                    self.ensure_unary_regs(rd, ra, "mir-list-len")?;
                     if let Some(shape) = self.list_operation_contract(contract)? {
                         Self::validate_canonical_list_operation(
                             self.get_reg(ra),
@@ -3390,6 +3404,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Int(len as i64));
                 }
                 Op::MirListReverse { rd, ra, contract } => {
+                    self.ensure_unary_regs(rd, ra, "mir-list-reverse")?;
                     let shape = self.list_operation_contract(contract)?.ok_or_else(|| {
                         InterpError::new("List.reverse: canonical operation has no receipt")
                     })?;
@@ -3430,6 +3445,7 @@ impl BytecodeVM {
                     rb,
                     contract,
                 } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mir-list-concat")?;
                     let shape = self.list_operation_contract(contract)?.ok_or_else(|| {
                         InterpError::new("List.concat: canonical operation has no receipt")
                     })?;
@@ -3660,12 +3676,15 @@ impl BytecodeVM {
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {
+                    self.ensure_reg(rd, "new-map destination")?;
                     self.set_reg(rd, Value::Record(None, std::collections::HashMap::new()));
                 }
                 Op::NewSet { rd } => {
+                    self.ensure_reg(rd, "new-set destination")?;
                     self.set_reg(rd, Value::Set(Vec::new()));
                 }
                 Op::MapGet { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "map-get")?;
                     let key = self.get_reg(rb).clone();
                     // Borrow map, extract only the value (avoid cloning entire map).
                     let v = match (self.get_reg(ra), &key) {
@@ -3677,6 +3696,7 @@ impl BytecodeVM {
                     self.set_reg(rd, v);
                 }
                 Op::MapSet { ra, rb, rc } => {
+                    self.ensure_ternary_sources(ra, rb, rc, "map-set")?;
                     let key = self.get_reg(rb).clone();
                     let val = self.get_reg(rc).clone();
                     let map = self.get_reg_mut(ra);
@@ -3688,6 +3708,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::MapContains { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "map-contains")?;
                     let key = self.get_reg(rb).clone();
                     let contains = match (self.get_reg(ra), &key) {
                         (Value::Record(_, fields), Value::String(k)) => {
@@ -3702,6 +3723,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Bool(contains));
                 }
                 Op::SetAdd { ra, rb } => {
+                    self.ensure_source_pair(ra, rb, "set-add")?;
                     let val = self.get_reg(rb).clone();
                     let set = self.get_reg_mut(ra);
                     match set {
@@ -3714,6 +3736,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::SetContains { rd, ra, rb } => {
+                    self.ensure_binary_regs(rd, ra, rb, "set-contains")?;
                     let set = self.get_reg(ra).clone();
                     let val = self.get_reg(rb).clone();
                     match &set {
@@ -5722,6 +5745,19 @@ impl BytecodeVM {
     fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
         self.ensure_reg(ra, &format!("{} lhs source", operation))?;
         self.ensure_reg(rb, &format!("{} rhs source", operation))?;
+        Ok(())
+    }
+
+    fn ensure_ternary_sources(
+        &self,
+        ra: Reg,
+        rb: Reg,
+        rc: Reg,
+        operation: &str,
+    ) -> Result<(), InterpError> {
+        self.ensure_reg(ra, &format!("{} target source", operation))?;
+        self.ensure_reg(rb, &format!("{} index source", operation))?;
+        self.ensure_reg(rc, &format!("{} value source", operation))?;
         Ok(())
     }
 
