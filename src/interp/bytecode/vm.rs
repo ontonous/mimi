@@ -1860,6 +1860,14 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let args_end = (args_base as usize).checked_add(argc as usize);
+                    if args_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "move-call argument register window base {} count {} exceeds frame with {} register(s)",
+                            args_base, argc, register_count
+                        )));
+                    }
                     let mut args = Vec::with_capacity(argc as usize);
                     for i in 0..argc {
                         let value = std::mem::replace(

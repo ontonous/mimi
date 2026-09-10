@@ -10905,6 +10905,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_forged_call_move_argument_window_before_bytecode_access() {
+        let source =
+            "func identity(value: string) -> string { value }\nfunc main() -> string { identity(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let call = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::CallMove {
+                    args_base, argc, ..
+                } => Some((args_base, argc)),
+                _ => None,
+            })
+            .expect("owned call must emit a CallMove instruction");
+        *call.0 = register_count;
+        *call.1 = 1;
+
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("a forged move-call argument window must fail before move access");
+        assert!(
+            error
+                .to_string()
+                .contains("move-call argument register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn bytecode_and_reference_agree_on_owned_tuple_return() {
         let source = "func main() -> (string, i32) { (\"owned\", 41) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
