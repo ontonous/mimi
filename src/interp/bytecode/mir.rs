@@ -11674,7 +11674,58 @@ func main() -> i32 {
             .run_value()
             .expect_err("a forged descriptor index must fail before loading");
         assert!(
-            error.to_string().contains("descriptor instruction '"),
+            error.to_string().contains("descriptor index 1 instruction"),
+            "{error}"
+        );
+        assert!(error
+            .to_string()
+            .contains("disagrees with bytecode instruction"));
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_instruction_identity_before_loading() {
+        let source = r#"
+extern "C" {
+    func labs(x: i64) -> i64;
+    func llabs(x: i64) -> i64;
+}
+func main() -> i32 {
+    println(labs(42))
+    println(llabs(-3))
+    0
+}
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex FFI calls"))
+            .parse_file()
+            .expect("parse FFI calls");
+        let checked = crate::core::check_program(&file).expect("check FFI calls");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical FFI bytecode");
+        assert_eq!(bytecode.canonical_ffi.len(), 2);
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let main_idx = forged
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let first_instruction = forged.canonical_ffi[0].instruction.clone();
+        let second_instruction = forged.canonical_ffi[1].instruction.clone();
+        let instruction_idx = forged.functions[main_idx]
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::CallCanonicalExtern { instruction, .. } => Some(*instruction),
+                _ => None,
+            })
+            .expect("canonical extern instruction");
+        assert_ne!(first_instruction, second_instruction);
+        forged.functions[main_idx].constants[instruction_idx as usize] =
+            ConstValue::Str(second_instruction);
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("a forged instruction identity must fail before loading");
+        assert!(
+            error.to_string().contains("descriptor index 0 instruction"),
             "{error}"
         );
         assert!(error
