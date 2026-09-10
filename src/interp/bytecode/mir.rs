@@ -11721,9 +11721,20 @@ func main() -> i32 {
         assert_ne!(first_instruction, second_instruction);
         forged.functions[main_idx].constants[instruction_idx as usize] =
             ConstValue::Str(second_instruction);
-        let error = BytecodeVM::new(bytecode)
+        let error = BytecodeVM::new(bytecode.clone())
             .call_function(main_idx as u32, &[])
             .expect_err("a forged instruction identity must fail before loading");
+        assert!(
+            error.to_string().contains("descriptor index 0 instruction"),
+            "{error}"
+        );
+        assert!(error
+            .to_string()
+            .contains("disagrees with bytecode instruction"));
+
+        let error = BytecodeVM::new(bytecode)
+            .call_function_wrap_ok(main_idx as u32, &[], Value::Int(0))
+            .expect_err("wrapped entry must reject forged instruction identity before loading");
         assert!(
             error.to_string().contains("descriptor index 0 instruction"),
             "{error}"
