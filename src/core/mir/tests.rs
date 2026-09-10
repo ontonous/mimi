@@ -189,6 +189,46 @@ fn canonical_copy_scalar_requires_complete_shape() {
 }
 
 #[test]
+fn canonical_ffi_endpoint_predicate_rejects_forged_metadata() {
+    let checked = checked_program("func main() -> i64 { 0 }");
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked)
+        .expect("scalar-returning function must materialize a MIR type catalog");
+    let i64_id = checked
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| {
+            matches!(ty, ResolvedType::Primitive(PrimitiveType::I64)).then_some(id.clone())
+        })
+        .expect("i64 TypeDesc must be present");
+    assert!(catalog.is_canonical_ffi_endpoint(&i64_id, false));
+
+    let unit_id = checked
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| {
+            matches!(ty, ResolvedType::Primitive(PrimitiveType::Unit)).then_some(id.clone())
+        })
+        .expect("unit TypeDesc must be present");
+    assert!(!catalog.is_canonical_ffi_endpoint(&unit_id, false));
+    assert!(catalog.is_canonical_ffi_endpoint(&unit_id, true));
+
+    let descriptor = catalog.get(&i64_id).expect("i64 TypeDesc entry");
+    for mutation in 0..4 {
+        let mut forged = descriptor.clone();
+        match mutation {
+            0 => forged.session_protocol = Some(i64_id.clone()),
+            1 => forged.needs_drop_glue = true,
+            2 => forged.drop_plan = Some(types::MirDropGluePlan { fields: Vec::new() }),
+            3 => forged.variant_drop_plan = Some(Vec::new()),
+            _ => unreachable!(),
+        }
+        let mut forged_catalog = catalog.clone();
+        forged_catalog.replace_for_test_only(i64_id.clone(), forged);
+        assert!(!forged_catalog.is_canonical_ffi_endpoint(&i64_id, false));
+    }
+}
+
+#[test]
 fn materialized_call_result_presence_rejects_noncopy_unit() {
     let checked = checked_program(
         r#"

@@ -4932,7 +4932,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     format!("extern call {role} '{value}' is absent from MIR values"),
                 ));
             };
-            let Some(descriptor) = self.program.type_catalog().get(&info.ty) else {
+            let Some(_descriptor) = self.program.type_catalog().get(&info.ty) else {
                 return Err(self.error(
                     &function.owner,
                     format!(
@@ -4941,7 +4941,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ),
                 ));
             };
-            if !descriptor.is_canonical_ffi_scalar() {
+            if !self
+                .program
+                .type_catalog()
+                .is_canonical_ffi_endpoint(&info.ty, false)
+            {
                 return Err(self.error(
                     &function.owner,
                     format!(
@@ -4972,7 +4976,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 // call; an `ensures` expression that mentions `result` is
                 // rejected by the receipt validator below because it has no
                 // scalar result identity.
-            } else if !descriptor.is_canonical_ffi_scalar() {
+            } else if !self
+                .program
+                .type_catalog()
+                .is_canonical_ffi_endpoint(&info.ty, true)
+            {
                 return Err(self.error(
                     &function.owner,
                     format!(

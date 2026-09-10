@@ -302,7 +302,8 @@ fn scalar_ffi_type(
             ty.as_str()
         )
     })?;
-    if role == "result" && descriptor.is_canonical_ffi_unit() {
+    let allow_unit_result = role == "result";
+    if allow_unit_result && descriptor.is_canonical_ffi_unit() {
         return Ok(CanonicalFfiScalarType::Unit);
     }
     if descriptor.layout != MirLayout::Scalar || descriptor.ownership != MirOwnership::Copy {
@@ -314,7 +315,10 @@ fn scalar_ffi_type(
             descriptor.layout
         ));
     }
-    if !descriptor.is_canonical_ffi_scalar() {
+    if !program
+        .type_catalog()
+        .is_canonical_ffi_endpoint(ty, allow_unit_result)
+    {
         return Err(format!(
             "canonical FFI '{}' {} TypeDesc '{}' is outside the complete Copy scalar shape",
             instruction,

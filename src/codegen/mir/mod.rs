@@ -451,7 +451,7 @@ fn native_ffi_scalar_type<'ctx>(
             ),
         ));
     }
-    if !descriptor.is_canonical_ffi_scalar() {
+    if !catalog.is_canonical_ffi_endpoint(ty, false) {
         return Err(NativeMirError::new(
             subject,
             format!(

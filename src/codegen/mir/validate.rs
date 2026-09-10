@@ -2623,7 +2623,11 @@ impl<'a> NativeMirValidator<'a> {
         if allow_unit_result && desc.is_canonical_ffi_unit() {
             return;
         }
-        if !desc.is_canonical_ffi_scalar() {
+        if !self
+            .program
+            .type_catalog()
+            .is_canonical_ffi_endpoint(&info.ty, allow_unit_result)
+        {
             self.errors.push(NativeMirError::new(
                 subject,
                 format!(

@@ -1556,6 +1556,22 @@ pub struct MirTypeCatalog {
 }
 
 impl MirTypeCatalog {
+    /// Whether this catalog entry is a complete scalar FFI endpoint.  Unit is
+    /// admitted only for a result/declaration that lowers to `void`; every
+    /// non-unit endpoint must satisfy the closed Copy scalar contract.  Keep
+    /// this composite predicate on the catalog so native, bytecode and
+    /// reference consumers cannot drift on declaration/result admission.
+    pub(crate) fn is_canonical_ffi_endpoint(
+        &self,
+        ty: &ResolvedTypeId,
+        allow_unit_result: bool,
+    ) -> bool {
+        self.get(ty).is_some_and(|descriptor| {
+            (allow_unit_result && descriptor.is_canonical_ffi_unit())
+                || descriptor.is_canonical_ffi_scalar()
+        })
+    }
+
     pub fn from_resolved_types(table: &ResolvedTypeTable) -> Result<Self, Vec<String>> {
         let mut errors = Vec::new();
         if let Err(type_errors) = table.validate() {
