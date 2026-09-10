@@ -296,6 +296,18 @@ impl BytecodeVM {
                     binding.function
                 )));
             };
+            if binding.param_count > binding.register_count {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding for function '{}' has {} parameter slot(s) but only {} register(s) in its compiler frame snapshot",
+                    proto.name, binding.param_count, binding.register_count
+                )));
+            }
+            if proto.param_count > proto.register_count {
+                return Err(InterpError::new(format!(
+                    "canonical FFI function '{}' has {} parameter slot(s) but only {} register(s) in its frame",
+                    proto.name, proto.param_count, proto.register_count
+                )));
+            }
             let Some(op) = proto.code.get(binding.pc as usize) else {
                 return Err(InterpError::new(format!(
                     "canonical FFI binding manifest entry points to pc {} out of range in function '{}'",
@@ -424,6 +436,13 @@ impl BytecodeVM {
                     return Err(InterpError::new(format!(
                         "canonical FFI descriptor index {extern_idx} at function '{}' pc {pc} differs from its compiler binding",
                         proto.name
+                    )));
+                }
+                if *argc as usize != descriptor.arguments.len() {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} argument count {argc} disagrees with descriptor arity {}",
+                        proto.name,
+                        descriptor.arguments.len()
                     )));
                 }
                 if descriptor.caller != proto.name {

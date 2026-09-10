@@ -162,6 +162,15 @@ fn materialize_canonical_ffi_bindings(
                 continue;
             };
             let register_count = proto.register_count as usize;
+            if proto.param_count > proto.register_count {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} function frame has {} register(s) for {} parameter slot(s)",
+                        proto.register_count, proto.param_count
+                    ),
+                });
+            }
             if (*rd as usize) >= register_count {
                 errors.push(MirBytecodeError {
                     function: NodeId(proto.name.clone()),
@@ -180,6 +189,15 @@ fn materialize_canonical_ffi_bindings(
                     function: NodeId(proto.name.clone()),
                     message: format!(
                         "canonical FFI binding at pc {pc} argument register window base {args_base} count {argc} exceeds function frame with {register_count} register(s)"
+                    ),
+                });
+            }
+            if *argc as usize != descriptor.arguments.len() {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} argument count {argc} disagrees with descriptor arity {}",
+                        descriptor.arguments.len()
                     ),
                 });
             }
@@ -11894,6 +11912,58 @@ mod tests {
     }
 
     #[test]
+    fn canonical_ffi_binding_materialization_rejects_frame_shape_and_arity_drift() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let main_idx = bytecode
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let call_idx = bytecode.functions[main_idx]
+            .code
+            .iter()
+            .position(|op| matches!(op, Op::CallCanonicalExtern { .. }))
+            .expect("canonical FFI call");
+
+        let mut forged_frame = bytecode.functions.clone();
+        let register_count = forged_frame[main_idx].register_count;
+        forged_frame[main_idx].param_count = register_count.saturating_add(1);
+        let errors =
+            super::materialize_canonical_ffi_bindings(&forged_frame, &bytecode.canonical_ffi)
+                .expect_err("a frame with fewer registers than parameter slots must fail");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("parameter slot")
+                    && error.message.contains("register(s)")),
+            "{errors:?}"
+        );
+
+        let mut forged_arity = bytecode.functions.clone();
+        if let Op::CallCanonicalExtern { argc, .. } = &mut forged_arity[main_idx].code[call_idx] {
+            *argc = 0;
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let errors =
+            super::materialize_canonical_ffi_bindings(&forged_arity, &bytecode.canonical_ffi)
+                .expect_err("a call arity differing from its descriptor must fail");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("argument count")
+                    && error.message.contains("descriptor arity")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn canonical_scalar_ffi_bytecode_rejects_string_layout_before_execution() {
         let source = r#"
 extern "C" {
@@ -12288,6 +12358,50 @@ func main() -> i32 {
             .run_value()
             .expect_err("forged function parameter count must fail before execution");
         assert!(error.to_string().contains("parameter count"), "{error}");
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_incoherent_frame_and_descriptor_arity() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let original = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+
+        let mut forged_frame = original.clone();
+        let binding = forged_frame.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let invalid_param_count = binding.register_count.saturating_add(1);
+        let forged = std::sync::Arc::make_mut(&mut forged_frame);
+        forged.functions[function_idx].param_count = invalid_param_count;
+        forged.canonical_ffi_bindings[0].param_count = invalid_param_count;
+        let error = BytecodeVM::new(forged_frame)
+            .run_value()
+            .expect_err("a binding frame with fewer registers than parameters must fail");
+        assert!(error.to_string().contains("parameter slot"), "{error}");
+
+        let mut forged_arity = original;
+        let binding = forged_arity.canonical_ffi_bindings[0].clone();
+        let function_idx = binding.function as usize;
+        let pc = binding.pc as usize;
+        let forged = std::sync::Arc::make_mut(&mut forged_arity);
+        if let Op::CallCanonicalExtern {
+            args_base, argc, ..
+        } = &mut forged.functions[function_idx].code[pc]
+        {
+            *args_base = 0;
+            *argc = 0;
+            forged.canonical_ffi_bindings[0].args_base = 0;
+            forged.canonical_ffi_bindings[0].argc = 0;
+        } else {
+            panic!("binding must point at a canonical extern");
+        }
+        let error = BytecodeVM::new(forged_arity)
+            .run_value()
+            .expect_err("a call arity differing from its descriptor must fail");
+        assert!(error.to_string().contains("descriptor arity"), "{error}");
     }
 
     #[test]
