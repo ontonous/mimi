@@ -1255,7 +1255,11 @@ pub(crate) fn module_is_dependency(path: &Path) -> bool {
 
 pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, String> {
     let mut all_items = Vec::new();
-    let mut seen_imports = HashSet::new();
+    // Import aliases are part of the checker-visible namespace: `use dep as
+    // left` and `use dep as right` must both survive a file merge so later
+    // resolution can observe the complete import set.  Deduplicate only exact
+    // path+alias pairs; path-only dedup silently discarded the later alias.
+    let mut seen_imports: HashSet<(Vec<String>, Option<String>)> = HashSet::new();
     let mut all_imports = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
     let mut sources = SourceRegistry::default();
@@ -1312,7 +1316,7 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
             all_items.push(item.clone());
         }
         for imp in &file.imports {
-            if seen_imports.insert(imp.path.clone()) {
+            if seen_imports.insert((imp.path.clone(), imp.alias.clone())) {
                 all_imports.push(imp.clone());
             }
         }
@@ -2123,6 +2127,49 @@ mod tests {
             result.unwrap_err(),
             "duplicate item 'conflict' found in modules: a.mimi, b.mimi"
         );
+    }
+
+    #[test]
+    fn flow_merge_all_preserves_distinct_import_aliases() {
+        let import = |alias: &str| Import {
+            meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+                "test.loader_import_alias",
+            )),
+            path: vec!["shared".into()],
+            alias: Some(alias.into()),
+        };
+        let file = |imports| File {
+            sources: crate::span::SourceRegistry::default(),
+            imports,
+            items: vec![],
+            implicit_single: false,
+        };
+        let modules = HashMap::from([
+            (
+                "a".to_string(),
+                LoadedModule {
+                    path: PathBuf::from("a.mimi"),
+                    // Keep an exact duplicate in one module to prove the
+                    // deduplication boundary remains pairwise.
+                    file: file(vec![import("left"), import("left")]),
+                },
+            ),
+            (
+                "b".to_string(),
+                LoadedModule {
+                    path: PathBuf::from("b.mimi"),
+                    file: file(vec![import("right")]),
+                },
+            ),
+        ]);
+
+        let merged = flow_merge_all(&modules).expect("merge aliased imports");
+        let aliases = merged
+            .imports
+            .iter()
+            .map(|import| import.alias.as_deref().expect("test alias"))
+            .collect::<Vec<_>>();
+        assert_eq!(aliases, ["left", "right"]);
     }
 
     #[test]
