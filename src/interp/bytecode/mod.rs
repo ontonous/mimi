@@ -1280,6 +1280,45 @@ func main() -> i32 {
         );
     }
 
+    #[test]
+    fn vm_rejects_forged_call_indirect_argument_window() {
+        let source = r#"
+        func main() -> i32 {
+            let f = fn(x: i32) -> i32 { x + 1 }
+            f(41)
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let call = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::CallIndirect {
+                    args_base, argc, ..
+                } => Some((args_base, argc)),
+                _ => None,
+            })
+            .expect("lambda call must emit a CallIndirect instruction");
+        *call.0 = register_count;
+        *call.1 = 1;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged indirect-call argument window must fail before register access");
+        assert!(
+            error
+                .to_string()
+                .contains("indirect call argument register window"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {
