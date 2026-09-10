@@ -2710,6 +2710,16 @@ fn canonical_ffi_type_id(
     table: &crate::core::ResolvedTypeTable,
     program: &crate::core::CheckedProgram,
 ) -> Result<crate::core::ResolvedTypeId, String> {
+    let mut visiting_aliases = BTreeSet::new();
+    canonical_ffi_type_id_inner(ty, table, program, &mut visiting_aliases)
+}
+
+fn canonical_ffi_type_id_inner(
+    ty: &crate::ast::Type,
+    table: &crate::core::ResolvedTypeTable,
+    program: &crate::core::CheckedProgram,
+    visiting_aliases: &mut BTreeSet<String>,
+) -> Result<crate::core::ResolvedTypeId, String> {
     use crate::ast::Type;
     use crate::core::ir::{FunctionTypeAbi, OwnershipTypeKind, ResolvedType, TraitTypeKind};
 
@@ -2800,15 +2810,17 @@ fn canonical_ffi_type_id(
 
     match ty.unlocated() {
         Type::Name(name, arguments) if name == "Option" && arguments.len() == 1 => {
-            let inner = canonical_ffi_type_id(&arguments[0], table, program)?;
+            let inner =
+                canonical_ffi_type_id_inner(&arguments[0], table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Option(candidate) if *candidate == inner)
             })
             .ok_or_else(|| format!("canonical Option type for '{name}' is absent"))
         }
         Type::Name(name, arguments) if name == "Result" && arguments.len() == 2 => {
-            let ok = canonical_ffi_type_id(&arguments[0], table, program)?;
-            let error = canonical_ffi_type_id(&arguments[1], table, program)?;
+            let ok = canonical_ffi_type_id_inner(&arguments[0], table, program, visiting_aliases)?;
+            let error =
+                canonical_ffi_type_id_inner(&arguments[1], table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Result { ok: candidate_ok, error: candidate_error } if *candidate_ok == ok && *candidate_error == error)
             })
@@ -2817,7 +2829,9 @@ fn canonical_ffi_type_id(
         Type::Name(name, arguments) if name == "Tuple" => {
             let elements = arguments
                 .iter()
-                .map(|argument| canonical_ffi_type_id(argument, table, program))
+                .map(|argument| {
+                    canonical_ffi_type_id_inner(argument, table, program, visiting_aliases)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Tuple(candidate) if *candidate == elements)
@@ -2847,7 +2861,14 @@ fn canonical_ffi_type_id(
                         ));
                     }
                     if let crate::ast::TypeDefKind::Alias(target) = &definition.declaration.kind {
-                        return canonical_ffi_type_id(target, table, program);
+                        let alias_key = definition.node_id.0.clone();
+                        if !visiting_aliases.insert(alias_key.clone()) {
+                            return Err(format!("transparent type alias cycle involves '{name}'"));
+                        }
+                        let result =
+                            canonical_ffi_type_id_inner(target, table, program, visiting_aliases);
+                        visiting_aliases.remove(&alias_key);
+                        return result;
                     }
                 }
             }
@@ -2862,7 +2883,9 @@ fn canonical_ffi_type_id(
             let item = nominal_id(name, table, program)?;
             let arguments = arguments
                 .iter()
-                .map(|argument| canonical_ffi_type_id(argument, table, program))
+                .map(|argument| {
+                    canonical_ffi_type_id_inner(argument, table, program, visiting_aliases)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Nominal { item: candidate_item, arguments: candidate_arguments, .. } if *candidate_item == item && *candidate_arguments == arguments)
@@ -2870,7 +2893,7 @@ fn canonical_ffi_type_id(
             .ok_or_else(|| format!("canonical nominal type '{name}' is absent"))
         }
         Type::Ref(lifetime, inner) | Type::RefMut(lifetime, inner) => {
-            let target = canonical_ffi_type_id(inner, table, program)?;
+            let target = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             let mutable = matches!(ty.unlocated(), Type::RefMut(_, _));
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Reference { lifetime: candidate_lifetime, mutable: candidate_mutable, target: candidate_target } if *candidate_lifetime == *lifetime && *candidate_mutable == mutable && *candidate_target == target)
@@ -2878,15 +2901,15 @@ fn canonical_ffi_type_id(
             .ok_or_else(|| "canonical reference type is absent".into())
         }
         Type::Option(inner) => {
-            let inner = canonical_ffi_type_id(inner, table, program)?;
+            let inner = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Option(candidate) if *candidate == inner)
             })
             .ok_or_else(|| "canonical Option type is absent".into())
         }
         Type::Result(ok, error) => {
-            let ok = canonical_ffi_type_id(ok, table, program)?;
-            let error = canonical_ffi_type_id(error, table, program)?;
+            let ok = canonical_ffi_type_id_inner(ok, table, program, visiting_aliases)?;
+            let error = canonical_ffi_type_id_inner(error, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Result { ok: candidate_ok, error: candidate_error } if *candidate_ok == ok && *candidate_error == error)
             })
@@ -2895,7 +2918,9 @@ fn canonical_ffi_type_id(
         Type::Tuple(elements) => {
             let elements = elements
                 .iter()
-                .map(|element| canonical_ffi_type_id(element, table, program))
+                .map(|element| {
+                    canonical_ffi_type_id_inner(element, table, program, visiting_aliases)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Tuple(candidate) if *candidate == elements)
@@ -2905,9 +2930,11 @@ fn canonical_ffi_type_id(
         Type::Func(parameters, result) | Type::ExternFunc(parameters, result) => {
             let parameters = parameters
                 .iter()
-                .map(|parameter| canonical_ffi_type_id(parameter, table, program))
+                .map(|parameter| {
+                    canonical_ffi_type_id_inner(parameter, table, program, visiting_aliases)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            let result = canonical_ffi_type_id(result, table, program)?;
+            let result = canonical_ffi_type_id_inner(result, table, program, visiting_aliases)?;
             let abi = if matches!(ty.unlocated(), Type::ExternFunc(_, _)) {
                 FunctionTypeAbi::C
             } else {
@@ -2919,7 +2946,7 @@ fn canonical_ffi_type_id(
             .ok_or_else(|| "canonical function type is absent".into())
         }
         Type::CBuffer(inner) => {
-            let inner = canonical_ffi_type_id(inner, table, program)?;
+            let inner = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::CBuffer(candidate) if *candidate == inner)
             })
@@ -2933,7 +2960,7 @@ fn canonical_ffi_type_id(
             .ok_or_else(|| "canonical capability type is absent".into())
         }
         Type::Shared(inner) | Type::Weak(inner) => {
-            let target = canonical_ffi_type_id(inner, table, program)?;
+            let target = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             let kind = if matches!(ty.unlocated(), Type::Shared(_)) {
                 OwnershipTypeKind::Shared
             } else {
@@ -2946,21 +2973,21 @@ fn canonical_ffi_type_id(
         }
         Type::Newtype(name, inner) => {
             let item = nominal_id(name, table, program)?;
-            let inner = canonical_ffi_type_id(inner, table, program)?;
+            let inner = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Newtype { item: candidate_item, inner: candidate_inner } if *candidate_item == item && *candidate_inner == inner)
             })
             .ok_or_else(|| "canonical newtype is absent".into())
         }
         Type::Array(inner, length) => {
-            let element = canonical_ffi_type_id(inner, table, program)?;
+            let element = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Array { element: candidate_element, length: candidate_length } if *candidate_element == element && *candidate_length == *length)
             })
             .ok_or_else(|| "canonical array type is absent".into())
         }
         Type::Slice(inner) => {
-            let inner = canonical_ffi_type_id(inner, table, program)?;
+            let inner = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Slice(candidate) if *candidate == inner)
             })
@@ -2982,7 +3009,7 @@ fn canonical_ffi_type_id(
             .ok_or_else(|| "canonical trait type is absent".into())
         }
         Type::RawPtr(inner) | Type::RawPtrMut(inner) => {
-            let target = canonical_ffi_type_id(inner, table, program)?;
+            let target = canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)?;
             let mutable = matches!(ty.unlocated(), Type::RawPtrMut(_));
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::RawPointer { mutable: candidate_mutable, target: candidate_target } if *candidate_mutable == mutable && *candidate_target == target)
