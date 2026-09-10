@@ -1288,7 +1288,7 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
             }
             if let Some(name) = item_name(item) {
                 if !seen_names.insert(name.clone()) {
-                    let dup_modules: Vec<String> = modules
+                    let mut dup_modules: Vec<String> = modules
                         .values()
                         .filter(|m| {
                             m.file
@@ -1298,6 +1298,10 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
                         })
                         .map(|m| m.path.display().to_string())
                         .collect();
+                    // HashMap iteration is intentionally unspecified.  Sort
+                    // the provenance list so duplicate alias/item diagnostics
+                    // remain deterministic across processes and runs.
+                    dup_modules.sort();
                     return Err(format!(
                         "duplicate item '{}' found in modules: {}",
                         name,
@@ -2115,7 +2119,10 @@ mod tests {
         );
         let result = flow_merge_all(&modules);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("duplicate"));
+        assert_eq!(
+            result.unwrap_err(),
+            "duplicate item 'conflict' found in modules: a.mimi, b.mimi"
+        );
     }
 
     #[test]
