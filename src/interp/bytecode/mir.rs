@@ -12051,6 +12051,34 @@ func main() -> i32 {
     }
 
     #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_binding_site_on_non_ffi_instruction() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let function_idx = forged.canonical_ffi_bindings[0].function as usize;
+        let non_ffi_pc = forged.functions[function_idx]
+            .code
+            .iter()
+            .position(|op| !matches!(op, Op::CallCanonicalExtern { .. }))
+            .expect("fixture must contain a non-FFI instruction");
+        forged.canonical_ffi_bindings[0].pc = non_ffi_pc as u32;
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("binding on a non-FFI instruction must fail before loading");
+        assert!(
+            error
+                .to_string()
+                .contains("does not point to CallCanonicalExtern"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn canonical_scalar_ffi_missing_descriptor_never_uses_compatibility_runtime() {
         let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
         let file = Parser::new(Lexer::new(source).tokenize().unwrap())
