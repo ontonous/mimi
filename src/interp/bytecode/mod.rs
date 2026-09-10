@@ -1239,6 +1239,47 @@ func main() -> i32 {
         );
     }
 
+    #[test]
+    fn vm_rejects_forged_new_closure_capture_window() {
+        let source = r#"
+        func main() -> i32 {
+            let f = fn(x: i32) -> i32 { x + 1 }
+            f(41)
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let closure = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::NewClosure {
+                    captures_base,
+                    capture_count,
+                    ..
+                } => Some((captures_base, capture_count)),
+                _ => None,
+            })
+            .expect("lambda must emit a NewClosure instruction");
+        *closure.0 = register_count;
+        *closure.1 = 1;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged closure capture window must fail before capture access");
+        assert!(
+            error
+                .to_string()
+                .contains("closure capture register window base"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {
