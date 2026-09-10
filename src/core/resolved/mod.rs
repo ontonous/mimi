@@ -1664,6 +1664,57 @@ impl CheckedProgram {
             .find(|sig| sig.name == name)
     }
 
+    /// Resolve the checker-owned extern declaration for one call-site name.
+    ///
+    /// The checker rejects duplicate extern symbols in a well-formed source
+    /// file, but merged or hand-built `CheckedProgram` values can still carry
+    /// more than one declaration with the same surface name.  A call-site
+    /// consumer must not let a sorted catalog turn that malformed state into a
+    /// silently selected ABI.  Keep the cardinality explicit and report every
+    /// candidate identity in stable order.  `argc` is part of the API because
+    /// callers are resolving a call, but it is intentionally not used to
+    /// overload extern symbols: duplicate names are ambiguous even when their
+    /// arities differ.
+    pub fn extern_func_signature_for_call(
+        &self,
+        name: &str,
+        argc: usize,
+    ) -> Result<Option<&ResolvedExternFunc>, String> {
+        let mut matches = self
+            .extern_blocks
+            .values()
+            .flat_map(|block| {
+                block
+                    .signatures
+                    .iter()
+                    .filter(|signature| signature.name == name)
+                    .map(move |signature| (block, signature))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left_block, left), (right_block, right)| {
+            left_block
+                .node_id
+                .cmp(&right_block.node_id)
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        match matches.as_slice() {
+            [] => Ok(None),
+            [(_, signature)] => Ok(Some(*signature)),
+            _ => {
+                let identities = matches
+                    .iter()
+                    .map(|(block, signature)| {
+                        format!("{}:{}", block.node_id.0, signature.node_id.0)
+                    })
+                    .collect::<Vec<_>>();
+                Err(format!(
+                    "extern call '{}' ({} arguments) has ambiguous checker-owned declaration identity: {:?}",
+                    name, argc, identities
+                ))
+            }
+        }
+    }
+
     pub fn type_schemes(&self) -> &HashMap<NodeId, TypeScheme> {
         &self.type_schemes
     }

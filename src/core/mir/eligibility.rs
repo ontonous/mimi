@@ -28,7 +28,8 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
-        let Some(declaration) = program.extern_func_signature(&site.callee) else {
+        let Ok(Some(declaration)) = program.extern_func_signature_for_call(&site.callee, site.argc)
+        else {
             return false;
         };
         let Ok(Some(block)) = program.extern_block_for_signature(&declaration.node_id) else {
@@ -84,11 +85,15 @@ pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
-        let Some(declaration) = program.extern_func_signature(&site.callee) else {
-            return Some(format!(
-                "extern call '{}' has no checker-owned declaration identity",
-                site.callee
-            ));
+        let declaration = match program.extern_func_signature_for_call(&site.callee, site.argc) {
+            Ok(Some(declaration)) => declaration,
+            Ok(None) => {
+                return Some(format!(
+                    "extern call '{}' has no checker-owned declaration identity",
+                    site.callee
+                ));
+            }
+            Err(message) => return Some(message),
         };
         let block = match program.extern_block_for_signature(&declaration.node_id) {
             Ok(Some(block)) => block,

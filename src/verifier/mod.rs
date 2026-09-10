@@ -194,12 +194,15 @@ fn verify_ffi_checked_with_source_hash(
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
-        let signature = program.extern_func_signature(&site.callee).ok_or_else(|| {
-            format!(
-                "TOOL-RESOLUTION-001: missing resolved extern signature for call '{}'",
-                site.callee
-            )
-        })?;
+        let signature = program
+            .extern_func_signature_for_call(&site.callee, site.argc)
+            .map_err(|message| format!("TOOL-RESOLUTION-001: {message}"))?
+            .ok_or_else(|| {
+                format!(
+                    "TOOL-RESOLUTION-001: missing resolved extern signature for call '{}'",
+                    site.callee
+                )
+            })?;
         if site.argc != signature.params.len() {
             return Err(format!(
                 "TOOL-RESOLUTION-001: extern call '{}' expects {} arguments, got {}",
@@ -274,7 +277,12 @@ fn verify_ffi_checked_with_source_hash(
         .call_sites()
         .values()
         .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
-        .filter_map(|site| program.extern_func_signature(&site.callee))
+        .filter_map(|site| {
+            program
+                .extern_func_signature_for_call(&site.callee, site.argc)
+                .ok()
+                .flatten()
+        })
         .filter(|signature| signature.requires.is_some() || signature.ensures.is_some())
         .map(|signature| signature.name.clone())
         .collect::<std::collections::HashSet<_>>();

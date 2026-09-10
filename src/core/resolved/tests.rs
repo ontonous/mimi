@@ -1550,10 +1550,45 @@ func main() -> i32 { c_abs(1) }
         .expect_err("duplicate checker-owned block must fail closed");
     assert!(error.contains("ambiguous checker-owned ABI blocks"));
     assert!(!crate::core::mir::is_scalar_ffi_candidate(&program));
+    let boundary = crate::core::mir::scalar_ffi_boundary_reason(&program)
+        .expect("ambiguous declaration identity must explain the route boundary");
+    assert!(boundary.contains("ambiguous checker-owned declaration identity"));
+}
+
+#[test]
+fn checked_program_extern_call_identity_rejects_same_named_merged_declarations() {
+    let file = parse(
+        r#"
+extern "C" { func c_abs(x: i32) -> i32 }
+func main() -> i32 { c_abs(1) }
+"#,
+    );
+    let mut program = CheckedProgram::from_checked_file(&file).expect("IR");
+    let mut duplicate = program
+        .extern_blocks()
+        .values()
+        .next()
+        .expect("extern block")
+        .clone();
+    duplicate.node_id = NodeId("extern-block:duplicate-name".into());
+    duplicate.signatures[0].node_id = NodeId("extern-signature:c_abs:duplicate".into());
+    program
+        .extern_blocks
+        .insert(duplicate.node_id.clone(), duplicate);
+
+    let error = program
+        .extern_func_signature_for_call("c_abs", 1)
+        .expect_err("same-named merged declarations must fail closed");
+    assert!(error.contains("ambiguous checker-owned declaration identity"));
+    assert!(error.contains("extern-signature:c_abs:duplicate"));
+    assert!(!crate::core::mir::is_scalar_ffi_candidate(&program));
     assert_eq!(
         crate::core::mir::scalar_ffi_boundary_reason(&program).as_deref(),
         Some(error.as_str())
     );
+    let verifier_error = crate::verifier::verify_ffi_checked(&program)
+        .expect_err("verifier must reject same-named merged declarations");
+    assert!(verifier_error.contains("ambiguous checker-owned declaration identity"));
 }
 
 #[test]
