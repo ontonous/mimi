@@ -39,6 +39,19 @@ const MIXED_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_expect_f64(x: f64) -> i64; }
 func main() -> i64 { mir_ffi_expect_f64(7 as i32) }
 "#;
+const ALIASED_F64_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
+"#;
+const ALIASED_F64_SOURCE: &str = r#"
+type Scalar = f64
+type Real = Scalar
+extern "C" { func mir_ffi_expect_alias_f64(value: Real) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_expect_alias_f64(7 as i64))
+    0
+}
+"#;
 
 struct Oracle(Cell<i64>);
 
@@ -447,6 +460,141 @@ fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
         .expect("native integer-to-float FFI execution");
     assert_eq!(native.exit_code, Some(42));
     assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_transparent_alias_chain_preserves_float_argument_abi_across_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, ALIASED_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(ALIASED_F64_SOURCE)
+        .tokenize()
+        .expect("lex transparent alias FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse transparent alias FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check transparent alias FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize transparent alias FFI fixture");
+    let direct_tokens = crate::lexer::Lexer::new(
+        r#"
+extern "C" { func mir_ffi_expect_alias_f64(value: f64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_expect_alias_f64(7 as i64))
+    0
+}
+"#,
+    )
+    .tokenize()
+    .expect("lex direct f64 FFI fixture");
+    let direct_file = crate::parser::Parser::new(direct_tokens)
+        .parse_file()
+        .expect("parse direct f64 FFI fixture");
+    let direct_checked =
+        crate::core::check_program(&direct_file).expect("check direct f64 FFI fixture");
+    let direct_mir = MirProgram::from_checked_program(&direct_checked)
+        .expect("materialize direct f64 FFI fixture");
+    assert_eq!(
+        mir.type_catalog().canonical_text(),
+        direct_mir.type_catalog().canonical_text(),
+        "transparent aliases must not add opaque nominal TypeDesc entries"
+    );
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("transparent alias FFI receipt");
+    assert_eq!(receipt.symbol, "mir_ffi_expect_alias_f64");
+    assert_eq!(receipt.parameter_conversions.len(), 1);
+    assert_eq!(
+        receipt.parameter_conversions[0],
+        crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        }
+    );
+    assert_eq!(
+        receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
+    let declared_float = receipt.parameter_types[0].clone();
+    assert!(matches!(
+        mir.type_catalog()
+            .get(&declared_float)
+            .expect("alias target TypeDesc")
+            .abi,
+        MirAbiClass::Float { bits: 64 }
+    ));
+
+    struct AliasFloatOracle;
+    impl MirReferenceFfiResolver for AliasFloatOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_expect_alias_f64", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 7.0 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err("transparent alias FFI binding did not receive f64 ABI argument".into()),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&AliasFloatOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference transparent alias FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free transparent alias FFI bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value()
+            .expect("bytecode transparent alias FFI execution"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "42\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_alias_f64");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native transparent alias FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid transparent alias FFI LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(ALIASED_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native transparent alias FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
     assert_eq!(native.stderr, "");
 }
 

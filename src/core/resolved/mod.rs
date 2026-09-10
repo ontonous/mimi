@@ -8811,6 +8811,48 @@ fn build_canonical_function_signatures(
     let mut resolved_variants = BTreeMap::new();
     let mut type_targets = BTreeMap::new();
     let mut errors = Vec::new();
+
+    // Transparent aliases must not become opaque nominal entries merely
+    // because an extern declaration or a retained function type mentions
+    // their surface spelling.  The scalar FFI island later resolves the
+    // declaration type structurally, so this callback must make the same
+    // primitive alias chain visible while interning every canonical type.
+    // Ambiguous, cyclic, or non-primitive aliases remain unresolved here and
+    // are handled by the normal nominal lookup/fail-closed path.
+    fn transparent_alias_primitive(
+        name: &str,
+        program: &crate::core::CheckedProgram,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Option<crate::core::ir::PrimitiveType> {
+        if let Some(primitive) = crate::core::ir::PrimitiveType::from_language_name(name) {
+            return Some(primitive);
+        }
+        if !seen.insert(name.to_owned()) {
+            return None;
+        }
+        let definitions = program
+            .type_defs()
+            .values()
+            .filter(|definition| {
+                matches!(
+                    &definition.declaration.kind,
+                    crate::ast::TypeDefKind::Alias(_)
+                ) && (definition.qualified_name == name
+                    || definition.qualified_name.rsplit("::").next() == Some(name))
+            })
+            .collect::<Vec<_>>();
+        let definition = (definitions.len() == 1).then(|| definitions[0])?;
+        let crate::ast::TypeDefKind::Alias(target) = &definition.declaration.kind else {
+            return None;
+        };
+        match target.unlocated() {
+            crate::ast::Type::Name(target, arguments) if arguments.is_empty() => {
+                transparent_alias_primitive(target, program, seen)
+            }
+            _ => None,
+        }
+    }
+
     let mut functions = program.functions.values().collect::<Vec<_>>();
     functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
 
@@ -8926,6 +8968,11 @@ fn build_canonical_function_signatures(
                             .map(crate::core::ResolvedTypeName::Nominal);
                     }
                 }
+            }
+            if let Some(primitive) =
+                transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+            {
+                return Some(crate::core::ResolvedTypeName::Primitive(primitive));
             }
             if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
                 return Some(resolved);
@@ -9301,6 +9348,11 @@ fn build_canonical_function_signatures(
         if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
             return Some(primitive);
         }
+        if let Some(primitive) =
+            transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+        {
+            return Some(crate::core::ResolvedTypeName::Primitive(primitive));
+        }
         resolve_nominal(&nominal_catalog, name)
             .or_else(|| builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal))
     };
@@ -9402,6 +9454,11 @@ fn build_canonical_function_signatures(
                             .map(crate::core::ResolvedTypeName::Nominal);
                     }
                 }
+            }
+            if let Some(primitive) =
+                transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+            {
+                return Some(crate::core::ResolvedTypeName::Primitive(primitive));
             }
             if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
                 return Some(resolved);
@@ -9844,6 +9901,11 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
+            if let Some(primitive) =
+                transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+            {
+                return Some(crate::core::ResolvedTypeName::Primitive(primitive));
+            }
             if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
                 return Some(resolved);
             }
@@ -10030,6 +10092,11 @@ fn build_canonical_function_signatures(
                     }
                 }
             }
+            if let Some(primitive) =
+                transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+            {
+                return Some(crate::core::ResolvedTypeName::Primitive(primitive));
+            }
             if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
                 return Some(resolved);
             }
@@ -10101,6 +10168,11 @@ fn build_canonical_function_signatures(
                             .map(crate::core::ResolvedTypeName::Nominal);
                     }
                 }
+            }
+            if let Some(primitive) =
+                transparent_alias_primitive(name, program, &mut std::collections::BTreeSet::new())
+            {
+                return Some(crate::core::ResolvedTypeName::Primitive(primitive));
             }
             if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
                 return Some(resolved);
