@@ -139,6 +139,7 @@ fn materialize_canonical_ffi_bindings(
 ) -> Result<Vec<CanonicalFfiBinding>, Vec<MirBytecodeError>> {
     let mut bindings = Vec::new();
     let mut errors = Vec::new();
+    let mut descriptor_references = vec![None; descriptors.len()];
     for (function, proto) in functions.iter().enumerate() {
         for (pc, op) in proto.code.iter().enumerate() {
             let Op::CallCanonicalExtern {
@@ -158,6 +159,18 @@ fn materialize_canonical_ffi_bindings(
                 });
                 continue;
             };
+            let descriptor_index = *extern_idx as usize;
+            if let Some((previous_function, previous_pc)) = descriptor_references[descriptor_index]
+            {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI descriptor index {extern_idx} is referenced by multiple emitted call sites (function #{previous_function} pc {previous_pc} and function #{function} pc {pc})"
+                    ),
+                });
+            } else {
+                descriptor_references[descriptor_index] = Some((function, pc));
+            }
             let Some(ConstValue::Str(instruction_text)) =
                 proto.constants.get(*instruction as usize)
             else {
@@ -177,6 +190,28 @@ fn materialize_canonical_ffi_bindings(
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
             });
+        }
+    }
+    if errors.is_empty() {
+        if bindings.len() != descriptors.len() {
+            errors.push(MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "canonical FFI binding manifest has {} entries for {} descriptors",
+                    bindings.len(),
+                    descriptors.len()
+                ),
+            });
+        }
+        for (index, reference) in descriptor_references.iter().enumerate() {
+            if reference.is_none() {
+                errors.push(MirBytecodeError {
+                    function: NodeId("mir-program".into()),
+                    message: format!(
+                        "canonical FFI descriptor index {index} has no emitted bytecode binding"
+                    ),
+                });
+            }
         }
     }
     if errors.is_empty() {
@@ -11610,6 +11645,7 @@ mod tests {
         let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
         assert!(bytecode.ast.is_none());
         assert_eq!(bytecode.canonical_ffi.len(), 1);
+        assert_eq!(bytecode.canonical_ffi_bindings.len(), 1);
         assert_eq!(bytecode.canonical_ffi[0].symbol, "labs");
         assert_eq!(bytecode.canonical_ffi[0].abi, "C");
         assert_eq!(
@@ -11654,6 +11690,66 @@ mod tests {
             .expect("AST-free canonical scalar FFI bytecode execution");
         assert!(matches!(value, Value::Int(0)));
         assert_eq!(vm.stdout(), "42\n");
+    }
+
+    #[test]
+    fn canonical_ffi_binding_materialization_rejects_orphan_descriptor() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let mut functions = bytecode.functions.clone();
+        let main_idx = functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        functions[main_idx]
+            .code
+            .retain(|op| !matches!(op, Op::CallCanonicalExtern { .. }));
+        let errors = super::materialize_canonical_ffi_bindings(&functions, &bytecode.canonical_ffi)
+            .expect_err("an orphan canonical descriptor must fail at bytecode construction");
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.message.contains("has no emitted bytecode binding") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_ffi_binding_materialization_rejects_duplicate_descriptor_reference() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        let mut functions = bytecode.functions.clone();
+        let main_idx = functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let call_index = functions[main_idx]
+            .code
+            .iter()
+            .position(|op| matches!(op, Op::CallCanonicalExtern { .. }))
+            .expect("canonical FFI call");
+        let call = functions[main_idx].code[call_index];
+        functions[main_idx].code.insert(call_index + 1, call);
+        let errors = super::materialize_canonical_ffi_bindings(&functions, &bytecode.canonical_ffi)
+            .expect_err("a descriptor referenced twice must fail at bytecode construction");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("is referenced by multiple emitted call sites")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]
