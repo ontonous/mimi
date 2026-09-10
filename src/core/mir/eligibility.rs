@@ -24,7 +24,7 @@ use crate::core::{
 /// those compatibility consumers.
 pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
     let mut found = false;
-    for site in program.call_sites().values() {
+    for site in program.call_sites_sorted() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
@@ -81,7 +81,7 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
 /// prelude) produces an unrelated error.  Type/layout failures remain
 /// construction-time diagnostics because they require the MIR TypeDesc.
 pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
-    for site in program.call_sites().values() {
+    for site in program.call_sites_sorted() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }

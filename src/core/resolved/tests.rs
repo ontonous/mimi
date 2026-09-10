@@ -1716,6 +1716,60 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn checked_program_call_site_directory_uses_stable_identity_order() {
+    let file = parse(
+        r#"
+extern "C" {
+    func c_abs(x: i32) -> i32
+}
+func main() -> i32 { c_abs(1) + c_abs(2) }
+"#,
+    );
+    let mut program = crate::core::check_program(&file).expect("check");
+    let original_key = program
+        .call_sites()
+        .iter()
+        .find_map(|(key, site)| {
+            (program
+                .call_sites()
+                .values()
+                .filter(|candidate| candidate.node_id == site.node_id)
+                .count()
+                == 1)
+                .then(|| key.clone())
+        })
+        .expect("unique call site identity");
+    let original = program
+        .call_sites()
+        .get(&original_key)
+        .expect("call site")
+        .clone();
+    let duplicate_key = NodeId("call-site:compatibility-duplicate".into());
+    let mut duplicate = original.clone();
+    duplicate.node_id = original.node_id.clone();
+    duplicate.ret = Some("different".into());
+    program.call_sites.insert(duplicate_key.clone(), duplicate);
+
+    let sorted = program.call_sites_sorted();
+    assert_eq!(sorted.len(), program.call_sites().len());
+    assert!(sorted.windows(2).all(|pair| {
+        pair[0].node_id < pair[1].node_id
+            || (pair[0].node_id == pair[1].node_id && pair[0].owner <= pair[1].owner)
+    }));
+    let same_identity = sorted
+        .iter()
+        .filter(|site| site.node_id == original.node_id)
+        .collect::<Vec<_>>();
+    assert_eq!(same_identity.len(), 2);
+    let expected_first_ret = if original_key < duplicate_key {
+        original.ret
+    } else {
+        Some("different".into())
+    };
+    assert_eq!(same_identity[0].ret, expected_first_ret);
+}
+
+#[test]
 fn actor_method_signatures_are_materialised() {
     // 0.34.18c (§4.2): `with Io` effect clause removed; signature/params
     // assertions kept, effects assertions dropped (effects now always empty).

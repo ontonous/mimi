@@ -187,10 +187,10 @@ fn verify_ffi_checked_with_source_hash(
     // Keeping the trigger scoped to actual extern call-sites shrinks the
     // FfiVerifierCompatibility owner without changing any FFI proof result.
     let has_extern_call = program
-        .call_sites()
-        .values()
+        .call_sites_sorted()
+        .into_iter()
         .any(|site| site.kind == crate::core::ResolvedCallKind::Extern);
-    for site in program.call_sites().values() {
+    for site in program.call_sites_sorted() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
@@ -274,8 +274,8 @@ fn verify_ffi_checked_with_source_hash(
     // directory contract-only so an unsupported ABI with no obligation can
     // still return the same empty result as the canonical scalar profile.
     let called_contract_names = program
-        .call_sites()
-        .values()
+        .call_sites_sorted()
+        .into_iter()
         .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
         .filter_map(|site| {
             program

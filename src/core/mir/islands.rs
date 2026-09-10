@@ -138,7 +138,7 @@ pub fn classify_managed_result_call_admission(
 ) -> ManagedResultCallAdmission {
     let mut has_candidate = false;
     let mut unsupported_shape = false;
-    for site in program.call_sites().values() {
+    for site in program.call_sites_sorted() {
         if site.kind != ResolvedCallKind::Function {
             continue;
         }
@@ -177,7 +177,7 @@ pub fn classify_managed_result_call_admission(
 /// through a legacy consumer, but it does not classify unrelated
 /// `Result<_, string>`/nominal error APIs as this island.
 pub fn has_managed_result_call_candidate(program: &CheckedProgram) -> bool {
-    program.call_sites().values().any(|site| {
+    program.call_sites_sorted().into_iter().any(|site| {
         site.kind == ResolvedCallKind::Function
             && program
                 .resolved_node_type(&site.node_id)

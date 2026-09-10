@@ -149,7 +149,7 @@ fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSe
             None => continue,
         };
         let owner_key = format!("function:{}", owner_fn.qualified_name);
-        for site in program.call_sites().values() {
+        for site in program.call_sites_sorted() {
             if site.owner != owner_key {
                 continue;
             }

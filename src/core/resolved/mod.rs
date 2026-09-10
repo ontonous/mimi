@@ -1283,7 +1283,15 @@ impl CheckedProgram {
         for meta in node_meta.values() {
             origin_catalog.register(&meta.node_id, &meta.origin, &mut errors);
         }
-        for call in call_sites.values() {
+        let mut call_entries = call_sites.values().collect::<Vec<_>>();
+        call_entries.sort_by(|left, right| {
+            left.node_id
+                .cmp(&right.node_id)
+                .then_with(|| left.owner.cmp(&right.owner))
+                .then_with(|| left.callee.cmp(&right.callee))
+                .then_with(|| left.argc.cmp(&right.argc))
+        });
+        for call in call_entries {
             origin_catalog.register(&call.node_id, &call.origin, &mut errors);
         }
         for flow in flows.values() {
@@ -1764,6 +1772,26 @@ impl CheckedProgram {
 
     pub fn call_sites(&self) -> &HashMap<NodeId, ResolvedCallSite> {
         &self.call_sites
+    }
+
+    /// Return checker-owned call sites in canonical identity order.
+    ///
+    /// Call-site consumers often fold over the directory to select a route or
+    /// report the first structural boundary.  Exposing a sorted view keeps
+    /// those decisions independent of `HashMap` iteration order; the map key
+    /// is the final tie-break for malformed entries whose embedded identity
+    /// fields are equal.
+    pub fn call_sites_sorted(&self) -> Vec<&ResolvedCallSite> {
+        let mut sites = self.call_sites.iter().collect::<Vec<_>>();
+        sites.sort_by(|(left_key, left), (right_key, right)| {
+            left.node_id
+                .cmp(&right.node_id)
+                .then_with(|| left.owner.cmp(&right.owner))
+                .then_with(|| left.callee.cmp(&right.callee))
+                .then_with(|| left.argc.cmp(&right.argc))
+                .then_with(|| left_key.cmp(right_key))
+        });
+        sites.into_iter().map(|(_, site)| site).collect()
     }
 
     pub fn extern_func_signature(&self, name: &str) -> Option<&ResolvedExternFunc> {
