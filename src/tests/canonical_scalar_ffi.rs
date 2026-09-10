@@ -599,6 +599,45 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_generic_aliases_remain_fail_closed_at_the_c_abi_boundary() {
+    for (alias, parameter, expected) in [
+        (
+            "type Scalar<T> = f64",
+            "Scalar",
+            "type 'Scalar' is not allowed across the C ABI boundary",
+        ),
+        (
+            "type Box<T> = List<T>",
+            "Box<i64>",
+            "type 'List<i64>' is a Mimi list/array and cannot cross the C ABI boundary directly",
+        ),
+    ] {
+        let source = format!(
+            r#"
+{alias}
+extern "C" {{ func foreign(value: {parameter}) -> i64; }}
+func main() -> i64 {{ 0 }}
+"#
+        );
+        let tokens = crate::lexer::Lexer::new(&source)
+            .tokenize()
+            .expect("lex generic alias FFI boundary fixture");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse generic alias FFI boundary fixture");
+        let errors = crate::core::check_program(&file)
+            .expect_err("generic aliases must not enter scalar FFI admission");
+        let text = errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("E0231"), "{alias}: {text}");
+        assert!(text.contains(expected), "{alias}: {text}");
+    }
+}
+
+#[test]
 fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
     for (declaration, expected) in [
         ("func foreign(x: i64 ...) -> i64;", "variadic"),

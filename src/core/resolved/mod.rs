@@ -8842,6 +8842,13 @@ fn build_canonical_function_signatures(
             })
             .collect::<Vec<_>>();
         let definition = (definitions.len() == 1).then(|| definitions[0])?;
+        // Generic aliases require an instantiated type argument before their
+        // target can be interpreted.  Keeping them out of this primitive-only
+        // shortcut preserves the checker-owned arity boundary and prevents a
+        // malformed/partially-resolved spelling from becoming an FFI scalar.
+        if !definition.generic_parameters.is_empty() {
+            return None;
+        }
         let crate::ast::TypeDefKind::Alias(target) = &definition.declaration.kind else {
             return None;
         };
