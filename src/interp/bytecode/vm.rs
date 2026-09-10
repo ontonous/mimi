@@ -2756,6 +2756,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Int(len as i64));
                 }
                 Op::NewTuple { rd, base, arity } => {
+                    self.ensure_reg(rd, "new-tuple destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(arity as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -2769,6 +2770,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Tuple(elems));
                 }
                 Op::NewTupleMove { rd, base, arity } => {
+                    self.ensure_reg(rd, "new-tuple-move destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(arity as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -2850,6 +2852,7 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    self.ensure_reg(rd, "new-record destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(count as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -2897,6 +2900,7 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    self.ensure_reg(rd, "new-record-move destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(count as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -2953,6 +2957,8 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    self.ensure_reg(rd, "update-record destination")?;
+                    self.ensure_reg(ra, "update-record source")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(count as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -3009,6 +3015,8 @@ impl BytecodeVM {
                     base,
                     count,
                 } => {
+                    self.ensure_reg(rd, "update-record-move destination")?;
+                    self.ensure_reg(ra, "update-record-move source")?;
                     let register_count = self.cur_frame().regs.len();
                     let source_end = (base as usize).checked_add(count as usize);
                     if source_end.map_or(true, |end| end > register_count) {
@@ -3530,6 +3538,7 @@ impl BytecodeVM {
                     predicate,
                     contract,
                 } => {
+                    self.ensure_unary_regs(rd, ra, "mir-variant-predicate")?;
                     let shape = self.variant_predicate_contract(contract)?.ok_or_else(|| {
                         InterpError::new("variant predicate: canonical operation has no receipt")
                     })?;
@@ -3581,6 +3590,7 @@ impl BytecodeVM {
                     rb,
                     contract,
                 } => {
+                    self.ensure_binary_regs(rd, ra, rb, "mir-variant-project-or")?;
                     let shape = self
                         .variant_projection_fallback_contract(contract)?
                         .ok_or_else(|| {
@@ -3951,6 +3961,7 @@ impl BytecodeVM {
                     arity,
                     shapes,
                 } => {
+                    self.ensure_reg(rd, "new-variant destination")?;
                     let (tag, shape) =
                         Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
                     let register_count = self.cur_frame().regs.len();
@@ -3982,6 +3993,7 @@ impl BytecodeVM {
                     arity,
                     shapes,
                 } => {
+                    self.ensure_reg(rd, "new-variant-move destination")?;
                     let (tag, shape) =
                         Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
                     let register_count = self.cur_frame().regs.len();

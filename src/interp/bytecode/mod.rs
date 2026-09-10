@@ -1777,6 +1777,124 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_aggregate_and_variant_registers() {
+        expect_register_error(
+            |result| Op::NewTuple {
+                rd: result + 1,
+                base: result,
+                arity: 0,
+            },
+            "new-tuple destination register",
+        );
+        expect_register_error(
+            |result| Op::NewTupleMove {
+                rd: result + 1,
+                base: result,
+                arity: 0,
+            },
+            "new-tuple-move destination register",
+        );
+        expect_register_error(
+            |result| Op::NewRecord {
+                rd: result + 1,
+                type_name: 0,
+                base: result,
+                count: 0,
+            },
+            "new-record destination register",
+        );
+        expect_register_error(
+            |result| Op::NewRecordMove {
+                rd: result + 1,
+                type_name: 0,
+                base: result,
+                count: 0,
+            },
+            "new-record-move destination register",
+        );
+        expect_register_error(
+            |result| Op::UpdateRecord {
+                rd: result + 1,
+                type_name: 0,
+                ra: result,
+                base: result,
+                count: 0,
+            },
+            "update-record destination register",
+        );
+        expect_register_error(
+            |result| Op::UpdateRecord {
+                rd: result,
+                type_name: 0,
+                ra: result + 1,
+                base: result,
+                count: 0,
+            },
+            "update-record source register",
+        );
+        expect_register_error(
+            |result| Op::UpdateRecordMove {
+                rd: result + 1,
+                type_name: 0,
+                ra: result,
+                base: result,
+                count: 0,
+            },
+            "update-record-move destination register",
+        );
+        expect_register_error(
+            |result| Op::UpdateRecordMove {
+                rd: result,
+                type_name: 0,
+                ra: result + 1,
+                base: result,
+                count: 0,
+            },
+            "update-record-move source register",
+        );
+        expect_register_error(
+            |result| Op::NewVariant {
+                rd: result + 1,
+                type_name: 0,
+                variant: 0,
+                base: result,
+                arity: 0,
+                shapes: None,
+            },
+            "new-variant destination register",
+        );
+        expect_register_error(
+            |result| Op::NewVariantMove {
+                rd: result + 1,
+                type_name: 0,
+                variant: 0,
+                base: result,
+                arity: 0,
+                shapes: None,
+            },
+            "new-variant-move destination register",
+        );
+        expect_unary_register_errors(
+            |rd, ra| Op::MirVariantPredicate {
+                rd,
+                ra,
+                predicate: crate::core::mir::MirVariantPredicate::IsSome,
+                contract: None,
+            },
+            "mir-variant-predicate",
+        );
+        expect_binary_register_errors(
+            |rd, ra, rb| Op::MirVariantProjectOr {
+                rd,
+                ra,
+                rb,
+                contract: None,
+            },
+            "mir-variant-project-or",
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();
