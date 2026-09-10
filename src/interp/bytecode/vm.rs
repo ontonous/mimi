@@ -1841,6 +1841,7 @@ impl BytecodeVM {
                     frame.pc = new_pc as usize;
                 }
                 Op::JmpIf { offset, ra } => {
+                    self.ensure_reg(ra, "jmp-if condition source")?;
                     if crate::interp::is_truthy(self.get_reg(ra)) {
                         let frame = self.cur_frame_mut();
                         let pc = frame.pc as i32;
@@ -1863,6 +1864,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::JmpIfNot { offset, ra } => {
+                    self.ensure_reg(ra, "jmp-if-not condition source")?;
                     if !crate::interp::is_truthy(self.get_reg(ra)) {
                         let frame = self.cur_frame_mut();
                         let pc = frame.pc as i32;
@@ -1892,6 +1894,7 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "call destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let args_end = (args_base as usize).checked_add(argc as usize);
                     if args_end.map_or(true, |end| end > register_count) {
@@ -1923,6 +1926,7 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "move-call destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let args_end = (args_base as usize).checked_add(argc as usize);
                     if args_end.map_or(true, |end| end > register_count) {
@@ -1958,8 +1962,18 @@ impl BytecodeVM {
                     }
                     let mut targets = Vec::with_capacity(count as usize);
                     for i in 0..count {
-                        match self.get_reg(regs_base + i) {
-                            Value::Int(reg) => targets.push(*reg as Reg),
+                        let value = self.get_reg(regs_base + i).clone();
+                        match value {
+                            Value::Int(reg) if reg >= 0 && (reg as usize) < register_count => {
+                                targets.push(reg as Reg)
+                            }
+                            Value::Int(reg) => {
+                                self.cur_frame_mut().mutate_writebacks = None;
+                                return Err(InterpError::new(format!(
+                                    "mutate setup target register {} exceeds frame with {} register(s)",
+                                    reg, register_count
+                                )));
+                            }
                             _ => {
                                 self.cur_frame_mut().mutate_writebacks = None;
                                 targets.clear();
@@ -1989,9 +2003,20 @@ impl BytecodeVM {
                     for i in 0..count {
                         let obj_slot = regs_base + (i * 2) as Reg;
                         let field_slot = obj_slot + 1;
-                        match (self.get_reg(obj_slot), self.get_reg(field_slot)) {
-                            (Value::Int(obj_reg), Value::String(field)) => {
-                                targets.push((*obj_reg as Reg, field.as_str().to_string()));
+                        let obj = self.get_reg(obj_slot).clone();
+                        let field = self.get_reg(field_slot).clone();
+                        match (obj, field) {
+                            (Value::Int(obj_reg), Value::String(field))
+                                if obj_reg >= 0 && (obj_reg as usize) < register_count =>
+                            {
+                                targets.push((obj_reg as Reg, field.as_str().to_string()));
+                            }
+                            (Value::Int(obj_reg), Value::String(_)) => {
+                                self.cur_frame_mut().mutate_field_writebacks = None;
+                                return Err(InterpError::new(format!(
+                                    "mutate field setup target register {} exceeds frame with {} register(s)",
+                                    obj_reg, register_count
+                                )));
                             }
                             _ => {
                                 ok = false;
@@ -2011,6 +2036,7 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "builtin call destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let args_end = (args_base as usize).checked_add(argc as usize);
                     if args_end.map_or(true, |end| end > register_count) {
@@ -2057,6 +2083,7 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "extern call destination")?;
                     let register_count = self.cur_frame().regs.len();
                     let args_end = (args_base as usize).checked_add(argc as usize);
                     if args_end.map_or(true, |end| end > register_count) {
@@ -2093,6 +2120,15 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "canonical extern call destination")?;
+                    let register_count = self.cur_frame().regs.len();
+                    let args_end = (args_base as usize).checked_add(argc as usize);
+                    if args_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "canonical extern call argument register window base {} count {} exceeds frame with {} register(s)",
+                            args_base, argc, register_count
+                        )));
+                    }
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
@@ -2141,6 +2177,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::Ret { ra } => {
+                    self.ensure_reg(ra, "ret source")?;
                     // B-5 (Wave-2): an ensures-contract violation (E0808) in
                     // do_return previously escaped the same-frame fault handlers
                     // via bare `?`. The frame is still on the stack at that point
@@ -2196,11 +2233,13 @@ impl BytecodeVM {
                         .push(crate::interp::value::QuotedAst::Ident(name));
                 }
                 Op::QuoteInterpPush { rs } => {
+                    self.ensure_reg(rs, "quote interpolation source")?;
                     let v = self.get_reg(rs).clone();
                     self.quote_stack
                         .push(crate::interp::value::QuotedAst::Interpolate(Box::new(v)));
                 }
                 Op::QuoteAstPush { rs } => {
+                    self.ensure_reg(rs, "quote ast source")?;
                     let v = self.get_reg(rs).clone();
                     match v {
                         Value::QuoteAst(q) => {
@@ -2215,6 +2254,7 @@ impl BytecodeVM {
                     }
                 }
                 Op::QuoteCapture { str_idx, reg } => {
+                    self.ensure_reg(reg, "quote capture source")?;
                     let name = self.const_str(str_idx)?.to_string();
                     self.quote_captures.insert(name, self.get_reg(reg).clone());
                 }
@@ -2461,10 +2501,12 @@ impl BytecodeVM {
                         .push(crate::interp::value::QuotedAst::Try(Box::new(e)));
                 }
                 Op::QuoteResult { rd } => {
+                    self.ensure_reg(rd, "quote result destination")?;
                     let node = self.quote_pop()?;
                     self.set_reg(rd, Value::QuoteAst(Box::new(node)));
                 }
                 Op::RetEarly { ra } => {
+                    self.ensure_reg(ra, "ret-early source")?;
                     // Check fault handler before returning. Audit fix #2: pop the
                     // TOP handler from the per-frame stack; after its compensation
                     // runs, FaultRetEarly cascades to the remaining handlers so
@@ -3754,6 +3796,7 @@ impl BytecodeVM {
                     captures_base,
                     capture_count,
                 } => {
+                    self.ensure_reg(rd, "new-closure destination")?;
                     // Collect captured variables by name.
                     let Some(target_proto) = self.program.functions.get(proto_idx as usize) else {
                         return Err(InterpError::new(format!(
@@ -3796,6 +3839,7 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "indirect call destination")?;
                     let register_count = self.cur_frame().regs.len();
                     if (callee as usize) >= register_count {
                         return Err(InterpError::new(format!(

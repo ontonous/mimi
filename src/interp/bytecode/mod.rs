@@ -2527,6 +2527,141 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_control_call_and_quote_registers() {
+        expect_register_error(
+            |result| Op::JmpIf {
+                offset: 1,
+                ra: result + 1,
+            },
+            "jmp-if condition source",
+        );
+        expect_register_error(
+            |result| Op::JmpIfNot {
+                offset: 1,
+                ra: result + 1,
+            },
+            "jmp-if-not condition source",
+        );
+        expect_register_error(
+            |result| Op::Call {
+                rd: result + 1,
+                func: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "call destination",
+        );
+        expect_register_error(
+            |result| Op::CallMove {
+                rd: result + 1,
+                func: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "move-call destination",
+        );
+        expect_register_error(
+            |result| Op::CallBuiltin {
+                rd: result + 1,
+                builtin: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "builtin call destination",
+        );
+        expect_register_error(
+            |result| Op::CallExtern {
+                rd: result + 1,
+                extern_idx: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "extern call destination",
+        );
+        expect_register_error(
+            |result| Op::CallIndirect {
+                rd: result + 1,
+                callee: result,
+                args_base: result,
+                argc: 0,
+            },
+            "indirect call destination",
+        );
+        expect_register_error(
+            |result| Op::NewClosure {
+                rd: result + 1,
+                proto: 0,
+                captures_base: result,
+                capture_count: 0,
+            },
+            "new-closure destination",
+        );
+        expect_register_error(|result| Op::Ret { ra: result + 1 }, "ret source");
+        expect_register_error(|result| Op::RetEarly { ra: result + 1 }, "ret-early source");
+        expect_register_error(
+            |result| Op::QuoteInterpPush { rs: result + 1 },
+            "quote interpolation source",
+        );
+        expect_register_error(
+            |result| Op::QuoteAstPush { rs: result + 1 },
+            "quote ast source",
+        );
+        expect_register_error(
+            |result| Op::QuoteCapture {
+                str_idx: 0,
+                reg: result + 1,
+            },
+            "quote capture source",
+        );
+        expect_register_error(
+            |result| Op::QuoteResult { rd: result + 1 },
+            "quote result destination",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_mutate_writeback_targets() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let target = main.alloc_reg();
+        let invalid = main.add_const(ConstValue::Int(-1));
+        main.emit(Op::LoadConst {
+            rd: target,
+            idx: invalid,
+        });
+        main.emit(Op::MutateSetup {
+            regs_base: target,
+            count: 1,
+        });
+        main.emit(Op::Ret { ra: target });
+        let error = run_single_op(main).expect_err("invalid mutate target must fail closed");
+        assert!(error.contains("mutate setup target register -1"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let obj = main.alloc_reg();
+        let field = main.alloc_reg();
+        let invalid = main.add_const(ConstValue::Int(-1));
+        let field_name = main.add_const(ConstValue::Str("field".into()));
+        main.emit(Op::LoadConst {
+            rd: obj,
+            idx: invalid,
+        });
+        main.emit(Op::LoadConst {
+            rd: field,
+            idx: field_name,
+        });
+        main.emit(Op::MutateSetupField {
+            regs_base: obj,
+            count: 1,
+        });
+        main.emit(Op::Ret { ra: obj });
+        let error = run_single_op(main).expect_err("invalid mutate field target must fail closed");
+        assert!(
+            error.contains("mutate field setup target register -1"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {
