@@ -2071,7 +2071,7 @@ impl BytecodeVM {
                     let fp = self.registry.fast_path(builtin);
                     let mut handled = false;
                     if let Some(kind) = fp {
-                        if let Some(v) = self.exec_builtin_fast(kind, args_base, argc) {
+                        if let Some(v) = self.exec_builtin_fast(kind, args_base, argc)? {
                             self.set_reg(rd, v);
                             handled = true;
                         }
@@ -3264,10 +3264,7 @@ impl BytecodeVM {
                 Op::RecordSet { ra, field, rb } => {
                     self.ensure_reg(ra, "record set target")?;
                     self.ensure_reg(rb, "record set value")?;
-                    let field_name = match &proto.constants[field as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
-                    };
+                    let field_name = self.const_str(field)?.to_string();
                     let value = self.get_reg(rb).clone();
                     let record = self.get_reg_mut(ra);
                     match record {
@@ -3311,10 +3308,7 @@ impl BytecodeVM {
                 Op::TupleSet { ra, idx, rb } => {
                     self.ensure_reg(ra, "tuple set target")?;
                     self.ensure_reg(rb, "tuple set value")?;
-                    let idx_name = match &proto.constants[idx as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
-                    };
+                    let idx_name = self.const_str(idx)?.to_string();
                     let idx: usize = idx_name.parse().unwrap_or(usize::MAX);
                     let value = self.get_reg(rb).clone();
                     let tuple = self.get_reg_mut(ra);
@@ -4234,9 +4228,20 @@ impl BytecodeVM {
                     self.ensure_reg(rd, "is-variant destination")?;
                     self.ensure_reg(ra, "is-variant source")?;
                     let v = self.get_reg(ra);
-                    let expected_tag = match &proto.constants[tag as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
+                    let expected_tag = match proto.constants.get(tag as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "is-variant tag constant {} is not a string",
+                                tag
+                            )))
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "is-variant tag constant {} out of range",
+                                tag
+                            )))
+                        }
                     };
                     let matches = match v {
                         Value::Variant(name, _) => name == &expected_tag,
@@ -4470,10 +4475,7 @@ impl BytecodeVM {
                     // are Record(Some(name), HashMap) — extract by field name.
                     // Variants keep positional _0.._N semantics.
                     let v = self.get_reg(ra).clone();
-                    let field_name = match &proto.constants[field as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
-                    };
+                    let field_name = self.const_str(field as ConstIdx)?.to_string();
                     match v {
                         Value::Record(_, fields) => {
                             if let Some(value) = fields.get(&field_name) {
@@ -4720,9 +4722,15 @@ impl BytecodeVM {
                 }
                 Op::Trap { msg } => {
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let msg_str = match &proto.constants[msg as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => "unknown trap".to_string(),
+                    let msg_str = match proto.constants.get(msg as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => "unknown trap".to_string(),
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "trap message constant {} out of range",
+                                msg
+                            )))
+                        }
                     };
                     return Err(InterpError::new(msg_str));
                 }
@@ -5011,6 +5019,11 @@ impl BytecodeVM {
                         Value::Set(items) => {
                             let result: Result<Value, InterpError> = match method_name.as_str() {
                                 "remove" => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'remove' requires one argument",
+                                        ));
+                                    }
                                     let elem = self.get_reg(args_base + 1).clone();
                                     let new_set: Vec<Value> = items
                                         .iter()
@@ -5020,6 +5033,11 @@ impl BytecodeVM {
                                     Ok(Value::Set(new_set))
                                 }
                                 "insert" => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'insert' requires one argument",
+                                        ));
+                                    }
                                     let elem = self.get_reg(args_base + 1).clone();
                                     let mut new_set = items.clone();
                                     if !new_set
@@ -5032,6 +5050,11 @@ impl BytecodeVM {
                                 }
                                 "is_empty" => Ok(Value::Bool(items.is_empty())),
                                 "contains" => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'contains' requires one argument",
+                                        ));
+                                    }
                                     let elem = self.get_reg(args_base + 1).clone();
                                     Ok(Value::Bool(
                                         items.iter().any(|v| crate::interp::values_equal(v, &elem)),
@@ -5095,6 +5118,11 @@ impl BytecodeVM {
                                 ("Err", "is_err") => Ok(Value::Bool(true)),
                                 // and_then: call closure with payload on Some/Ok, pass through on None/Err
                                 ("Some" | "Ok", "and_then") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'and_then' requires one argument",
+                                        ));
+                                    }
                                     let closure_reg = args_base + 1;
                                     let closure = self.get_reg(closure_reg).clone();
                                     let arg = payload.first().cloned().unwrap_or(Value::Unit);
@@ -5104,6 +5132,11 @@ impl BytecodeVM {
                                 ("Err", "and_then") => Ok(receiver.clone()),
                                 // map: transform payload on Some/Ok, pass through on None/Err
                                 ("Some", "map") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'map' requires one argument",
+                                        ));
+                                    }
                                     let closure_reg = args_base + 1;
                                     let closure = self.get_reg(closure_reg).clone();
                                     let arg = payload.first().cloned().unwrap_or(Value::Unit);
@@ -5111,6 +5144,11 @@ impl BytecodeVM {
                                     Ok(Value::Variant("Some".into(), vec![mapped]))
                                 }
                                 ("Ok", "map") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'map' requires one argument",
+                                        ));
+                                    }
                                     let closure_reg = args_base + 1;
                                     let closure = self.get_reg(closure_reg).clone();
                                     let arg = payload.first().cloned().unwrap_or(Value::Unit);
@@ -5121,6 +5159,11 @@ impl BytecodeVM {
                                 ("Err", "map") => Ok(receiver.clone()),
                                 // map_err: transform error on Err, pass through on Ok/Some
                                 ("Err", "map_err") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'map_err' requires one argument",
+                                        ));
+                                    }
                                     let closure_reg = args_base + 1;
                                     let closure = self.get_reg(closure_reg).clone();
                                     let arg = payload.first().cloned().unwrap_or(Value::Unit);
@@ -5133,13 +5176,28 @@ impl BytecodeVM {
                                     Ok(payload.first().cloned().unwrap_or(Value::Unit))
                                 }
                                 ("None" | "Err", "unwrap_or") | ("None" | "Err", "value_or") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'unwrap_or' requires one argument",
+                                        ));
+                                    }
                                     Ok(self.get_reg(args_base + 1).clone())
                                 }
                                 // ok_or: Option → Result (Some(v) → Ok(v), None → Err(e))
                                 ("Some", "ok_or") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'ok_or' requires one argument",
+                                        ));
+                                    }
                                     Ok(Value::Variant("Ok".into(), payload.clone()))
                                 }
                                 ("None", "ok_or") => {
+                                    if argc < 2 {
+                                        return Err(InterpError::new(
+                                            "dynamic method call 'ok_or' requires one argument",
+                                        ));
+                                    }
                                     let err_val = self.get_reg(args_base + 1).clone();
                                     Ok(Value::Variant("Err".into(), vec![err_val]))
                                 }
@@ -5755,26 +5813,42 @@ impl BytecodeVM {
 
     /// R4 inline fast path for hot pure-numeric builtins. Reads args straight
     /// from the frame registers (no `Vec<Value>`), computes, returns `Some`.
-    /// Returns `None` (fall back to `call_builtin`) when the arg types are not
-    /// the expected numeric ones or an edge case (e.g. `abs(i64::MIN)`) needs
-    /// the general path's identical error text. Semantics mirror the
-    /// corresponding `builtin_*` functions exactly.
-    fn exec_builtin_fast(&self, kind: BuiltinFastPath, args_base: Reg, argc: u16) -> Option<Value> {
+    /// Returns `Ok(None)` (fall back to `call_builtin`) when the arg types are
+    /// not the expected numeric ones or an edge case (e.g. `abs(i64::MIN)`)
+    /// needs the general path's identical error text. An invalid register
+    /// window is a hard error even though the normal caller checks it first;
+    /// this keeps the private helper fail-closed if another entry point is
+    /// added later. Semantics mirror the corresponding `builtin_*` functions.
+    fn exec_builtin_fast(
+        &self,
+        kind: BuiltinFastPath,
+        args_base: Reg,
+        argc: u16,
+    ) -> Result<Option<Value>, InterpError> {
         let regs = &self.cur_frame().regs;
-        match kind {
+        let args_end = (args_base as usize).checked_add(argc as usize);
+        if args_end.map_or(true, |end| end > regs.len()) {
+            return Err(InterpError::new(format!(
+                "builtin fast-path argument register window base {} count {} exceeds frame with {} register(s)",
+                args_base,
+                argc,
+                regs.len()
+            )));
+        }
+        Ok(match kind {
             BuiltinFastPath::Abs => {
                 if argc != 1 {
-                    return None;
+                    return Ok(None);
                 }
                 match &regs[args_base as usize] {
-                    Value::Int(v) => Some(Value::Int(v.checked_abs()?)),
+                    Value::Int(v) => v.checked_abs().map(Value::Int),
                     Value::Float(v) => Some(Value::Float(v.abs())),
                     _ => None,
                 }
             }
             BuiltinFastPath::Min => {
                 if argc != 2 {
-                    return None;
+                    return Ok(None);
                 }
                 match (&regs[args_base as usize], &regs[args_base as usize + 1]) {
                     (Value::Int(a), Value::Int(b)) => Some(Value::Int((*a).min(*b))),
@@ -5784,7 +5858,7 @@ impl BytecodeVM {
             }
             BuiltinFastPath::Max => {
                 if argc != 2 {
-                    return None;
+                    return Ok(None);
                 }
                 match (&regs[args_base as usize], &regs[args_base as usize + 1]) {
                     (Value::Int(a), Value::Int(b)) => Some(Value::Int((*a).max(*b))),
@@ -5794,7 +5868,7 @@ impl BytecodeVM {
             }
             BuiltinFastPath::Floor => {
                 if argc != 1 {
-                    return None;
+                    return Ok(None);
                 }
                 match &regs[args_base as usize] {
                     Value::Int(v) => Some(Value::Int(*v)),
@@ -5804,7 +5878,7 @@ impl BytecodeVM {
             }
             BuiltinFastPath::Ceil => {
                 if argc != 1 {
-                    return None;
+                    return Ok(None);
                 }
                 match &regs[args_base as usize] {
                     Value::Int(v) => Some(Value::Int(*v)),
@@ -5814,7 +5888,7 @@ impl BytecodeVM {
             }
             BuiltinFastPath::Round => {
                 if argc != 1 {
-                    return None;
+                    return Ok(None);
                 }
                 match &regs[args_base as usize] {
                     Value::Int(v) => Some(Value::Int(*v)),
@@ -5822,7 +5896,7 @@ impl BytecodeVM {
                     _ => None,
                 }
             }
-        }
+        })
     }
 
     /// Append to captured stdout (used by builtin io functions).

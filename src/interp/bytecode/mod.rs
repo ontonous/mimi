@@ -2008,6 +2008,47 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_dynamic_methods_with_missing_arguments() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let receiver = main.alloc_reg();
+        let result = main.alloc_reg();
+        let method = main.add_const_raw(ConstValue::Str("remove".into()));
+        main.emit(Op::NewSet { rd: receiver });
+        main.emit(Op::DynMethodCall {
+            rd: result,
+            method,
+            args_base: receiver,
+            argc: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged Set.remove call without its element must fail closed");
+        assert!(
+            error.contains("dynamic method call 'remove' requires one argument"),
+            "{error}"
+        );
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let receiver = main.alloc_reg();
+        let result = main.alloc_reg();
+        let method = main.add_const_raw(ConstValue::Str("ok_or".into()));
+        main.emit(Op::None { rd: receiver });
+        main.emit(Op::DynMethodCall {
+            rd: result,
+            method,
+            args_base: receiver,
+            argc: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged Option.ok_or call without its error must fail closed");
+        assert!(
+            error.contains("dynamic method call 'ok_or' requires one argument"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_runtime_metadata_indices() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();
@@ -2044,6 +2085,67 @@ func main() -> i32 {
         let error =
             run_single_op(main).expect_err("forged mutable parameter metadata must fail closed");
         assert!(error.contains("mutable parameter register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_direct_constant_indices() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let target = main.alloc_reg();
+        let value = main.alloc_reg();
+        main.emit(Op::RecordSet {
+            ra: target,
+            field: u32::MAX,
+            rb: value,
+        });
+        main.emit(Op::Ret { ra: target });
+        let error = run_single_op(main)
+            .expect_err("a forged record field constant must fail before indexing");
+        assert!(error.contains("expected Str constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let target = main.alloc_reg();
+        let value = main.alloc_reg();
+        main.emit(Op::TupleSet {
+            ra: target,
+            idx: u32::MAX,
+            rb: value,
+        });
+        main.emit(Op::Ret { ra: target });
+        let error = run_single_op(main)
+            .expect_err("a forged tuple index constant must fail before indexing");
+        assert!(error.contains("expected Str constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let target = main.alloc_reg();
+        let result = main.alloc_reg();
+        main.emit(Op::IsVariant {
+            rd: result,
+            ra: target,
+            tag: u32::MAX,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged variant tag constant must fail before indexing");
+        assert!(error.contains("is-variant tag constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let target = main.alloc_reg();
+        let result = main.alloc_reg();
+        main.emit(Op::PatternField {
+            rd: result,
+            ra: target,
+            field: u16::MAX,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("a forged pattern field constant must fail before indexing");
+        assert!(error.contains("expected Str constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        main.emit(Op::Trap { msg: u32::MAX });
+        let error = run_single_op(main)
+            .expect_err("a forged trap message constant must fail before indexing");
+        assert!(error.contains("trap message constant"), "{error}");
     }
 
     #[test]
