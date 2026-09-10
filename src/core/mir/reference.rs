@@ -2841,6 +2841,11 @@ fn canonical_ffi_type_id(
                     return Err(format!("ambiguous transparent type alias '{name}'"));
                 }
                 if let Some(definition) = alias.into_iter().next() {
+                    if !definition.generic_parameters.is_empty() {
+                        return Err(format!(
+                            "generic transparent type alias '{name}' requires explicit type arguments"
+                        ));
+                    }
                     if let crate::ast::TypeDefKind::Alias(target) = &definition.declaration.kind {
                         return canonical_ffi_type_id(target, table, program);
                     }

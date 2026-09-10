@@ -52,6 +52,10 @@ func main() -> i64 {
     0
 }
 "#;
+const IMPORTED_ALIAS_F64_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_import_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
+"#;
 
 struct Oracle(Cell<i64>);
 
@@ -635,6 +639,147 @@ func main() -> i64 {{ 0 }}
         assert!(text.contains("E0231"), "{alias}: {text}");
         assert!(text.contains(expected), "{alias}: {text}");
     }
+}
+
+#[test]
+fn scalar_ffi_imported_alias_keeps_checker_identity_after_file_merge() {
+    use crate::core::mir::types::MirAbiClass;
+    use std::fs;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, IMPORTED_ALIAS_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-import-alias-{}-{counter}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create imported alias project");
+    let main_path = project.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(call_imported_alias(7 as i64))
+    0
+}
+"#,
+    )
+    .expect("write imported alias main");
+    fs::write(
+        project.join("ffi_types.mimi"),
+        r#"
+pub type Real = f64
+extern "C" { func mir_ffi_import_alias_f64(value: Real) -> i64; }
+pub func call_imported_alias(value: i64) -> i64 {
+    mir_ffi_import_alias_f64(value)
+}
+"#,
+    )
+    .expect("write imported alias module");
+
+    let source = fs::read_to_string(&main_path).expect("read imported alias main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex imported alias main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select imported alias parser")
+        .parse_file()
+        .expect("parse imported alias main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load imported alias graph");
+    let mut merged = loader.merge_all().expect("merge imported alias graph");
+    crate::loader::merge_prelude_into(&mut merged);
+    let checked = crate::core::check_program(&merged).expect("check imported alias graph");
+    let excluded_sources = merged
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize imported alias canonical MIR");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .find(|receipt| receipt.symbol == "mir_ffi_import_alias_f64")
+        .expect("imported alias FFI receipt");
+    assert_eq!(receipt.parameter_conversions.len(), 1);
+    assert_eq!(
+        receipt.parameter_conversions[0],
+        crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        }
+    );
+    let declared = mir
+        .type_catalog()
+        .get(&receipt.parameter_types[0])
+        .expect("imported alias declaration TypeDesc");
+    assert!(matches!(declared.abi, MirAbiClass::Float { bits: 64 }));
+
+    struct ImportedAliasOracle;
+    impl MirReferenceFfiResolver for ImportedAliasOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_import_alias_f64", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 7.0 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err("imported alias FFI binding did not receive f64 ABI argument".into()),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&ImportedAliasOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference imported alias FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free imported alias FFI bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value()
+            .expect("bytecode imported alias FFI execution"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "42\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_imported_alias_f64");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native imported alias FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid imported alias FFI LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(IMPORTED_ALIAS_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native imported alias FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert_eq!(native.stderr, "");
+    fs::remove_dir_all(project).expect("remove imported alias project");
 }
 
 #[test]
