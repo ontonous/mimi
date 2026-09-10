@@ -2645,11 +2645,27 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Int(len as i64));
                 }
                 Op::NewTuple { rd, base, arity } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(arity as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "tuple construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let elems: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
                     self.set_reg(rd, Value::Tuple(elems));
                 }
                 Op::NewTupleMove { rd, base, arity } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(arity as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "tuple move construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let frame = self.cur_frame_mut();
                     let elems: Vec<Value> = (0..arity)
                         .map(|i| {

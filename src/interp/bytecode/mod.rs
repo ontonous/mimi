@@ -1354,6 +1354,86 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_new_tuple_register_window() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::NewTuple {
+            rd: result,
+            base: result + 1,
+            arity: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged tuple source window must fail before source access");
+        assert!(
+            error
+                .to_string()
+                .contains("tuple construction register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_new_tuple_move_register_window() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::NewTupleMove {
+            rd: result,
+            base: result + 1,
+            arity: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![main],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = BytecodeVM::new(std::sync::Arc::new(prog))
+            .run()
+            .expect_err("a forged tuple-move source window must fail before source access");
+        assert!(
+            error
+                .to_string()
+                .contains("tuple move construction register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_extern_argument_window() {
         let source = r#"
         extern "C" {
