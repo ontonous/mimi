@@ -1347,13 +1347,13 @@ impl MirFfiAbiConversion {
 
     fn argument_kind(self) -> Option<MirFfiConversionKind> {
         let kind = self.kind()?;
-        matches!(
-            kind,
+        match kind {
+            MirFfiConversionKind::Identity { abi } if abi == types::MirAbiClass::Unit => None,
             MirFfiConversionKind::Identity { .. }
-                | MirFfiConversionKind::SignedIntegerWiden { .. }
-                | MirFfiConversionKind::SignedIntegerToFloat { .. }
-        )
-        .then_some(kind)
+            | MirFfiConversionKind::SignedIntegerWiden { .. }
+            | MirFfiConversionKind::SignedIntegerToFloat { .. } => Some(kind),
+            _ => None,
+        }
     }
 
     fn result_kind(self) -> Option<MirFfiConversionKind> {

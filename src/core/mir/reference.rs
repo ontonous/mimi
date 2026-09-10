@@ -12162,6 +12162,71 @@ func main() -> i64 {
     }
 
     #[test]
+    fn forged_ffi_conversion_receipt_is_rejected_by_every_direct_consumer() {
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i32; } func main() -> i32 { foreign(1 as i64) }",
+        );
+        let receipt = program.ffi_calls().values().next().expect("FFI receipt");
+        assert_eq!(receipt.parameter_conversions.len(), 1);
+        assert!(receipt.result_conversion.is_some());
+
+        for mutation in 0..2 {
+            let mut receipts = program.ffi_calls().clone();
+            let forged = receipts.values_mut().next().expect("FFI receipt");
+            if mutation == 0 {
+                forged.parameter_conversions[0] = MirFfiAbiConversion {
+                    from: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    to: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                };
+            } else {
+                forged.result_conversion = Some(MirFfiAbiConversion {
+                    from: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    to: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                });
+            }
+            let mut forged_program = program.clone();
+            forged_program.replace_ffi_calls_for_test_only(receipts);
+
+            let reference_error = MirReferenceInterpreter::new(&forged_program)
+                .execute(&NodeId("function:main".into()), &[])
+                .expect_err("reference must reject forged conversion receipt");
+            assert!(
+                reference_error
+                    .to_string()
+                    .contains("conversion receipt disagrees")
+                    || reference_error.to_string().contains("conversion from"),
+                "{reference_error}"
+            );
+
+            let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged_program)
+                .expect_err("bytecode must reject forged conversion receipt");
+            assert!(bytecode_error.iter().any(|error| {
+                error.message.contains("conversion receipt disagrees")
+                    || error.message.contains("conversion from")
+            }));
+
+            let native_error = crate::codegen::mir::validate_mir_native(&forged_program)
+                .expect_err("native must reject forged conversion receipt");
+            assert!(native_error.iter().any(|error| {
+                error.message.contains("conversion receipt disagrees")
+                    || error.message.contains("conversion from")
+            }));
+        }
+    }
+
+    #[test]
     fn canonical_program_gate_rejects_orphaned_ffi_receipts() {
         let source =
             "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }";

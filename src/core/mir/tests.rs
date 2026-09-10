@@ -397,6 +397,16 @@ fn scalar_ffi_conversion_kind_is_directional_and_closed() {
         to: f64_abi,
     }
     .is_supported_argument());
+    assert!(!MirFfiAbiConversion {
+        from: MirAbiClass::Unit,
+        to: MirAbiClass::Unit,
+    }
+    .is_supported_argument());
+    assert!(MirFfiAbiConversion {
+        from: MirAbiClass::Unit,
+        to: MirAbiClass::Unit,
+    }
+    .is_supported_result());
     assert!(MirFfiAbiConversion {
         from: MirAbiClass::Integer {
             bits: 32,

@@ -187,6 +187,9 @@ impl CanonicalMirFfiRuntime {
         if descriptor.parameter_conversions.len() != descriptor.arguments.len() {
             return Err("canonical FFI parameter conversion receipt arity mismatch".into());
         }
+        if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
+            return Err("unit is not a canonical scalar FFI argument".into());
+        }
         for (index, (scalar, conversion)) in descriptor
             .arguments
             .iter()
@@ -221,9 +224,6 @@ impl CanonicalMirFfiRuntime {
             return Err(
                 "canonical FFI result conversion source disagrees with declaration ABI".into(),
             );
-        }
-        if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
-            return Err("unit is not a canonical scalar FFI argument".into());
         }
         if descriptor.argument_ids.len() != args.len() {
             return Err("canonical FFI argument identity arity mismatch".into());
