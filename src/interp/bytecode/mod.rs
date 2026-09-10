@@ -1895,6 +1895,158 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_option_misc_and_runtime_registers() {
+        expect_unary_register_errors(|rd, ra| Op::Some { rd, ra }, "some");
+        expect_register_error(|result| Op::None { rd: result + 1 }, "none destination");
+        expect_register_error(
+            |result| Op::NewCap {
+                rd: result + 1,
+                name: 0,
+            },
+            "new-cap destination",
+        );
+        expect_unary_register_errors(|rd, ra| Op::Ok { rd, ra }, "ok");
+        expect_unary_register_errors(|rd, ra| Op::Err { rd, ra }, "err");
+        expect_unary_register_errors(|rd, ra| Op::IsSome { rd, ra }, "is-some");
+        expect_unary_register_errors(|rd, ra| Op::Unwrap { rd, ra }, "unwrap");
+        expect_unary_register_errors(|rd, ra| Op::ToString { rd, ra }, "to-string");
+        expect_unary_register_errors(|rd, ra| Op::TypeOf { rd, ra }, "type-of");
+        expect_unary_register_errors(|rd, ra| Op::Await { rd, ra }, "await");
+        expect_unary_register_errors(|rd, ra| Op::SharedNew { rd, ra }, "shared-new");
+        expect_unary_register_errors(|rd, ra| Op::WeakNew { rd, ra }, "weak-new");
+        expect_source_pair_errors(|ra, rb| Op::SharedSet { ra, rb }, "shared-set");
+    }
+
+    #[test]
+    fn vm_rejects_forged_spawn_flow_and_dynamic_method_windows() {
+        expect_register_error(
+            |result| Op::Spawn {
+                rd: result + 1,
+                func: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "spawn destination",
+        );
+        expect_register_error(
+            |result| Op::ActorSpawn {
+                rd: result + 1,
+                actor: 0,
+            },
+            "actor-spawn destination",
+        );
+        expect_register_error(
+            |result| Op::ActorSpawnDetached {
+                rd: result + 1,
+                actor: 0,
+            },
+            "actor-spawn-detached destination",
+        );
+        expect_register_error(
+            |result| Op::FlowTransition {
+                rd: result + 1,
+                flow: 0,
+                method: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "flow-transition destination",
+        );
+        expect_register_error(
+            |result| Op::DynMethodCall {
+                rd: result + 1,
+                method: 0,
+                args_base: result,
+                argc: 0,
+            },
+            "dynamic method call destination",
+        );
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::Spawn {
+            rd: result,
+            func: 0,
+            args_base: result + 1,
+            argc: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main).expect_err("forged spawn argument window must fail closed");
+        assert!(error.contains("spawn argument register window"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::FlowTransition {
+            rd: result,
+            flow: 0,
+            method: 0,
+            args_base: result + 1,
+            argc: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main).expect_err("forged flow argument window must fail closed");
+        assert!(
+            error.contains("flow-transition argument register window"),
+            "{error}"
+        );
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::DynMethodCall {
+            rd: result,
+            method: 0,
+            args_base: result + 1,
+            argc: 2,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main)
+            .expect_err("forged dynamic method argument window must fail closed");
+        assert!(
+            error.contains("dynamic method call argument register window"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_runtime_metadata_indices() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::ActorSpawn {
+            rd: result,
+            actor: u32::MAX,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main).expect_err("forged actor constant index must fail closed");
+        assert!(error.contains("actor name constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::DynMethodCall {
+            rd: result,
+            method: u32::MAX,
+            args_base: result,
+            argc: 1,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main).expect_err("forged method constant index must fail closed");
+        assert!(error.contains("method name constant"), "{error}");
+
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.mut_param_indices.push(u16::MAX);
+        main.emit(Op::Call {
+            rd: result,
+            func: 0,
+            args_base: result,
+            argc: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+        let error =
+            run_single_op(main).expect_err("forged mutable parameter metadata must fail closed");
+        assert!(error.contains("mutable parameter register"), "{error}");
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();

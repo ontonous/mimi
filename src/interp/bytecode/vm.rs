@@ -786,6 +786,25 @@ impl BytecodeVM {
                 args.len()
             )));
         }
+        if let Some(return_reg) = return_reg {
+            let caller_register_count = self.stack.last().map_or(0, |frame| frame.regs.len());
+            if caller_register_count == 0 || return_reg as usize >= caller_register_count {
+                return Err(InterpError::new(format!(
+                    "function '{}' return register {} is outside caller frame with {} register(s)",
+                    proto.name, return_reg, caller_register_count
+                )));
+            }
+        }
+        if let Some(&mut_reg) = proto
+            .mut_param_indices
+            .iter()
+            .find(|&&reg| reg as usize >= reg_count)
+        {
+            return Err(InterpError::new(format!(
+                "function '{}' mutable parameter register {} is outside frame with {} register(s)",
+                proto.name, mut_reg, reg_count
+            )));
+        }
 
         // Contract pre-condition check (0.33 Phase F).
         if self.verify_contracts && proto.has_requires {
@@ -4539,17 +4558,26 @@ impl BytecodeVM {
 
                 // ── Option / Result (Variant encoding — matches tree-walker) ──
                 Op::Some { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "some")?;
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::Variant("Some".into(), vec![v]));
                 }
                 Op::None { rd } => {
+                    self.ensure_reg(rd, "none destination")?;
                     self.set_reg(rd, Value::Variant("None".into(), vec![]));
                 }
                 Op::NewCap { rd, name } => {
+                    self.ensure_reg(rd, "new-cap destination")?;
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let cap_str = match &proto.constants[name as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => "unknown_cap".to_string(),
+                    let cap_str = match proto.constants.get(name as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => "unknown_cap".to_string(),
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "new-cap name constant {} out of range",
+                                name
+                            )))
+                        }
                     };
                     // Components stored as comma-separated string.
                     let components: Vec<String> =
@@ -4557,14 +4585,17 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Cap(components));
                 }
                 Op::Ok { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ok")?;
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::Variant("Ok".into(), vec![v]));
                 }
                 Op::Err { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "err")?;
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::Variant("Err".into(), vec![v]));
                 }
                 Op::IsSome { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "is-some")?;
                     let v = self.get_reg(ra);
                     let is_some = match v {
                         Value::Variant(name, _) => name == "Some" || name == "Ok",
@@ -4574,6 +4605,7 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::Bool(is_some));
                 }
                 Op::Unwrap { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "unwrap")?;
                     let v = self.get_reg(ra).clone();
                     match v {
                         Value::Variant(name, payload) if name == "Some" || name == "Ok" => {
@@ -4608,6 +4640,7 @@ impl BytecodeVM {
 
                 // ── Misc ───────────────────────────────────────
                 Op::ToString { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "to-string")?;
                     let v = self.get_reg(ra).clone();
                     self.set_reg(rd, Value::String(Arc::new(v.to_string())));
                 }
@@ -4662,6 +4695,7 @@ impl BytecodeVM {
                     self.set_reg(rd, result);
                 }
                 Op::TypeOf { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "type-of")?;
                     let v = self.get_reg(ra);
                     // Match tree-walker's value_type_name semantics.
                     let name = match v {
@@ -4716,6 +4750,8 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "spawn destination")?;
+                    self.ensure_arg_window(args_base, argc, "spawn argument")?;
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
@@ -4723,6 +4759,7 @@ impl BytecodeVM {
                     self.set_reg(rd, handle);
                 }
                 Op::Await { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "await")?;
                     let handle = self.get_reg(ra).clone();
                     let value = self.await_task(handle)?;
                     self.set_reg(rd, value);
@@ -4730,21 +4767,35 @@ impl BytecodeVM {
 
                 // ── Actor / Flow / Session (Phase D) ──────────
                 Op::ActorSpawn { rd, actor } => {
+                    self.ensure_reg(rd, "actor-spawn destination")?;
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let actor_name = match &proto.constants[actor as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => return Err(InterpError::new("ActorSpawn: invalid actor name")),
+                    let actor_name = match proto.constants.get(actor as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => return Err(InterpError::new("ActorSpawn: invalid actor name")),
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "ActorSpawn: actor name constant {} out of range",
+                                actor
+                            )))
+                        }
                     };
                     let val = self.spawn_actor(&actor_name, false)?;
                     self.set_reg(rd, val);
                 }
 
                 Op::ActorSpawnDetached { rd, actor } => {
+                    self.ensure_reg(rd, "actor-spawn-detached destination")?;
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let actor_name = match &proto.constants[actor as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => {
+                    let actor_name = match proto.constants.get(actor as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => {
                             return Err(InterpError::new("ActorSpawnDetached: invalid actor name"))
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "ActorSpawnDetached: actor name constant {} out of range",
+                                actor
+                            )))
                         }
                     };
                     let val = self.spawn_actor(&actor_name, true)?;
@@ -4758,14 +4809,37 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "flow-transition destination")?;
+                    self.ensure_arg_window(args_base, argc, "flow-transition argument")?;
+                    if argc == 0 {
+                        return Err(InterpError::new(
+                            "flow transition requires a from-state argument",
+                        ));
+                    }
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let flow_name = match &proto.constants[flow as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => return Err(InterpError::new("FlowTransition: invalid flow name")),
+                    let flow_name = match proto.constants.get(flow as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new("FlowTransition: invalid flow name"))
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "FlowTransition: flow name constant {} out of range",
+                                flow
+                            )))
+                        }
                     };
-                    let method_name = match &proto.constants[method as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => return Err(InterpError::new("FlowTransition: invalid method name")),
+                    let method_name = match proto.constants.get(method as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new("FlowTransition: invalid method name"))
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "FlowTransition: method name constant {} out of range",
+                                method
+                            )))
+                        }
                     };
                     // Extract from-state name from the first argument.
                     let from_state = match self.get_reg(args_base) {
@@ -4823,10 +4897,25 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    self.ensure_reg(rd, "dynamic method call destination")?;
+                    self.ensure_arg_window(args_base, argc, "dynamic method call argument")?;
+                    if argc == 0 {
+                        return Err(InterpError::new(
+                            "dynamic method call requires a receiver argument",
+                        ));
+                    }
                     let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
-                    let method_name = match &proto.constants[method as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => return Err(InterpError::new("DynMethodCall: invalid method name")),
+                    let method_name = match proto.constants.get(method as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new("DynMethodCall: invalid method name"))
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "DynMethodCall: method name constant {} out of range",
+                                method
+                            )))
+                        }
                     };
                     let receiver = self.get_reg(args_base).clone();
                     match &receiver {
@@ -5073,6 +5162,7 @@ impl BytecodeVM {
                 }
 
                 Op::SharedNew { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "shared-new")?;
                     let v = self.get_reg(ra).clone();
                     let shared = match v {
                         Value::Shared(arc) => Value::Shared(std::sync::Arc::clone(&arc)),
@@ -5082,6 +5172,7 @@ impl BytecodeVM {
                 }
 
                 Op::SharedSet { ra, rb } => {
+                    self.ensure_source_pair(ra, rb, "shared-set")?;
                     let val = self.get_reg(rb).clone();
                     let target = self.get_reg(ra).clone();
                     match target {
@@ -5107,6 +5198,7 @@ impl BytecodeVM {
                 }
 
                 Op::WeakNew { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "weak-new")?;
                     let v = self.get_reg(ra).clone();
                     let weak = match v {
                         Value::Shared(arc) => Value::WeakShared(std::sync::Arc::downgrade(&arc)),
@@ -5801,6 +5893,18 @@ impl BytecodeVM {
     fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
         self.ensure_reg(ra, &format!("{} lhs source", operation))?;
         self.ensure_reg(rb, &format!("{} rhs source", operation))?;
+        Ok(())
+    }
+
+    fn ensure_arg_window(&self, base: Reg, count: u16, role: &str) -> Result<(), InterpError> {
+        let register_count = self.cur_frame().regs.len();
+        let end = (base as usize).checked_add(count as usize);
+        if end.map_or(true, |end| end > register_count) {
+            return Err(InterpError::new(format!(
+                "{} register window base {} count {} exceeds frame with {} register(s)",
+                role, base, count, register_count
+            )));
+        }
         Ok(())
     }
 
