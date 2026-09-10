@@ -1440,6 +1440,46 @@ func main() -> i32 {
         );
     }
 
+    #[test]
+    fn vm_rejects_forged_mutate_setup_register_window() {
+        let source = r#"
+        func add_mutate(x: mutate i32) -> i32 {
+            x = x + 1
+            x
+        }
+        func main() -> i32 {
+            let mut value = 41
+            add_mutate(value)
+            0
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let setup = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::MutateSetup { regs_base, count } => Some((regs_base, count)),
+                _ => None,
+            })
+            .expect("mutate call must emit a MutateSetup instruction");
+        *setup.0 = register_count;
+        *setup.1 = 1;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged mutate setup window must fail before target access");
+        assert!(
+            error.to_string().contains("mutate setup register window"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {

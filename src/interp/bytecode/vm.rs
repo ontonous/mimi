@@ -1885,6 +1885,14 @@ impl BytecodeVM {
                     }
                 }
                 Op::MutateSetup { regs_base, count } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let targets_end = (regs_base as usize).checked_add(count as usize);
+                    if targets_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "mutate setup register window base {} count {} exceeds frame with {} register(s)",
+                            regs_base, count, register_count
+                        )));
+                    }
                     let mut targets = Vec::with_capacity(count as usize);
                     for i in 0..count {
                         match self.get_reg(regs_base + i) {
