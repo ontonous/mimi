@@ -771,7 +771,12 @@ impl BytecodeVM {
             ));
         }
 
-        let proto = &program.functions[func_idx as usize];
+        let Some(proto) = program.functions.get(func_idx as usize) else {
+            return Err(InterpError::new(format!(
+                "function #{} out of range",
+                func_idx
+            )));
+        };
         let reg_count = proto.register_count as usize;
         if args.len() != proto.param_count as usize {
             return Err(InterpError::new(format!(

@@ -12543,4 +12543,47 @@ func main() -> i32 {
         );
         assert!(!error.to_string().contains("legacy_tripwire"));
     }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_function_entry_indices() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex scalar FFI"))
+            .parse_file()
+            .expect("parse scalar FFI");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let original = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+
+        let mut forged_entry = original.clone();
+        std::sync::Arc::make_mut(&mut forged_entry).entry = u32::MAX;
+        let error = BytecodeVM::new(forged_entry)
+            .run_value()
+            .expect_err("a forged entry function index must fail before execution");
+        assert!(
+            error
+                .to_string()
+                .contains("function #4294967295 out of range"),
+            "{error}"
+        );
+
+        let error = BytecodeVM::new(original.clone())
+            .call_function(u32::MAX, &[])
+            .expect_err("a forged public function index must fail before execution");
+        assert!(
+            error
+                .to_string()
+                .contains("function #4294967295 out of range"),
+            "{error}"
+        );
+
+        let error = BytecodeVM::new(original)
+            .call_function_wrap_ok(u32::MAX, &[], Value::Int(0))
+            .expect_err("a forged wrapped function index must fail before execution");
+        assert!(
+            error
+                .to_string()
+                .contains("function #4294967295 out of range"),
+            "{error}"
+        );
+    }
 }
