@@ -3811,6 +3811,14 @@ impl BytecodeVM {
                 } => {
                     let (tag, shape) =
                         Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(arity as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "variant construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let payload: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
                     let value = match shape {
@@ -3834,6 +3842,14 @@ impl BytecodeVM {
                 } => {
                     let (tag, shape) =
                         Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
+                    let register_count = self.cur_frame().regs.len();
+                    let source_end = (base as usize).checked_add(arity as usize);
+                    if source_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "variant move construction register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let payload: Vec<Value> = (0..arity)
                         .map(|i| {
                             let frame = self.cur_frame_mut();
