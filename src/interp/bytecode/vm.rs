@@ -1952,6 +1952,14 @@ impl BytecodeVM {
                     args_base,
                     argc,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let args_end = (args_base as usize).checked_add(argc as usize);
+                    if args_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "extern call argument register window base {} count {} exceeds frame with {} register(s)",
+                            args_base, argc, register_count
+                        )));
+                    }
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();

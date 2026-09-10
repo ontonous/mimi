@@ -1319,6 +1319,48 @@ func main() -> i32 {
         );
     }
 
+    #[test]
+    fn vm_rejects_forged_call_extern_argument_window() {
+        let source = r#"
+        extern "C" {
+            func labs(x: i64) -> i64;
+        }
+        func main() -> i32 {
+            labs(41)
+            0
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut program);
+        let main = &mut forged.functions[forged.entry as usize];
+        let register_count = main.register_count;
+        let call = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::CallExtern {
+                    args_base, argc, ..
+                } => Some((args_base, argc)),
+                _ => None,
+            })
+            .expect("extern call must emit a CallExtern instruction");
+        *call.0 = register_count;
+        *call.1 = 1;
+
+        let error = BytecodeVM::new(program)
+            .run()
+            .expect_err("a forged extern-call argument window must fail before symbol loading");
+        assert!(
+            error
+                .to_string()
+                .contains("extern call argument register window"),
+            "{error}"
+        );
+    }
+
     /// F2: Nested field write-back through &mut reference.
     #[test]
     fn vm_nested_borrow_writeback() {
