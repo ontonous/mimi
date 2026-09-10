@@ -28,10 +28,11 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstIdx, ConstValue, FuncIdx,
-    FunctionProto, ListOperationShape, ListProjectionShape, Op, RecordMoveDropProjectionShape,
-    RecordProjectionShape, RecordResidualDropShape, Reg, TupleDestructureShape,
-    TupleProjectionShape, VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
+    BytecodeProgram, CanonicalFfiBinding, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstIdx,
+    ConstValue, FuncIdx, FunctionProto, ListOperationShape, ListProjectionShape, Op,
+    RecordMoveDropProjectionShape, RecordProjectionShape, RecordResidualDropShape, Reg,
+    TupleDestructureShape, TupleProjectionShape, VariantPredicateShape,
+    VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -88,6 +89,8 @@ pub fn compile_mir_program(
         return Err(errors);
     }
 
+    let canonical_ffi_bindings = materialize_canonical_ffi_bindings(&functions, &canonical_ffi)?;
+
     let entry = ordered
         .iter()
         .find(|(owner, _)| owner.0 == "function:main")
@@ -111,6 +114,7 @@ pub fn compile_mir_program(
         builtin_names,
         extern_names: Vec::new(),
         canonical_ffi,
+        canonical_ffi_bindings,
         actor_defs: std::collections::HashMap::new(),
         flow_defs: std::collections::HashMap::new(),
         flow_transition_funcs: std::collections::HashMap::new(),
@@ -123,6 +127,63 @@ pub fn compile_mir_program(
         ast: None,
         record_fields: std::collections::HashMap::new(),
     }))
+}
+
+/// Capture the compiler-owned mapping from each emitted call site to its MIR
+/// descriptor.  The executable instruction and descriptor tables remain
+/// inspectable for compatibility, so the VM validates them against this
+/// crate-private snapshot before loading any FFI symbol.
+fn materialize_canonical_ffi_bindings(
+    functions: &[FunctionProto],
+    descriptors: &[CanonicalFfiDescriptor],
+) -> Result<Vec<CanonicalFfiBinding>, Vec<MirBytecodeError>> {
+    let mut bindings = Vec::new();
+    let mut errors = Vec::new();
+    for (function, proto) in functions.iter().enumerate() {
+        for (pc, op) in proto.code.iter().enumerate() {
+            let Op::CallCanonicalExtern {
+                extern_idx,
+                instruction,
+                ..
+            } = op
+            else {
+                continue;
+            };
+            let Some(descriptor) = descriptors.get(*extern_idx as usize) else {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} references descriptor index {extern_idx}"
+                    ),
+                });
+                continue;
+            };
+            let Some(ConstValue::Str(instruction_text)) =
+                proto.constants.get(*instruction as usize)
+            else {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI binding at pc {pc} has invalid instruction identity constant {instruction}"
+                    ),
+                });
+                continue;
+            };
+            bindings.push(CanonicalFfiBinding {
+                function: function as FuncIdx,
+                pc: pc as u32,
+                extern_idx: *extern_idx,
+                instruction: *instruction,
+                instruction_text: instruction_text.clone(),
+                descriptor: descriptor.clone(),
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(bindings)
+    } else {
+        Err(errors)
+    }
 }
 
 fn materialize_canonical_ffi(
@@ -11632,7 +11693,9 @@ func main() -> i64 {
         let error = BytecodeVM::new(bytecode)
             .run_value()
             .expect_err("forged ABI must be rejected before symbol execution");
-        assert!(error.to_string().contains("outside the C scalar island"));
+        assert!(error
+            .to_string()
+            .contains("differs from its compiler binding"));
     }
 
     #[test]
@@ -11673,13 +11736,7 @@ func main() -> i32 {
         let error = BytecodeVM::new(bytecode)
             .run_value()
             .expect_err("a forged descriptor index must fail before loading");
-        assert!(
-            error.to_string().contains("descriptor index 1 instruction"),
-            "{error}"
-        );
-        assert!(error
-            .to_string()
-            .contains("disagrees with bytecode instruction"));
+        assert!(error.to_string().contains("compiler binding"), "{error}");
     }
 
     #[test]
@@ -11724,24 +11781,83 @@ func main() -> i32 {
         let error = BytecodeVM::new(bytecode.clone())
             .call_function(main_idx as u32, &[])
             .expect_err("a forged instruction identity must fail before loading");
-        assert!(
-            error.to_string().contains("descriptor index 0 instruction"),
-            "{error}"
-        );
-        assert!(error
-            .to_string()
-            .contains("disagrees with bytecode instruction"));
+        assert!(error.to_string().contains("compiler binding"), "{error}");
 
         let error = BytecodeVM::new(bytecode)
             .call_function_wrap_ok(main_idx as u32, &[], Value::Int(0))
             .expect_err("wrapped entry must reject forged instruction identity before loading");
-        assert!(
-            error.to_string().contains("descriptor index 0 instruction"),
-            "{error}"
-        );
-        assert!(error
-            .to_string()
-            .contains("disagrees with bytecode instruction"));
+        assert!(error.to_string().contains("compiler binding"), "{error}");
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_swapped_call_site_bindings_before_loading() {
+        let source = r#"
+extern "C" {
+    func labs(x: i64) -> i64;
+    func llabs(x: i64) -> i64;
+}
+func main() -> i32 {
+    println(labs(42))
+    println(llabs(-3))
+    0
+}
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex FFI calls"))
+            .parse_file()
+            .expect("parse FFI calls");
+        let checked = crate::core::check_program(&file).expect("check FFI calls");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical FFI bytecode");
+        assert_eq!(bytecode.canonical_ffi.len(), 2);
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let main_idx = forged
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("main function");
+        let sites: Vec<(usize, u16, u32)> = forged.functions[main_idx]
+            .code
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, op)| match op {
+                Op::CallCanonicalExtern {
+                    extern_idx,
+                    instruction,
+                    ..
+                } => Some((pc, *extern_idx, *instruction)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sites.len(), 2, "fixture must contain two canonical calls");
+        let (first_pc, first_descriptor, first_instruction) = sites[0];
+        let (second_pc, second_descriptor, second_instruction) = sites[1];
+        let code = &mut forged.functions[main_idx].code;
+        if let Op::CallCanonicalExtern {
+            extern_idx,
+            instruction,
+            ..
+        } = &mut code[first_pc]
+        {
+            *extern_idx = second_descriptor;
+            *instruction = second_instruction;
+        } else {
+            panic!("first site is not canonical");
+        }
+        if let Op::CallCanonicalExtern {
+            extern_idx,
+            instruction,
+            ..
+        } = &mut code[second_pc]
+        {
+            *extern_idx = first_descriptor;
+            *instruction = first_instruction;
+        } else {
+            panic!("second site is not canonical");
+        }
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("swapping both mutable call-site fields must fail before loading");
+        assert!(error.to_string().contains("compiler binding"), "{error}");
     }
 
     #[test]
@@ -11760,7 +11876,7 @@ func main() -> i32 {
             .run_value()
             .expect_err("canonical FFI must reject its missing descriptor");
         assert!(
-            error.to_string().contains("canonical FFI descriptor index"),
+            error.to_string().contains("canonical FFI binding manifest"),
             "{error}"
         );
         assert!(!error.to_string().contains("legacy_tripwire"));

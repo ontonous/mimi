@@ -606,6 +606,7 @@ mod tests {
         let prog = crate::interp::bytecode::instr::BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: Vec::new(),
             entry: 0,
             builtin_names: vec![],

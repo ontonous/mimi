@@ -1823,6 +1823,11 @@ pub struct BytecodeProgram {
     /// an AST or legacy `ExternFunc` declaration.  Compatibility bytecode
     /// leaves the table empty and uses `extern_names` instead.
     pub canonical_ffi: Vec<CanonicalFfiDescriptor>,
+    /// Internal source binding for every canonical FFI call site.  The
+    /// compiler records this snapshot before the program crosses the VM
+    /// boundary so public bytecode fields cannot swap a call's descriptor and
+    /// instruction identity together without being detected.
+    pub(crate) canonical_ffi_bindings: Vec<CanonicalFfiBinding>,
     /// Actor definitions (for spawn at runtime).
     pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
     /// Flow definitions (for transition dispatch).
@@ -1848,6 +1853,22 @@ pub struct BytecodeProgram {
     /// Record field types: type_name → [(field_name, field_type_str)].
     /// Used by from_json_typed for recursive field coercion.
     pub record_fields: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+/// Immutable compiler-side provenance for one canonical FFI call site.
+///
+/// `BytecodeProgram` intentionally keeps the executable tables public for
+/// compatibility and inspection.  This private-to-the-crate snapshot gives
+/// the VM a source of truth that those tables cannot rewrite from outside the
+/// bytecode module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalFfiBinding {
+    pub(crate) function: FuncIdx,
+    pub(crate) pc: u32,
+    pub(crate) extern_idx: u16,
+    pub(crate) instruction: ConstIdx,
+    pub(crate) instruction_text: String,
+    pub(crate) descriptor: CanonicalFfiDescriptor,
 }
 
 /// The deliberately narrow scalar ABI admitted by the Canonical MIR FFI

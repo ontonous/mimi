@@ -258,14 +258,26 @@ impl BytecodeVM {
     }
 
     /// Validate the checker-owned provenance graph before executing any
-    /// bytecode.  Canonical FFI descriptors are materialized one-per-MIR
-    /// call-site, so every descriptor must be referenced by exactly one
-    /// `CallCanonicalExtern` carrying the same caller and instruction
-    /// identity.  Keeping this check at the VM boundary closes the gap where
-    /// a malformed program could alter an instruction's descriptor index and
-    /// identity together, bypassing the per-call runtime comparison.
+    /// bytecode. Canonical FFI descriptors are materialized one-per-MIR
+    /// call-site, and the compiler records an internal binding snapshot for
+    /// every emitted call. The executable tables are public for compatibility,
+    /// so this VM-boundary check compares them against that snapshot before a
+    /// malformed program can alter a descriptor index, instruction identity,
+    /// or descriptor payload together and bypass the per-call runtime check.
     fn validate_canonical_ffi_program(&self) -> Result<(), InterpError> {
         let descriptors = &self.program.canonical_ffi;
+        let bindings = &self.program.canonical_ffi_bindings;
+        if descriptors.is_empty() {
+            if !bindings.is_empty() {
+                return Err(InterpError::new(
+                    "canonical FFI binding manifest is non-empty while descriptor table is empty",
+                ));
+            }
+        } else if bindings.is_empty() {
+            return Err(InterpError::new(
+                "canonical FFI binding manifest is missing",
+            ));
+        }
         let mut references = vec![None; descriptors.len()];
         let mut call_count = 0usize;
 
@@ -280,12 +292,29 @@ impl BytecodeVM {
                     continue;
                 };
                 call_count += 1;
-                let descriptor = descriptors.get(*extern_idx as usize).ok_or_else(|| {
-                    InterpError::new(format!(
-                        "canonical FFI descriptor index {extern_idx} out of range at function '{}' pc {pc}",
-                        proto.name
-                    ))
-                })?;
+                let binding = bindings
+                    .iter()
+                    .find(|binding| {
+                        binding.function == function_idx as FuncIdx && binding.pc == pc as u32
+                    })
+                    .ok_or_else(|| {
+                        InterpError::new(format!(
+                            "canonical FFI call at function '{}' pc {pc} has no compiler binding",
+                            proto.name
+                        ))
+                    })?;
+                if binding.extern_idx != *extern_idx {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} descriptor index {extern_idx} disagrees with compiler binding index {}",
+                        proto.name, binding.extern_idx
+                    )));
+                }
+                if binding.instruction != *instruction {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} instruction constant {instruction} disagrees with compiler binding constant {}",
+                        proto.name, binding.instruction
+                    )));
+                }
                 let expected_instruction = match proto.constants.get(*instruction as usize) {
                     Some(ConstValue::Str(value)) => value,
                     Some(_) => {
@@ -301,6 +330,24 @@ impl BytecodeVM {
                         )))
                     }
                 };
+                if binding.instruction_text != *expected_instruction {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI call at function '{}' pc {pc} instruction identity '{}' disagrees with compiler binding '{}'",
+                        proto.name, expected_instruction, binding.instruction_text
+                    )));
+                }
+                let descriptor = descriptors.get(*extern_idx as usize).ok_or_else(|| {
+                    InterpError::new(format!(
+                        "canonical FFI descriptor index {extern_idx} out of range at function '{}' pc {pc}",
+                        proto.name
+                    ))
+                })?;
+                if descriptor != &binding.descriptor {
+                    return Err(InterpError::new(format!(
+                        "canonical FFI descriptor index {extern_idx} at function '{}' pc {pc} differs from its compiler binding",
+                        proto.name
+                    )));
+                }
                 if descriptor.caller != proto.name {
                     return Err(InterpError::new(format!(
                         "canonical FFI descriptor index {extern_idx} caller '{}' disagrees with bytecode function '{}' at pc {pc}",
@@ -331,6 +378,12 @@ impl BytecodeVM {
                 )));
             }
             return Ok(());
+        }
+        if bindings.len() != call_count {
+            return Err(InterpError::new(format!(
+                "canonical FFI binding manifest has {} entries for {call_count} bytecode call sites",
+                bindings.len()
+            )));
         }
         for (index, reference) in references.iter().enumerate() {
             if reference.is_none() {

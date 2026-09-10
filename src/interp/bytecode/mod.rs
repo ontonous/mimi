@@ -53,6 +53,7 @@ mod tests {
         let prog = BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
@@ -108,6 +109,7 @@ mod tests {
         let prog = BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
@@ -167,6 +169,7 @@ mod tests {
         let prog = BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: vec![add_fn, main],
             entry: 1,
             builtin_names: vec![],
@@ -288,6 +291,7 @@ mod tests {
         let prog = BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: vec![fib, main],
             entry: 1,
             builtin_names: vec![],
@@ -376,6 +380,7 @@ mod tests {
         let prog = BytecodeProgram {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
