@@ -289,6 +289,26 @@ impl BytecodeVM {
                 )));
             }
         }
+        for binding in bindings {
+            let Some(proto) = self.program.functions.get(binding.function as usize) else {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding manifest entry points to function #{} out of range",
+                    binding.function
+                )));
+            };
+            let Some(op) = proto.code.get(binding.pc as usize) else {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding manifest entry points to pc {} out of range in function '{}'",
+                    binding.pc, proto.name
+                )));
+            };
+            if !matches!(op, Op::CallCanonicalExtern { .. }) {
+                return Err(InterpError::new(format!(
+                    "canonical FFI binding manifest entry for function '{}' pc {} does not point to CallCanonicalExtern",
+                    proto.name, binding.pc
+                )));
+            }
+        }
         let mut references = vec![None; descriptors.len()];
         let mut call_count = 0usize;
 
