@@ -3874,6 +3874,14 @@ impl BytecodeVM {
                     variant_tag,
                     shapes,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let target_end = (base as usize).checked_add(arity as usize);
+                    if target_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "variant destructure register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
                         Value::CanonicalVariant {
@@ -3981,6 +3989,14 @@ impl BytecodeVM {
                     arity,
                     shape,
                 } => {
+                    let register_count = self.cur_frame().regs.len();
+                    let target_end = (base as usize).checked_add(arity as usize);
+                    if target_end.map_or(true, |end| end > register_count) {
+                        return Err(InterpError::new(format!(
+                            "tuple destructure register window base {} count {} exceeds frame with {} register(s)",
+                            base, arity, register_count
+                        )));
+                    }
                     let expected = match proto.constants.get(shape as usize) {
                         Some(ConstValue::TupleDestructure(shape)) => shape,
                         Some(_) => {
