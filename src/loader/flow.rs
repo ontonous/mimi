@@ -1257,8 +1257,11 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
     let mut all_items = Vec::new();
     // Import aliases are part of the checker-visible namespace: `use dep as
     // left` and `use dep as right` must both survive a file merge so later
-    // resolution can observe the complete import set.  Deduplicate only exact
-    // path+alias pairs; path-only dedup silently discarded the later alias.
+    // resolution can observe the complete import set.  The omitted alias has
+    // the same effective binding as the first path segment (`use dep` is
+    // equivalent to `use dep as dep`), so normalize that spelling before
+    // deduplication.  Path-only dedup silently discarded distinct aliases,
+    // while raw alias dedup would retain two spellings of one binding.
     let mut seen_imports: HashSet<(Vec<String>, Option<String>)> = HashSet::new();
     let mut all_imports = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
@@ -1316,7 +1319,8 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
             all_items.push(item.clone());
         }
         for imp in &file.imports {
-            if seen_imports.insert((imp.path.clone(), imp.alias.clone())) {
+            let effective_alias = imp.alias.clone().or_else(|| imp.path.first().cloned());
+            if seen_imports.insert((imp.path.clone(), effective_alias)) {
                 all_imports.push(imp.clone());
             }
         }
@@ -2170,6 +2174,47 @@ mod tests {
             .map(|import| import.alias.as_deref().expect("test alias"))
             .collect::<Vec<_>>();
         assert_eq!(aliases, ["left", "right"]);
+    }
+
+    #[test]
+    fn flow_merge_all_normalizes_implicit_default_aliases() {
+        let import = |alias: Option<&str>| Import {
+            meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+                "test.loader_import_default_alias",
+            )),
+            path: vec!["shared".into()],
+            alias: alias.map(str::to_owned),
+        };
+        let file = |imports| File {
+            sources: crate::span::SourceRegistry::default(),
+            imports,
+            items: vec![],
+            implicit_single: false,
+        };
+        let modules = HashMap::from([
+            (
+                "a".to_string(),
+                LoadedModule {
+                    path: PathBuf::from("a.mimi"),
+                    // `use shared` and `use shared as shared` produce the
+                    // same checker-visible binding and must not create two
+                    // import metadata nodes after file merge.
+                    file: file(vec![import(None)]),
+                },
+            ),
+            (
+                "b".to_string(),
+                LoadedModule {
+                    path: PathBuf::from("b.mimi"),
+                    file: file(vec![import(Some("shared"))]),
+                },
+            ),
+        ]);
+
+        let merged = flow_merge_all(&modules).expect("merge equivalent default aliases");
+        assert_eq!(merged.imports.len(), 1);
+        assert_eq!(merged.imports[0].path, ["shared"]);
+        assert_eq!(merged.imports[0].alias, None);
     }
 
     #[test]
