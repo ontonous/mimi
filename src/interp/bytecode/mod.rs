@@ -1106,6 +1106,15 @@ mod bench {
         vm.run().map_err(|e| e.to_string())
     }
 
+    fn expect_register_error(build: impl FnOnce(instr::Reg) -> Op, expected: &str) {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(build(result));
+        main.emit(Op::Ret { ra: result });
+        let error = run_single_op(main).expect_err("a forged register must fail before access");
+        assert!(error.contains(expected), "{error}");
+    }
+
     #[test]
     fn bench_fib25_bytecode() {
         // fib(20) bytecode benchmark (tree-walker removed in 0.33 Phase F).
@@ -2035,6 +2044,148 @@ func main() -> i32 {
         let error = run_single_op(main)
             .expect_err("a forged variant get source register must fail before access");
         assert!(error.contains("variant get source register"), "{error}");
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_set_target_register() {
+        expect_register_error(
+            |result| Op::RecordSet {
+                ra: result + 1,
+                field: 0,
+                rb: result,
+            },
+            "record set target register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_record_set_value_register() {
+        expect_register_error(
+            |result| Op::RecordSet {
+                ra: result,
+                field: 0,
+                rb: result + 1,
+            },
+            "record set value register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_tuple_set_target_register() {
+        expect_register_error(
+            |result| Op::TupleSet {
+                ra: result + 1,
+                idx: 0,
+                rb: result,
+            },
+            "tuple set target register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_tuple_set_value_register() {
+        expect_register_error(
+            |result| Op::TupleSet {
+                ra: result,
+                idx: 0,
+                rb: result + 1,
+            },
+            "tuple set value register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_is_variant_source_register() {
+        expect_register_error(
+            |result| Op::IsVariant {
+                rd: result,
+                ra: result + 1,
+                tag: 0,
+            },
+            "is-variant source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_is_variant_destination_register() {
+        expect_register_error(
+            |result| Op::IsVariant {
+                rd: result + 1,
+                ra: result,
+                tag: 0,
+            },
+            "is-variant destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_pattern_field_source_register() {
+        expect_register_error(
+            |result| Op::PatternField {
+                rd: result,
+                ra: result + 1,
+                field: 0,
+            },
+            "pattern field source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_pattern_field_destination_register() {
+        expect_register_error(
+            |result| Op::PatternField {
+                rd: result + 1,
+                ra: result,
+                field: 0,
+            },
+            "pattern field destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_tag_source_register() {
+        expect_register_error(
+            |result| Op::VariantTag {
+                rd: result,
+                ra: result + 1,
+            },
+            "variant tag source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_tag_destination_register() {
+        expect_register_error(
+            |result| Op::VariantTag {
+                rd: result + 1,
+                ra: result,
+            },
+            "variant tag destination register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_payload_source_register() {
+        expect_register_error(
+            |result| Op::VariantPayload {
+                rd: result,
+                ra: result + 1,
+                idx: 0,
+            },
+            "variant payload source register",
+        );
+    }
+
+    #[test]
+    fn vm_rejects_forged_variant_payload_destination_register() {
+        expect_register_error(
+            |result| Op::VariantPayload {
+                rd: result + 1,
+                ra: result,
+                idx: 0,
+            },
+            "variant payload destination register",
+        );
     }
 
     #[test]

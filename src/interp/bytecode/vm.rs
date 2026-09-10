@@ -3124,6 +3124,8 @@ impl BytecodeVM {
                     self.set_reg(rd, value);
                 }
                 Op::RecordSet { ra, field, rb } => {
+                    self.ensure_reg(ra, "record set target")?;
+                    self.ensure_reg(rb, "record set value")?;
                     let field_name = match &proto.constants[field as usize] {
                         ConstValue::Str(s) => s.clone(),
                         _ => String::new(),
@@ -3169,6 +3171,8 @@ impl BytecodeVM {
                     }
                 }
                 Op::TupleSet { ra, idx, rb } => {
+                    self.ensure_reg(ra, "tuple set target")?;
+                    self.ensure_reg(rb, "tuple set value")?;
                     let idx_name = match &proto.constants[idx as usize] {
                         ConstValue::Str(s) => s.clone(),
                         _ => String::new(),
@@ -4066,6 +4070,8 @@ impl BytecodeVM {
                     }
                 }
                 Op::IsVariant { rd, ra, tag } => {
+                    self.ensure_reg(rd, "is-variant destination")?;
+                    self.ensure_reg(ra, "is-variant source")?;
                     let v = self.get_reg(ra);
                     let expected_tag = match &proto.constants[tag as usize] {
                         ConstValue::Str(s) => s.clone(),
@@ -4297,6 +4303,8 @@ impl BytecodeVM {
                     self.set_reg(rd, elem);
                 }
                 Op::PatternField { rd, ra, field } => {
+                    self.ensure_reg(rd, "pattern field destination")?;
+                    self.ensure_reg(ra, "pattern field source")?;
                     // v0.34.15: field extraction for match arms. Flow states
                     // are Record(Some(name), HashMap) — extract by field name.
                     // Variants keep positional _0.._N semantics.
@@ -4337,6 +4345,8 @@ impl BytecodeVM {
                     }
                 }
                 Op::VariantTag { rd, ra } => {
+                    self.ensure_reg(rd, "variant tag destination")?;
+                    self.ensure_reg(ra, "variant tag source")?;
                     let v = self.get_reg(ra);
                     match v {
                         Value::Variant(name, _) => {
@@ -4357,6 +4367,8 @@ impl BytecodeVM {
                     }
                 }
                 Op::VariantPayload { rd, ra, idx } => {
+                    self.ensure_reg(rd, "variant payload destination")?;
+                    self.ensure_reg(ra, "variant payload source")?;
                     let v = self.get_reg(ra).clone();
                     match v {
                         Value::Variant(_, fields)
