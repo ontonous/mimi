@@ -12223,6 +12223,21 @@ func main() -> i64 {
                 error.message.contains("conversion receipt disagrees")
                     || error.message.contains("conversion from")
             }));
+
+            let capability_error = crate::verifier::validate_mir_capabilities(&forged_program)
+                .expect_err("verifier capability gate must reject forged conversion receipt");
+            assert!(capability_error.iter().any(|error| {
+                error.contains("conversion receipt disagrees") || error.contains("conversion from")
+            }));
+
+            let verifier_error =
+                crate::verifier::verify_mir(&forged_program, "forged-ffi-conversion".into())
+                    .expect_err("verifier must reject forged conversion receipt");
+            assert!(
+                verifier_error.contains("conversion receipt disagrees")
+                    || verifier_error.contains("conversion from"),
+                "{verifier_error}"
+            );
         }
     }
 
