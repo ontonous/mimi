@@ -1163,7 +1163,7 @@ impl<'a> NativeMirValidator<'a> {
                                 .validate_owned_string(&function.values[argument].ty)
                                 .is_ok()
                         } else {
-                            desc.ownership == MirOwnership::Copy
+                            desc.is_canonical_copy_scalar(true)
                         };
                         if !contract.accepts_abi(desc.abi)
                             || !contract.accepts_layout(&desc.layout)
@@ -1199,7 +1199,7 @@ impl<'a> NativeMirValidator<'a> {
                 } else {
                     contract.accepts_abi(result_desc.abi)
                         && contract.accepts_layout(&result_desc.layout)
-                        && result_desc.ownership == MirOwnership::Copy
+                        && result_desc.is_canonical_copy_scalar(true)
                         && (!matches!(
                             kind,
                             MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
@@ -2966,6 +2966,91 @@ mod tests {
                     .message
                     .contains("complete canonical scalar TypeDesc contract")),
                 "unexpected forged FFI diagnostics: {:?}",
+                validator.errors
+            );
+        }
+    }
+
+    #[test]
+    fn native_builtin_scalar_values_require_complete_copy_metadata() {
+        let program = canonical_program(
+            r#"
+func main() -> i64 {
+    println(1)
+    0
+}
+"#,
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let function = program.functions().get(&owner).expect("main MIR");
+        let (builtin_kind, arguments, result, instruction_id) = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| {
+                let MirInstructionKind::BuiltinCall {
+                    kind,
+                    arguments,
+                    result,
+                    ..
+                } = &instruction.kind
+                else {
+                    return None;
+                };
+                Some((
+                    *kind,
+                    arguments.clone(),
+                    result.clone(),
+                    instruction.id.clone(),
+                ))
+            })
+            .expect("println builtin MIR instruction");
+        assert_eq!(builtin_kind, MirBuiltinKind::PrintlnInt);
+        let argument = arguments.first().expect("println argument");
+        let scalar_id = function
+            .values
+            .get(argument)
+            .expect("println argument value")
+            .ty
+            .clone();
+        let descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("println scalar TypeDesc")
+            .clone();
+        let instruction = MirInstructionKind::BuiltinCall {
+            kind: builtin_kind,
+            arguments,
+            result,
+            string_field_contract: None,
+        };
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(scalar_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => {
+                    forged.drop_plan =
+                        Some(crate::core::mir::types::MirDropGluePlan { fields: Vec::new() })
+                }
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(scalar_id.clone(), forged);
+            let forged_program =
+                MirProgram::with_type_catalog(program.functions().clone(), catalog)
+                    .expect("forged builtin scalar catalog remains structurally valid");
+            let forged_function = forged_program.functions().get(&owner).expect("main MIR");
+            let mut validator = NativeMirValidator::new(&forged_program);
+            validator.validate_instruction(forged_function, &instruction, instruction_id.as_str());
+            assert!(
+                validator.errors.iter().any(|error| {
+                    error.message.contains("builtin 'println' argument")
+                        && error.message.contains("native scalar contract")
+                }),
+                "unexpected forged builtin diagnostics: {:?}",
                 validator.errors
             );
         }
