@@ -1753,12 +1753,13 @@ fn validate_instance_table(
                 .validate_scalar_generic_arguments(&instance.arguments)
                 .or_else(|scalar_error| {
                     if instance.arguments.len() == 1 {
-                        type_catalog
-                            .validate_move_owned_list_payload(&instance.arguments[0])
-                            .or_else(|_| {
-                                type_catalog.validate_nested_list_payload(&instance.arguments[0])
-                            })
-                            .map_err(|_| scalar_error)
+                        match instance.arguments.first() {
+                            Some(argument) => type_catalog
+                                .validate_move_owned_list_payload(argument)
+                                .or_else(|_| type_catalog.validate_nested_list_payload(argument))
+                                .map_err(|_| scalar_error),
+                            None => Err(scalar_error),
+                        }
                     } else {
                         Err(scalar_error)
                     }
@@ -1772,8 +1773,10 @@ fn validate_instance_table(
                         "generic record projection contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
+                } else if let Some(argument) = instance.arguments.first() {
+                    type_catalog.validate_generic_record_projection_argument(argument)
                 } else {
-                    type_catalog.validate_generic_record_projection_argument(&instance.arguments[0])
+                    Err("generic record projection contract argument is absent".into())
                 }
             }
             MirGenericInstanceContract::ScalarRecordUpdate { .. } => {
@@ -1788,10 +1791,12 @@ fn validate_instance_table(
                         "owned generic record projection contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
-                } else {
+                } else if let Some(argument) = instance.arguments.first() {
                     type_catalog
-                        .validate_move_owned_record_payload(&instance.arguments[0])
+                        .validate_move_owned_record_payload(argument)
                         .map(|_| ())
+                } else {
+                    Err("owned generic record projection contract argument is absent".into())
                 }
             }
             MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => {
@@ -1800,10 +1805,15 @@ fn validate_instance_table(
                         "owned generic record move/drop projection contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
-                } else {
+                } else if let Some(argument) = instance.arguments.first() {
                     type_catalog
-                        .validate_move_owned_record_payload(&instance.arguments[0])
+                        .validate_move_owned_record_payload(argument)
                         .map(|_| ())
+                } else {
+                    Err(
+                        "owned generic record move/drop projection contract argument is absent"
+                            .into(),
+                    )
                 }
             }
             MirGenericInstanceContract::OwnedRecordUpdate { .. } => {
@@ -1812,9 +1822,10 @@ fn validate_instance_table(
                         "owned generic record update contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
+                } else if let Some(argument) = instance.arguments.first() {
+                    type_catalog.validate_owned_record_update_generic_argument(argument)
                 } else {
-                    type_catalog
-                        .validate_owned_record_update_generic_argument(&instance.arguments[0])
+                    Err("owned generic record update contract argument is absent".into())
                 }
             }
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {
@@ -1831,10 +1842,12 @@ fn validate_instance_table(
                         "owned generic variant projection contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
-                } else {
+                } else if let Some(argument) = instance.arguments.first() {
                     type_catalog
-                        .validate_move_owned_payload(&instance.arguments[0])
+                        .validate_move_owned_payload(argument)
                         .map(|_| ())
+                } else {
+                    Err("owned generic variant projection contract argument is absent".into())
                 }
             }
             MirGenericInstanceContract::ScalarVariantProjection { ref contract } => type_catalog
