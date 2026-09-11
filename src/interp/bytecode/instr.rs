@@ -1755,6 +1755,18 @@ impl FunctionProto {
         r
     }
 
+    /// Try to allocate a new register without wrapping the `u16` bytecode
+    /// register ABI.  The legacy compiler still uses `alloc_reg`; canonical
+    /// MIR consumers use this checked entry point so malformed or unusually
+    /// large programs fail during emission instead of producing an invalid
+    /// register index.
+    pub fn try_alloc_reg(&mut self) -> Option<Reg> {
+        let r = self.register_count;
+        let next = r.checked_add(1)?;
+        self.register_count = next;
+        Some(r)
+    }
+
     /// Add a constant to the pool, returning its index.
     /// Deduplicates strings and integers.
     pub fn add_const(&mut self, val: ConstValue) -> ConstIdx {

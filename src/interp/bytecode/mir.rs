@@ -559,6 +559,7 @@ struct FunctionEmitter<'a> {
     block_starts: BTreeMap<crate::core::mir::MirBlockId, usize>,
     pending_jumps: Vec<(usize, crate::core::mir::MirBlockId)>,
     errors: Vec<MirBytecodeError>,
+    register_overflow_reported: bool,
 }
 
 fn compile_function(
@@ -583,6 +584,7 @@ fn compile_function(
         block_starts: BTreeMap::new(),
         pending_jumps: Vec::new(),
         errors: Vec::new(),
+        register_overflow_reported: false,
     };
     emitter.assign_registers();
     emitter.validate_signature();
@@ -604,6 +606,44 @@ impl<'a> FunctionEmitter<'a> {
         });
     }
 
+    /// Allocate a temporary register through the checked bytecode ABI.  A
+    /// sentinel keeps emission progressing far enough to collect any other
+    /// structural errors, while the first overflow is reported once and the
+    /// function is rejected before a `BytecodeProgram` can escape.
+    fn alloc_reg(&mut self) -> Reg {
+        match self.proto.try_alloc_reg() {
+            Some(reg) => reg,
+            None => {
+                if !self.register_overflow_reported {
+                    self.error("MIR bytecode register allocation exceeds u16 ABI");
+                    self.register_overflow_reported = true;
+                }
+                0
+            }
+        }
+    }
+
+    fn offset_reg(&mut self, base: Reg, offset: usize, role: &str) -> Option<Reg> {
+        let offset = match u16::try_from(offset) {
+            Ok(offset) => offset,
+            Err(_) => {
+                self.error(format!(
+                    "{role} register offset {offset} exceeds bytecode register ABI"
+                ));
+                return None;
+            }
+        };
+        match base.checked_add(offset) {
+            Some(reg) => Some(reg),
+            None => {
+                self.error(format!(
+                    "{role} register index overflow (base {base}, offset {offset})"
+                ));
+                None
+            }
+        }
+    }
+
     fn assign_registers(&mut self) {
         if self.function.values.len() > u16::MAX as usize {
             self.error("MIR value catalog exceeds bytecode register ABI");
@@ -615,7 +655,7 @@ impl<'a> FunctionEmitter<'a> {
         }
         for value in self.function.values.keys() {
             if !self.registers.contains_key(value) {
-                let reg = self.proto.alloc_reg();
+                let reg = self.alloc_reg();
                 self.registers.insert(value.clone(), reg);
             }
         }
@@ -1249,7 +1289,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(contract) = self.add_record_projection_contract(&receipt.projection) else {
                 return;
             };
-            let field_reg = self.proto.alloc_reg();
+            let field_reg = self.alloc_reg();
             self.proto.emit(Op::RecordGet {
                 rd: field_reg,
                 ra: source_reg,
@@ -1257,7 +1297,7 @@ impl<'a> FunctionEmitter<'a> {
                 contract: Some(contract),
             });
             let Some(rd) = self.reg(result) else { return };
-            let args_base = self.proto.alloc_reg();
+            let args_base = self.alloc_reg();
             self.proto.emit(Op::Mov {
                 rd: args_base,
                 rs: field_reg,
@@ -1391,12 +1431,12 @@ impl<'a> FunctionEmitter<'a> {
         // Builtin operands use the same consecutive range ABI as calls.  The
         // copies are explicit so MIR value register allocation remains an
         // implementation detail and never becomes semantic argument order.
-        let args_base = self.proto.alloc_reg();
+        let args_base = self.alloc_reg();
         for (index, argument) in arguments.iter().enumerate() {
             let destination = if index == 0 {
                 args_base
             } else {
-                self.proto.alloc_reg()
+                self.alloc_reg()
             };
             let Some(source) = self.reg(argument) else {
                 return;
@@ -1466,8 +1506,8 @@ impl<'a> FunctionEmitter<'a> {
             self.error("builtin 'session_pair' has no bytecode registry implementation");
             return;
         };
-        let pair_reg = self.proto.alloc_reg();
-        let args_base = self.proto.alloc_reg();
+        let pair_reg = self.alloc_reg();
+        let args_base = self.alloc_reg();
         self.proto.emit(Op::CallBuiltin {
             rd: pair_reg,
             builtin,
@@ -1569,7 +1609,7 @@ impl<'a> FunctionEmitter<'a> {
         let Some(source) = self.reg(endpoint) else {
             return;
         };
-        let args_base = self.proto.alloc_reg();
+        let args_base = self.alloc_reg();
         self.proto.emit(Op::Mov {
             rd: args_base,
             rs: source,
@@ -1583,7 +1623,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(payload_reg) = self.reg(payload) else {
                 return;
             };
-            let payload_slot = self.proto.alloc_reg();
+            let payload_slot = self.alloc_reg();
             self.proto.emit(Op::Mov {
                 rd: payload_slot,
                 rs: payload_reg,
@@ -1676,7 +1716,7 @@ impl<'a> FunctionEmitter<'a> {
             let destination = if index + 1 == place.projections.len() {
                 rd
             } else {
-                self.proto.alloc_reg()
+                self.alloc_reg()
             };
             match projection {
                 crate::core::ir::ResolvedProjection::Tuple {
@@ -2225,13 +2265,13 @@ impl<'a> FunctionEmitter<'a> {
         }
         let rd = result
             .and_then(|value| self.reg(value))
-            .unwrap_or_else(|| self.proto.alloc_reg());
-        let args_base = self.proto.alloc_reg();
+            .unwrap_or_else(|| self.alloc_reg());
+        let args_base = self.alloc_reg();
         for (index, argument) in arguments.iter().enumerate() {
             let destination = if index == 0 {
                 args_base
             } else {
-                self.proto.alloc_reg()
+                self.alloc_reg()
             };
             let Some(source) = self.reg(argument) else {
                 return;
@@ -2365,16 +2405,16 @@ impl<'a> FunctionEmitter<'a> {
         }
         let rd = result
             .and_then(|value| self.reg(value))
-            .unwrap_or_else(|| self.proto.alloc_reg());
+            .unwrap_or_else(|| self.alloc_reg());
         // Calls require a consecutive argument range.  Materialize a parallel
         // copy so a source register can also be a destination of another copy.
-        let args_base = self.proto.alloc_reg();
+        let args_base = self.alloc_reg();
         let mut arg_regs = Vec::with_capacity(arguments.len());
         for argument in arguments {
             let scratch = if arg_regs.is_empty() {
                 args_base
             } else {
-                self.proto.alloc_reg()
+                self.alloc_reg()
             };
             let Some(source) = self.reg(argument) else {
                 return;
@@ -2413,7 +2453,11 @@ impl<'a> FunctionEmitter<'a> {
             arg_regs.push(scratch);
         }
         debug_assert!(
-            arguments.is_empty() || arg_regs.windows(2).all(|pair| pair[1] == pair[0] + 1)
+            self.register_overflow_reported
+                || arguments.is_empty()
+                || arg_regs
+                    .windows(2)
+                    .all(|pair| { pair[0].checked_add(1).is_some_and(|next| pair[1] == next) })
         );
         self.proto.emit(Op::CallMove {
             rd,
@@ -3666,16 +3710,12 @@ impl<'a> FunctionEmitter<'a> {
             self.error("tuple arity exceeds bytecode aggregate ABI");
             return;
         }
-        let base = self.proto.alloc_reg();
+        let base = self.alloc_reg();
         for (index, field) in fields.iter().enumerate() {
             let Some(source) = self.reg(field) else {
                 return;
             };
-            let destination = if index == 0 {
-                base
-            } else {
-                self.proto.alloc_reg()
-            };
+            let destination = if index == 0 { base } else { self.alloc_reg() };
             if !self.emit_value_transfer(destination, source, &elements[index]) {
                 return;
             }
@@ -3767,7 +3807,7 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        let base = self.proto.alloc_reg();
+        let base = self.alloc_reg();
         for (index, field_desc) in layout_fields.iter().enumerate() {
             let Some(source_value) = supplied.get(&field_desc.id) else {
                 self.error(format!(
@@ -3779,11 +3819,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(source_value) else {
                 return;
             };
-            let destination = if index == 0 {
-                base
-            } else {
-                self.proto.alloc_reg()
-            };
+            let destination = if index == 0 { base } else { self.alloc_reg() };
             if result_desc.ownership == MirOwnership::Copy {
                 self.proto.emit(Op::Mov {
                     rd: destination,
@@ -3879,7 +3915,7 @@ impl<'a> FunctionEmitter<'a> {
         let Some(shapes) = self.emit_variant_shape_table(&result_desc.id) else {
             return;
         };
-        let base = self.proto.alloc_reg();
+        let base = self.alloc_reg();
         for (index, field_desc) in variant_desc.fields.iter().enumerate() {
             let Some(value) = supplied.get(&field_desc.id) else {
                 self.error("variant payload field disappeared during emission");
@@ -3888,11 +3924,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(value) else {
                 return;
             };
-            let destination = if index == 0 {
-                base
-            } else {
-                self.proto.alloc_reg()
-            };
+            let destination = if index == 0 { base } else { self.alloc_reg() };
             self.proto.emit(if move_payload {
                 Op::Move {
                     rd: destination,
@@ -4058,7 +4090,7 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        let update_base = self.proto.alloc_reg();
+        let update_base = self.alloc_reg();
         for (index, field_desc) in layout_fields
             .iter()
             .filter(|field| supplied.contains_key(&field.id))
@@ -4073,7 +4105,7 @@ impl<'a> FunctionEmitter<'a> {
             let destination = if index == 0 {
                 update_base
             } else {
-                self.proto.alloc_reg()
+                self.alloc_reg()
             };
             if record_update_move_contract.is_some() {
                 if !self.emit_value_transfer(destination, source, &field_desc.ty) {
@@ -4388,7 +4420,7 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     };
-                    let condition = self.proto.alloc_reg();
+                    let condition = self.alloc_reg();
                     let tag = self
                         .proto
                         .add_const(ConstValue::Str(variant_desc.name.clone()));
@@ -4474,7 +4506,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(argument) else {
                 return;
             };
-            let scratch = self.proto.alloc_reg();
+            let scratch = self.alloc_reg();
             let Some(argument_info) = self.function.values.get(argument) else {
                 self.error(format!("edge argument '{}' is absent", argument));
                 return;
@@ -4500,9 +4532,9 @@ impl<'a> FunctionEmitter<'a> {
         let Some(shapes) = self.emit_variant_shape_table(scrutinee_ty) else {
             return;
         };
-        let payload_base = self.proto.alloc_reg();
+        let payload_base = self.alloc_reg();
         for _ in 1..variant.fields.len() {
-            self.proto.alloc_reg();
+            self.alloc_reg();
         }
         let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
         self.proto.emit(Op::DestructureVariantMove {
@@ -4517,7 +4549,11 @@ impl<'a> FunctionEmitter<'a> {
                 .iter()
                 .any(|binding| binding.projection.field == field.id)
             {
-                self.emit_drop_register(payload_base + index as u16, &field.ty);
+                let Some(field_reg) = self.offset_reg(payload_base, index, "variant payload")
+                else {
+                    return;
+                };
+                self.emit_drop_register(field_reg, &field.ty);
             }
         }
         let mut nested_bases = BTreeMap::new();
@@ -4563,9 +4599,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("nested tuple payload arity exceeds bytecode field ABI");
                 return;
             }
-            let tuple_base = self.proto.alloc_reg();
+            let tuple_base = self.alloc_reg();
             for _ in 1..elements.len() {
-                self.proto.alloc_reg();
+                self.alloc_reg();
             }
             let shape = self
                 .proto
@@ -4573,8 +4609,13 @@ impl<'a> FunctionEmitter<'a> {
                     tuple_ty: nested.tuple_ty.clone(),
                     element_tys: elements.clone(),
                 }));
+            let Some(tuple_source) =
+                self.offset_reg(payload_base, outer_index as usize, "nested variant payload")
+            else {
+                return;
+            };
             self.proto.emit(Op::DestructureTupleMove {
-                ra: payload_base + outer_index as u16,
+                ra: tuple_source,
                 base: tuple_base,
                 arity: elements.len() as u16,
                 shape,
@@ -4608,9 +4649,18 @@ impl<'a> FunctionEmitter<'a> {
                     .get(&index)
                     .copied()
                     .expect("nested tuple base materialized");
-                tuple_base + nested.field_index as u16
+                let Some(source) =
+                    self.offset_reg(tuple_base, nested.field_index as usize, "nested tuple")
+                else {
+                    return;
+                };
+                source
             } else {
-                payload_base + index as u16
+                let Some(source) = self.offset_reg(payload_base, index as usize, "variant payload")
+                else {
+                    return;
+                };
+                source
             };
             sources.push(source);
         }
@@ -4796,7 +4846,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(argument) else {
                 return;
             };
-            let scratch = self.proto.alloc_reg();
+            let scratch = self.alloc_reg();
             let Some(argument_info) = self.function.values.get(argument) else {
                 self.error(format!("edge argument '{}' is absent", argument));
                 return;
@@ -4832,7 +4882,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("variant payload index exceeds bytecode field ABI");
                 return;
             }
-            let scratch = self.proto.alloc_reg();
+            let scratch = self.alloc_reg();
             self.proto.emit(Op::VariantGet {
                 rd: scratch,
                 ra: scrutinee,
@@ -4874,7 +4924,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(argument) else {
                 return;
             };
-            let temp = self.proto.alloc_reg();
+            let temp = self.alloc_reg();
             let Some(argument_info) = self.function.values.get(argument) else {
                 self.error(format!("edge argument '{}' is absent", argument));
                 return;
@@ -4948,7 +4998,7 @@ impl<'a> FunctionEmitter<'a> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::compile_mir_program;
+    use super::{compile_mir_program, FunctionEmitter};
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
@@ -4957,7 +5007,7 @@ mod tests {
     };
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
-    use crate::interp::bytecode::instr::CanonicalFfiScalarType;
+    use crate::interp::bytecode::instr::{CanonicalFfiScalarType, FunctionProto};
     use crate::interp::bytecode::BytecodeVM;
     use crate::interp::bytecode::{ConstValue, Op};
     use crate::interp::value::Value;
@@ -5010,6 +5060,43 @@ mod tests {
         let checked = crate::core::check_program(&file)
             .map_err(|errors| DifferentialHarnessError::Check(format!("{errors:?}")))?;
         Ok((file, checked))
+    }
+
+    #[test]
+    fn mir_bytecode_register_abi_rejects_allocation_and_offset_overflow() {
+        let (_, checked) = parse_and_check("func main() -> i32 { 42 }").expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let function = program.functions().get(&owner).expect("main function");
+        let mut emitter = FunctionEmitter {
+            function,
+            program: &program,
+            indices: &BTreeMap::new(),
+            ffi_indices: &BTreeMap::new(),
+            proto: FunctionProto::new(function.owner.0.clone(), 0),
+            registers: BTreeMap::new(),
+            block_starts: BTreeMap::new(),
+            pending_jumps: Vec::new(),
+            errors: Vec::new(),
+            register_overflow_reported: false,
+        };
+
+        emitter.proto.register_count = u16::MAX;
+        assert_eq!(emitter.alloc_reg(), 0);
+        assert_eq!(emitter.proto.register_count, u16::MAX);
+        assert_eq!(
+            emitter.errors[0].message,
+            "MIR bytecode register allocation exceeds u16 ABI"
+        );
+        assert_eq!(
+            emitter.offset_reg(u16::MAX, 1, "variant payload"),
+            None,
+            "a register base plus field offset must not wrap"
+        );
+        assert!(emitter
+            .errors
+            .iter()
+            .any(|error| error.message.contains("register index overflow")));
     }
 
     #[test]
