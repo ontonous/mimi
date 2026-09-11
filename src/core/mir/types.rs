@@ -5239,7 +5239,15 @@ impl MirTypeCatalog {
                         ty.as_str()
                     ));
                 }
-                if field.ty != elements[field.index] {
+                let Some(layout_field_ty) = elements.get(field.index) else {
+                    return Err(format!(
+                        "type '{}' drop plan field {} is outside {} layout",
+                        ty.as_str(),
+                        field.index,
+                        layout_name
+                    ));
+                };
+                if field.ty != *layout_field_ty {
                     return Err(format!(
                         "type '{}' drop plan field {} type disagrees with {} layout",
                         ty.as_str(),
