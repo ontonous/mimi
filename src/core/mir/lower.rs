@@ -10629,11 +10629,11 @@ fn is_list_len_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog
         return false;
     }
     type_catalog.is_some_and(|catalog| {
-        catalog
-            .get(&call.arguments[0].value.ty)
-            .is_some_and(|descriptor| {
+        call.arguments.first().is_some_and(|argument| {
+            catalog.get(&argument.value.ty).is_some_and(|descriptor| {
                 matches!(descriptor.layout, super::types::MirLayout::List { .. })
             })
+        })
     })
 }
 
@@ -10647,11 +10647,11 @@ fn is_list_reverse_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCat
         return false;
     }
     type_catalog.is_some_and(|catalog| {
-        catalog
-            .get(&call.arguments[0].value.ty)
-            .is_some_and(|descriptor| {
+        call.arguments.first().is_some_and(|argument| {
+            catalog.get(&argument.value.ty).is_some_and(|descriptor| {
                 matches!(descriptor.layout, super::types::MirLayout::List { .. })
             })
+        })
     })
 }
 
@@ -10949,11 +10949,11 @@ fn is_set_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) ->
     if builtin.as_str() == "contains" {
         return call.arguments.len() == 2
             && type_catalog.is_some_and(|catalog| {
-                catalog
-                    .get(&call.arguments[0].value.ty)
-                    .is_some_and(|descriptor| {
+                call.arguments.first().is_some_and(|argument| {
+                    catalog.get(&argument.value.ty).is_some_and(|descriptor| {
                         matches!(descriptor.layout, super::types::MirLayout::Set { .. })
                     })
+                })
             });
     }
     matches!(
