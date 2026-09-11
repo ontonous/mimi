@@ -1577,12 +1577,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // narrower integers are widened back into the i64 slot.
         match mapped {
             BasicValueEnum::StructValue(_) | BasicValueEnum::PointerValue(_) => {
-                let mapped_sty = match mapped {
-                    BasicValueEnum::StructValue(sv) => sv.get_type(),
-                    BasicValueEnum::PointerValue(_) => {
-                        return Err("map_err: pointer-typed error result requires a struct".into());
-                    }
-                    _ => unreachable!(),
+                let mapped_sty = if let BasicValueEnum::StructValue(sv) = mapped {
+                    sv.get_type()
+                } else {
+                    return Err("map_err: pointer-typed error result requires a struct".into());
                 };
                 let size_bytes = mapped_sty
                     .size_of()
