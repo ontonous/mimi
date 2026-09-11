@@ -102,6 +102,12 @@ fn lower_body_impl(
             message: error.to_string(),
         }]
     })?;
+    let fallback_value = MirValueId::new("error:fallback").map_err(|error| {
+        vec![MirLoweringError {
+            node_id: body.owner.clone(),
+            message: error.to_string(),
+        }]
+    })?;
     let mut lowerer = Lowerer {
         body,
         type_catalog,
@@ -110,6 +116,7 @@ fn lower_body_impl(
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
         current: entry.clone(),
+        fallback_value,
         loops: Vec::new(),
         transition_result,
         errors: Vec::new(),
@@ -6935,6 +6942,7 @@ struct Lowerer<'a> {
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
     current: MirBlockId,
+    fallback_value: MirValueId,
     loops: Vec<LoopTargets>,
     errors: Vec<MirLoweringError>,
 }
@@ -8641,7 +8649,7 @@ impl<'a> Lowerer<'a> {
             Ok(value) => value,
             Err(error) => {
                 self.error(node, error.to_string());
-                return None;
+                self.fallback_value.clone()
             }
         };
         self.insert_value(value.clone(), ty.clone(), node);
@@ -9831,8 +9839,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn fallback_value(&mut self, expression: &ResolvedExpr) -> MirValueId {
-        let value = MirValueId::new(format!("error:{}", expression.node_id.0))
-            .unwrap_or_else(|_| MirValueId::new("error:fallback").expect("static MIR id"));
+        let value = match MirValueId::new(format!("error:{}", expression.node_id.0)) {
+            Ok(value) => value,
+            Err(error) => {
+                self.error(&expression.node_id, error.to_string());
+                self.fallback_value.clone()
+            }
+        };
         self.insert_value(value.clone(), expression.ty.clone(), &expression.node_id);
         value
     }
