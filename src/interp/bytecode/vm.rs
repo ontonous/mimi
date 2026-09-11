@@ -772,7 +772,9 @@ impl BytecodeVM {
     /// Enrich an error with the current frame's function name and source line.
     fn enrich_error(&self, err: InterpError) -> InterpError {
         if let Some(frame) = self.stack.last() {
-            let proto = &self.program.functions[frame.proto_idx as usize];
+            let Some(proto) = self.program.functions.get(frame.proto_idx as usize) else {
+                return err;
+            };
             let err = err.in_func(proto.name.clone());
             let pc = if frame.pc > 0 { frame.pc - 1 } else { 0 };
             if let Some(&line) = proto.line_table.get(pc) {
@@ -926,7 +928,13 @@ impl BytecodeVM {
             }
 
             let frame = self.cur_frame();
-            let proto = &program.functions[frame.proto_idx as usize];
+            let Some(proto) = program.functions.get(frame.proto_idx as usize) else {
+                return Err(InterpError::new(format!(
+                    "frame prototype {} is out of range (function count {})",
+                    frame.proto_idx,
+                    program.functions.len()
+                )));
+            };
 
             if frame.pc >= proto.code.len() {
                 // Fell off the end — implicit return Unit.
@@ -2183,9 +2191,7 @@ impl BytecodeVM {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    let caller = self.program.functions[self.cur_frame().proto_idx as usize]
-                        .name
-                        .clone();
+                    let caller = proto.name.clone();
                     let expected_instruction = match proto.constants.get(instruction as usize) {
                         Some(crate::interp::bytecode::ConstValue::Str(value)) => value.clone(),
                         Some(_) => {
@@ -2248,10 +2254,7 @@ impl BytecodeVM {
                 }
                 // ── Quote assembly (0.33 Phase F) ──
                 Op::QuotePushLit { const_idx } => {
-                    let lit = match self.program.functions[self.cur_frame().proto_idx as usize]
-                        .constants
-                        .get(const_idx as usize)
-                    {
+                    let lit = match proto.constants.get(const_idx as usize) {
                         Some(ConstValue::Int(v)) => Lit::Int(*v),
                         Some(ConstValue::Float(v)) => Lit::Float(*v),
                         Some(ConstValue::Bool(v)) => Lit::Bool(*v),
@@ -2385,10 +2388,7 @@ impl BytecodeVM {
                     });
                 }
                 Op::QuoteCast { type_idx } => {
-                    let ty = match self.program.functions[self.cur_frame().proto_idx as usize]
-                        .constants
-                        .get(type_idx as usize)
-                    {
+                    let ty = match proto.constants.get(type_idx as usize) {
                         Some(ConstValue::Type(t)) => t.clone(),
                         _ => return Err(InterpError::new("QuoteCast: constant is not a type")),
                     };
@@ -2420,10 +2420,7 @@ impl BytecodeVM {
                         ));
                 }
                 Op::QuoteWhileLet { pat_idx } => {
-                    let pat = match self.program.functions[self.cur_frame().proto_idx as usize]
-                        .constants
-                        .get(pat_idx as usize)
-                    {
+                    let pat = match proto.constants.get(pat_idx as usize) {
                         Some(ConstValue::Pattern(p)) => p.clone(),
                         _ => {
                             return Err(InterpError::new(
@@ -2518,7 +2515,6 @@ impl BytecodeVM {
                     names_idx,
                     ty_idx,
                 } => {
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let names = match proto.constants.get(names_idx as usize) {
                         Some(ConstValue::StrVec(v)) => v.clone(),
                         _ => {
@@ -2588,7 +2584,7 @@ impl BytecodeVM {
                     // `return` without value / bodies without tail expression).
                     // B-5/B-4: ensures failures route through the same-frame
                     // fault handlers and drop the caller's stale writebacks.
-                    let contract_args = self.collect_contract_args(false);
+                    let contract_args = self.collect_contract_args(false)?;
                     let mut_param_vals = self.collect_mut_param_vals()?;
                     match self.finish_return(
                         Value::Unit,
@@ -3926,7 +3922,15 @@ impl BytecodeVM {
 
                             // Bind captured variables in the new frame.
                             // Captures go into registers param_count..param_count+capture_count.
-                            let target_proto = &self.program.functions[proto_idx as usize];
+                            let target_proto =
+                                self.program.functions.get(proto_idx as usize).ok_or_else(
+                                    || {
+                                        InterpError::new(format!(
+                                            "CallIndirect: closure prototype {} is out of range",
+                                            proto_idx
+                                        ))
+                                    },
+                                )?;
                             let param_count = target_proto.param_count as usize;
                             let frame_len = self.stack.last().map(|f| f.regs.len()).unwrap_or(0);
                             for (i, name) in target_proto.capture_names.iter().enumerate() {
@@ -4602,7 +4606,6 @@ impl BytecodeVM {
                 }
                 Op::NewCap { rd, name } => {
                     self.ensure_reg(rd, "new-cap destination")?;
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let cap_str = match proto.constants.get(name as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => "unknown_cap".to_string(),
@@ -4753,7 +4756,6 @@ impl BytecodeVM {
                     self.set_reg(rd, Value::String(Arc::new(name)));
                 }
                 Op::Trap { msg } => {
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let msg_str = match proto.constants.get(msg as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => "unknown trap".to_string(),
@@ -4808,7 +4810,6 @@ impl BytecodeVM {
                 // ── Actor / Flow / Session (Phase D) ──────────
                 Op::ActorSpawn { rd, actor } => {
                     self.ensure_reg(rd, "actor-spawn destination")?;
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let actor_name = match proto.constants.get(actor as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => return Err(InterpError::new("ActorSpawn: invalid actor name")),
@@ -4825,7 +4826,6 @@ impl BytecodeVM {
 
                 Op::ActorSpawnDetached { rd, actor } => {
                     self.ensure_reg(rd, "actor-spawn-detached destination")?;
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let actor_name = match proto.constants.get(actor as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
@@ -4856,7 +4856,6 @@ impl BytecodeVM {
                             "flow transition requires a from-state argument",
                         ));
                     }
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let flow_name = match proto.constants.get(flow as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
@@ -4944,7 +4943,6 @@ impl BytecodeVM {
                             "dynamic method call requires a receiver argument",
                         ));
                     }
-                    let proto = &self.program.functions[self.cur_frame().proto_idx as usize];
                     let method_name = match proto.constants.get(method as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
@@ -5432,7 +5430,16 @@ impl BytecodeVM {
                 self.push_frame(*proto_idx, args.to_vec(), None)?;
 
                 // Bind captured variables in the new frame.
-                let target_proto = &self.program.functions[*proto_idx as usize];
+                let target_proto =
+                    self.program
+                        .functions
+                        .get(*proto_idx as usize)
+                        .ok_or_else(|| {
+                            InterpError::new(format!(
+                                "call_closure: closure prototype {} is out of range",
+                                proto_idx
+                            ))
+                        })?;
                 let param_count = target_proto.param_count as usize;
                 for (i, name) in target_proto.capture_names.iter().enumerate() {
                     if let Some(value) = captured.get(name) {
@@ -5570,7 +5577,7 @@ impl BytecodeVM {
         // value lives in that slot — replacing it first handed the contract
         // (and the caller write-back) `Unit`, producing a spurious E0808
         // "ensures condition failed: false" and/or a silent Unit write-back.
-        let contract_args = self.collect_contract_args(is_early_return);
+        let contract_args = self.collect_contract_args(is_early_return)?;
         let mut_param_vals = self.collect_mut_param_vals()?;
         // Move value out of register (frame is about to be popped — no clone needed).
         let v = std::mem::replace(self.get_reg_mut(ra), Value::Unit);
@@ -5581,27 +5588,38 @@ impl BytecodeVM {
     /// register values plus its PRE-call snapshots (for `old(x)`). Returns
     /// None when contract verification is off, the return is early (`?`
     /// rejection — no postcondition on the wrapped value), or the function
-    /// carries no ensures contract.
+    /// carries no ensures contract. A malformed active-frame prototype is
+    /// returned as a structured error instead of being silently treated as a
+    /// function without contracts.
     fn collect_contract_args(
         &self,
         is_early_return: bool,
-    ) -> Option<(FuncIdx, Vec<Value>, Vec<Value>)> {
+    ) -> Result<Option<(FuncIdx, Vec<Value>, Vec<Value>)>, InterpError> {
         if self.verify_contracts && !is_early_return {
             let frame = self.cur_frame();
-            let proto = &self.program.functions[frame.proto_idx as usize];
+            let proto = self.current_proto()?;
             if proto.has_ensures {
-                Some((
+                Ok(Some((
                     frame.proto_idx,
                     (0..proto.param_count as usize)
-                        .map(|i| frame.regs[i].clone())
-                        .collect::<Vec<_>>(),
+                        .map(|i| {
+                            frame.regs.get(i).cloned().ok_or_else(|| {
+                                InterpError::new(format!(
+                                    "function '{}' parameter register {} is outside frame with {} register(s)",
+                                    proto.name,
+                                    i,
+                                    frame.regs.len()
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                     frame.old_snapshots.clone(),
-                ))
+                )))
             } else {
-                None
+                Ok(None)
             }
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -5672,7 +5690,17 @@ impl BytecodeVM {
     /// Uses a temporary tree-walker to evaluate contract expressions
     /// (same pattern as builtin_ast_eval).
     fn check_requires(&mut self, func_idx: FuncIdx, args: &[Value]) -> Result<(), InterpError> {
-        let proto = &self.program.functions[func_idx as usize];
+        let proto = self
+            .program
+            .functions
+            .get(func_idx as usize)
+            .ok_or_else(|| {
+                InterpError::new(format!(
+                    "requires contract owner function {} is out of range (function count {})",
+                    func_idx,
+                    self.program.functions.len()
+                ))
+            })?;
         if proto.requires_funcs.is_empty() {
             return Ok(());
         }
@@ -5698,7 +5726,17 @@ impl BytecodeVM {
         old_snapshots: &[Value],
         result: &Value,
     ) -> Result<(), InterpError> {
-        let proto = &self.program.functions[func_idx as usize];
+        let proto = self
+            .program
+            .functions
+            .get(func_idx as usize)
+            .ok_or_else(|| {
+                InterpError::new(format!(
+                    "ensures contract owner function {} is out of range (function count {})",
+                    func_idx,
+                    self.program.functions.len()
+                ))
+            })?;
         if proto.ensures_funcs.is_empty() {
             return Ok(());
         }
@@ -5731,7 +5769,7 @@ impl BytecodeVM {
     /// (before the frame is destroyed by pop).
     fn collect_mut_param_vals(&self) -> Result<Vec<Value>, InterpError> {
         let frame = self.cur_frame();
-        let proto = &self.program.functions[frame.proto_idx as usize];
+        let proto = self.current_proto()?;
         if proto.mut_param_indices.is_empty() {
             Ok(Vec::new())
         } else {
@@ -6100,12 +6138,27 @@ impl BytecodeVM {
         self.cur_frame_mut().regs[idx] = v;
     }
 
+    /// Resolve the prototype for the active frame through a checked table
+    /// lookup. All helper-level constant and contract metadata readers use
+    /// this boundary so a malformed frame cannot turn a diagnostic path into
+    /// an unchecked slice panic.
+    fn current_proto(&self) -> Result<&FunctionProto, InterpError> {
+        let frame = self.cur_frame();
+        self.program
+            .functions
+            .get(frame.proto_idx as usize)
+            .ok_or_else(|| {
+                InterpError::new(format!(
+                    "frame prototype {} is out of range (function count {})",
+                    frame.proto_idx,
+                    self.program.functions.len()
+                ))
+            })
+    }
+
     /// Look up a Str constant of the current frame's prototype.
     fn const_str(&self, idx: ConstIdx) -> Result<&str, InterpError> {
-        match self.program.functions[self.cur_frame().proto_idx as usize]
-            .constants
-            .get(idx as usize)
-        {
+        match self.current_proto()?.constants.get(idx as usize) {
             Some(ConstValue::Str(s)) => Ok(s),
             _ => Err(InterpError::new("expected Str constant")),
         }
@@ -6157,10 +6210,7 @@ impl BytecodeVM {
         let Some(contract_idx) = contract else {
             return Ok(None);
         };
-        match self.program.functions[self.cur_frame().proto_idx as usize]
-            .constants
-            .get(contract_idx as usize)
-        {
+        match self.current_proto()?.constants.get(contract_idx as usize) {
             Some(ConstValue::ListProjection(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
                 "list projection: contract constant {} is not a ListProjection",
@@ -6237,10 +6287,7 @@ impl BytecodeVM {
         let Some(contract_idx) = contract else {
             return Ok(None);
         };
-        match self.program.functions[self.cur_frame().proto_idx as usize]
-            .constants
-            .get(contract_idx as usize)
-        {
+        match self.current_proto()?.constants.get(contract_idx as usize) {
             Some(ConstValue::ListOperation(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
                 "canonical List operation: contract constant {} is not a ListOperation",
@@ -6261,10 +6308,7 @@ impl BytecodeVM {
         let Some(contract_idx) = contract else {
             return Ok(None);
         };
-        match self.program.functions[self.cur_frame().proto_idx as usize]
-            .constants
-            .get(contract_idx as usize)
-        {
+        match self.current_proto()?.constants.get(contract_idx as usize) {
             Some(ConstValue::VariantPredicate(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
                 "variant predicate: contract constant {} is not a VariantPredicate",
@@ -6286,9 +6330,7 @@ impl BytecodeVM {
         let Some(contract_idx) = contract else {
             return Ok(None);
         };
-        match self.program.functions[self.cur_frame().proto_idx as usize]
-            .constants
-            .get(contract_idx as usize)
+        match self.current_proto()?.constants.get(contract_idx as usize)
         {
             Some(ConstValue::VariantProjectionFallback(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
