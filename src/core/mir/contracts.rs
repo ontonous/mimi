@@ -475,7 +475,12 @@ pub(crate) fn validate_ffi_runtime_contracts(
         match expression {
             MirContractExpr::Value(value) => {
                 if let Some(index) = arguments.iter().position(|argument| argument == value) {
-                    return scalar_kind(argument_abis[index], phase);
+                    let abi = argument_abis.get(index).copied().ok_or_else(|| {
+                        format!(
+                            "extern {phase} argument ABI metadata is absent at index {index}"
+                        )
+                    })?;
+                    return scalar_kind(abi, phase);
                 }
                 if phase == "postcondition" && result == Some(value) {
                     return scalar_kind(result_abi, phase);

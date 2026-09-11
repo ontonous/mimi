@@ -407,7 +407,9 @@ fn is_direct_nested_tuple_match(arms: &[MatchArm]) -> bool {
             if saw_some || fields.len() != 1 {
                 return false;
             }
-            let (_, payload) = &fields[0];
+            let Some((_, payload)) = fields.first() else {
+                return false;
+            };
             let ResolvedPatternKind::Tuple(elements) = &payload.kind else {
                 return false;
             };

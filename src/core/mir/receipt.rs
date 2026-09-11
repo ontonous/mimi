@@ -147,7 +147,7 @@ impl CanonicalMirRouteReceipt {
         if self
             .root_owners
             .windows(2)
-            .any(|owners| owners[0] >= owners[1])
+            .any(|owners| matches!(owners, [left, right] if left >= right))
         {
             return Err("route receipt root owners must be strictly sorted".into());
         }
@@ -376,7 +376,10 @@ fn validate_manifest_values(entries: &BTreeMap<String, String>) -> Result<(), St
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    if owners.windows(2).any(|window| window[0] >= window[1]) {
+    if owners
+        .windows(2)
+        .any(|window| matches!(window, [left, right] if left >= right))
+    {
         return Err("invalid MIR route manifest: root owners must be strictly sorted".into());
     }
     Ok(())
