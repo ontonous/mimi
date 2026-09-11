@@ -54,6 +54,13 @@ impl fmt::Display for MirBytecodeError {
 
 impl std::error::Error for MirBytecodeError {}
 
+fn checked_function_index(index: usize, owner: &NodeId) -> Result<FuncIdx, MirBytecodeError> {
+    FuncIdx::try_from(index).map_err(|_| MirBytecodeError {
+        function: owner.clone(),
+        message: format!("canonical MIR function ordinal {index} exceeds u32 bytecode ABI"),
+    })
+}
+
 /// Compile an already validated canonical MIR program into a bytecode program.
 ///
 /// The returned program is deliberately free of an AST (`ast: None`).  This is
@@ -72,7 +79,8 @@ pub fn compile_mir_program(
 
     let mut indices = BTreeMap::new();
     for (index, (owner, _)) in ordered.iter().enumerate() {
-        indices.insert((*owner).clone(), index as FuncIdx);
+        let function_index = checked_function_index(index, owner).map_err(|error| vec![error])?;
+        indices.insert((*owner).clone(), function_index);
     }
 
     let (ffi_indices, canonical_ffi) = materialize_canonical_ffi(program)?;
@@ -5117,7 +5125,7 @@ impl<'a> FunctionEmitter<'a> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{compile_mir_program, FunctionEmitter};
+    use super::{checked_function_index, compile_mir_program, FunctionEmitter};
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
@@ -5231,6 +5239,20 @@ mod tests {
             None,
             "switch binding parameter arithmetic must not wrap"
         );
+    }
+
+    #[test]
+    fn mir_bytecode_function_table_index_rejects_u32_overflow() {
+        let owner = crate::core::NodeId("function:test".into());
+        assert_eq!(
+            checked_function_index(u32::MAX as usize, &owner),
+            Ok(u32::MAX)
+        );
+        let error = checked_function_index(u32::MAX as usize + 1, &owner)
+            .expect_err("function ordinals beyond the bytecode ABI must fail closed");
+        assert_eq!(error.function, owner);
+        assert!(error.message.contains("function ordinal"));
+        assert!(error.message.contains("u32 bytecode ABI"));
     }
 
     #[test]
