@@ -6074,7 +6074,7 @@ fn detect_scalar_list_projection_contract(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let [(_, _, _, contract)] = projection.as_slice() else {
+    let [(_, _, projection_index, contract)] = projection.as_slice() else {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message:
@@ -6102,7 +6102,7 @@ fn detect_scalar_list_projection_contract(
             message: "generic List projection requires a constant index literal 0 or 1".into(),
         }]);
     };
-    if projection[0].2 != index_id {
+    if projection_index != &index_id {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: "generic List projection index must be the constant literal 0 or 1".into(),
