@@ -1595,11 +1595,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             // from the then value, the mismatched else fell into the zero-fill
             // below) — silently wrong results plus width-inconsistent phis.
             let target_bw = then_bw.max(else_bw);
-            // target_bw > 0 here (both branch widths are > 0 by the guard
-            // above), so the NonZeroU32 construction cannot fail.
+            // Both branch widths are expected to be non-zero, but keep the
+            // LLVM type construction total if malformed IR ever reaches this
+            // path.  A zero-width integer cannot be represented by LLVM.
+            let target_width = std::num::NonZeroU32::new(target_bw).ok_or_else(|| {
+                CompileError::LlvmError("if target width must be non-zero".to_string())
+            })?;
             let target_ty = self
                 .context
-                .custom_width_int_type(std::num::NonZeroU32::new(target_bw as u32).unwrap())
+                .custom_width_int_type(target_width)
                 .map_err(|e| CompileError::LlvmError(format!("if target width: {}", e)))?;
             // Extend then_val to the target width inside its own predecessor
             // block (before the terminator) so the phi stays type-uniform
