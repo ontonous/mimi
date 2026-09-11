@@ -16,11 +16,7 @@ pub(super) fn metadata_of<'ctx>(v: &BasicValueEnum<'ctx>) -> BasicMetadataValueE
         BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(*sv),
         BasicValueEnum::ArrayValue(av) => BasicMetadataValueEnum::ArrayValue(*av),
         BasicValueEnum::VectorValue(vv) => BasicMetadataValueEnum::VectorValue(*vv),
-        // ScalableVectorValue cannot be a call argument here (reduce operands
-        // are scalars); this arm is unreachable in practice.
-        BasicValueEnum::ScalableVectorValue(_) => {
-            unreachable!("scalable vector as reduce operand")
-        }
+        BasicValueEnum::ScalableVectorValue(vv) => BasicMetadataValueEnum::ScalableVectorValue(*vv),
     }
 }
 
