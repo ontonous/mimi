@@ -2571,9 +2571,12 @@ impl<'a> FunctionEmitter<'a> {
         debug_assert!(
             self.register_overflow_reported
                 || arguments.is_empty()
-                || arg_regs
-                    .windows(2)
-                    .all(|pair| { pair[0].checked_add(1).is_some_and(|next| pair[1] == next) })
+                || arg_regs.windows(2).all(|pair| {
+                    let [first, second] = pair else {
+                        return false;
+                    };
+                    (*first).checked_add(1).is_some_and(|next| *second == next)
+                })
         );
         let Some(argc) = self.u16_abi(arguments.len(), "call argument count") else {
             return;
