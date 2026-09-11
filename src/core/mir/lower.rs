@@ -8610,7 +8610,9 @@ impl<'a> Lowerer<'a> {
             return value;
         };
         let Some(result) = self.id("flow.ok", node) else {
-            return self.fallback_value_for_type(&result_ty, node);
+            return self
+                .fallback_value_for_type(&result_ty, node)
+                .unwrap_or(value);
         };
         let Some((nominal, variant, field)) = self.result_variant_parts(&result_ty, "Ok", node)
         else {
@@ -8634,11 +8636,16 @@ impl<'a> Lowerer<'a> {
         &mut self,
         ty: &crate::core::ResolvedTypeId,
         node: &NodeId,
-    ) -> MirValueId {
-        let value = MirValueId::new(format!("error:flow:{}", node.0))
-            .unwrap_or_else(|_| MirValueId::new("error:flow").expect("static MIR id"));
+    ) -> Option<MirValueId> {
+        let value = match MirValueId::new(format!("error:flow:{}", node.0)) {
+            Ok(value) => value,
+            Err(error) => {
+                self.error(node, error.to_string());
+                return None;
+            }
+        };
         self.insert_value(value.clone(), ty.clone(), node);
-        value
+        Some(value)
     }
 
     fn lower_try_expr(&mut self, node: &NodeId, result: MirValueId, inner: &ResolvedExpr) {
@@ -8820,9 +8827,13 @@ impl<'a> Lowerer<'a> {
         });
         self.switch_to(err_block);
         self.emit_failure_parameter_drops(node);
-        let failure_payload = self
-            .id("flow.failure.payload", node)
-            .unwrap_or_else(|| self.fallback_value_for_type(&outer_error, node));
+        let failure_payload = match self.id("flow.failure.payload", node) {
+            Some(value) => value,
+            None => match self.fallback_value_for_type(&outer_error, node) {
+                Some(value) => value,
+                None => return,
+            },
+        };
         self.insert_value(failure_payload.clone(), outer_error.clone(), node);
         self.emit(
             node,
