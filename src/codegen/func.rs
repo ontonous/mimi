@@ -857,9 +857,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         match ty {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();
-                fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::IntType(_))
+                matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+                )
             }
             _ => false,
         }
@@ -919,9 +920,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_closure = match ret_type {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();
-                fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
+                matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::PointerType(_)]
+                )
             }
             _ => false,
         };
@@ -1048,17 +1050,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // actually be claimed (golden-IR stability for every other shape).
         fn agg_claim_shape(st: inkwell::types::StructType) -> bool {
             let fields = st.get_field_types();
-            let is_plain_string = fields.len() == 2
-                && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                && matches!(fields[1], BasicTypeEnum::IntType(_));
+            let is_plain_string = matches!(
+                fields.as_slice(),
+                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+            );
             fields.len() >= 2
                 && !is_plain_string
                 && fields.iter().any(|f| match f {
                     BasicTypeEnum::StructType(inner) => {
                         let fs = inner.get_field_types();
-                        fs.len() == 2
-                            && matches!(fs[0], BasicTypeEnum::PointerType(_))
-                            && matches!(fs[1], BasicTypeEnum::IntType(_))
+                        matches!(
+                            fs.as_slice(),
+                            [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+                        )
                     }
                     _ => false,
                 })
@@ -1085,9 +1089,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         if let Some((st, sv, pv)) = agg_claim_val {
             let fields = st.get_field_types();
-            let is_plain_string = fields.len() == 2
-                && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                && matches!(fields[1], BasicTypeEnum::IntType(_));
+            let is_plain_string = matches!(
+                fields.as_slice(),
+                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+            );
             if fields.len() >= 2 && !is_plain_string {
                 // 0.39.x (L1 parity fix): string-shaped fields used to be
                 // CLAIMED only (ownership transfer). That is unsound when the
@@ -1145,9 +1150,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_string_struct = match ret_type {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();
-                fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::IntType(_))
+                matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+                )
             }
             _ => false,
         };
@@ -1158,12 +1164,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             let is_variant_with_string_payload = match ret_type {
                 BasicTypeEnum::StructType(st) => {
                     let fields = st.get_field_types();
-                    if fields.len() >= 2 {
-                        matches!(fields[0], BasicTypeEnum::IntType(it) if it.get_bit_width() == 1)
-                            && Self::is_string_llvm_type(fields[1])
-                    } else {
-                        false
-                    }
+                    matches!(
+                        fields.as_slice(),
+                        [BasicTypeEnum::IntType(it), payload, ..]
+                            if it.get_bit_width() == 1 && Self::is_string_llvm_type(*payload)
+                    )
                 }
                 _ => false,
             };
@@ -1293,9 +1298,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let sty = sv.get_type();
         let fields = sty.get_field_types();
-        let is_string_struct = fields.len() == 2
-            && matches!(fields[0], BasicTypeEnum::PointerType(_))
-            && matches!(fields[1], BasicTypeEnum::IntType(_));
+        let is_string_struct = matches!(
+            fields.as_slice(),
+            [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+        );
         if !is_string_struct {
             return Ok(val);
         }
@@ -1611,9 +1617,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         };
         let fields = st.get_field_types();
-        let is_enum_shape = fields.len() == 2
-            && matches!(fields[0], BasicTypeEnum::IntType(it) if it.get_bit_width() == 32)
-            && matches!(fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+        let is_enum_shape = matches!(
+            fields.as_slice(),
+            [
+                BasicTypeEnum::IntType(tag),
+                BasicTypeEnum::IntType(payload)
+            ] if tag.get_bit_width() == 32 && payload.get_bit_width() == 64
+        );
         if !is_enum_shape {
             return Ok(());
         }
@@ -1671,9 +1681,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::StructValue(sv) => {
                 let sty = sv.get_type();
                 let fields = sty.get_field_types();
-                let is_mimi_string_struct = fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                let is_mimi_string_struct = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+                );
                 if !is_mimi_string_struct {
                     return Ok(sv.into());
                 }
@@ -2114,9 +2125,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns true if `st` is the Mimi string struct `{ ptr, i64 }`.
     fn is_mimi_string_struct(st: inkwell::types::StructType<'ctx>) -> bool {
         let fields = st.get_field_types();
-        fields.len() == 2
-            && matches!(&fields[0], BasicTypeEnum::PointerType(_))
-            && matches!(&fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+        matches!(
+            fields.as_slice(),
+            [
+                BasicTypeEnum::PointerType(_),
+                BasicTypeEnum::IntType(len)
+            ] if len.get_bit_width() == 64
+        )
     }
 
     /// 0.35.7-fix: LLVM type for a legacy-function parameter. A generic
