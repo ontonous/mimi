@@ -2187,6 +2187,42 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_cleans_residual_frames_after_run_value_failure() {
+        let source = r#"
+        func boom() -> i32 { 1 / 0 }
+        func ok() -> i32 { 7 }
+        func main() -> i32 { 0 }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        let boom = program
+            .functions
+            .iter()
+            .position(|function| function.name == "boom")
+            .expect("boom function must be present") as u32;
+        let ok = program
+            .functions
+            .iter()
+            .position(|function| function.name == "ok")
+            .expect("ok function must be present") as u32;
+        std::sync::Arc::make_mut(&mut program).entry = boom;
+
+        let mut vm = BytecodeVM::new(program);
+        let error = vm
+            .run_value()
+            .expect_err("public run_value must report the entry trap");
+        assert!(error.to_string().contains("division by zero"), "{error}");
+        assert_eq!(
+            vm.debug_stack_state(),
+            (0, 0),
+            "failed run_value left residual frames or depth"
+        );
+        assert_eq!(vm.call_function(ok, &[]).unwrap(), Value::Int(7));
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();

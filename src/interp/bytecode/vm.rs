@@ -209,6 +209,11 @@ impl BytecodeVM {
         &self.program
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_stack_state(&self) -> (usize, usize) {
+        (self.stack.len(), self.depth)
+    }
+
     /// Request the VM to terminate with the given exit code.
     /// Called by the `exit()` builtin.
     pub fn request_exit(&mut self, code: i64) {
@@ -582,18 +587,10 @@ impl BytecodeVM {
     pub fn run(&mut self) -> Result<i64, InterpError> {
         self.validate_canonical_ffi_program()?;
         let entry = self.program.entry;
+        let stack_len_before = self.stack.len();
+        let depth_before = self.depth;
         self.push_frame(entry, Vec::new(), None)?;
-        let result = loop {
-            match self.exec_loop() {
-                Ok(v) => break Ok(v),
-                Err(e) => {
-                    if self.absorb_flow_fault(&e)? {
-                        continue;
-                    }
-                    break Err(self.enrich_error(e));
-                }
-            }
-        };
+        let result = self.exec_entry_loop();
         match result {
             Ok(Value::Int(code)) => Ok(code),
             Ok(Value::Unit) => Ok(0),
@@ -611,7 +608,10 @@ impl BytecodeVM {
                 "main returned non-integer: {}",
                 other
             ))),
-            Err(e) => Err(e),
+            Err(e) => {
+                self.cleanup_failed_subexec(stack_len_before, depth_before);
+                Err(e)
+            }
         }
     }
 
@@ -620,16 +620,31 @@ impl BytecodeVM {
     pub fn run_value(&mut self) -> Result<Value, InterpError> {
         self.validate_canonical_ffi_program()?;
         let entry = self.program.entry;
+        let stack_len_before = self.stack.len();
+        let depth_before = self.depth;
         self.push_frame(entry, Vec::new(), None)?;
+        match self.exec_entry_loop() {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.cleanup_failed_subexec(stack_len_before, depth_before);
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute a fresh public entry while routing runtime panics through flow
+    /// fault absorption. The caller owns cleanup of residual frames when this
+    /// loop returns an error; successful entry execution leaves the stack at
+    /// the pre-entry depth after the entry frame returns.
+    fn exec_entry_loop(&mut self) -> Result<Value, InterpError> {
         loop {
             match self.exec_loop() {
                 Ok(v) => return Ok(v),
-                Err(e) => {
-                    if self.absorb_flow_fault(&e)? {
-                        continue;
-                    }
-                    return Err(self.enrich_error(e));
-                }
+                Err(e) => match self.absorb_flow_fault(&e) {
+                    Ok(true) => continue,
+                    Ok(false) => return Err(self.enrich_error(e)),
+                    Err(absorb_error) => return Err(self.enrich_error(absorb_error)),
+                },
             }
         }
     }
