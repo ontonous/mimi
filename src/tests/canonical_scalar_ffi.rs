@@ -484,6 +484,16 @@ fn scalar_ffi_transparent_alias_chain_preserves_float_argument_abi_across_consum
         .parse_file()
         .expect("parse transparent alias FFI fixture");
     let checked = crate::core::check_program(&file).expect("check transparent alias FFI fixture");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "transparent primitive aliases must enter the same default scalar FFI route"
+    );
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize transparent alias default route");
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+        "transparent primitive aliases must materialize a scalar FFI receipt"
+    );
     let mir = MirProgram::from_checked_program(&checked)
         .expect("materialize transparent alias FFI fixture");
     let direct_tokens = crate::lexer::Lexer::new(
@@ -696,6 +706,10 @@ pub func call_imported_alias(value: i64) -> i64 {
     let mut merged = loader.merge_all().expect("merge imported alias graph");
     crate::loader::merge_prelude_into(&mut merged);
     let checked = crate::core::check_program(&merged).expect("check imported alias graph");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "imported transparent primitive aliases must enter scalar FFI admission"
+    );
     let excluded_sources = merged
         .sources
         .records()
@@ -703,6 +717,13 @@ pub func call_imported_alias(value: i64) -> i64 {
         .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
         .map(|record| record.id)
         .collect::<std::collections::HashSet<_>>();
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+            .expect("materialize imported alias default route");
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+        "imported transparent primitive aliases must materialize scalar FFI"
+    );
     let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
         .expect("materialize imported alias canonical MIR");
     let receipt = mir

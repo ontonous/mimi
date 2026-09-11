@@ -15,6 +15,24 @@ use crate::core::{
     TransitionId,
 };
 
+fn is_scalar_ffi_decl_type(program: &CheckedProgram, ty: &Type, result: bool) -> bool {
+    let primitive = match ty.unlocated() {
+        Type::Name(name, arguments) if arguments.is_empty() => {
+            crate::core::resolved::transparent_alias_primitive(name, program)
+        }
+        _ => None,
+    };
+    match primitive {
+        Some(crate::core::ir::PrimitiveType::I32)
+        | Some(crate::core::ir::PrimitiveType::I64)
+        | Some(crate::core::ir::PrimitiveType::Bool)
+        | Some(crate::core::ir::PrimitiveType::F64) => true,
+        Some(crate::core::ir::PrimitiveType::Unit) if result => true,
+        _ if result => matches!(ty.unlocated(), Type::Tuple(elements) if elements.is_empty()),
+        _ => false,
+    }
+}
+
 /// A called scalar C ABI crosses the shared canonical route boundary. Body
 /// syntax is deliberately irrelevant: let bindings, branches, nested calls,
 /// and ordinary helpers all have to materialize as one complete MIR graph.
@@ -49,23 +67,17 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
         }
         // Extern declarations live in their own checker-owned signature
         // directory, not the ordinary callable ResolvedSignature table.
-        // Inspect typed ABI declarations here; concrete MIR argument/result
-        // TypeDesc agreement is still checked before every consumer.
-        let scalar = |ty: &Type, result: bool| {
-            matches!(ty.unlocated(), Type::Name(name, arguments)
-                if arguments.is_empty() && (matches!(name.as_str(), "i32" | "i64" | "bool" | "f64")
-                    || (result && name == "unit")))
-                || (result
-                    && matches!(ty.unlocated(), Type::Tuple(elements) if elements.is_empty()))
-        };
+        // Resolve transparent aliases through the same checker-owned helper
+        // used by canonical signature construction; concrete MIR argument/
+        // result TypeDesc agreement is still checked before every consumer.
         if !declaration
             .ret_type
             .as_ref()
-            .is_none_or(|ty| scalar(ty, true))
+            .is_none_or(|ty| is_scalar_ffi_decl_type(program, ty, true))
             || !declaration
                 .typed_params
                 .iter()
-                .all(|(_, ty, _)| scalar(ty, false))
+                .all(|(_, ty, _)| is_scalar_ffi_decl_type(program, ty, false))
         {
             return false;
         }
