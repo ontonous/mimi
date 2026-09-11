@@ -3043,6 +3043,7 @@ fn materialize_ffi_call_contracts(
                 let super::MirInstructionKind::Call {
                     callee: super::ResolvedCallee::Extern(callee),
                     arguments,
+                    result,
                     ..
                 } = &instruction.kind
                 else {
@@ -3165,10 +3166,7 @@ fn materialize_ffi_call_contracts(
                     .iter()
                     .map(|(name, _, _)| name.as_str())
                     .collect::<Vec<_>>();
-                let result = match &instruction.kind {
-                    super::MirInstructionKind::Call { result, .. } => result.clone(),
-                    _ => unreachable!("FFI receipt materializes only Call instructions"),
-                };
+                let result = result.clone();
                 let parameter_conversions = arguments
                     .iter()
                     .zip(&parameter_types)
