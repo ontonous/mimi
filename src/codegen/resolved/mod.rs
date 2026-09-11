@@ -785,11 +785,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // return), emitting the body would produce INVALID IR (signature
             // says i64, terminator says struct) that segfaults callers.
             // Fail loud here so the function is left to the legacy emitter.
-            let existing = self
-                .generator
-                .module
-                .get_function(&symbol)
-                .expect("checked above");
+            let Some(existing) = self.generator.module.get_function(&symbol) else {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved callable '{symbol}' disappeared after ABI declaration"
+                )));
+            };
             let existing_ty = existing.get_type();
             let resolved_ty = function_type;
             let ret_compatible = existing_ty.get_return_type() == resolved_ty.get_return_type();
@@ -6095,7 +6095,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "Some" | "Ok" => Some(1),
                                 "Err" => Some(2),
                                 "None" => None,
-                                _ => unreachable!(),
+                                _ => {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "unsupported builtin constructor variant '{variant_name}'"
+                                    )))
+                                }
                             }
                         } else {
                             // 0.32.12: User-defined enum variants have payload
@@ -6843,7 +6847,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let const_bit = match op {
             ResolvedBinaryOp::LogicalAnd => 0u64, // LHS falsy → false
             ResolvedBinaryOp::LogicalOr => 1u64,  // LHS truthy → true
-            _ => unreachable!("guarded above"),
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "short-circuit constant requested for a non-logical operator".into(),
+                ))
+            }
         };
         let const_val: BasicValueEnum<'ctx> = match result_ty {
             BasicTypeEnum::IntType(int_ty) => int_ty.const_int(const_bit, false).into(),
@@ -8573,7 +8581,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let then_terminated = self.current_block_terminated();
         if !then_terminated {
             if !as_statement {
-                let result_alloca = result_alloca.expect("if alloca present in expr mode");
+                let Some(result_alloca) = result_alloca else {
+                    return Err(CompileError::Unsupported(
+                        "if expression is missing result storage".into(),
+                    ));
+                };
                 if let Some(value) = then_value {
                     let value = self.coerce_to(value, result_type)?;
                     self.generator.build_store(result_alloca, value)?;
@@ -8591,7 +8603,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let else_terminated = self.current_block_terminated();
         if !else_terminated {
             if !as_statement {
-                let result_alloca = result_alloca.expect("if alloca present in expr mode");
+                let Some(result_alloca) = result_alloca else {
+                    return Err(CompileError::Unsupported(
+                        "if expression is missing result storage".into(),
+                    ));
+                };
                 if let Some(value) = else_value {
                     let value = self.coerce_to(value, result_type)?;
                     self.generator.build_store(result_alloca, value)?;
@@ -8608,7 +8624,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         if as_statement {
             Ok(result_type.const_zero())
         } else {
-            let result_alloca = result_alloca.expect("if alloca present in expr mode");
+            let Some(result_alloca) = result_alloca else {
+                return Err(CompileError::Unsupported(
+                    "if expression is missing result storage".into(),
+                ));
+            };
             self.generator
                 .build_load(result_type, result_alloca, "if_val")
         }
