@@ -8212,7 +8212,9 @@ impl<'a> Lowerer<'a> {
                                         source,
                                     },
                                 );
-                                arguments[1] = converted;
+                                if let Some(slot) = arguments.get_mut(1) {
+                                    *slot = converted;
+                                }
                             }
                         }
                     }
