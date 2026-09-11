@@ -7433,7 +7433,7 @@ impl<'a> Lowerer<'a> {
         if builtin.as_str() != "println" || call.arguments.len() != 1 {
             return None;
         }
-        let (base_local, field) = match &call.arguments[0].value.kind {
+        let (base_local, field) = match &call.arguments.first()?.value.kind {
             ResolvedExprKind::Load(place) => {
                 let [crate::core::ir::ResolvedProjection::Field { field, .. }] =
                     place.projections.as_slice()
