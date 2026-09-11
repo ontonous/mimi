@@ -837,6 +837,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_cond_br(active, active_block, inactive_block)?;
 
             let fields = variant.get_field_types();
+            let required_fields = match plan {
+                GluePlan::Option(_) => 2,
+                GluePlan::Result { .. } => 3,
+                _ => 0,
+            };
+            if fields.len() < required_fields {
+                return Err(CompileError::Unsupported(format!(
+                    "variant clone glue `{}` has {} fields, needs at least {}",
+                    plan.symbol_suffix(),
+                    fields.len(),
+                    required_fields
+                )));
+            }
             self.builder.position_at_end(active_block);
             let active_value = match plan {
                 GluePlan::Option(payload) => {
@@ -1043,6 +1056,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.build_cond_br(active, active_block, inactive_block)?;
 
             let fields = variant.get_field_types();
+            let required_fields = match plan {
+                GluePlan::Option(_) => 2,
+                GluePlan::Result { .. } => 3,
+                _ => 0,
+            };
+            if fields.len() < required_fields {
+                return Err(CompileError::Unsupported(format!(
+                    "variant drop glue `{}` has {} fields, needs at least {}",
+                    plan.symbol_suffix(),
+                    fields.len(),
+                    required_fields
+                )));
+            }
             self.builder.position_at_end(active_block);
             match plan {
                 GluePlan::Option(payload) => {
