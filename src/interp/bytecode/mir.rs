@@ -4326,7 +4326,10 @@ impl<'a> FunctionEmitter<'a> {
                 let then_jump = self.proto.emit(Op::Jmp { offset: 0 });
                 self.pending_jumps.push((then_jump, then_target.clone()));
                 let else_start = self.proto.code.len();
-                self.proto.patch_jump_to(conditional, else_start);
+                if let Err(message) = self.proto.try_patch_jump_to(conditional, else_start) {
+                    self.error(format!("conditional branch jump patch failed: {message}"));
+                    return;
+                }
                 self.emit_edge_arguments(else_target, else_arguments);
                 let else_jump = self.proto.emit(Op::Jmp { offset: 0 });
                 self.pending_jumps.push((else_jump, else_target.clone()));
@@ -4454,7 +4457,11 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     let jump = self.proto.emit(Op::Jmp { offset: 0 });
                     self.pending_jumps.push((jump, arm.target.clone()));
-                    self.proto.patch_jump_to(next_arm, self.proto.code.len());
+                    let target = self.proto.code.len();
+                    if let Err(message) = self.proto.try_patch_jump_to(next_arm, target) {
+                        self.error(format!("variant switch jump patch failed: {message}"));
+                        return;
+                    }
                 }
                 crate::core::mir::MirSwitchCase::Default => {
                     has_default = true;
@@ -4986,7 +4993,9 @@ impl<'a> FunctionEmitter<'a> {
         let pending = std::mem::take(&mut self.pending_jumps);
         for (jump, target) in pending {
             if let Some(&pc) = self.block_starts.get(&target) {
-                self.proto.patch_jump_to(jump, pc);
+                if let Err(message) = self.proto.try_patch_jump_to(jump, pc) {
+                    self.error(format!("jump at pc {jump} patch failed: {message}"));
+                }
             } else {
                 self.error(format!("jump target '{}' has no bytecode address", target));
             }
@@ -5097,6 +5106,20 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.message.contains("register index overflow")));
+    }
+
+    #[test]
+    fn mir_bytecode_jump_patch_rejects_invalid_construction_index() {
+        let mut proto = FunctionProto::new("function:test".into(), 0);
+        proto.emit(Op::RetUnit);
+        assert_eq!(
+            proto.try_patch_jump_to(1, 0),
+            Err("jump patch instruction index out of range")
+        );
+        assert_eq!(
+            proto.try_patch_jump_to(0, 0),
+            Err("jump patch target is not a jump instruction")
+        );
     }
 
     #[test]

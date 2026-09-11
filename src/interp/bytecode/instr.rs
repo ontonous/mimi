@@ -1801,20 +1801,44 @@ impl FunctionProto {
     /// Patch a jump instruction at `idx` with the correct offset
     /// to jump to the current end of code.
     pub fn patch_jump(&mut self, idx: usize) {
-        let target = self.code.len() as i32;
-        self.patch_jump_to(idx, target as usize);
+        let target = self.code.len();
+        let _ = self.try_patch_jump_to(idx, target);
     }
 
     /// Patch a jump instruction at `idx` to jump to an explicit target instruction.
     pub fn patch_jump_to(&mut self, idx: usize, target: usize) {
-        let origin = idx as i32;
-        let offset = target as i32 - origin - 1; // -1: relative to next instruction
-        match &mut self.code[idx] {
+        let _ = self.try_patch_jump_to(idx, target);
+    }
+
+    /// Checked variant of [`Self::patch_jump_to`] used by canonical emitters.
+    /// Invalid instruction indices, non-jump instructions, and offsets outside
+    /// the bytecode `i32` jump ABI are reported instead of panicking or
+    /// silently leaving an unpatched instruction behind.
+    pub(crate) fn try_patch_jump_to(
+        &mut self,
+        idx: usize,
+        target: usize,
+    ) -> Result<(), &'static str> {
+        let next = idx
+            .checked_add(1)
+            .ok_or("jump patch origin overflows usize")?;
+        let distance = if target >= next {
+            i64::try_from(target - next).map_err(|_| "jump patch offset exceeds i64 ABI")?
+        } else {
+            -i64::try_from(next - target).map_err(|_| "jump patch offset exceeds i64 ABI")?
+        };
+        let offset = i32::try_from(distance).map_err(|_| "jump patch offset exceeds i32 ABI")?;
+        let op = self
+            .code
+            .get_mut(idx)
+            .ok_or("jump patch instruction index out of range")?;
+        match op {
             Op::Jmp { offset: o } => *o = offset,
             Op::JmpIf { offset: o, .. } => *o = offset,
             Op::JmpIfNot { offset: o, .. } => *o = offset,
-            _ => {}
+            _ => return Err("jump patch target is not a jump instruction"),
         }
+        Ok(())
     }
 }
 
