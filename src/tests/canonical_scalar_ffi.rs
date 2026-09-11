@@ -1049,6 +1049,29 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
             artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == receipt.mir_digest
         })
     }));
+    for (label, public_results) in [
+        (
+            "verify_checked",
+            crate::verifier::verify_checked(&checked, "imported-alias-proof-public".into()),
+        ),
+        (
+            "verify_checked_dual",
+            crate::verifier::verify_checked_dual(&checked, "imported-alias-proof-dual".into()),
+        ),
+    ] {
+        let public_results = public_results.expect("public imported alias proof verification");
+        assert_eq!(public_results.len(), results.len(), "{label}");
+        assert!(
+            public_results.iter().all(|result| {
+                result.artifact.as_ref().is_some_and(|artifact| {
+                    artifact.engine == ProofArtifact::ENGINE_MIR
+                        && artifact.mir_hash == receipt.mir_digest
+                        && artifact.source_hash != "imported-alias-proof"
+                })
+            }),
+            "{label}: {public_results:?}"
+        );
+    }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     fs::remove_dir_all(project).expect("remove imported alias proof project");
 }
