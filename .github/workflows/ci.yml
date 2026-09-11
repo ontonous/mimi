@@ -46,6 +46,9 @@ jobs:
       - name: Canonical MIR native production boundary audit
         run: bash scripts/audit-mir-native-production.sh
 
+      - name: Canonical MIR legacy owner audit
+        run: bash scripts/audit-mir-legacy-owners.sh
+
       - name: Pre-build runtime (prime cache)
         run: rustc --edition 2021 --crate-type staticlib --cfg standalone --crate-name mimi_runtime -o /tmp/mimi_runtime_test.a src/runtime/standalone.rs
 

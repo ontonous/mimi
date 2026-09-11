@@ -106,6 +106,7 @@ ci-check:
 	cargo clippy --all-targets -- -D warnings
 	cargo fmt -- --check
 	bash scripts/audit-mir-native-production.sh
+	bash scripts/audit-mir-legacy-owners.sh
 	python3 scripts/check_language_docs.py
 	python3 scripts/check_unsafe_safety.py
 

@@ -20,6 +20,8 @@ cargo fmt -- --check
 
 echo "== native MIR production boundary audit =="
 bash scripts/audit-mir-native-production.sh
+echo "== canonical MIR legacy owner audit =="
+bash scripts/audit-mir-legacy-owners.sh
 
 echo "== clippy =="
 cargo clippy --all-targets -- -D warnings
