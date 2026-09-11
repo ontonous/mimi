@@ -782,7 +782,13 @@ pub(crate) fn validate_flow_effect_receipt(
             if receipt.result != *result_ty || receipt.result != contract.result {
                 return Err("Flow Boundary effect receipt result TypeDesc disagrees with transition contract".into());
             }
-            if contract.targets.len() != 1 || receipt.target != contract.targets[0] {
+            let [target] = contract.targets.as_slice() else {
+                return Err(
+                    "Flow Boundary effect receipt target identity disagrees with transition contract"
+                        .into(),
+                );
+            };
+            if receipt.target != *target {
                 return Err("Flow Boundary effect receipt target identity disagrees with transition contract".into());
             }
             Ok(())
@@ -3312,11 +3318,11 @@ pub(crate) fn validate_transfer_event_boundaries(
                     && matching_points.iter().any(|(_, _, arguments)| {
                         effect_receipts.iter().any(|receipt| {
                             receipt.kind == types::MirCallEffectKind::TransferSession
-                                && receipt.argument_index < arguments.len()
-                                && reaches_argument(
-                                    value,
-                                    std::slice::from_ref(&arguments[receipt.argument_index]),
-                                )
+                                && arguments
+                                    .get(receipt.argument_index)
+                                    .is_some_and(|argument| {
+                                        reaches_argument(value, std::slice::from_ref(argument))
+                                    })
                         })
                     });
                 if !receipt_matches {
