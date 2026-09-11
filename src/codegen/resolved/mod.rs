@@ -6594,7 +6594,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_br(guard_bb)?;
                 self.generator.builder.position_at_end(guard_bb);
                 self.bind_static_flow_arm_live(arm, sv, callable_body, frame)?;
-                let guard_val = self.emit_expr(arm.guard.as_ref().unwrap(), frame)?;
+                let guard = arm.guard.as_ref().ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "resolved flow arm {} marked guarded without a guard expression",
+                        arm_index
+                    ))
+                })?;
+                let guard_val = self.emit_expr(guard, frame)?;
                 let guard_bool = self.ensure_bool(guard_val)?;
                 self.generator.build_cond_br(guard_bool, arm_bb, next_bb)?;
                 if !is_last {
