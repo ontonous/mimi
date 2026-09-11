@@ -1628,7 +1628,7 @@ fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     );
     fs::write(
         dir.join("ffi_types.mimi"),
-        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64; }\npub func imported_alias(value: i64) -> i64 { mir_ffi_cli_import_alias(value) }\n",
+        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64 requires: value >= 0; }\npub func imported_alias(value: i64) -> i64 { requires: value > 0\n    mir_ffi_cli_import_alias(value)\n}\n",
     )
     .expect("write imported alias consumer helper");
     let source = dir.join("main.mimi");
@@ -1705,6 +1705,12 @@ fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
             !String::from_utf8_lossy(&verify.stderr)
                 .contains("canonical route disposition: legacy"),
             "imported alias verify must not fall back to legacy"
+        );
+        assert!(
+            String::from_utf8_lossy(&verify.stdout)
+                .contains("canonical MIR extern requires contract proven"),
+            "imported alias verify must expose the canonical FFI proof: {}",
+            String::from_utf8_lossy(&verify.stdout)
         );
     }
     fs::remove_dir_all(&dir).ok();
