@@ -18,6 +18,9 @@ export LLVM_SYS_181_PREFIX
 echo "== fmt =="
 cargo fmt -- --check
 
+echo "== native MIR production boundary audit =="
+bash scripts/audit-mir-native-production.sh
+
 echo "== clippy =="
 cargo clippy --all-targets -- -D warnings
 
