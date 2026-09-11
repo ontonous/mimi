@@ -10472,8 +10472,8 @@ mod tests {
             .message()
             .contains("variant construction: tag 'Some' has discriminant 0, opcode carries 1"));
         assert!(matches!(
-            vm.get_reg(payload_reg),
-            Value::String(value) if value.as_str() == "owned"
+            vm.debug_recycled_reg(payload_reg),
+            Some(Value::String(value)) if value.as_str() == "owned"
         ));
     }
 
@@ -11165,8 +11165,10 @@ mod tests {
             .message()
             .contains("variant get: canonical identity for tag 'Some' disagrees with shape table"));
         assert!(matches!(
-            vm.get_reg(source_reg),
-            Value::CanonicalVariant {
+            vm.debug_recycled_reg(source_reg),
+            Some(value) if matches!(
+                value,
+                Value::CanonicalVariant {
                 nominal,
                 variant,
                 tag,
@@ -11175,6 +11177,7 @@ mod tests {
                 && variant.0 == "builtin:variant:Option::Some"
                 && tag == "Some"
                 && *payload == vec![Value::Int(41)]
+            )
         ));
     }
 
@@ -11293,8 +11296,8 @@ mod tests {
             .message()
             .contains("variant destructure: expected tag 'Err', got 'Some'"));
         assert!(matches!(
-            vm.get_reg(scrutinee),
-            Value::CanonicalVariant { tag, .. } if tag == "Some"
+            vm.debug_recycled_reg(scrutinee),
+            Some(value) if matches!(value, Value::CanonicalVariant { tag, .. } if tag == "Some")
         ));
     }
 
@@ -11340,8 +11343,10 @@ mod tests {
             "variant destructure: canonical identity for tag 'Some' disagrees with shape table"
         ));
         assert!(matches!(
-            vm.get_reg(source_reg),
-            Value::CanonicalVariant {
+            vm.debug_recycled_reg(source_reg),
+            Some(value) if matches!(
+                value,
+                Value::CanonicalVariant {
                 nominal,
                 variant,
                 tag,
@@ -11349,6 +11354,7 @@ mod tests {
             } if nominal.as_str() == "builtin:type:Option"
                 && variant.0 == "builtin:variant:Option::Some"
                 && tag == "Some"
+            )
         ));
     }
 
@@ -11399,8 +11405,8 @@ mod tests {
             .message()
             .contains("variant drop: tag 'Some' is absent from canonical drop shapes"));
         assert!(matches!(
-            vm.get_reg(source_reg),
-            Value::CanonicalVariant { tag, .. } if tag == "Some"
+            vm.debug_recycled_reg(source_reg),
+            Some(value) if matches!(value, Value::CanonicalVariant { tag, .. } if tag == "Some")
         ));
     }
 
@@ -11446,8 +11452,10 @@ mod tests {
             "variant drop: canonical identity for tag 'Some' disagrees with shape table"
         ));
         assert!(matches!(
-            vm.get_reg(source_reg),
-            Value::CanonicalVariant {
+            vm.debug_recycled_reg(source_reg),
+            Some(value) if matches!(
+                value,
+                Value::CanonicalVariant {
                 nominal,
                 variant,
                 tag,
@@ -11455,6 +11463,7 @@ mod tests {
             } if nominal.as_str() == "builtin:type:Option"
                 && variant.0 == "builtin:variant:Option::Some"
                 && tag == "Some"
+            )
         ));
     }
 

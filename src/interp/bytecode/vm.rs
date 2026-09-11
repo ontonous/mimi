@@ -214,6 +214,11 @@ impl BytecodeVM {
         (self.stack.len(), self.depth)
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_recycled_reg(&self, r: Reg) -> Option<&Value> {
+        self.free_regs.last().and_then(|regs| regs.get(r as usize))
+    }
+
     /// Request the VM to terminate with the given exit code.
     /// Called by the `exit()` builtin.
     pub fn request_exit(&mut self, code: i64) {
