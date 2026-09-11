@@ -1392,6 +1392,73 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_record_field_constant_index_overflow() {
+        let constructors = [
+            Op::NewRecord {
+                rd: 0,
+                type_name: u32::MAX,
+                base: 0,
+                count: 1,
+            },
+            Op::NewRecordMove {
+                rd: 0,
+                type_name: u32::MAX,
+                base: 0,
+                count: 1,
+            },
+        ];
+        for op in constructors {
+            let mut main = FunctionProto::new("main".into(), 0);
+            main.alloc_reg();
+            main.emit(op);
+            main.emit(Op::Ret { ra: 0 });
+            let error =
+                run_single_op(main).expect_err("record field constant arithmetic must fail closed");
+            assert!(
+                error.contains("record field constant index overflow"),
+                "{error}"
+            );
+        }
+
+        let updates = [
+            Op::UpdateRecord {
+                rd: 0,
+                type_name: u32::MAX,
+                ra: 0,
+                base: 1,
+                count: 1,
+            },
+            Op::UpdateRecordMove {
+                rd: 0,
+                type_name: u32::MAX,
+                ra: 0,
+                base: 1,
+                count: 1,
+            },
+        ];
+        for op in updates {
+            let mut main = FunctionProto::new("main".into(), 0);
+            main.constants.push(ConstValue::Str("Record".into()));
+            main.alloc_reg();
+            main.alloc_reg();
+            main.emit(Op::NewRecord {
+                rd: 0,
+                type_name: 0,
+                base: 1,
+                count: 0,
+            });
+            main.emit(op);
+            main.emit(Op::Ret { ra: 0 });
+            let error =
+                run_single_op(main).expect_err("record update field arithmetic must fail closed");
+            assert!(
+                error.contains("record field constant index overflow"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn vm_rejects_forged_call_indirect_argument_window() {
         let source = r#"
         func main() -> i32 {

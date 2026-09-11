@@ -2951,7 +2951,7 @@ impl BytecodeVM {
                     // Field names are stored in constants[type_name+1..type_name+1+count].
                     let mut fields = std::collections::HashMap::new();
                     for i in 0..count {
-                        let idx = (type_name + 1 + i as u32) as usize;
+                        let idx = Self::record_field_const_idx(type_name, i)?;
                         let field_name = match proto.constants.get(idx) {
                             Some(ConstValue::Str(s)) => s.clone(),
                             _ => {
@@ -3001,7 +3001,7 @@ impl BytecodeVM {
                     // fail closed without partially transferring its fields.
                     let mut field_names = Vec::with_capacity(count as usize);
                     for i in 0..count {
-                        let idx = (type_name + 1 + i as u32) as usize;
+                        let idx = Self::record_field_const_idx(type_name, i)?;
                         let field_name = match proto.constants.get(idx) {
                             Some(ConstValue::Str(s)) => s.clone(),
                             _ => {
@@ -3065,7 +3065,7 @@ impl BytecodeVM {
                     };
                     // Field names are stored in constants[type_name+1..type_name+1+count].
                     for i in 0..count {
-                        let idx = (type_name + 1 + i as u32) as usize;
+                        let idx = Self::record_field_const_idx(type_name, i)?;
                         let field_name = match proto.constants.get(idx) {
                             Some(ConstValue::Str(s)) => s.clone(),
                             _ => {
@@ -3114,7 +3114,7 @@ impl BytecodeVM {
                     };
                     let field_names = (0..count)
                         .map(|i| {
-                            let idx = (type_name + 1 + i as u32) as usize;
+                            let idx = Self::record_field_const_idx(type_name, i)?;
                             match proto.constants.get(idx) {
                                 Some(ConstValue::Str(s)) => Ok(s.clone()),
                                 _ if idx < proto.constants.len() => Ok(format!("_{}", i)),
@@ -6236,6 +6236,24 @@ impl BytecodeVM {
             Some(ConstValue::Str(s)) => Ok(s),
             _ => Err(InterpError::new("expected Str constant")),
         }
+    }
+
+    /// Compute the constant-pool slot for a record field name without letting
+    /// forged type-name metadata wrap around in release builds.
+    fn record_field_const_idx(
+        type_name: ConstIdx,
+        field_offset: u16,
+    ) -> Result<usize, InterpError> {
+        type_name
+            .checked_add(1)
+            .and_then(|base| base.checked_add(field_offset as ConstIdx))
+            .map(|idx| idx as usize)
+            .ok_or_else(|| {
+                InterpError::new(format!(
+                    "record field constant index overflow (type constant {}, field offset {})",
+                    type_name, field_offset
+                ))
+            })
     }
 
     /// Decode the optional canonical tuple projection receipt and prove that
