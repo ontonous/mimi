@@ -439,16 +439,18 @@ impl CanonicalMirFfiRuntime {
         // SAFETY: `cif` matches the typed argument/return storage above;
         // `symbol` is looked up in the live library handle and the call is
         // synchronous, so all pointed-to storage remains valid.
+        let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
+            return Err(format!(
+                "canonical MIR FFI library cache index {lib_idx} is out of range"
+            ));
+        };
         let raw_symbol: libloading::Symbol<*mut c_void> = unsafe {
-            self.loaded_libs[lib_idx]
-                .1
-                .get(descriptor.symbol.as_bytes())
-                .map_err(|error| {
-                    format!(
-                        "failed to find canonical MIR FFI symbol '{}': {error}",
-                        descriptor.symbol
-                    )
-                })?
+            library.get(descriptor.symbol.as_bytes()).map_err(|error| {
+                format!(
+                    "failed to find canonical MIR FFI symbol '{}': {error}",
+                    descriptor.symbol
+                )
+            })?
         };
         let code_ptr = CodePtr(*raw_symbol);
         // SAFETY: argument storage above matches every CIF type and stays
