@@ -3940,8 +3940,9 @@ impl BytecodeVM {
                         Value::BytecodeClosure {
                             proto: proto_idx,
                             captured,
-                            program: _,
+                            program,
                         } => {
+                            self.ensure_bytecode_closure_program(&program)?;
                             // Collect arguments.
                             let args: Vec<Value> = (0..argc)
                                 .map(|i| self.get_reg(args_base + i).clone())
@@ -5435,8 +5436,9 @@ impl BytecodeVM {
             Value::BytecodeClosure {
                 proto: proto_idx,
                 captured,
-                program: _,
+                program,
             } => {
+                self.ensure_bytecode_closure_program(program)?;
                 // H-14: snapshot the stack so a failed closure run can be cleaned.
                 let stack_len_before = self.stack.len();
                 let depth_before = self.depth;
@@ -5966,6 +5968,21 @@ impl BytecodeVM {
                 )));
             };
             *slot = value;
+        }
+        Ok(())
+    }
+
+    /// A closure's prototype index is meaningful only in the bytecode
+    /// program that created it. Reject cross-program values before a frame is
+    /// pushed rather than interpreting the index against an unrelated table.
+    fn ensure_bytecode_closure_program(
+        &self,
+        closure_program: &std::sync::Arc<BytecodeProgram>,
+    ) -> Result<(), InterpError> {
+        if !std::sync::Arc::ptr_eq(&self.program, closure_program) {
+            return Err(InterpError::new(
+                "bytecode closure belongs to a different bytecode program",
+            ));
         }
         Ok(())
     }

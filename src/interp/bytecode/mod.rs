@@ -2299,6 +2299,69 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_cross_program_bytecode_closure() {
+        let mut owner = FunctionProto::new("owner".into(), 0);
+        owner.emit(Op::RetUnit);
+        let owner_program = std::sync::Arc::new(BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![owner],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        });
+        let mut current = FunctionProto::new("current".into(), 0);
+        current.emit(Op::RetUnit);
+        let current_program = std::sync::Arc::new(BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![current],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        });
+        let closure = Value::BytecodeClosure {
+            proto: 0,
+            captured: std::collections::HashMap::new(),
+            program: std::sync::Arc::clone(&owner_program),
+        };
+        let mut vm = BytecodeVM::new(current_program);
+        let error = vm
+            .call_closure(&closure, &[])
+            .expect_err("a closure from another bytecode program must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("belongs to a different bytecode program"),
+            "{error}"
+        );
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.call_function(0, &[]).unwrap(), Value::Unit);
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();
