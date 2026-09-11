@@ -1679,13 +1679,22 @@ fn materialize_generic_instance(
                     .into(),
         }]);
     }
-    let generic_id = generic_parameter_type_id(program, &callable.signature.generic_parameters[0])
-        .ok_or_else(|| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: "generic signature parameter has no canonical ResolvedTypeId".into(),
-            }]
-        })?;
+    let Some(generic_parameter) = callable.signature.generic_parameters.first() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic signature parameter is absent".into(),
+        }]);
+    };
+    let generic_id = generic_parameter_type_id(program, generic_parameter).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic signature parameter has no canonical ResolvedTypeId".into(),
+        }]
+    })?;
+    let first_parameter = callable.signature.parameters.first();
+    let second_parameter = callable.signature.parameters.get(1);
+    let first_parameter_type =
+        first_parameter.and_then(|parameter| program.resolved_types().get(&parameter.ty));
     let generic_list_facade = callable.signature.parameters.iter().any(|parameter| {
         mentions_generic_list_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
     }) || mentions_generic_list_type(
@@ -1732,16 +1741,13 @@ fn materialize_generic_instance(
     let is_copy_record_projection = !is_owned_record_projection_drop_callable(program, callable)
         && callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Nominal { arguments, .. }
-                        if arguments.as_slice() == [generic_id.clone()]
-                )
-            })
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Nominal { arguments, .. }
+                    if arguments.as_slice() == [generic_id.clone()]
+            )
+        })
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -1769,7 +1775,7 @@ fn materialize_generic_instance(
             &mut HashSet::new(),
         ) || mentions_generic_result_type(program, &callable.signature.result, &generic_id);
     let is_identity = callable.signature.parameters.len() == 1
-        && callable.signature.parameters[0].ty == generic_id
+        && first_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.signature.result == generic_id;
     let concrete = arguments.first().cloned().ok_or_else(|| {
         vec![MirLoweringError {
@@ -1792,9 +1798,7 @@ fn materialize_generic_instance(
     // projections remain on their existing scalar-only contracts.
     let is_owned_option_projection = callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
+        && first_parameter_type
             .is_some_and(|ty| matches!(ty, ResolvedType::Option(inner) if inner == &generic_id))
         && callable.body.root.statements.is_empty()
         && callable
@@ -1820,11 +1824,9 @@ fn materialize_generic_instance(
     // receipt whose Move/Drop glue is explicit to every consumer.
     let is_owned_option_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
+        && first_parameter_type
             .is_some_and(|ty| matches!(ty, ResolvedType::Option(inner) if inner == &generic_id))
-        && callable.signature.parameters[1].ty == generic_id
+        && second_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -1867,22 +1869,19 @@ fn materialize_generic_instance(
             });
         callable.signature.parameters.len() == 1
             && callable.signature.result == generic_id
-            && program
-                .resolved_types()
-                .get(&callable.signature.parameters[0].ty)
-                .is_some_and(|ty| {
-                    matches!(
-                        ty,
-                        crate::core::ResolvedType::Result { ok, error }
-                            if ok == &generic_id
-                                && matches!(
-                                    program.resolved_types().get(error),
-                                    Some(crate::core::ResolvedType::Primitive(
-                                        PrimitiveType::I32 | PrimitiveType::Bool
-                                    ))
-                                )
-                    )
-                })
+            && first_parameter_type.is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Result { ok, error }
+                        if ok == &generic_id
+                            && matches!(
+                                program.resolved_types().get(error),
+                                Some(crate::core::ResolvedType::Primitive(
+                                    PrimitiveType::I32 | PrimitiveType::Bool
+                                ))
+                            )
+                )
+            })
             && callable.body.root.statements.is_empty()
             && callable
                 .body
@@ -1911,23 +1910,20 @@ fn materialize_generic_instance(
     // Move receipt only transfers the Ok payload or the explicit fallback.
     let is_owned_result_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Result { ok, error }
-                        if ok == &generic_id
-                            && matches!(
-                                program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(
-                                    PrimitiveType::I32 | PrimitiveType::Bool,
-                                ))
-                            )
-                )
-            })
-        && callable.signature.parameters[1].ty == generic_id
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Result { ok, error }
+                    if ok == &generic_id
+                        && matches!(
+                            program.resolved_types().get(error),
+                            Some(crate::core::ResolvedType::Primitive(
+                                PrimitiveType::I32 | PrimitiveType::Bool,
+                            ))
+                        )
+            )
+        })
+        && second_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -1983,15 +1979,12 @@ fn materialize_generic_instance(
             .is_ok();
     let is_copy_option_projection = callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Option(inner) if inner == &generic_id
-                )
-            })
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Option(inner) if inner == &generic_id
+            )
+        })
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -2011,16 +2004,13 @@ fn materialize_generic_instance(
             });
     let is_copy_option_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Option(inner) if inner == &generic_id
-                )
-            })
-        && callable.signature.parameters[1].ty == generic_id
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Option(inner) if inner == &generic_id
+            )
+        })
+        && second_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -2044,20 +2034,17 @@ fn materialize_generic_instance(
     // `Result<f64, f64>` cannot inherit this exception accidentally.
     let is_copy_result_projection = callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Result { ok, error }
-                        if ok == &generic_id
-                            && matches!(
-                                program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
-                            )
-                )
-            })
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Result { ok, error }
+                    if ok == &generic_id
+                        && matches!(
+                            program.resolved_types().get(error),
+                            Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                        )
+            )
+        })
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -2082,23 +2069,20 @@ fn materialize_generic_instance(
     // fail-closed path.
     let is_copy_result_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
-            .is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::core::ResolvedType::Result { ok, error }
-                        if ok == &generic_id
-                            && matches!(
-                                program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(
-                                    PrimitiveType::I32 | PrimitiveType::Bool,
-                                ))
-                            )
-                )
-            })
-        && callable.signature.parameters[1].ty == generic_id
+        && first_parameter_type.is_some_and(|ty| {
+            matches!(
+                ty,
+                crate::core::ResolvedType::Result { ok, error }
+                    if ok == &generic_id
+                        && matches!(
+                            program.resolved_types().get(error),
+                            Some(crate::core::ResolvedType::Primitive(
+                                PrimitiveType::I32 | PrimitiveType::Bool,
+                            ))
+                        )
+            )
+        })
+        && second_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.body.root.statements.is_empty()
         && callable
             .body
@@ -2118,6 +2102,9 @@ fn materialize_generic_instance(
             });
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
+            let Some(argument) = arguments.first() else {
+                return Err("generic instance has no concrete argument".into());
+            };
             if is_identity {
                 catalog.validate_generic_identity_arguments(arguments)
             } else if is_owned_record_update {
@@ -2127,7 +2114,7 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog.validate_owned_record_update_generic_argument(&arguments[0])
+                    catalog.validate_owned_record_update_generic_argument(argument)
                 }
             } else if is_owned_record_projection_drop || is_owned_record_projection {
                 if arguments.len() != 1 {
@@ -2137,7 +2124,7 @@ fn materialize_generic_instance(
                     ))
                 } else {
                     catalog
-                        .validate_move_owned_record_payload(&arguments[0])
+                        .validate_move_owned_record_payload(argument)
                         .map(|_| ())
                 }
             } else if is_owned_variant_projection {
@@ -2147,9 +2134,7 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog
-                        .validate_move_owned_payload(&arguments[0])
-                        .map(|_| ())
+                    catalog.validate_move_owned_payload(argument).map(|_| ())
                 }
             } else if is_copy_option_projection || is_copy_option_projection_fallback {
                 if arguments.len() != 1 {
@@ -2158,7 +2143,7 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog.validate_generic_option_projection_argument(&arguments[0])
+                    catalog.validate_generic_option_projection_argument(argument)
                 }
             } else if is_copy_result_projection || is_copy_result_projection_fallback {
                 if arguments.len() != 1 {
@@ -2167,7 +2152,7 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog.validate_generic_result_projection_argument(&arguments[0])
+                    catalog.validate_generic_result_projection_argument(argument)
                 }
             } else if is_copy_record_projection {
                 if arguments.len() != 1 {
@@ -2176,7 +2161,7 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog.validate_generic_record_projection_argument(&arguments[0])
+                    catalog.validate_generic_record_projection_argument(argument)
                 }
             } else if generic_list_construct_facade {
                 catalog
@@ -2184,8 +2169,8 @@ fn materialize_generic_instance(
                     .or_else(|scalar_error| {
                         if arguments.len() == 1 {
                             catalog
-                                .validate_move_owned_list_payload(&arguments[0])
-                                .or_else(|_| catalog.validate_nested_list_payload(&arguments[0]))
+                                .validate_move_owned_list_payload(argument)
+                                .or_else(|_| catalog.validate_nested_list_payload(argument))
                                 .map_err(|_| scalar_error)
                         } else {
                             Err(scalar_error)
