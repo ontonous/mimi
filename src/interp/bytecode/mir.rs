@@ -2568,16 +2568,18 @@ impl<'a> FunctionEmitter<'a> {
             }
             arg_regs.push(scratch);
         }
-        debug_assert!(
-            self.register_overflow_reported
-                || arguments.is_empty()
-                || arg_regs.windows(2).all(|pair| {
-                    let [first, second] = pair else {
-                        return false;
-                    };
-                    (*first).checked_add(1).is_some_and(|next| *second == next)
-                })
-        );
+        if !self.register_overflow_reported
+            && !arguments.is_empty()
+            && !arg_regs.windows(2).all(|pair| {
+                let [first, second] = pair else {
+                    return false;
+                };
+                (*first).checked_add(1).is_some_and(|next| *second == next)
+            })
+        {
+            self.error("call move argument registers are not contiguous");
+            return;
+        }
         let Some(argc) = self.u16_abi(arguments.len(), "call argument count") else {
             return;
         };
