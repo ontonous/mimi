@@ -2223,6 +2223,47 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_cleans_residual_frames_after_closure_capture_failure() {
+        let mut target = FunctionProto::new("target".into(), 0);
+        target.alloc_reg();
+        target.capture_names.push("missing".into());
+        let program = std::sync::Arc::new(BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            functions: vec![target],
+            entry: 0,
+            builtin_names: Vec::new(),
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        });
+        let closure = Value::BytecodeClosure {
+            proto: 0,
+            captured: std::collections::HashMap::new(),
+            program: std::sync::Arc::clone(&program),
+        };
+        let mut vm = BytecodeVM::new(program);
+        let error = vm
+            .call_closure(&closure, &[])
+            .expect_err("missing closure capture must fail closed");
+        assert!(
+            error.to_string().contains("missing capture 'missing'"),
+            "{error}"
+        );
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.call_function(0, &[]).unwrap(), Value::Unit);
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();

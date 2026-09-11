@@ -3938,41 +3938,17 @@ impl BytecodeVM {
                                 .collect();
 
                             // Push a new frame for the closure.
+                            let stack_len_before = self.stack.len();
+                            let depth_before = self.depth;
                             self.push_frame(proto_idx, args, Some(rd))?;
 
                             // Bind captured variables in the new frame.
                             // Captures go into registers param_count..param_count+capture_count.
-                            let target_proto =
-                                self.program.functions.get(proto_idx as usize).ok_or_else(
-                                    || {
-                                        InterpError::new(format!(
-                                            "CallIndirect: closure prototype {} is out of range",
-                                            proto_idx
-                                        ))
-                                    },
-                                )?;
-                            let param_count = target_proto.param_count as usize;
-                            let frame_len = self.stack.last().map(|f| f.regs.len()).unwrap_or(0);
-                            for (i, name) in target_proto.capture_names.iter().enumerate() {
-                                let reg = param_count + i;
-                                let value = captured
-                                    .get(name)
-                                    .ok_or_else(|| {
-                                        InterpError::new(format!(
-                                            "CallIndirect: missing capture '{}'",
-                                            name
-                                        ))
-                                    })?
-                                    .clone();
-                                if reg >= frame_len {
-                                    return Err(InterpError::new(format!(
-                                        "CallIndirect: capture register {} out of bounds (len {})",
-                                        reg, frame_len
-                                    )));
-                                }
-                                if let Some(frame) = self.stack.last_mut() {
-                                    frame.regs[reg] = value;
-                                }
+                            if let Err(e) =
+                                self.bind_bytecode_closure_captures(proto_idx, &captured)
+                            {
+                                self.cleanup_failed_subexec(stack_len_before, depth_before);
+                                return Err(e);
                             }
                             // Continue loop — new frame is now active.
                         }
@@ -5449,27 +5425,11 @@ impl BytecodeVM {
                 // Push a new frame for the closure.
                 self.push_frame(*proto_idx, args.to_vec(), None)?;
 
-                // Bind captured variables in the new frame.
-                let target_proto =
-                    self.program
-                        .functions
-                        .get(*proto_idx as usize)
-                        .ok_or_else(|| {
-                            InterpError::new(format!(
-                                "call_closure: closure prototype {} is out of range",
-                                proto_idx
-                            ))
-                        })?;
-                let param_count = target_proto.param_count as usize;
-                for (i, name) in target_proto.capture_names.iter().enumerate() {
-                    if let Some(value) = captured.get(name) {
-                        let reg = param_count + i;
-                        if let Some(frame) = self.stack.last_mut() {
-                            if reg < frame.regs.len() {
-                                frame.regs[reg] = value.clone();
-                            }
-                        }
-                    }
+                // Bind captured variables in the new frame. A malformed
+                // closure must not leave the freshly pushed frame behind.
+                if let Err(e) = self.bind_bytecode_closure_captures(*proto_idx, captured) {
+                    self.cleanup_failed_subexec(stack_len_before, depth_before);
+                    return Err(e);
                 }
 
                 // Set stop_depth so exec_loop returns when this frame pops.
@@ -5931,6 +5891,64 @@ impl BytecodeVM {
             }
         }
         self.depth = depth_before;
+    }
+
+    /// Bind a bytecode closure's captured environment into the frame just
+    /// pushed for it. Prototype metadata and every destination register are
+    /// checked before any capture is written, so callers can roll back the
+    /// whole frame atomically when malformed closure input is encountered.
+    fn bind_bytecode_closure_captures(
+        &mut self,
+        proto_idx: FuncIdx,
+        captured: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), InterpError> {
+        let (param_count, capture_names) = {
+            let target_proto = self
+                .program
+                .functions
+                .get(proto_idx as usize)
+                .ok_or_else(|| {
+                    InterpError::new(format!(
+                        "bytecode closure prototype {} is out of range",
+                        proto_idx
+                    ))
+                })?;
+            (
+                target_proto.param_count as usize,
+                target_proto.capture_names.clone(),
+            )
+        };
+        let frame_len = self.cur_frame().regs.len();
+        let mut bindings = Vec::with_capacity(capture_names.len());
+        for (i, name) in capture_names.iter().enumerate() {
+            let reg = param_count.checked_add(i).ok_or_else(|| {
+                InterpError::new(format!(
+                    "bytecode closure capture register overflow at capture '{}'",
+                    name
+                ))
+            })?;
+            if reg >= frame_len {
+                return Err(InterpError::new(format!(
+                    "bytecode closure capture register {} out of bounds (len {})",
+                    reg, frame_len
+                )));
+            }
+            let value = captured.get(name).ok_or_else(|| {
+                InterpError::new(format!("bytecode closure missing capture '{}'", name))
+            })?;
+            bindings.push((reg, value.clone()));
+        }
+        let frame = self.cur_frame_mut();
+        for (reg, value) in bindings {
+            let Some(slot) = frame.regs.get_mut(reg) else {
+                return Err(InterpError::new(format!(
+                    "bytecode closure capture register {} disappeared from frame",
+                    reg
+                )));
+            };
+            *slot = value;
+        }
+        Ok(())
     }
 
     // ── Builtin dispatch (D1: registry, not giant match) ─────
