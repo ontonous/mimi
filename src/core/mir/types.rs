@@ -8306,7 +8306,10 @@ impl MirTypeCatalog {
                     && variant.name == "Ok"
                     && variant.discriminant == 0
                     && variant.fields.len() == 1
-                    && variant.fields[0].ty == *result_ty
+                    && variant
+                        .fields
+                        .first()
+                        .is_some_and(|field| field.ty == *result_ty)
             })
             .ok_or_else(|| {
                 "Result projection target must be the canonical Ok payload".to_string()
@@ -8318,7 +8321,10 @@ impl MirTypeCatalog {
                     && variant.name == "Err"
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
-                    && variant.fields[0].ty == *error
+                    && variant
+                        .fields
+                        .first()
+                        .is_some_and(|field| field.ty == *error)
             })
             .ok_or_else(|| {
                 "Result projection source must contain the canonical Err payload".to_string()
@@ -8331,7 +8337,10 @@ impl MirTypeCatalog {
             || projection.field_index != 0
             || projection.arity != 1
             || projection.variant != selected.id
-            || projection.field != selected.fields[0].id
+            || !selected
+                .fields
+                .first()
+                .is_some_and(|field| projection.field == field.id)
         {
             return Err("Result projection requires the canonical single Copy Ok payload".into());
         }
@@ -8390,7 +8399,12 @@ impl MirTypeCatalog {
             .iter()
             .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
             .ok_or_else(|| "Result layout has no canonical Err variant".to_string())?;
-        if alternate.fields.len() != 1 || alternate.fields[0].ty != *error {
+        if alternate.fields.len() != 1
+            || !alternate
+                .fields
+                .first()
+                .is_some_and(|field| field.ty == *error)
+        {
             return Err("Result Err variant payload disagrees with heterogeneous TypeDesc".into());
         }
         self.validated_result_scalar_projection_trap_contract(ty, &selected.id, &field.id, ok)
