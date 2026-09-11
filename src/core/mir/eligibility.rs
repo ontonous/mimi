@@ -441,7 +441,10 @@ fn is_exact_cross_state_result_match(
 ) -> bool {
     if transition.silent_transition
         || transition.targets.len() != 1
-        || transition.targets[0] == transition.id.source
+        || transition
+            .targets
+            .first()
+            .is_some_and(|target| target == &transition.id.source)
         || transition.params.len() != 0
         || transition.fails.is_none()
         || transition.is_fallback
