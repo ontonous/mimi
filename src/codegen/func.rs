@@ -189,7 +189,7 @@ fn collect_old_idents_walker(expr: &crate::ast::Expr, out: &mut Vec<String>) {
             }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) | Expr::Ident(_) => {}
-        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+        Expr::Located { expr: inner, .. } => collect_old_idents_walker(inner, out),
     }
 }
 
@@ -364,7 +364,7 @@ fn collect_all_idents_depth(expr: &crate::ast::Expr, out: &mut Vec<String>, dept
             }
         }
         Expr::TypeInfo(_) | Expr::Literal(_) => {}
-        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+        Expr::Located { expr: inner, .. } => collect_all_idents_depth(inner, out, d),
     }
 }
 
