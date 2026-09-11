@@ -7236,22 +7236,29 @@ impl<'a> Lowerer<'a> {
     /// runtime discharge when the transition body does not move them into its
     /// result. The first parameter is the Flow source and is deliberately
     /// excluded: recoverable transitions return it in `Err((source, error))`.
-    fn linear_transition_parameter_values(&self) -> Vec<MirValueId> {
+    fn linear_transition_parameter_values(&self) -> Result<Vec<MirValueId>, String> {
         let Some(catalog) = self.type_catalog else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        self.body
-            .parameters
-            .iter()
-            .skip(1)
-            .filter_map(|parameter| self.locals.get(parameter))
-            .filter(|value| {
-                catalog
-                    .get(&self.values[value].ty)
-                    .is_some_and(|descriptor| descriptor.ownership.needs_drop())
-            })
-            .cloned()
-            .collect()
+        let mut parameters = Vec::new();
+        for parameter in self.body.parameters.iter().skip(1) {
+            let Some(value) = self.locals.get(parameter) else {
+                continue;
+            };
+            let Some(mir_value) = self.values.get(value) else {
+                return Err(format!(
+                    "linear Flow parameter '{}' has no MIR value descriptor",
+                    parameter.0 .0
+                ));
+            };
+            if catalog
+                .get(&mir_value.ty)
+                .is_some_and(|descriptor| descriptor.ownership.needs_drop())
+            {
+                parameters.push(value.clone());
+            }
+        }
+        Ok(parameters)
     }
 
     /// Classify whether a value was consumed on all, no, or only some MIR
@@ -7378,7 +7385,13 @@ impl<'a> Lowerer<'a> {
     /// paths. Discharge that original only in the success block where the
     /// Clone is actually present; a direct Move return remains untouched.
     fn emit_success_parameter_drops(&mut self, node: &NodeId) {
-        let parameters = self.linear_transition_parameter_values();
+        let parameters = match self.linear_transition_parameter_values() {
+            Ok(parameters) => parameters,
+            Err(message) => {
+                self.error(node, message);
+                return;
+            }
+        };
         for (index, parameter) in parameters.into_iter().enumerate() {
             let cloned_here = self.blocks.get(&self.current).is_some_and(|block| {
                 block.instructions.iter().any(|instruction| {
@@ -7403,7 +7416,13 @@ impl<'a> Lowerer<'a> {
     /// boundary must therefore be dropped on the error edge before the
     /// failure envelope is constructed.
     fn emit_failure_parameter_drops(&mut self, node: &NodeId) {
-        let parameters = self.linear_transition_parameter_values();
+        let parameters = match self.linear_transition_parameter_values() {
+            Ok(parameters) => parameters,
+            Err(message) => {
+                self.error(node, message);
+                return;
+            }
+        };
         for (index, parameter) in parameters.into_iter().enumerate() {
             let (any_consumed, all_consumed) =
                 self.value_consumption_on_paths_to_current(&parameter);
