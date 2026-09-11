@@ -965,8 +965,8 @@ impl BytecodeVM {
                 // ── Constants & moves ──────────────────────────
                 Op::LoadConst { rd, idx } => {
                     self.ensure_reg(rd, "load-const destination")?;
-                    let val = self.load_const(proto, idx);
-                    self.cur_frame_mut().regs[rd as usize] = val;
+                    let val = self.load_const(proto, idx)?;
+                    self.set_reg(rd, val);
                 }
                 Op::LoadUnit { rd } => {
                     self.ensure_reg(rd, "load-unit destination")?;
@@ -5542,12 +5542,15 @@ impl BytecodeVM {
         if self.stack.is_empty() {
             self.validate_canonical_ffi_program()?;
         }
+        // Keep the wrapped public entry point on the same residual-frame
+        // cleanup path as `call_function`. A runtime error can leave nested
+        // frames (for example, a callee that traps before returning); without
+        // cleanup the next actor/embedding call would inherit those frames
+        // and bypass the fresh-entry validation above.
+        let stack_len_before = self.stack.len();
+        let depth_before = self.depth;
         self.push_frame_wrap_ok(func_idx, args.to_vec(), None, source_state)?;
-        let prev_stop = self.stop_depth;
-        self.stop_depth = self.depth;
-        let result = self.exec_loop();
-        self.stop_depth = prev_stop;
-        result
+        self.exec_nested(stack_len_before, depth_before, true)
     }
 
     /// Shared return path for Op::Ret / Op::RetUnit / Op::RetEarly.
@@ -6722,14 +6725,15 @@ impl BytecodeVM {
         Ok(())
     }
 
-    fn load_const(&self, proto: &FunctionProto, idx: ConstIdx) -> Value {
-        mimi_debug_assert!(
-            (idx as usize) < proto.constants.len(),
-            "constant index {} out of bounds (len {})",
-            idx,
-            proto.constants.len()
-        );
-        match &proto.constants[idx as usize] {
+    fn load_const(&self, proto: &FunctionProto, idx: ConstIdx) -> Result<Value, InterpError> {
+        let constant = proto.constants.get(idx as usize).ok_or_else(|| {
+            InterpError::new(format!(
+                "load-const index {} out of range (constant count {})",
+                idx,
+                proto.constants.len()
+            ))
+        })?;
+        Ok(match constant {
             ConstValue::Int(v) => Value::Int(*v),
             ConstValue::Float(v) => Value::Float(*v),
             ConstValue::Bool(v) => Value::Bool(*v),
@@ -6749,7 +6753,7 @@ impl BytecodeVM {
             ConstValue::ListOperation(_) => Value::Unit,
             ConstValue::VariantPredicate(_) => Value::Unit,
             ConstValue::VariantProjectionFallback(_) => Value::Unit,
-        }
+        })
     }
 
     // ── Actor spawn helper ───────────────────────────────────

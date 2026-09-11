@@ -1080,6 +1080,7 @@ mod tests {
 #[cfg(test)]
 mod bench {
     use super::*;
+    use crate::interp::value::Value;
     use std::time::Instant;
 
     fn run_single_op(main: FunctionProto) -> Result<i64, String> {
@@ -2089,6 +2090,14 @@ func main() -> i32 {
 
     #[test]
     fn vm_rejects_forged_direct_constant_indices() {
+        expect_register_error(
+            |result| Op::LoadConst {
+                rd: result,
+                idx: u32::MAX,
+            },
+            "load-const index",
+        );
+
         let mut main = FunctionProto::new("main".into(), 0);
         let target = main.alloc_reg();
         let value = main.alloc_reg();
@@ -2146,6 +2155,35 @@ func main() -> i32 {
         let error = run_single_op(main)
             .expect_err("a forged trap message constant must fail before indexing");
         assert!(error.contains("trap message constant"), "{error}");
+    }
+
+    #[test]
+    fn vm_cleans_residual_frames_after_wrapped_entry_failure() {
+        let source = r#"
+        func boom() -> i32 { 1 / 0 }
+        func ok() -> i32 { 7 }
+        func main() -> i32 { 0 }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let program = compiler.compile_file(&file).unwrap();
+        let boom = program
+            .functions
+            .iter()
+            .position(|function| function.name == "boom")
+            .expect("boom function must be present") as u32;
+        let ok = program
+            .functions
+            .iter()
+            .position(|function| function.name == "ok")
+            .expect("ok function must be present") as u32;
+        let mut vm = BytecodeVM::new(program);
+        let error = vm
+            .call_function_wrap_ok(boom, &[], Value::Int(0))
+            .expect_err("wrapped entry must report the callee trap");
+        assert!(error.to_string().contains("division by zero"), "{error}");
+        assert_eq!(vm.call_function(ok, &[]).unwrap(), Value::Int(7));
     }
 
     #[test]
