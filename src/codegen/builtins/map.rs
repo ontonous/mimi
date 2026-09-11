@@ -227,12 +227,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| format!("map_set list load: {}", e))?;
                 if let BasicValueEnum::StructValue(sv) = loaded {
                     let fields = sv.get_type().get_field_types();
-                    let is_list = fields.len() == 2
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        )
-                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    let is_list = matches!(
+                        fields.as_slice(),
+                        [
+                            BasicTypeEnum::IntType(it),
+                            BasicTypeEnum::PointerType(_)
+                        ] if it.get_bit_width() == 64
+                    );
                     if is_list {
                         let size =
                             self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
@@ -287,18 +288,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::StructValue(sv) => {
                 let fields = sv.get_type().get_field_types();
                 // List {i64, ptr} — heap-pack before map_set (never treat as C string).
-                let is_list = fields.len() == 2
-                    && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                    )
-                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
-                let is_mimi_string = fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(
-                        fields[1],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                    );
+                let is_list = matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(it),
+                        BasicTypeEnum::PointerType(_)
+                    ] if it.get_bit_width() == 64
+                );
+                let is_mimi_string = matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::PointerType(_),
+                        BasicTypeEnum::IntType(it)
+                    ] if it.get_bit_width() == 64
+                );
                 if is_list {
                     let i64_ty = self.context.i64_type();
                     let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
