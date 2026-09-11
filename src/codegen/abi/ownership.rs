@@ -293,7 +293,7 @@ fn classify_surface_inner(
         Type::ImplTrait(_) | Type::Nothing => OwnershipClass::Scalar,
         Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) => OwnershipClass::Generic,
         Type::TyErr => OwnershipClass::Unknown,
-        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+        Type::Located { ty, .. } => classify_surface_inner(ty, type_defs, active),
     }
 }
 

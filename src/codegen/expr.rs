@@ -781,9 +781,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             // 0.36.4 Fault nominal: a bare state/event name as a no-payload
             // StateId/EventId variant (e.g. `Fault { last_state: Working }`).
-            let enum_type = self
-                .nominal_variant_enum(name.as_str())
-                .expect("nominal_variant_enum is consistent with the guard above");
+            let Some(enum_type) = self.nominal_variant_enum(name.as_str()) else {
+                return Err(format!(
+                    "nominal variant '{}' disappeared during code generation",
+                    name
+                )
+                .into());
+            };
             self.build_nominal_variant(&enum_type, name, None)
         } else if self.find_variant_owner(name).is_some() {
             // Unit enum variant used as a value (e.g. `Yes` or `Pending`)
@@ -2798,7 +2802,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[
                     // CG-H5: QAST tags are non-negative; use unsigned const_int
                     // consistently across leaf/node/list (was mixed true/false).
-                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)?),
                     BasicMetadataValueEnum::IntValue(value),
                 ],
                 "q_leaf",
@@ -2809,9 +2813,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// CG-H5: QAST discriminant tags are always non-negative small ints.
     /// Always emit unsigned `const_int(..., false)` so leaf/node/list agree.
-    fn quote_tag_const(&self, tag: i32) -> inkwell::values::IntValue<'ctx> {
-        debug_assert!(tag >= 0, "QAST tag must be non-negative, got {tag}");
-        self.context.i32_type().const_int(tag as u64, false)
+    fn quote_tag_const(&self, tag: i32) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        if tag < 0 {
+            return Err(CompileError::Unsupported(format!(
+                "QAST tag must be non-negative, got {tag}"
+            )));
+        }
+        Ok(self.context.i32_type().const_int(tag as u64, false))
     }
 
     fn i64_const(&self, v: i64) -> inkwell::values::IntValue<'ctx> {
@@ -2878,7 +2886,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 func,
                 &[
                     // CG-H5: same unsigned tag const as leaf/list.
-                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)?),
                     BasicMetadataValueEnum::PointerValue(c0_ptr),
                     BasicMetadataValueEnum::PointerValue(c1_ptr),
                     // BinOp/UnOp discriminants are non-negative; bit-pattern const.
@@ -2908,7 +2916,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 func,
                 &[
                     // CG-H5: same unsigned tag const as leaf/node.
-                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)),
+                    BasicMetadataValueEnum::IntValue(self.quote_tag_const(tag)?),
                     BasicMetadataValueEnum::PointerValue(children_ptr),
                     BasicMetadataValueEnum::IntValue(i64_ty.const_int(len as u64, false)),
                 ],
