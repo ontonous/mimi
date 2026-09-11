@@ -554,6 +554,14 @@ func main() -> i64 {
         direct_mir.type_catalog().canonical_text(),
         "transparent aliases must not add opaque nominal TypeDesc entries"
     );
+    let alias_route_receipt = mir.route_receipt("scalar-ffi-v1");
+    let repeated_mir = MirProgram::from_checked_program(&checked)
+        .expect("repeat materialize transparent alias FFI fixture");
+    assert_eq!(
+        alias_route_receipt.ffi_digest,
+        repeated_mir.route_receipt("scalar-ffi-v1").ffi_digest,
+        "transparent alias FFI receipt identity must be deterministic"
+    );
     let receipt = mir
         .ffi_calls()
         .values()
