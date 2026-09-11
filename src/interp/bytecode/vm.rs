@@ -596,6 +596,12 @@ impl BytecodeVM {
         let depth_before = self.depth;
         self.push_frame(entry, Vec::new(), None)?;
         let result = self.exec_entry_loop();
+        // `exit()` asks `exec_loop` to return a successful value before the
+        // active frame reaches Ret.  Treat those extra frames like any other
+        // early sub-execution return so a reusable VM cannot inherit them.
+        if self.stack.len() > stack_len_before {
+            self.cleanup_failed_subexec(stack_len_before, depth_before);
+        }
         match result {
             Ok(Value::Int(code)) => Ok(code),
             Ok(Value::Unit) => Ok(0),
@@ -628,7 +634,11 @@ impl BytecodeVM {
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
         self.push_frame(entry, Vec::new(), None)?;
-        match self.exec_entry_loop() {
+        let result = self.exec_entry_loop();
+        if self.stack.len() > stack_len_before {
+            self.cleanup_failed_subexec(stack_len_before, depth_before);
+        }
+        match result {
             Ok(v) => Ok(v),
             Err(e) => {
                 self.cleanup_failed_subexec(stack_len_before, depth_before);
@@ -5398,7 +5408,16 @@ impl BytecodeVM {
         let result = self.exec_loop();
         self.stop_depth = prev_stop;
         match result {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                // `exit()` is a successful early return from exec_loop and
+                // therefore can leave the freshly pushed frame active.  A
+                // nested caller must observe the same clean stack contract as
+                // the error path before it continues executing.
+                if self.stack.len() > stack_len_before {
+                    self.cleanup_failed_subexec(stack_len_before, depth_before);
+                }
+                Ok(v)
+            }
             Err(e) => {
                 let e = if enrich { self.enrich_error(e) } else { e };
                 self.cleanup_failed_subexec(stack_len_before, depth_before);

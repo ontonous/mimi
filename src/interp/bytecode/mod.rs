@@ -2264,6 +2264,41 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_cleans_residual_frames_after_exit_request() {
+        let source = r#"
+        func exit_now() -> i32 {
+            exit(7)
+            0
+        }
+        func ok() -> i32 { 9 }
+        func main() -> i32 { exit_now() }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let program = compiler.compile_file(&file).unwrap();
+        let exit_now = program
+            .functions
+            .iter()
+            .position(|function| function.name == "exit_now")
+            .expect("exit_now function must be present") as u32;
+        let ok = program
+            .functions
+            .iter()
+            .position(|function| function.name == "ok")
+            .expect("ok function must be present") as u32;
+
+        let mut vm = BytecodeVM::new(program);
+        assert_eq!(vm.call_function(exit_now, &[]).unwrap(), Value::Int(7));
+        assert_eq!(
+            vm.debug_stack_state(),
+            (0, 0),
+            "successful exit left residual frames or depth"
+        );
+        assert_eq!(vm.call_function(ok, &[]).unwrap(), Value::Int(9));
+    }
+
+    #[test]
     fn vm_rejects_forged_destructure_variant_register_window() {
         let mut main = FunctionProto::new("main".into(), 0);
         let result = main.alloc_reg();
