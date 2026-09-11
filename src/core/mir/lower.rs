@@ -8701,7 +8701,11 @@ impl<'a> Lowerer<'a> {
             );
             return;
         };
-        if ok != &self.values[&result].ty {
+        let Some(result_ty) = self.values.get(&result).map(|value| value.ty.clone()) else {
+            self.error(node, "Flow failure Try result has no canonical MIR type");
+            return;
+        };
+        if ok != &result_ty {
             self.error(
                 node,
                 "Flow failure Try result TypeDesc disagrees with Result::Ok",
@@ -8790,7 +8794,7 @@ impl<'a> Lowerer<'a> {
             &inner_ty,
             &ok_id,
             &ok_field_id,
-            &self.values[&result].ty,
+            &result_ty,
         ) {
             Ok(projection) => projection,
             Err(message) => {
