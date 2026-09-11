@@ -2490,7 +2490,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 name
                             )));
                         }
-                        let trait_name = &trait_names[0];
+                        let trait_name = trait_names.first().ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "dyn Trait binding '{}' requires at least one trait",
+                                name
+                            ))
+                        })?;
                         // Records bind as pointers in Mimi (reference
                         // semantics): the compiled value is a LidarDriver*
                         // while type_llvm registers the {i32} value shape.

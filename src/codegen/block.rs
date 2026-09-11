@@ -235,7 +235,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 name
                             )));
                         }
-                        let trait_name = &trait_names[0];
+                        let trait_name = trait_names.first().ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "dyn Trait binding '{}' requires at least one trait",
+                                name
+                            ))
+                        })?;
                         let concrete_ty = self
                             .type_llvm
                             .get(&concrete_type)
