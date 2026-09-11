@@ -1537,21 +1537,18 @@ fn is_owned_record_projection_drop_callable(
     {
         return false;
     }
-    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(
-            ty,
-            ResolvedType::GenericParameter(candidate)
-                if candidate == &callable.signature.generic_parameters[0]
-        )
-        .then_some(id.clone())
-    }) else {
+    let Some(generic_parameter) = callable.signature.generic_parameters.first() else {
+        return false;
+    };
+    let Some(generic_ty) = generic_parameter_type_id(program, generic_parameter) else {
+        return false;
+    };
+    let Some(parameter) = callable.signature.parameters.first() else {
         return false;
     };
     let Some(ResolvedType::Nominal {
         item, arguments, ..
-    }) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    }) = program.resolved_types().get(&parameter.ty)
     else {
         return false;
     };
@@ -1569,7 +1566,9 @@ fn is_owned_record_projection_drop_callable(
     {
         return false;
     }
-    let binder = &definition.generic_parameters[0].1;
+    let Some((_, binder)) = definition.generic_parameters.first() else {
+        return false;
+    };
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
     let mut owned_list_fields = 0usize;
@@ -1596,12 +1595,14 @@ fn is_owned_record_projection_drop_callable(
                 item, arguments, ..
             } if item.as_str() == "builtin:type:List"
                 && arguments.len() == 1
-                && matches!(
-                    program.resolved_types().get(&arguments[0]),
-                    Some(ResolvedType::Primitive(
-                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-                    ))
-                ) =>
+                && arguments.first().is_some_and(|argument| {
+                    matches!(
+                        program.resolved_types().get(argument),
+                        Some(ResolvedType::Primitive(
+                            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                        ))
+                    )
+                }) =>
             {
                 owned_list_fields += 1;
                 true
@@ -1610,12 +1611,14 @@ fn is_owned_record_projection_drop_callable(
                 item, arguments, ..
             } if item.as_str() == "builtin:type:Set"
                 && arguments.len() == 1
-                && matches!(
-                    program.resolved_types().get(&arguments[0]),
-                    Some(ResolvedType::Primitive(
-                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-                    ))
-                ) =>
+                && arguments.first().is_some_and(|argument| {
+                    matches!(
+                        program.resolved_types().get(argument),
+                        Some(ResolvedType::Primitive(
+                            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                        ))
+                    )
+                }) =>
             {
                 owned_set_fields += 1;
                 true
