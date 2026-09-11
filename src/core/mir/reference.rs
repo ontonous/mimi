@@ -7475,9 +7475,14 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "variant construction contains an unknown payload field",
             ));
         }
+        let variant_nominal = crate::core::NominalTypeId::new(expected_nominal).map_err(|_| {
+            self.error(
+                &function.owner,
+                "variant TypeDesc nominal is empty during construction",
+            )
+        })?;
         Ok(MirRuntimeValue::Variant {
-            nominal: crate::core::NominalTypeId::new(expected_nominal)
-                .expect("TypeDesc variant nominal is non-empty"),
+            nominal: variant_nominal,
             variant: expected_variant.id.clone(),
             payload,
         })
