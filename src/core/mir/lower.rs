@@ -2330,7 +2330,12 @@ fn materialize_generic_instance(
                     ),
                 }]
             })?;
-        let instruction = block.instructions.first_mut().expect("one instruction");
+        let Some(instruction) = block.instructions.first_mut() else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "owned generic record move/drop projection instruction is absent".into(),
+            }]);
+        };
         instruction.kind = MirInstructionKind::MoveProjectDrop {
             result: project_result,
             base: project_base,
@@ -2433,7 +2438,12 @@ fn materialize_generic_instance(
                     ),
                 }]
             })?;
-        let instruction = block.instructions.first_mut().expect("one instruction");
+        let Some(instruction) = block.instructions.first_mut() else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "owned generic record projection instruction is absent".into(),
+            }]);
+        };
         instruction.kind = MirInstructionKind::MoveProject {
             result: project_result,
             base: project_base,
@@ -9841,14 +9851,20 @@ impl<'a> Lowerer<'a> {
                         .validated_generic_list_len_operation_contract(&result_ty, &list_ty),
                     super::MirListOperation::Reverse => type_catalog
                         .validated_generic_list_reverse_operation_contract(&result_ty, &list_ty),
-                    super::MirListOperation::Concat => type_catalog
-                        .validated_generic_list_concat_operation_contract(
+                    super::MirListOperation::Concat => {
+                        let Some(argument_ty) = argument_ty.as_ref() else {
+                            self.error(
+                                node_id,
+                                "generic List concat placeholder has no argument type",
+                            );
+                            return None;
+                        };
+                        type_catalog.validated_generic_list_concat_operation_contract(
                             &result_ty,
                             &list_ty,
-                            argument_ty
-                                .as_ref()
-                                .expect("Concat placeholder has an argument"),
-                        ),
+                            argument_ty,
+                        )
+                    }
                 };
                 match placeholder {
                     Ok(contract) => Some(contract),
@@ -9900,9 +9916,13 @@ impl<'a> Lowerer<'a> {
                         )
                     }) =>
             {
-                let element_ty = element_types
-                    .first()
-                    .expect("single-element List construction has an element type");
+                let Some(element_ty) = element_types.first() else {
+                    self.error(
+                        node_id,
+                        "single-element List construction has no element type",
+                    );
+                    return None;
+                };
                 match type_catalog.validated_generic_list_construct_contract(&result_ty, element_ty)
                 {
                     Ok(contract) => Some(contract),
@@ -10339,11 +10359,8 @@ fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<No
         ),
         _ => return None,
     };
-    Some((
-        NominalTypeId::new(nominal).expect("static builtin nominal"),
-        NodeId(variant.into()),
-        fields,
-    ))
+    let nominal = NominalTypeId::new(nominal).ok()?;
+    Some((nominal, NodeId(variant.into()), fields))
 }
 
 /// Resolve a checker-owned user-enum constructor into the canonical variant
