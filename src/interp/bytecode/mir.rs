@@ -601,18 +601,21 @@ fn compile_function(
     indices: &BTreeMap<NodeId, FuncIdx>,
     ffi_indices: &BTreeMap<crate::core::mir::MirInstructionId, u16>,
 ) -> Result<FunctionProto, Vec<MirBytecodeError>> {
-    if function.parameters.len() > u16::MAX as usize {
-        return Err(vec![MirBytecodeError {
-            function: function.owner.clone(),
-            message: "parameter count exceeds bytecode register ABI".into(),
-        }]);
-    }
+    let parameter_count = match u16::try_from(function.parameters.len()) {
+        Ok(count) => count,
+        Err(_) => {
+            return Err(vec![MirBytecodeError {
+                function: function.owner.clone(),
+                message: "parameter count exceeds bytecode register ABI".into(),
+            }]);
+        }
+    };
     let mut emitter = FunctionEmitter {
         function,
         program,
         indices,
         ffi_indices,
-        proto: FunctionProto::new(function.owner.0.clone(), function.parameters.len() as u16),
+        proto: FunctionProto::new(function.owner.0.clone(), parameter_count),
         registers: BTreeMap::new(),
         block_starts: BTreeMap::new(),
         pending_jumps: Vec::new(),
@@ -698,6 +701,16 @@ impl<'a> FunctionEmitter<'a> {
             Ok(value) => Some(value),
             Err(_) => {
                 self.error(format!("{role} {value} exceeds bytecode u16 ABI"));
+                None
+            }
+        }
+    }
+
+    fn u32_abi(&mut self, value: usize, role: &str) -> Option<u32> {
+        match u32::try_from(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                self.error(format!("{role} {value} exceeds bytecode u32 ABI"));
                 None
             }
         }
@@ -3473,14 +3486,10 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("List construction is unsupported: {message}"));
             return;
         }
-        if elements.len() > u32::MAX as usize {
-            self.error("List construction length exceeds bytecode capacity ABI");
+        let Some(capacity) = self.u32_abi(elements.len(), "List construction length") else {
             return;
-        }
-        self.proto.emit(Op::NewList {
-            rd,
-            capacity: elements.len() as u32,
-        });
+        };
+        self.proto.emit(Op::NewList { rd, capacity });
         for (index, value) in elements.iter().enumerate() {
             let Some(rb) = self.reg(value) else { return };
             let Some(value_info) = self.function.values.get(value) else {
@@ -3803,10 +3812,9 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        if fields.len() > u16::MAX as usize {
-            self.error("tuple arity exceeds bytecode aggregate ABI");
+        let Some(arity) = self.u16_abi(fields.len(), "tuple arity") else {
             return;
-        }
+        };
         let base = self.alloc_reg();
         for (index, field) in fields.iter().enumerate() {
             let Some(source) = self.reg(field) else {
@@ -3818,17 +3826,9 @@ impl<'a> FunctionEmitter<'a> {
             }
         }
         if result_desc.ownership == MirOwnership::Copy {
-            self.proto.emit(Op::NewTuple {
-                rd,
-                base,
-                arity: fields.len() as u16,
-            });
+            self.proto.emit(Op::NewTuple { rd, base, arity });
         } else {
-            self.proto.emit(Op::NewTupleMove {
-                rd,
-                base,
-                arity: fields.len() as u16,
-            });
+            self.proto.emit(Op::NewTupleMove { rd, base, arity });
         }
     }
 
@@ -4006,10 +4006,9 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        if variant_desc.fields.len() > u16::MAX as usize {
-            self.error("variant payload arity exceeds bytecode aggregate ABI");
+        let Some(arity) = self.u16_abi(variant_desc.fields.len(), "variant payload arity") else {
             return;
-        }
+        };
         let Some(shapes) = self.emit_variant_shape_table(&result_desc.id) else {
             return;
         };
@@ -4042,7 +4041,7 @@ impl<'a> FunctionEmitter<'a> {
                 type_name,
                 variant: variant_desc.discriminant,
                 base,
-                arity: variant_desc.fields.len() as u16,
+                arity,
                 shapes: Some(shapes),
             }
         } else {
@@ -4051,7 +4050,7 @@ impl<'a> FunctionEmitter<'a> {
                 type_name,
                 variant: variant_desc.discriminant,
                 base,
-                arity: variant_desc.fields.len() as u16,
+                arity,
                 shapes: Some(shapes),
             }
         });
@@ -4107,10 +4106,13 @@ impl<'a> FunctionEmitter<'a> {
             self.error("record update nominal/layout disagrees with TypeDesc");
             return;
         }
-        if field_ids.len() != values.len() || field_ids.len() > u16::MAX as usize {
+        if field_ids.len() != values.len() {
             self.error("record update field/value arity exceeds the bytecode ABI");
             return;
         }
+        let Some(update_count) = self.u16_abi(values.len(), "record update field count") else {
+            return;
+        };
         let field_types = values
             .iter()
             .filter_map(|value| self.type_of(value).map(|descriptor| descriptor.id.clone()))
@@ -4227,7 +4229,7 @@ impl<'a> FunctionEmitter<'a> {
                 type_name,
                 ra,
                 base: update_base,
-                count: supplied.len() as u16,
+                count: update_count,
             });
         } else {
             self.proto.emit(Op::UpdateRecord {
@@ -4235,7 +4237,7 @@ impl<'a> FunctionEmitter<'a> {
                 type_name,
                 ra,
                 base: update_base,
-                count: supplied.len() as u16,
+                count: update_count,
             });
         }
     }
@@ -4616,10 +4618,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             sources.push(scratch);
         }
-        if variant.fields.len() > u16::MAX as usize {
-            self.error("variant payload arity exceeds bytecode field ABI");
+        let Some(arity) = self.u16_abi(variant.fields.len(), "variant payload arity") else {
             return;
-        }
+        };
         let Some((expected_nominal, _)) = self
             .program
             .type_catalog()
@@ -4640,7 +4641,7 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(Op::DestructureVariantMove {
             ra: scrutinee,
             base: payload_base,
-            arity: variant.fields.len() as u16,
+            arity,
             variant_tag,
             shapes,
         });
@@ -4700,10 +4701,9 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("nested tuple binding TypeDesc has no tuple layout");
                 return;
             };
-            if elements.len() > u16::MAX as usize {
-                self.error("nested tuple payload arity exceeds bytecode field ABI");
+            let Some(arity) = self.u16_abi(elements.len(), "nested tuple payload arity") else {
                 return;
-            }
+            };
             let tuple_base = self.alloc_reg();
             for _ in 1..elements.len() {
                 self.alloc_reg();
@@ -4720,7 +4720,7 @@ impl<'a> FunctionEmitter<'a> {
             self.proto.emit(Op::DestructureTupleMove {
                 ra: tuple_source,
                 base: tuple_base,
-                arity: elements.len() as u16,
+                arity,
                 shape,
             });
             nested_bases.insert(outer_index, tuple_base);
@@ -4827,19 +4827,22 @@ impl<'a> FunctionEmitter<'a> {
         };
         let mut shapes = Vec::with_capacity(variants.len());
         for variant in variants {
-            if variant.fields.len() > u16::MAX as usize {
-                self.error(format!(
-                    "variant '{}' in '{}' exceeds bytecode payload ABI",
-                    variant.name, nominal
-                ));
-                return None;
-            }
+            let arity = match u16::try_from(variant.fields.len()) {
+                Ok(arity) => arity,
+                Err(_) => {
+                    self.error(format!(
+                        "variant '{}' in '{}' exceeds bytecode payload ABI",
+                        variant.name, nominal
+                    ));
+                    return None;
+                }
+            };
             shapes.push(VariantShape {
                 nominal: nominal_id.clone(),
                 variant: variant.id.clone(),
                 tag: variant.name.clone(),
                 discriminant: variant.discriminant,
-                arity: variant.fields.len() as u16,
+                arity,
             });
         }
         Some(self.add_const(ConstValue::VariantShapes(shapes)))
@@ -5011,15 +5014,14 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch binding parameter disagrees with target block parameter");
                 return;
             }
-            if index > u16::MAX as usize {
-                self.error("variant payload index exceeds bytecode field ABI");
+            let Some(index) = self.u16_abi(index, "variant payload index") else {
                 return;
-            }
+            };
             let scratch = self.alloc_reg();
             self.proto.emit(Op::VariantGet {
                 rd: scratch,
                 ra: scrutinee,
-                idx: index as u16,
+                idx: index,
                 variant_tag,
                 shapes,
             });
@@ -5241,6 +5243,15 @@ mod tests {
             emitter.u16_abi(u16::MAX as usize + 1, "field index"),
             None,
             "physical u16 fields must reject an unrepresentable index"
+        );
+        assert_eq!(
+            emitter.u32_abi(u32::MAX as usize, "list capacity"),
+            Some(u32::MAX)
+        );
+        assert_eq!(
+            emitter.u32_abi(u32::MAX as usize + 1, "list capacity"),
+            None,
+            "physical u32 fields must reject an unrepresentable length"
         );
         assert_eq!(
             emitter.binding_parameter_index(usize::MAX, 1),
