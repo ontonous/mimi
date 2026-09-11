@@ -1785,11 +1785,53 @@ impl FunctionProto {
         (self.constants.len() - 1) as ConstIdx
     }
 
+    fn checked_const_idx(len: usize) -> Result<ConstIdx, &'static str> {
+        ConstIdx::try_from(len).map_err(|_| "constant pool index exceeds u32 ABI")
+    }
+
+    /// Checked constant-pool insertion used by canonical emitters.
+    ///
+    /// The legacy [`Self::add_const`] API remains available for compatibility;
+    /// canonical MIR construction uses this result-returning variant so a
+    /// malformed or oversized pool cannot wrap an index into an unrelated
+    /// constant.
+    pub(crate) fn try_add_const(&mut self, val: ConstValue) -> Result<ConstIdx, &'static str> {
+        // Dedup for common cases, preserving the legacy equality policy while
+        // checking the physical index before returning it.
+        for (i, existing) in self.constants.iter().enumerate() {
+            if std::mem::discriminant(existing) == std::mem::discriminant(&val) {
+                match (&existing, &val) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) if a == b => {
+                        return Self::checked_const_idx(i);
+                    }
+                    (ConstValue::Str(a), ConstValue::Str(b)) if a == b => {
+                        return Self::checked_const_idx(i);
+                    }
+                    (ConstValue::Float(a), ConstValue::Float(b)) if a == b => {
+                        return Self::checked_const_idx(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let index = Self::checked_const_idx(self.constants.len())?;
+        self.constants.push(val);
+        Ok(index)
+    }
+
     /// Add a constant WITHOUT deduplication. Used for record field names
     /// which must be contiguous after the type name in the constant pool.
     pub fn add_const_raw(&mut self, val: ConstValue) -> ConstIdx {
         self.constants.push(val);
         (self.constants.len() - 1) as ConstIdx
+    }
+
+    /// Checked non-deduplicating constant-pool insertion used by canonical
+    /// record construction, where field names must remain contiguous.
+    pub(crate) fn try_add_const_raw(&mut self, val: ConstValue) -> Result<ConstIdx, &'static str> {
+        let index = Self::checked_const_idx(self.constants.len())?;
+        self.constants.push(val);
+        Ok(index)
     }
 
     /// Emit an instruction and return its index.
@@ -1997,5 +2039,37 @@ impl BytecodeProgram {
             .iter()
             .position(|f| f.name == name)
             .map(|i| i as FuncIdx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConstValue, FunctionProto};
+
+    #[test]
+    fn checked_constant_pool_indices_preserve_dedup_and_reject_u32_overflow() {
+        let mut proto = FunctionProto::new("function:test".into(), 0);
+        assert_eq!(
+            proto.try_add_const(ConstValue::Int(7)),
+            Ok(0),
+            "checked insertion must return the first pool slot"
+        );
+        assert_eq!(
+            proto.try_add_const(ConstValue::Int(7)),
+            Ok(0),
+            "checked insertion must preserve legacy integer deduplication"
+        );
+        assert_eq!(
+            proto.try_add_const_raw(ConstValue::Int(7)),
+            Ok(1),
+            "raw insertion must remain non-deduplicating"
+        );
+        let first_unrepresentable = (u32::MAX as usize)
+            .checked_add(1)
+            .expect("test host must represent one value above u32::MAX");
+        assert_eq!(
+            FunctionProto::checked_const_idx(first_unrepresentable),
+            Err("constant pool index exceeds u32 ABI")
+        );
     }
 }

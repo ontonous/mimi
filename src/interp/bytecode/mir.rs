@@ -560,6 +560,7 @@ struct FunctionEmitter<'a> {
     pending_jumps: Vec<(usize, crate::core::mir::MirBlockId)>,
     errors: Vec<MirBytecodeError>,
     register_overflow_reported: bool,
+    constant_overflow_reported: bool,
 }
 
 fn compile_function(
@@ -585,6 +586,7 @@ fn compile_function(
         pending_jumps: Vec::new(),
         errors: Vec::new(),
         register_overflow_reported: false,
+        constant_overflow_reported: false,
     };
     emitter.assign_registers();
     emitter.validate_signature();
@@ -617,6 +619,42 @@ impl<'a> FunctionEmitter<'a> {
                 if !self.register_overflow_reported {
                     self.error("MIR bytecode register allocation exceeds u16 ABI");
                     self.register_overflow_reported = true;
+                }
+                0
+            }
+        }
+    }
+
+    /// Add a canonical constant through the checked `u32` pool ABI.  A
+    /// sentinel keeps emission progressing far enough to collect any other
+    /// structural errors, while the first overflow is reported once and the
+    /// function is rejected before a `BytecodeProgram` can escape.
+    fn add_const(&mut self, value: ConstValue) -> ConstIdx {
+        match self.proto.try_add_const(value) {
+            Ok(index) => index,
+            Err(message) => {
+                if !self.constant_overflow_reported {
+                    self.error(format!(
+                        "MIR bytecode constant allocation failed: {message}"
+                    ));
+                    self.constant_overflow_reported = true;
+                }
+                0
+            }
+        }
+    }
+
+    /// Add a canonical non-deduplicating constant, preserving contiguous
+    /// record field layouts while checking the same physical pool ABI.
+    fn add_const_raw(&mut self, value: ConstValue) -> ConstIdx {
+        match self.proto.try_add_const_raw(value) {
+            Ok(index) => index,
+            Err(message) => {
+                if !self.constant_overflow_reported {
+                    self.error(format!(
+                        "MIR bytecode constant allocation failed: {message}"
+                    ));
+                    self.constant_overflow_reported = true;
                 }
                 0
             }
@@ -903,17 +941,15 @@ impl<'a> FunctionEmitter<'a> {
                 let Some(rd) = self.reg(result) else { return };
                 let op = match literal {
                     ResolvedLiteral::Int(value) => {
-                        let idx = self.proto.add_const(ConstValue::Int(*value));
+                        let idx = self.add_const(ConstValue::Int(*value));
                         Op::LoadConst { rd, idx }
                     }
                     ResolvedLiteral::FloatBits(bits) => {
-                        let idx = self
-                            .proto
-                            .add_const(ConstValue::Float(f64::from_bits(*bits)));
+                        let idx = self.add_const(ConstValue::Float(f64::from_bits(*bits)));
                         Op::LoadConst { rd, idx }
                     }
                     ResolvedLiteral::String(value) => {
-                        let idx = self.proto.add_const(ConstValue::Str(value.clone()));
+                        let idx = self.add_const(ConstValue::Str(value.clone()));
                         Op::LoadConst { rd, idx }
                     }
                     ResolvedLiteral::Bool(true) => Op::LoadTrue { rd },
@@ -1283,9 +1319,7 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source_reg) = self.reg(&arguments[0]) else {
                 return;
             };
-            let field = self
-                .proto
-                .add_const(ConstValue::Str(receipt.projection.name.clone()));
+            let field = self.add_const(ConstValue::Str(receipt.projection.name.clone()));
             let Some(contract) = self.add_record_projection_contract(&receipt.projection) else {
                 return;
             };
@@ -1790,7 +1824,7 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     };
-                    let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                    let field_idx = self.add_const(ConstValue::Str(receipt.name.clone()));
                     let Some(contract) = self.add_record_projection_contract(&receipt) else {
                         return;
                     };
@@ -2295,9 +2329,7 @@ impl<'a> FunctionEmitter<'a> {
                 rs: source,
             });
         }
-        let instruction_idx = self
-            .proto
-            .add_const(ConstValue::Str(instruction.as_str().to_owned()));
+        let instruction_idx = self.add_const(ConstValue::Str(instruction.as_str().to_owned()));
         self.proto.emit(Op::CallCanonicalExtern {
             rd,
             extern_idx,
@@ -2623,7 +2655,7 @@ impl<'a> FunctionEmitter<'a> {
                         return;
                     }
                 };
-                let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                let field_idx = self.add_const(ConstValue::Str(receipt.name.clone()));
                 let Some(contract) = self.add_record_projection_contract(&receipt) else {
                     return;
                 };
@@ -2774,7 +2806,7 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     };
-                    let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                    let field_idx = self.add_const(ConstValue::Str(receipt.name.clone()));
                     let Some(contract) = self.add_record_projection_contract(&receipt) else {
                         return;
                     };
@@ -2795,14 +2827,13 @@ impl<'a> FunctionEmitter<'a> {
         receipt: &MirListIndexProjectionContract,
     ) -> Option<ConstIdx> {
         Some(
-            self.proto
-                .add_const(ConstValue::ListProjection(ListProjectionShape {
-                    list_ty: receipt.list_ty.clone(),
-                    element_ty: receipt.element_ty.clone(),
-                    index_ty: receipt.index_ty.clone(),
-                    result_ty: receipt.result_ty.clone(),
-                    mode: receipt.mode,
-                })),
+            self.add_const(ConstValue::ListProjection(ListProjectionShape {
+                list_ty: receipt.list_ty.clone(),
+                element_ty: receipt.element_ty.clone(),
+                index_ty: receipt.index_ty.clone(),
+                result_ty: receipt.result_ty.clone(),
+                mode: receipt.mode,
+            })),
         )
     }
 
@@ -2879,7 +2910,7 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         };
-        let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+        let field_idx = self.add_const(ConstValue::Str(receipt.name.clone()));
         let Some(contract) = self.add_record_projection_contract(&receipt) else {
             return;
         };
@@ -2968,7 +2999,7 @@ impl<'a> FunctionEmitter<'a> {
                 glue: field.glue,
             });
         }
-        let contract_idx = self.proto.add_const(ConstValue::RecordMoveDropProjection(
+        let contract_idx = self.add_const(ConstValue::RecordMoveDropProjection(
             RecordMoveDropProjectionShape {
                 base: RecordProjectionShape {
                     nominal: receipt.projection.nominal.clone(),
@@ -2980,9 +3011,7 @@ impl<'a> FunctionEmitter<'a> {
                 residual,
             },
         ));
-        let field_idx = self
-            .proto
-            .add_const(ConstValue::Str(receipt.projection.name.clone()));
+        let field_idx = self.add_const(ConstValue::Str(receipt.projection.name.clone()));
         self.proto.emit(Op::RecordMoveDropGet {
             rd,
             ra,
@@ -3057,9 +3086,7 @@ impl<'a> FunctionEmitter<'a> {
         let Some(shapes) = self.emit_variant_shape_table(&receipt.source_ty) else {
             return;
         };
-        let variant_tag = self
-            .proto
-            .add_const(ConstValue::Str(receipt.variant_name.clone()));
+        let variant_tag = self.add_const(ConstValue::Str(receipt.variant_name.clone()));
         self.proto.emit(Op::VariantGet {
             rd,
             ra,
@@ -3183,7 +3210,7 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant fallback alternate arity exceeds bytecode ABI");
             return;
         };
-        let contract_idx = self.proto.add_const(ConstValue::VariantProjectionFallback(
+        let contract_idx = self.add_const(ConstValue::VariantProjectionFallback(
             VariantProjectionFallbackShape {
                 source_ty: receipt.source_ty.clone(),
                 result_ty: receipt.result_ty.clone(),
@@ -3260,9 +3287,7 @@ impl<'a> FunctionEmitter<'a> {
         let Some(shapes) = self.emit_variant_shape_table(&receipt.source_ty) else {
             return;
         };
-        let variant_tag = self
-            .proto
-            .add_const(ConstValue::Str(receipt.variant_name.clone()));
+        let variant_tag = self.add_const(ConstValue::Str(receipt.variant_name.clone()));
         self.proto.emit(Op::VariantMoveGet {
             rd,
             ra,
@@ -3285,14 +3310,13 @@ impl<'a> FunctionEmitter<'a> {
             return None;
         };
         Some(
-            self.proto
-                .add_const(ConstValue::RecordProjection(RecordProjectionShape {
-                    nominal: receipt.nominal.clone(),
-                    field: receipt.field.clone(),
-                    name: receipt.name.clone(),
-                    index,
-                    arity,
-                })),
+            self.add_const(ConstValue::RecordProjection(RecordProjectionShape {
+                nominal: receipt.nominal.clone(),
+                field: receipt.field.clone(),
+                name: receipt.name.clone(),
+                index,
+                arity,
+            })),
         )
     }
 
@@ -3324,12 +3348,11 @@ impl<'a> FunctionEmitter<'a> {
             return None;
         };
         Some(
-            self.proto
-                .add_const(ConstValue::TupleProjection(TupleProjectionShape {
-                    tuple_ty: receipt.tuple_ty,
-                    index,
-                    arity,
-                })),
+            self.add_const(ConstValue::TupleProjection(TupleProjectionShape {
+                tuple_ty: receipt.tuple_ty,
+                index,
+                arity,
+            })),
         )
     }
 
@@ -3596,15 +3619,14 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn add_list_operation_contract(&mut self, receipt: &MirListOperationContract) -> ConstIdx {
-        self.proto
-            .add_const(ConstValue::ListOperation(ListOperationShape {
-                list_ty: receipt.list_ty.clone(),
-                element_ty: receipt.element_ty.clone(),
-                result_ty: receipt.result_ty.clone(),
-                argument_ty: receipt.argument_ty.clone(),
-                operation: receipt.operation,
-                mode: receipt.mode,
-            }))
+        self.add_const(ConstValue::ListOperation(ListOperationShape {
+            list_ty: receipt.list_ty.clone(),
+            element_ty: receipt.element_ty.clone(),
+            result_ty: receipt.result_ty.clone(),
+            argument_ty: receipt.argument_ty.clone(),
+            operation: receipt.operation,
+            mode: receipt.mode,
+        }))
     }
 
     fn emit_variant_predicate(
@@ -3641,19 +3663,17 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("variant predicate is unsupported: {message}"));
             return;
         }
-        let contract = self
-            .proto
-            .add_const(ConstValue::VariantPredicate(VariantPredicateShape {
-                variant_ty: receipt.variant_ty.clone(),
-                result_ty: receipt.result_ty.clone(),
-                nominal: receipt.nominal.clone(),
-                variant: receipt.variant.clone(),
-                variant_name: receipt.variant_name.clone(),
-                alternate_variant: receipt.alternate_variant.clone(),
-                alternate_variant_name: receipt.alternate_variant_name.clone(),
-                predicate: receipt.predicate,
-                discriminant: receipt.discriminant,
-            }));
+        let contract = self.add_const(ConstValue::VariantPredicate(VariantPredicateShape {
+            variant_ty: receipt.variant_ty.clone(),
+            result_ty: receipt.result_ty.clone(),
+            nominal: receipt.nominal.clone(),
+            variant: receipt.variant.clone(),
+            variant_name: receipt.variant_name.clone(),
+            alternate_variant: receipt.alternate_variant.clone(),
+            alternate_variant_name: receipt.alternate_variant_name.clone(),
+            predicate: receipt.predicate,
+            discriminant: receipt.discriminant,
+        }));
         self.proto.emit(Op::MirVariantPredicate {
             rd,
             ra,
@@ -3829,12 +3849,9 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        let type_name = self
-            .proto
-            .add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
+        let type_name = self.add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
         for field in &layout_fields {
-            self.proto
-                .add_const_raw(ConstValue::Str(field.name.clone()));
+            self.add_const_raw(ConstValue::Str(field.name.clone()));
         }
         if result_desc.ownership == MirOwnership::Copy {
             self.proto.emit(Op::NewRecord {
@@ -3937,9 +3954,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
             });
         }
-        let type_name = self
-            .proto
-            .add_const(ConstValue::Str(variant_desc.name.clone()));
+        let type_name = self.add_const(ConstValue::Str(variant_desc.name.clone()));
         self.proto.emit(if move_payload {
             Op::NewVariantMove {
                 rd,
@@ -4118,15 +4133,12 @@ impl<'a> FunctionEmitter<'a> {
                 });
             }
         }
-        let type_name = self
-            .proto
-            .add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
+        let type_name = self.add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
         for field in layout_fields
             .iter()
             .filter(|field| supplied.contains_key(&field.id))
         {
-            self.proto
-                .add_const_raw(ConstValue::Str(field.name.clone()));
+            self.add_const_raw(ConstValue::Str(field.name.clone()));
         }
         if record_update_move_contract.is_some() {
             self.proto.emit(Op::UpdateRecordMove {
@@ -4352,9 +4364,7 @@ impl<'a> FunctionEmitter<'a> {
                 if let Err(message) = crate::core::mir::types::validate_trap_code(code) {
                     self.error(format!("trap terminator is invalid: {message}"));
                 } else {
-                    let msg = self
-                        .proto
-                        .add_const(ConstValue::Str(format!("trap {code}")));
+                    let msg = self.add_const(ConstValue::Str(format!("trap {code}")));
                     self.proto.emit(Op::Trap { msg });
                 }
             }
@@ -4424,9 +4434,7 @@ impl<'a> FunctionEmitter<'a> {
                         }
                     };
                     let condition = self.alloc_reg();
-                    let tag = self
-                        .proto
-                        .add_const(ConstValue::Str(variant_desc.name.clone()));
+                    let tag = self.add_const(ConstValue::Str(variant_desc.name.clone()));
                     self.proto.emit(Op::IsVariant {
                         rd: condition,
                         ra: scrutinee_reg,
@@ -4543,7 +4551,7 @@ impl<'a> FunctionEmitter<'a> {
         for _ in 1..variant.fields.len() {
             self.alloc_reg();
         }
-        let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
+        let variant_tag = self.add_const(ConstValue::Str(variant.name.clone()));
         self.proto.emit(Op::DestructureVariantMove {
             ra: scrutinee,
             base: payload_base,
@@ -4610,12 +4618,10 @@ impl<'a> FunctionEmitter<'a> {
             for _ in 1..elements.len() {
                 self.alloc_reg();
             }
-            let shape = self
-                .proto
-                .add_const(ConstValue::TupleDestructure(TupleDestructureShape {
-                    tuple_ty: nested.tuple_ty.clone(),
-                    element_tys: elements.clone(),
-                }));
+            let shape = self.add_const(ConstValue::TupleDestructure(TupleDestructureShape {
+                tuple_ty: nested.tuple_ty.clone(),
+                element_tys: elements.clone(),
+            }));
             let Some(tuple_source) =
                 self.offset_reg(payload_base, outer_index as usize, "nested variant payload")
             else {
@@ -4737,7 +4743,7 @@ impl<'a> FunctionEmitter<'a> {
                 arity: variant.fields.len() as u16,
             });
         }
-        Some(self.proto.add_const(ConstValue::VariantShapes(shapes)))
+        Some(self.add_const(ConstValue::VariantShapes(shapes)))
     }
 
     fn emit_variant_drop_shape_table(
@@ -4847,7 +4853,7 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant payload projection has no canonical nominal");
             return;
         };
-        let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
+        let variant_tag = self.add_const(ConstValue::Str(variant.name.clone()));
         let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
         for argument in arguments {
             let Some(source) = self.reg(argument) else {
@@ -5088,6 +5094,7 @@ mod tests {
             pending_jumps: Vec::new(),
             errors: Vec::new(),
             register_overflow_reported: false,
+            constant_overflow_reported: false,
         };
 
         emitter.proto.register_count = u16::MAX;
