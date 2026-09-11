@@ -89,20 +89,32 @@ pub(crate) fn validate_ffi_symbol_matches_callee(
     let encoded = encoded_name.as_bytes();
     let mut index = 0;
     while index < encoded.len() {
-        if encoded[index] == b'%' {
-            if index + 2 >= encoded.len() {
-                return Err(format!(
-                    "extern callee '{}' is not a canonical extern function identity",
-                    callee.0
-                ));
-            }
-            let Some(high) = hex_value(encoded[index + 1]) else {
+        let Some(&marker) = encoded.get(index) else {
+            return Err(format!(
+                "extern callee '{}' is not a canonical extern function identity",
+                callee.0
+            ));
+        };
+        if marker == b'%' {
+            let Some(&high_byte) = encoded.get(index + 1) else {
                 return Err(format!(
                     "extern callee '{}' is not a canonical extern function identity",
                     callee.0
                 ));
             };
-            let Some(low) = hex_value(encoded[index + 2]) else {
+            let Some(&low_byte) = encoded.get(index + 2) else {
+                return Err(format!(
+                    "extern callee '{}' is not a canonical extern function identity",
+                    callee.0
+                ));
+            };
+            let Some(high) = hex_value(high_byte) else {
+                return Err(format!(
+                    "extern callee '{}' is not a canonical extern function identity",
+                    callee.0
+                ));
+            };
+            let Some(low) = hex_value(low_byte) else {
                 return Err(format!(
                     "extern callee '{}' is not a canonical extern function identity",
                     callee.0
@@ -111,7 +123,7 @@ pub(crate) fn validate_ffi_symbol_matches_callee(
             decoded.push((high << 4) | low);
             index += 3;
         } else {
-            decoded.push(encoded[index]);
+            decoded.push(marker);
             index += 1;
         }
     }
