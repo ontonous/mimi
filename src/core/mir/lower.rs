@@ -4846,7 +4846,7 @@ fn detect_scalar_record_projection_contract(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let [(_, _, _)] = projection.as_slice() else {
+    let [projection] = projection.as_slice() else {
         let unsupported_arity = function
             .values
             .get(parameter)
@@ -4871,7 +4871,7 @@ fn detect_scalar_record_projection_contract(
             message: "generic record projection body may contain only one field Project".into(),
         }]);
     }
-    let (project_result, project_base, field) = projection[0].clone();
+    let (project_result, project_base, field) = projection.clone();
     if project_base != *parameter {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
