@@ -1631,6 +1631,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let i1_ty = self.context.bool_type();
         let i64_ty = self.context.i64_type();
         let fields = variant_sty.get_field_types();
+        let payload_ty = fields.get(1).copied().ok_or_else(|| {
+            CompileError::Unsupported(format!(
+                "variant error path layout for {variant_sty:?} is missing payload field"
+            ))
+        })?;
         let d_gep_e = self
             .gep()
             .build_struct_gep(
@@ -1650,7 +1655,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "o_gep_e",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let zero_payload = Self::zero_value_for_type(fields[1], i64_ty);
+        let zero_payload = Self::zero_value_for_type(payload_ty, i64_ty);
         self.build_store(o_gep_e, zero_payload)?;
         if is_result {
             // H-19 (audit 2026-08-05 wave-2): the source Err slot must be
@@ -1662,7 +1667,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             // silent Err corruption on the codegen side). The Err payload
             // type itself (E) is unchanged by map/and_then, so load it with
             // the source field-2 type and store into the target field-2.
-            let src_err_ty = src_sty.get_field_types()[2];
+            let src_err_ty = src_sty.get_field_types().get(2).copied().ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "source Result layout for {src_sty:?} is missing error field"
+                ))
+            })?;
             let src_err_gep = self
                 .gep()
                 .build_struct_gep(BasicTypeEnum::StructType(src_sty), pv, 2, "src_err_gep")
