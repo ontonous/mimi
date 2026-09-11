@@ -1549,11 +1549,14 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
+        let Some(argc) = self.u16_abi(contract.arity, "builtin argument count") else {
+            return;
+        };
         self.proto.emit(Op::CallBuiltin {
             rd,
             builtin,
             args_base,
-            argc: contract.arity as u16,
+            argc,
         });
     }
 
