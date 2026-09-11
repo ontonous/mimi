@@ -965,7 +965,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })?
                         .into_struct_value()
                 }
-                _ => unreachable!("variant plan checked above"),
+                _ => {
+                    return Err(CompileError::Unsupported(format!(
+                        "value glue `{}` is not a built-in variant",
+                        plan.symbol_suffix()
+                    )))
+                }
             };
             let inactive_end = self.builder.get_insert_block().ok_or_else(|| {
                 CompileError::LlvmError("variant clone lost inactive block".into())
@@ -1066,7 +1071,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "drop_result_ok_child",
                     )?;
                 }
-                _ => unreachable!("variant plan checked above"),
+                _ => {
+                    return Err(CompileError::Unsupported(format!(
+                        "drop glue `{}` is not a built-in variant",
+                        plan.symbol_suffix()
+                    )))
+                }
             }
             self.build_br(exit_block)?;
 
