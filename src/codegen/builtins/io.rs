@@ -782,13 +782,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> MimiResult<bool> {
         if let BasicMetadataValueEnum::StructValue(sv) = arg {
             let fields = sv.get_type().get_field_types();
-            if fields.len() == 2
-                && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                && matches!(
-                    fields[1],
-                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                )
-            {
+            if matches!(
+                fields.as_slice(),
+                [
+                    BasicTypeEnum::PointerType(_),
+                    BasicTypeEnum::IntType(t)
+                ] if t.get_bit_width() == 64
+            ) {
                 let ptr = self
                     .build_extract_value((*sv).into(), 0, "str_ptr")?
                     .into_pointer_value();
@@ -949,16 +949,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 // Enum-like {i32, i64}: resolve type from arg_type or variant name.
-                if num_fields == 2
-                    && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
-                    )
-                    && matches!(
-                        fields[1],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                    )
-                {
+                let is_enum_layout = matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(tag),
+                        BasicTypeEnum::IntType(payload)
+                    ] if tag.get_bit_width() == 32 && payload.get_bit_width() == 64
+                );
+                if is_enum_layout {
                     let enum_ty = if self
                         .type_defs
                         .get(arg_type)
@@ -979,7 +977,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 // Detect Mimi string struct: {i8*, i64}
-                if num_fields == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_)) {
+                let is_string_layout =
+                    matches!(fields.as_slice(), [BasicTypeEnum::PointerType(_), _]);
+                if is_string_layout {
                     let ptr = self.build_extract_value((*sv).into(), 0, "str_ptr")?;
                     match ptr {
                         BasicValueEnum::PointerValue(pv) => {
@@ -987,13 +987,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         _ => Ok((BasicMetadataValueEnum::StructValue(*sv), "%p".to_string())),
                     }
-                } else if num_fields == 2
-                    && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                    )
-                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
-                {
+                } else if matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(len),
+                        BasicTypeEnum::PointerType(_)
+                    ] if len.get_bit_width() == 64
+                ) {
                     // Mimi list struct: {i64 len, ptr data} — require i64 len
                     // so Option {i1, ptr} is not misclassified as List.
                     let str_ptr = self.emit_list_typed_to_string(*sv, arg_type)?;
@@ -1001,24 +1001,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
                     ))
-                } else if num_fields == 2
-                    && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                    )
-                    && matches!(
-                        fields[1],
-                        BasicTypeEnum::StructType(st) if {
-                            let inner = st.get_field_types();
-                            inner.len() == 2
-                                && matches!(inner[0], BasicTypeEnum::PointerType(_))
-                                && matches!(
-                                    inner[1],
-                                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                                )
-                        }
-                    )
-                {
+                } else if matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(disc),
+                        BasicTypeEnum::StructType(st)
+                    ] if disc.get_bit_width() == 1 && {
+                        let inner = st.get_field_types();
+                        matches!(
+                            inner.as_slice(),
+                            [
+                                BasicTypeEnum::PointerType(_),
+                                BasicTypeEnum::IntType(len)
+                            ] if len.get_bit_width() == 64
+                        )
+                    }
+                ) {
                     // Option<string> whose type name is unrecoverable (e.g. a
                     // bare `let o = if ... { None } else { Some("hi") }` where
                     // the if expression has no var_type_names entry). Route to
@@ -1029,13 +1027,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicMetadataValueEnum::PointerValue(str_ptr),
                         "%s".to_string(),
                     ))
-                } else if num_fields == 2
-                    && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                    )
-                    && matches!(fields[1], BasicTypeEnum::PointerType(_))
-                {
+                } else if matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::IntType(disc), BasicTypeEnum::PointerType(_)]
+                        if disc.get_bit_width() == 1
+                ) {
                     // Option with pointer payload (e.g. Option<record>):
                     // disc i1 + payload ptr. Prefer typed Option path when known.
                     let inner_rec = arg_type
@@ -1058,8 +1054,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .iter()
                         .all(|f| matches!(f, BasicTypeEnum::IntType(_)))
                     && matches!(
-                        fields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        fields.as_slice(),
+                        [BasicTypeEnum::IntType(disc), ..] if disc.get_bit_width() == 1
                     )
                     && !arg_type.starts_with("Option")
                     && !arg_type.starts_with("Result")
@@ -1078,8 +1074,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // by printing payload only when disc!=0, else "None".
                     if (arg_type.starts_with("Option") || arg_type == "Option")
                         && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                            fields.as_slice(),
+                            [BasicTypeEnum::IntType(disc), ..] if disc.get_bit_width() == 1
                         )
                     {
                         let inner_rec = arg_type
@@ -1098,8 +1094,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     if (arg_type.starts_with("Result") || arg_type == "Result")
                         && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                            fields.as_slice(),
+                            [BasicTypeEnum::IntType(disc), ..] if disc.get_bit_width() == 1
                         )
                         && num_fields >= 3
                     {
@@ -1128,12 +1124,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let is_named = !arg_type.is_empty()
                         && self.type_defs.contains_key(arg_type)
                         && !is_product_alias;
-                    let is_enum_layout = num_fields == 2
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
-                        )
-                        && matches!(fields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
+                    let is_enum_layout = matches!(
+                        fields.as_slice(),
+                        [
+                            BasicTypeEnum::IntType(tag),
+                            BasicTypeEnum::IntType(payload)
+                        ] if tag.get_bit_width() == 32 && payload.get_bit_width() == 64
+                    );
                     if (!is_named || is_product_alias) && !is_enum_layout {
                         let str_ptr = self.emit_product_tuple_to_string(*sv, Some(arg_type))?;
                         return Ok((
@@ -11441,11 +11438,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         if arg_type.is_empty() {
             if let BasicMetadataValueEnum::StructValue(sv) = arg {
                 let fields = sv.get_type().get_field_types();
-                let is_str =
-                    fields.len() == 2 && matches!(fields[0], BasicTypeEnum::PointerType(_));
-                let is_list = fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64)
-                    && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                let is_str = matches!(fields.as_slice(), [BasicTypeEnum::PointerType(_), _]);
+                let is_list = matches!(
+                    fields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(len),
+                        BasicTypeEnum::PointerType(_)
+                    ] if len.get_bit_width() == 64
+                );
                 if is_str {
                     let ptr = self
                         .build_extract_value((*sv).into(), 0, "fmt_str_ptr")?
