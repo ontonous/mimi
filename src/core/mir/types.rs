@@ -7422,11 +7422,11 @@ impl MirTypeCatalog {
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
             return Err("generic record move update requires a record aggregate kind".into());
         };
-        if field_types.len() != 1 {
+        let [field_type] = field_types else {
             return Err(
                 "generic record move update requires a two-, three-, or four-field record with one override".into(),
             );
-        }
+        };
         let MirLayout::Record {
             nominal: layout_nominal,
             fields: layout_fields,
@@ -7440,11 +7440,8 @@ impl MirTypeCatalog {
         let update_field = fields
             .first()
             .ok_or_else(|| "generic record move update override field is absent".to_string())?;
-        let projection = self.validated_record_field_projection_contract(
-            result_ty,
-            update_field,
-            &field_types[0],
-        )?;
+        let projection =
+            self.validated_record_field_projection_contract(result_ty, update_field, field_type)?;
         let updated_desc = self.get(&projection.field_ty).ok_or_else(|| {
             format!(
                 "generic record move update field '{}' TypeDesc is absent",
