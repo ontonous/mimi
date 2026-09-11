@@ -560,11 +560,7 @@ fn exact_cross_state_transition_body(
                     }),
                     ResolvedExprKind::Literal(ResolvedLiteral::Int(1)),
                 ) if base == source_local
-                    && projections.len() == 1
-                    && matches!(
-                        projections[0],
-                        ResolvedProjection::Field { .. }
-                    )
+                    && matches!(projections.as_slice(), [ResolvedProjection::Field { .. }])
             )
         }
         [crate::core::ir::ResolvedStmt {
@@ -651,8 +647,7 @@ fn exact_cross_state_failure_transition_body(
     let source_field = match &left.kind {
         ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
             if base == source_local
-                && projections.len() == 1
-                && matches!(projections[0], ResolvedProjection::Field { .. }) =>
+                && matches!(projections.as_slice(), [ResolvedProjection::Field { .. }]) =>
         {
             true
         }
@@ -675,8 +670,11 @@ fn exact_cross_state_failure_transition_body(
         return false;
     }
     if !matches!(
-        error_call.arguments[0].value.kind,
-        ResolvedExprKind::Literal(ResolvedLiteral::String(_))
+        error_call
+            .arguments
+            .first()
+            .map(|argument| &argument.value.kind),
+        Some(ResolvedExprKind::Literal(ResolvedLiteral::String(_)))
     ) {
         return false;
     }
@@ -688,15 +686,18 @@ fn exact_cross_state_failure_transition_body(
     {
         return false;
     }
+    let Some(ok_argument) = ok_call.arguments.first() else {
+        return false;
+    };
     let ResolvedExprKind::Binary {
         op: ResolvedBinaryOp::Add,
         left: ok_left,
         right: ok_right,
-    } = &ok_call.arguments[0].value.kind
+    } = &ok_argument.value.kind
     else {
         return false;
     };
-    if !matches!(&ok_left.kind, ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) if base == source_local && projections.len() == 1 && matches!(projections[0], ResolvedProjection::Field { .. }))
+    if !matches!(&ok_left.kind, ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) if base == source_local && matches!(projections.as_slice(), [ResolvedProjection::Field { .. }]))
         || !matches!(
             ok_right.kind,
             ResolvedExprKind::Literal(ResolvedLiteral::Int(1))
@@ -1581,7 +1582,7 @@ pub fn is_s8_flow_transition_candidate(program: &CheckedProgram) -> bool {
 
     transition.silent_transition
         && transition.targets.len() == 1
-        && transition.targets[0] == transition.id.source
+        && target == &transition.id.source
         && transition.params.is_empty()
         && transition.fails.is_none()
         && !transition.is_fallback
