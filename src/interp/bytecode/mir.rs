@@ -4297,7 +4297,10 @@ impl<'a> FunctionEmitter<'a> {
                     .type_catalog()
                     .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
                 let MirLayout::List { element } = &desc.layout else {
-                    unreachable!()
+                    return Err(format!(
+                        "List ABI class has non-List layout for type '{}'",
+                        ty.as_str()
+                    ));
                 };
                 self.supported_type(element)
             }
