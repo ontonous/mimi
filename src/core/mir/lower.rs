@@ -923,11 +923,11 @@ fn rewrite_owned_record_call_argument(
         Some(MirInstruction {
             kind: MirInstructionKind::Move { result, source },
             ..
-        }) => (result, source, true),
+        }) => (result.clone(), source.clone(), true),
         Some(MirInstruction {
             kind: MirInstructionKind::Clone { result, source },
             ..
-        }) => (result, source, false),
+        }) => (result.clone(), source.clone(), false),
         _ => {
             return Err(vec![MirLoweringError {
                 node_id: subject,
@@ -935,7 +935,7 @@ fn rewrite_owned_record_call_argument(
             }])
         }
     };
-    if produced != argument {
+    if produced != *argument {
         return Err(vec![MirLoweringError {
             node_id: subject,
             message:
@@ -949,7 +949,7 @@ fn rewrite_owned_record_call_argument(
             message: "owned generic record projection call Move/Clone source is not a local".into(),
         }]);
     }
-    let Some(source_ty) = caller.values.get(source).map(|value| value.ty.clone()) else {
+    let Some(source_ty) = caller.values.get(&source).map(|value| value.ty.clone()) else {
         return Err(vec![MirLoweringError {
             node_id: subject,
             message: "owned generic record projection call Move/Clone source TypeDesc is absent"
@@ -993,9 +993,16 @@ fn rewrite_owned_record_call_argument(
         }]);
     }
     if !producer_is_move {
-        block.instructions[producer_index].kind = MirInstructionKind::Move {
-            result: produced.clone(),
-            source: source.clone(),
+        let Some(instruction) = block.instructions.get_mut(producer_index) else {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "owned generic record projection call producer disappeared during rewrite"
+                    .into(),
+            }]);
+        };
+        instruction.kind = MirInstructionKind::Move {
+            result: produced,
+            source,
         };
     }
     Ok(())
@@ -1144,7 +1151,13 @@ fn rewrite_owned_variant_projection_call_argument(
             })?;
             let source = source.clone();
             let result = result.clone();
-            block.instructions[producer_index].kind = MirInstructionKind::Move { result, source };
+            let Some(instruction) = block.instructions.get_mut(producer_index) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject,
+                    message: "owned generic Option projection call producer disappeared during rewrite".into(),
+                }]);
+            };
+            instruction.kind = MirInstructionKind::Move { result, source };
             Ok(())
         }
         _ => Err(vec![MirLoweringError {
@@ -3625,6 +3638,12 @@ fn detect_scalar_variant_predicate_contract(
             message: "generic variant predicate must have exactly one parameter".into(),
         }]);
     }
+    let parameter = function.parameters.first().ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic variant predicate parameter is absent".into(),
+        }]
+    })?;
     let predicates = function
         .blocks
         .values()
@@ -3650,7 +3669,6 @@ fn detect_scalar_variant_predicate_contract(
             message: "generic variant predicate must lower to exactly one receipt-bearing VariantPredicate".into(),
         }]);
     };
-    let parameter = &function.parameters[0];
     let direct_parameter = variant == parameter;
     let cloned_parameter = function.blocks.values().any(|block| {
         block.instructions.iter().any(|instruction| {
@@ -3725,6 +3743,10 @@ pub(crate) fn validate_scalar_variant_projection_mir(
     if function.parameters.len() != 1 {
         return Err("generic variant projection must have exactly one parameter".into());
     }
+    let parameter = function
+        .parameters
+        .first()
+        .ok_or_else(|| "generic variant projection parameter is absent".to_string())?;
     if function.blocks.len() != 1 {
         return Err("generic variant projection must have exactly one MIR block".into());
     }
@@ -3749,7 +3771,7 @@ pub(crate) fn validate_scalar_variant_projection_mir(
                 },
             ..
         }] => {
-            if cloned != base || clone_source != &function.parameters[0] {
+            if cloned != base || clone_source != parameter {
                 return Err("generic variant projection must project its sole parameter".into());
             }
             (result, base, receipt, false)
@@ -3766,7 +3788,7 @@ pub(crate) fn validate_scalar_variant_projection_mir(
                 },
             ..
         }] => {
-            if moved != base || source != &function.parameters[0] {
+            if moved != base || source != parameter {
                 return Err("generic owned variant projection must move its sole parameter".into());
             }
             (result, base, receipt, true)
@@ -3903,6 +3925,14 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
     if function.parameters.len() != 2 {
         return Err("generic variant fallback projection must have exactly two parameters".into());
     }
+    let variant_parameter = function
+        .parameters
+        .first()
+        .ok_or_else(|| "generic variant fallback variant parameter is absent".to_string())?;
+    let fallback_parameter = function
+        .parameters
+        .get(1)
+        .ok_or_else(|| "generic variant fallback operand parameter is absent".to_string())?;
     if function.blocks.len() != 1 {
         return Err("generic variant fallback projection must have exactly one MIR block".into());
     }
@@ -3927,7 +3957,7 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
                     .into(),
             );
         };
-        if base != &function.parameters[0] || fallback != &function.parameters[1] {
+        if base != variant_parameter || fallback != fallback_parameter {
             return Err(
                 "managed generic variant fallback projection must consume its variant and fallback parameters"
                     .into(),
@@ -4044,10 +4074,10 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
                 .into(),
         );
     };
-    if cloned_base != base || clone_base != &function.parameters[0] {
+    if cloned_base != base || clone_base != variant_parameter {
         return Err("generic variant fallback projection must clone its Option parameter".into());
     }
-    if cloned_fallback != fallback || clone_fallback != &function.parameters[1] {
+    if cloned_fallback != fallback || clone_fallback != fallback_parameter {
         return Err("generic variant fallback projection must clone its fallback parameter".into());
     }
     let base_ty = function
@@ -4228,7 +4258,10 @@ pub(crate) fn validate_scalar_variant_predicate_mir(
                 .into(),
         );
     }
-    let parameter = &function.parameters[0];
+    let parameter = function
+        .parameters
+        .first()
+        .ok_or_else(|| "generic variant predicate parameter is absent".to_string())?;
     let valid_source = variant == parameter
         || function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -4315,10 +4348,15 @@ pub(crate) fn validate_scalar_list_facade_mir(
     }) {
         return Err("scalar List facade parameter is not a canonical List<T>".into());
     }
-    if operation == super::MirListOperation::Concat && parameter_types[0] != parameter_types[1] {
+    let first_parameter_ty = parameter_types
+        .first()
+        .ok_or_else(|| "scalar List facade first parameter type is absent".to_string())?;
+    if operation == super::MirListOperation::Concat
+        && parameter_types.get(1) != Some(first_parameter_ty)
+    {
         return Err("scalar List.concat facade parameters must share one List TypeDesc".into());
     }
-    let list_ty = parameter_types[0].clone();
+    let list_ty = first_parameter_ty.clone();
     let Some(block) = function.blocks.get(&function.entry) else {
         return Err("scalar List facade entry block is absent".into());
     };
@@ -4434,7 +4472,15 @@ pub(crate) fn validate_scalar_list_facade_mir(
             );
         }
     }
-    if input_for(&function.parameters[0]).as_ref() != Some(&list_operand) {
+    if input_for(
+        function
+            .parameters
+            .first()
+            .ok_or_else(|| "scalar List facade first parameter is absent".to_string())?,
+    )
+    .as_ref()
+        != Some(&list_operand)
+    {
         return Err(match operation {
             super::MirListOperation::Concat => {
                 "scalar List.concat facade receiver is not the moved first List parameter".into()
@@ -4469,7 +4515,10 @@ pub(crate) fn validate_scalar_list_facade_mir(
             }
         }
         super::MirListOperation::Concat => {
-            let expected = input_for(&function.parameters[1]).ok_or_else(|| {
+            let second_parameter = function.parameters.get(1).ok_or_else(|| {
+                "scalar List.concat facade second parameter is absent".to_string()
+            })?;
+            let expected = input_for(second_parameter).ok_or_else(|| {
                 "scalar List.concat facade second parameter has no Move".to_string()
             })?;
             if argument.as_ref() != Some(&expected) {
@@ -4487,7 +4536,11 @@ pub(crate) fn validate_scalar_list_facade_mir(
                 .ok_or_else(|| "scalar List.concat facade argument value is absent".to_string())?
                 .ty
                 .clone();
-            if argument_ty != parameter_types[1] {
+            if argument_ty
+                != *parameter_types.get(1).ok_or_else(|| {
+                    "scalar List.concat facade second parameter type is absent".to_string()
+                })?
+            {
                 return Err(
                     "scalar List.concat facade argument TypeDesc disagrees with its parameter"
                         .into(),
