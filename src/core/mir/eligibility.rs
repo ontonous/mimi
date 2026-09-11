@@ -913,22 +913,31 @@ fn exact_failure_match_arm_for_local(
     {
         return false;
     }
+    let Some(argument) = print_call.arguments.first() else {
+        return false;
+    };
     let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
-        &print_call.arguments[0].value.kind
+        &argument.value.kind
     else {
+        return false;
+    };
+    let [first_projection, second_projection] = projections.as_slice() else {
         return false;
     };
     if base != error_local
         || projections.len() != 2
-        || !matches!(projections[0], ResolvedProjection::Tuple { index: 0, .. })
-        || !matches!(projections[1], ResolvedProjection::Field { .. })
+        || !matches!(first_projection, ResolvedProjection::Tuple { index: 0, .. })
+        || !matches!(second_projection, ResolvedProjection::Field { .. })
     {
         return false;
     }
     let ResolvedStmtKind::Drop(places) = &drop_statement.kind else {
         return false;
     };
-    if places.len() != 1 || places[0].base != *error_local || !places[0].projections.is_empty() {
+    let Some(place) = places.first() else {
+        return false;
+    };
+    if places.len() != 1 || place.base != *error_local || !place.projections.is_empty() {
         return false;
     }
     matches!(
@@ -981,22 +990,29 @@ fn exact_destructured_failure_match_arm(
     {
         return false;
     }
+    let Some(argument) = print_call.arguments.first() else {
+        return false;
+    };
     let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
-        &print_call.arguments[0].value.kind
+        &argument.value.kind
     else {
+        return false;
+    };
+    let [projection] = projections.as_slice() else {
         return false;
     };
     if base != source_local
         || projections.len() != 1
-        || !matches!(projections[0], ResolvedProjection::Field { .. })
+        || !matches!(projection, ResolvedProjection::Field { .. })
     {
         return false;
     }
     let is_drop = |statement: &ResolvedStmt, local: &ResolvedLocalId| {
         matches!(&statement.kind, ResolvedStmtKind::Drop(places)
-            if places.len() == 1
-                && places[0].base == *local
-                && places[0].projections.is_empty())
+        if places.len() == 1
+            && places.first().is_some_and(|place| {
+                place.base == *local && place.projections.is_empty()
+            }))
     };
     is_drop(drop_source, source_local)
         && is_drop(drop_error, error_local)
