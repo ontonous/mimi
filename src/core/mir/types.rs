@@ -9927,7 +9927,12 @@ impl MirTypeCatalog {
                     .fields
                     .iter()
                     .find(|field| field.id == field_id)
-                    .expect("validated variant field");
+                    .ok_or_else(|| {
+                        format!(
+                            "switch-move nested tuple field '{}' disappeared from variant '{}'",
+                            field_id.0, variant.name
+                        )
+                    })?;
                 let tuple = self.get(&field.ty).ok_or_else(|| {
                     format!(
                         "nested tuple payload field '{}' type '{}' is absent from TypeDesc",
@@ -10037,7 +10042,12 @@ impl MirTypeCatalog {
                     .fields
                     .iter()
                     .find(|field| field.id == field_id)
-                    .expect("validated variant field");
+                    .ok_or_else(|| {
+                        format!(
+                            "switch-move nested tuple field '{}' disappeared from variant '{}'",
+                            field_id.0, variant.name
+                        )
+                    })?;
                 let tuple = self.get(&field.ty).ok_or_else(|| {
                     format!(
                         "nested tuple payload field '{}' type '{}' is absent from TypeDesc",
