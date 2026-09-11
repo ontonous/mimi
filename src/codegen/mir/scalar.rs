@@ -31,7 +31,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .into()),
             (MirAbiClass::Float { bits: 32 | 64 }, ResolvedLiteral::FloatBits(value)) => {
                 let value = if matches!(desc.abi, MirAbiClass::Float { bits: 32 }) {
-                    f32::from_bits(*value as u32) as f64
+                    let bits = u32::try_from(*value).map_err(|_| {
+                        NativeMirError::new(
+                            subject,
+                            "f32 literal bits exceed the native u32 representation",
+                        )
+                    })?;
+                    f32::from_bits(bits) as f64
                 } else {
                     f64::from_bits(*value)
                 };
@@ -81,10 +87,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         global.set_alignment(1);
         self.emit_owned_string_from_parts(
             global.as_pointer_value(),
-            self.generator
-                .context
-                .i64_type()
-                .const_int(value.len() as u64, false),
+            self.generator.context.i64_type().const_int(
+                u64::try_from(value.len()).map_err(|_| {
+                    NativeMirError::new(
+                        subject,
+                        "String literal length exceeds the native u64 representation",
+                    )
+                })?,
+                false,
+            ),
             subject,
         )
     }
