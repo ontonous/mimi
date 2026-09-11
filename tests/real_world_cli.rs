@@ -1595,6 +1595,122 @@ fn canonical_mir_cli_receipt_manifest_imported_transparent_alias_matches_checker
 }
 
 #[test]
+fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-alias-consumers-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported alias consumer fixture directory");
+    let library = dir.join("ffi.so");
+    fs::write(
+        dir.join("ffi.c"),
+        "#include <stdint.h>\nint64_t mir_ffi_cli_import_alias(double value) { return value == 7.0 ? 42 : -1; }\n",
+    )
+    .expect("write imported alias consumer C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(dir.join("ffi.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported alias consumer C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64; }\npub func imported_alias(value: i64) -> i64 { mir_ffi_cli_import_alias(value) }\n",
+    )
+    .expect("write imported alias consumer helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use ffi_types;\nfunc main() -> i64 { println(imported_alias(7 as i64)); 0 }\n",
+    )
+    .expect("write imported alias consumer entry");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported alias consumer run");
+        assert!(
+            run.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"42\n", "explicit_mir={explicit_mir}");
+        assert!(
+            !String::from_utf8_lossy(&run.stderr).contains("canonical route disposition: legacy"),
+            "imported alias run must not fall back to legacy"
+        );
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--emit-ir")
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .expect("spawn imported alias consumer build");
+        assert!(
+            build.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&build.stdout).contains("mir_ffi_cli_import_alias"),
+            "imported alias build must retain the external symbol"
+        );
+        assert!(
+            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy"),
+            "imported alias build must not fall back to legacy"
+        );
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .expect("spawn imported alias consumer verify");
+        assert!(
+            verify.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&verify.stderr)
+                .contains("canonical route disposition: legacy"),
+            "imported alias verify must not fall back to legacy"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-receipt-multi-failure-{}-{}",
