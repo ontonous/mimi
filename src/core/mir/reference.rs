@@ -6684,7 +6684,10 @@ impl<'a> MirReferenceInterpreter<'a> {
                         ));
                     }
                     let MirRuntimeValue::Int(payload) = payload else {
-                        unreachable!("integer SessionCall payload checked above")
+                        return Err(self.error(
+                            &function.owner,
+                            "session_send payload shape changed after validation",
+                        ));
                     };
                     sent_payload = Some(payload);
                 } else if *operation == super::types::MirSessionOperation::Recv {
@@ -6723,7 +6726,10 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ));
                 }
                 let MirRuntimeValue::Int(endpoint) = endpoint else {
-                    unreachable!("validated SessionChan endpoint checked above")
+                    return Err(self.error(
+                        &function.owner,
+                        "SessionCall endpoint shape changed after validation",
+                    ));
                 };
                 if *operation == super::types::MirSessionOperation::Send {
                     if let Some(payload) = sent_payload {
