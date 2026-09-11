@@ -8415,9 +8415,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         && matches!(arg, BasicValueEnum::PointerValue(_))
                         && arg.get_type() != target
                     {
-                        let pv = match *arg {
-                            BasicValueEnum::PointerValue(pv) => pv,
-                            _ => unreachable!(),
+                        let BasicValueEnum::PointerValue(pv) = *arg else {
+                            return Err(CompileError::Generic(
+                                "string ABI wrapper expected a pointer argument".into(),
+                            ));
                         };
                         *arg = self.wrap_c_string(pv)?;
                         continue;
