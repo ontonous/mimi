@@ -1077,6 +1077,81 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
 }
 
 #[test]
+fn scalar_ffi_imported_alias_negative_verifier_artifact_matches_route_receipt() {
+    use crate::verifier::{ProofArtifact, VerifStatus};
+    use std::fs;
+
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-import-alias-negative-proof-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create imported alias negative proof project");
+    let main_path = project.join("main.mimi");
+    fs::write(
+        &main_path,
+        "use ffi_types;\nfunc main() -> i64 { call_imported_alias(-7 as i64) }\n",
+    )
+    .expect("write imported alias negative proof main");
+    fs::write(
+        project.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_import_alias_negative(value: Real) -> i64 requires: value >= 0; }\npub func call_imported_alias(value: i64) -> i64 { mir_ffi_import_alias_negative(value) }\n",
+    )
+    .expect("write imported alias negative proof module");
+
+    let source = fs::read_to_string(&main_path).expect("read imported alias negative proof main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex imported alias negative proof main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select imported alias negative proof parser")
+        .parse_file()
+        .expect("parse imported alias negative proof main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load imported alias negative proof graph");
+    let mut merged = loader
+        .merge_all()
+        .expect("merge imported alias negative proof graph");
+    crate::loader::merge_prelude_into(&mut merged);
+    let checked =
+        crate::core::check_program(&merged).expect("check imported alias negative proof graph");
+    let excluded_sources = merged
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+            .expect("materialize imported alias negative proof route");
+    let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize imported alias negative proof MIR");
+    let receipt = mir.route_receipt("scalar-ffi-v1");
+    assert_eq!(route.program.route_receipt("scalar-ffi-v1"), receipt);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "imported-alias-negative-proof".into())
+        .expect("verify imported alias negative proof MIR");
+    assert_eq!(
+        results.len(),
+        1,
+        "one imported alias extern requires obligation"
+    );
+    assert!(results
+        .iter()
+        .any(|result| result.status == VerifStatus::Disproven));
+    assert!(results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == receipt.mir_digest
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    fs::remove_dir_all(project).expect("remove imported alias negative proof project");
+}
+
+#[test]
 fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
     for (declaration, expected) in [
         ("func foreign(x: i64 ...) -> i64;", "variadic"),
