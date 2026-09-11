@@ -1673,7 +1673,11 @@ impl MirTypeCatalog {
                     });
                 }
                 let Some(descriptor) = catalog.entries.get_mut(id) else {
-                    unreachable!("enum TypeDesc entry checked above")
+                    errors.push(format!(
+                        "enum '{}' has no MIR TypeDesc entry",
+                        type_def.qualified_name
+                    ));
+                    continue;
                 };
                 descriptor.abi = MirAbiClass::Aggregate;
                 descriptor.ownership = ownership;
@@ -2132,9 +2136,12 @@ impl MirTypeCatalog {
             ));
         }
 
-        let (actual_nominal, _) = self
-            .variant_layout(ty)
-            .expect("tagged-variant layout checked above");
+        let Some((actual_nominal, _)) = self.variant_layout(ty) else {
+            return Err(format!(
+                "variant TypeDesc '{}' has no canonical variant layout",
+                ty.as_str()
+            ));
+        };
         if actual_nominal.is_empty() {
             return Err(format!(
                 "variant TypeDesc '{}' has an empty canonical nominal",
@@ -2291,7 +2298,7 @@ impl MirTypeCatalog {
         }
         self.validate_copy_scalar(&payload)?;
         let MirLayout::Result { variants, .. } = &descriptor.layout else {
-            unreachable!("Result layout checked above");
+            return Err("Copy Result TypeDesc has no Result layout".into());
         };
         if variants.len() != 2 {
             return Err(format!(
@@ -2316,7 +2323,15 @@ impl MirTypeCatalog {
                 "Result TypeDesc variants do not match canonical Copy Ok/Err layout".into(),
             );
         };
-        for (variant_name, field) in [("Ok", &ok.fields[0]), ("Err", &err.fields[0])] {
+        let ok_field = ok
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Copy Result Ok payload field is absent".to_string())?;
+        let err_field = err
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Copy Result Err payload field is absent".to_string())?;
+        for (variant_name, field) in [("Ok", ok_field), ("Err", err_field)] {
             if field.id.0 != format!("builtin:variant:Result::{variant_name}/payload:0")
                 || field.ty != payload
             {
@@ -2592,7 +2607,10 @@ impl MirTypeCatalog {
                     && variant.name == "Err"
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
-                    && variant.fields[0].ty == *result_ty
+                    && variant
+                        .fields
+                        .first()
+                        .is_some_and(|field| field.ty == *result_ty)
             })
             .ok_or_else(|| "Result unwrap_or requires the canonical Err i32 payload".to_string())?;
         let selected = variants
@@ -2684,10 +2702,14 @@ impl MirTypeCatalog {
             .iter()
             .find(|variant| variant.id == projection.variant)
             .ok_or_else(|| "Result fallback Ok variant is absent from TypeDesc".to_string())?;
+        let selected_field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "Result fallback Ok payload field is absent".to_string())?;
         if selected.name != "Ok"
             || selected.discriminant != 0
             || selected.fields.len() != 1
-            || selected.fields[0].ty != *result_ty
+            || selected_field.ty != *result_ty
         {
             return Err("Result fallback Ok discriminant/payload disagrees with TypeDesc".into());
         }
@@ -2698,7 +2720,10 @@ impl MirTypeCatalog {
                     && variant.name == "Err"
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
-                    && variant.fields[0].ty == *result_ty
+                    && variant
+                        .fields
+                        .first()
+                        .is_some_and(|field| field.ty == *result_ty)
             })
             .ok_or_else(|| "Result fallback requires the canonical Err payload".to_string())?;
         Ok(MirVariantProjectionFallbackContract {
@@ -2843,10 +2868,13 @@ impl MirTypeCatalog {
             .iter()
             .find(|variant| variant.id == projection.variant)
             .ok_or_else(|| "Result fallback Ok variant is absent from TypeDesc".to_string())?;
+        let selected_field = selected.fields.first().ok_or_else(|| {
+            "heterogeneous Result fallback Ok payload field is absent".to_string()
+        })?;
         if selected.name != "Ok"
             || selected.discriminant != 0
             || selected.fields.len() != 1
-            || selected.fields[0].ty != *result_ty
+            || selected_field.ty != *result_ty
         {
             return Err("Result fallback Ok discriminant/payload disagrees with TypeDesc".into());
         }
@@ -2857,7 +2885,10 @@ impl MirTypeCatalog {
                     && variant.name == "Err"
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
-                    && variant.fields[0].ty == *error
+                    && variant
+                        .fields
+                        .first()
+                        .is_some_and(|field| field.ty == *error)
             })
             .ok_or_else(|| {
                 "heterogeneous Result fallback requires the canonical Err payload".to_string()
@@ -3177,11 +3208,13 @@ impl MirTypeCatalog {
                     && variant.name == "Err"
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
-                    && self.get(&variant.fields[0].ty).is_some_and(|error| {
-                        matches!(
-                            error.kind,
-                            MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
-                        ) && error.ownership == MirOwnership::Copy
+                    && variant.fields.first().is_some_and(|field| {
+                        self.get(&field.ty).is_some_and(|error| {
+                            matches!(
+                                error.kind,
+                                MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+                            ) && error.ownership == MirOwnership::Copy
+                        })
                     })
             })
             .ok_or_else(|| {
@@ -3465,7 +3498,9 @@ impl MirTypeCatalog {
                 arguments.len()
             ));
         }
-        let ty = &arguments[0];
+        let ty = arguments
+            .first()
+            .ok_or_else(|| "scalar generic identity argument is absent".to_string())?;
         self.validate_copy_scalar(ty)
     }
 
@@ -3487,10 +3522,13 @@ impl MirTypeCatalog {
                 arguments.len()
             ));
         }
+        let argument = arguments
+            .first()
+            .ok_or_else(|| "generic variant projection argument is absent".to_string())?;
         if contract.projection.ownership == MirOwnership::Move {
-            self.validate_move_owned_payload(&arguments[0]).map(|_| ())
+            self.validate_move_owned_payload(argument).map(|_| ())
         } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
-            self.validate_generic_option_projection_argument(&arguments[0])
+            self.validate_generic_option_projection_argument(argument)
         } else if contract.projection.nominal.as_str() == "builtin:type:Result"
             && self.get(&contract.source_ty).is_some_and(|descriptor| {
                 matches!(
@@ -3502,7 +3540,7 @@ impl MirTypeCatalog {
                 )
             })
         {
-            self.validate_generic_result_projection_argument(&arguments[0])
+            self.validate_generic_result_projection_argument(argument)
         } else {
             self.validate_scalar_generic_arguments(arguments)
         }
@@ -3575,10 +3613,13 @@ impl MirTypeCatalog {
                 arguments.len()
             ));
         }
+        let argument = arguments
+            .first()
+            .ok_or_else(|| "generic variant fallback argument is absent".to_string())?;
         if contract.projection.ownership == MirOwnership::Move {
-            self.validate_move_owned_payload(&arguments[0]).map(|_| ())
+            self.validate_move_owned_payload(argument).map(|_| ())
         } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
-            self.validate_generic_option_projection_argument(&arguments[0])
+            self.validate_generic_option_projection_argument(argument)
         } else if contract.projection.nominal.as_str() == "builtin:type:Result"
             && self.get(&contract.source_ty).is_some_and(|descriptor| {
                 matches!(
@@ -3597,7 +3638,7 @@ impl MirTypeCatalog {
                 )
             })
         {
-            self.validate_generic_result_projection_argument(&arguments[0])
+            self.validate_generic_result_projection_argument(argument)
         } else {
             self.validate_scalar_generic_arguments(arguments)
         }
@@ -3617,7 +3658,9 @@ impl MirTypeCatalog {
                 arguments.len()
             ));
         }
-        let ty = &arguments[0];
+        let ty = arguments
+            .first()
+            .ok_or_else(|| "generic identity argument is absent".to_string())?;
         self.validate_copy_scalar(ty)
             .or_else(|_| self.validate_flat_copy_variant(ty).map(|_| ()))
             .or_else(|_| self.validate_owned_string(ty))
@@ -4063,9 +4106,12 @@ impl MirTypeCatalog {
                 ty.as_str()
             )
         })?;
-        let descriptor = self
-            .get(ty)
-            .expect("tuple TypeDesc remains present after validation");
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "tuple TypeDesc '{}' is absent after recursive ABI validation",
+                ty.as_str()
+            )
+        })?;
         if descriptor.ownership == MirOwnership::Copy {
             return Err(format!(
                 "move-owned tuple payload '{}' must be non-Copy",
@@ -7873,7 +7919,11 @@ impl MirTypeCatalog {
             .ok_or_else(|| {
                 "generic Option projection target must be the canonical Some variant".to_string()
             })?;
-        if selected.fields[0].id != *field_id || selected.fields[0].ty != *result_ty {
+        let selected_field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "generic Option projection Some payload field is absent".to_string())?;
+        if selected_field.id != *field_id || selected_field.ty != *result_ty {
             return Err(
                 "generic Option projection field must be the canonical Some payload".into(),
             );
@@ -7884,7 +7934,7 @@ impl MirTypeCatalog {
             projection: MirVariantProjectionContract {
                 nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
                 variant: selected.id.clone(),
-                field: selected.fields[0].id.clone(),
+                field: selected_field.id.clone(),
                 field_index: 0,
                 arity: 1,
                 field_ty: result_ty.clone(),
@@ -7976,7 +8026,11 @@ impl MirTypeCatalog {
             .ok_or_else(|| {
                 "generic Option fallback source must contain the canonical None variant".to_string()
             })?;
-        if selected.fields[0].id != *field_id || selected.fields[0].ty != *result_ty {
+        let selected_field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "generic Option fallback Some payload field is absent".to_string())?;
+        if selected_field.id != *field_id || selected_field.ty != *result_ty {
             return Err("generic Option fallback field must be the canonical Some payload".into());
         }
         Ok(MirVariantProjectionFallbackContract {
@@ -7986,7 +8040,7 @@ impl MirTypeCatalog {
             projection: MirVariantProjectionContract {
                 nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
                 variant: selected.id.clone(),
-                field: selected.fields[0].id.clone(),
+                field: selected_field.id.clone(),
                 field_index: 0,
                 arity: 1,
                 field_ty: result_ty.clone(),
@@ -8096,10 +8150,18 @@ impl MirTypeCatalog {
                 "generic Result projection source must contain the canonical Err variant"
                     .to_string()
             })?;
-        if selected.fields[0].id != *field_id
-            || selected.fields[0].ty != *result_ty
-            || (error_is_same_generic && alternate.fields[0].ty != *result_ty)
-            || (error_is_scalar && alternate.fields[0].ty != *error)
+        let selected_field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "generic Result projection Ok payload field is absent".to_string())?;
+        let alternate_field = alternate
+            .fields
+            .first()
+            .ok_or_else(|| "generic Result projection Err payload field is absent".to_string())?;
+        if selected_field.id != *field_id
+            || selected_field.ty != *result_ty
+            || (error_is_same_generic && alternate_field.ty != *result_ty)
+            || (error_is_scalar && alternate_field.ty != *error)
         {
             return Err(
                 "generic Result projection fields must be the canonical Ok/Err payloads".into(),
@@ -8111,7 +8173,7 @@ impl MirTypeCatalog {
             projection: MirVariantProjectionContract {
                 nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
                 variant: selected.id.clone(),
-                field: selected.fields[0].id.clone(),
+                field: selected_field.id.clone(),
                 field_index: 0,
                 arity: 1,
                 field_ty: result_ty.clone(),
@@ -8418,10 +8480,18 @@ impl MirTypeCatalog {
             .ok_or_else(|| {
                 "generic Result fallback source must contain the canonical Err variant".to_string()
             })?;
-        if selected.fields[0].id != *field_id
-            || selected.fields[0].ty != *result_ty
-            || (error_is_same_generic && alternate.fields[0].ty != *result_ty)
-            || (error_is_scalar && alternate.fields[0].ty != *error)
+        let selected_field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "generic Result fallback Ok payload field is absent".to_string())?;
+        let alternate_field = alternate
+            .fields
+            .first()
+            .ok_or_else(|| "generic Result fallback Err payload field is absent".to_string())?;
+        if selected_field.id != *field_id
+            || selected_field.ty != *result_ty
+            || (error_is_same_generic && alternate_field.ty != *result_ty)
+            || (error_is_scalar && alternate_field.ty != *error)
         {
             return Err(
                 "generic Result fallback fields must be the canonical Ok/Err payloads".into(),
@@ -8434,7 +8504,7 @@ impl MirTypeCatalog {
             projection: MirVariantProjectionContract {
                 nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
                 variant: selected.id.clone(),
-                field: selected.fields[0].id.clone(),
+                field: selected_field.id.clone(),
                 field_index: 0,
                 arity: 1,
                 field_ty: result_ty.clone(),
@@ -8756,13 +8826,16 @@ impl MirTypeCatalog {
                 && variant.discriminant == 1
                 && variant.fields.len() == 1
         });
-        if none.is_none() || some.is_none() {
+        let (Some(_none), Some(some)) = (none, some) else {
             return Err(
                 "Option TypeDesc variants do not match the canonical None/Some non-Copy contract"
                     .into(),
             );
-        }
-        let field = &some.expect("checked above").fields[0];
+        };
+        let field = some
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Option Some payload field is absent".to_string())?;
         if field.id.0 != "builtin:variant:Option::Some/payload:0" || field.ty != *inner {
             return Err(
                 "Option Some payload identity/type disagrees with the canonical non-Copy contract"
@@ -8830,12 +8903,15 @@ impl MirTypeCatalog {
                 && variant.discriminant == 1
                 && variant.fields.len() == 1
         });
-        if none.is_none() || some.is_none() {
+        let (Some(_none), Some(some)) = (none, some) else {
             return Err(
                 "Option TypeDesc variants do not match the canonical None/Some managed-payload contract".into(),
             );
-        }
-        let field = &some.expect("checked above").fields[0];
+        };
+        let field = some
+            .fields
+            .first()
+            .ok_or_else(|| "canonical managed Option Some payload field is absent".to_string())?;
         if field.id.0 != "builtin:variant:Option::Some/payload:0" || field.ty != *inner {
             return Err(
                 "Option Some payload identity/type disagrees with the canonical managed-payload contract".into(),
@@ -8969,7 +9045,10 @@ impl MirTypeCatalog {
                     .into(),
             );
         };
-        let ok_field = &ok.fields[0];
+        let ok_field = ok
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Result Ok payload field is absent".to_string())?;
         if ok_field.id.0 != "builtin:variant:Result::Ok/payload:0" {
             return Err(
                 "Result Ok payload identity disagrees with the canonical non-Copy contract".into(),
@@ -8983,7 +9062,10 @@ impl MirTypeCatalog {
                 )
             })?;
 
-        let err_field = &err.fields[0];
+        let err_field = err
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Result Err payload field is absent".to_string())?;
         if err_field.id.0 != "builtin:variant:Result::Err/payload:0" {
             return Err(
                 "Result Err payload identity disagrees with the canonical non-Copy contract".into(),
@@ -9163,7 +9245,15 @@ impl MirTypeCatalog {
                     && variant.fields.len() == 1
             })
             .ok_or_else(|| "recoverable Flow Result Err variant is not canonical".to_string())?;
-        if ok_variant.fields[0].ty != *ok || err_variant.fields[0].ty != *error {
+        let ok_field = ok_variant
+            .fields
+            .first()
+            .ok_or_else(|| "recoverable Flow Result Ok payload field is absent".to_string())?;
+        let err_field = err_variant
+            .fields
+            .first()
+            .ok_or_else(|| "recoverable Flow Result Err payload field is absent".to_string())?;
+        if ok_field.ty != *ok || err_field.ty != *error {
             return Err("recoverable Flow Result payload fields disagree with its layout".into());
         }
         for field_ty in [ok, error] {
@@ -9208,10 +9298,13 @@ impl MirTypeCatalog {
                 fields.len()
             ));
         }
-        let source_desc = self.get(&fields[0]).ok_or_else(|| {
+        let source_ty = fields
+            .first()
+            .ok_or_else(|| "recoverable Flow source Result source field is absent".to_string())?;
+        let source_desc = self.get(source_ty).ok_or_else(|| {
             format!(
                 "recoverable Flow source Result source type '{}' is absent from MIR type catalog",
-                fields[0].as_str()
+                source_ty.as_str()
             )
         })?;
         let MirLayout::Record { nominal, .. } = &source_desc.layout else {
@@ -9297,8 +9390,11 @@ impl MirTypeCatalog {
         let (none, some, _) = self.validated_option_string_payload(ty)?;
         let payload_plan = self.validated_variant_drop_plan(ty, &some.id)?;
         let empty_plan = self.validated_variant_drop_plan(ty, &none.id)?;
+        let Some(payload_field) = payload_plan.fields.first() else {
+            return Err("Option<string> payload drop plan field is absent".into());
+        };
         if payload_plan.fields.len() != 1
-            || payload_plan.fields[0].index != 0
+            || payload_field.index != 0
             || !empty_plan.fields.is_empty()
         {
             return Err(
