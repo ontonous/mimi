@@ -7982,7 +7982,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
                     let ffields = sty.get_field_types();
-                    if ffields.len() >= 1 && matches!(ffields[0], BasicTypeEnum::PointerType(_)) {
+                    if matches!(ffields.as_slice(), [BasicTypeEnum::PointerType(_), ..]) {
                         // string {ptr,len}: codegen strings are NUL-terminated
                         // C strings, so the data pointer can feed strlen/memcpy
                         // directly (no 256-byte truncation anymore).
@@ -7990,13 +7990,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_extract_value(fsv.into(), 0, "prod_str_ptr")?
                             .into_pointer_value();
                         parts.push(CatPart::Dyn(ptr));
-                    } else if ffields.len() == 2
-                        && matches!(
-                            ffields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                        )
-                        && matches!(ffields[1], BasicTypeEnum::PointerType(_))
-                    {
+                    } else if matches!(
+                        ffields.as_slice(),
+                        [
+                            BasicTypeEnum::IntType(len),
+                            BasicTypeEnum::PointerType(_)
+                        ] if len.get_bit_width() == 64
+                    ) {
                         // 0.35.20 (#6): Mimi list struct {i64 len, ptr data}
                         // by-value inside a product tuple (e.g. partition's
                         // `(List<T>, List<T>)` or a user function returning
@@ -8130,13 +8130,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 (BasicTypeEnum::StructType(sty), BasicValueEnum::StructValue(fsv)) => {
                     let ffields = sty.get_field_types();
-                    if ffields.len() == 2
-                        && matches!(ffields[0], BasicTypeEnum::PointerType(_))
-                        && matches!(
-                            ffields[1],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        )
-                    {
+                    if matches!(
+                        ffields.as_slice(),
+                        [
+                            BasicTypeEnum::PointerType(_),
+                            BasicTypeEnum::IntType(len)
+                        ] if len.get_bit_width() == 64
+                    ) {
                         // string {ptr,len} → JSON-escaped quoted string
                         // (mimi_json_escape_string already wraps with ").
                         let ptr = self
