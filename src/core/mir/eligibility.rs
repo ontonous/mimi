@@ -1055,11 +1055,13 @@ fn exact_println_then_value_block(
         || !call.type_arguments.is_empty()
         || !call.session.is_empty()
         || call.arguments.len() != 1
-        || !matches!(
-            &call.arguments[0].value.kind,
-            ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
-                if base == expected_local && projections.is_empty()
-        )
+        || !call.arguments.first().is_some_and(|argument| {
+            matches!(
+                &argument.value.kind,
+                ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
+                    if base == expected_local && projections.is_empty()
+            )
+        })
     {
         return false;
     }
@@ -1233,7 +1235,10 @@ fn exact_println_block(
     if !matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println") {
         return false;
     }
-    match (expected_local, &call.arguments[0].value.kind) {
+    let Some(argument) = call.arguments.first() else {
+        return false;
+    };
+    match (expected_local, &argument.value.kind) {
         (Some(expected), ResolvedExprKind::Load(place)) => {
             place.base == *expected && place.projections.is_empty()
         }
