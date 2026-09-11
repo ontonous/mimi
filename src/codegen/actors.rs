@@ -138,9 +138,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         match ty {
             BasicTypeEnum::StructType(st) => {
                 let fields = st.get_field_types();
-                fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                        if it.get_bit_width() == 64
+                )
             }
             _ => false,
         }
@@ -1463,9 +1465,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let last_val = match (last_val, ret_type) {
             (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(st)) => {
                 let field_types = st.get_field_types();
-                let is_string_struct = field_types.len() == 2
-                    && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
-                    && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                let is_string_struct = matches!(
+                    field_types.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                        if it.get_bit_width() == 64
+                );
                 if is_string_struct {
                     self.wrap_c_string(pv)?
                 } else {

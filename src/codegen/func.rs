@@ -1189,8 +1189,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // does not free the returned string before the caller can use it.
                 if let Some(expr) = expr {
                     if let Expr::Call(_, args) = expr.unlocated() {
-                        if args.len() == 1 && Self::is_string_temp_expr(&args[0], &val) {
-                            let _ = self.pop_last_heap_ptr();
+                        if let [arg] = args.as_slice() {
+                            if Self::is_string_temp_expr(arg, &val) {
+                                let _ = self.pop_last_heap_ptr();
+                            }
                         }
                     }
                 }
@@ -2479,13 +2481,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 match callee.unlocated() {
                                     Expr::Ident(fname) if fname == "unsafe_cast_protocol" => {
                                         is_unsafe_protocol_cast = true;
-                                        match args[0].unlocated() {
-                                            Expr::Ident(var_name) => self
-                                                .var_type_names
-                                                .get(var_name)
-                                                .cloned()
-                                                .unwrap_or_default(),
-                                            Expr::Record { ty: Some(tn), .. } => tn.clone(),
+                                        match args.as_slice() {
+                                            [arg] => match arg.unlocated() {
+                                                Expr::Ident(var_name) => self
+                                                    .var_type_names
+                                                    .get(var_name)
+                                                    .cloned()
+                                                    .unwrap_or_default(),
+                                                Expr::Record { ty: Some(tn), .. } => tn.clone(),
+                                                _ => String::new(),
+                                            },
                                             _ => String::new(),
                                         }
                                     }
@@ -2664,8 +2669,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if matches!(init.unlocated(), Expr::List(_)) {
                         if let Some(decl_ty) = ty.as_ref() {
                             if let Type::Name(n, args) = decl_ty.unlocated() {
-                                if n == "List" && args.len() == 1 {
-                                    self.pending_list_elem_type = Some(args[0].clone());
+                                if n == "List" {
+                                    if let [elem_ty] = args.as_slice() {
+                                        self.pending_list_elem_type = Some(elem_ty.clone());
+                                    }
                                 }
                             }
                         }
@@ -3505,9 +3512,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         if let Expr::Call(callee, _) = init.unlocated() {
                             if let Expr::Ident(func_name) = callee.unlocated() {
-                                if func_name == "map_get" && sub_pats.len() == 2 {
-                                    if let PatternKind::Variable(name) = &sub_pats[1].kind {
-                                        self.var_type_names.insert(name.clone(), "any".to_string());
+                                if func_name == "map_get" {
+                                    if let [_, second] = sub_pats.as_slice() {
+                                        if let PatternKind::Variable(name) = &second.kind {
+                                            self.var_type_names
+                                                .insert(name.clone(), "any".to_string());
+                                        }
                                     }
                                 }
                             }
@@ -4135,9 +4145,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let field_types = st.get_field_types();
                 // Check if this is the Mimi string struct {ptr, i64} — the pointer is
                 // a raw C string (from literal), not a pointer to an alloca'd struct.
-                let is_string_struct = field_types.len() == 2
-                    && matches!(&field_types[0], BasicTypeEnum::PointerType(_))
-                    && matches!(&field_types[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                let is_string_struct = matches!(
+                    field_types.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                        if it.get_bit_width() == 64
+                );
                 if is_string_struct {
                     self.wrap_c_string(pv)?
                 } else {
@@ -4575,9 +4587,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let saved_pending_result_ok_ty = self.pending_result_ok_ty.take();
         if let Some(ok_ty) = func.ret.as_ref().and_then(|r| match r.unlocated() {
             crate::ast::Type::Result(ok, _) => Some((**ok).clone()),
-            crate::ast::Type::Name(n, args) if n == "Result" && args.len() == 2 => {
-                Some(args[0].clone())
-            }
+            crate::ast::Type::Name(n, args) if n == "Result" => match args.as_slice() {
+                [ok_ty, _] => Some(ok_ty.clone()),
+                _ => None,
+            },
             _ => None,
         }) {
             self.pending_result_ok_ty = Some(ok_ty);
