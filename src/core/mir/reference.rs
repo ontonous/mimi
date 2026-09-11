@@ -7361,7 +7361,10 @@ impl<'a> MirReferenceInterpreter<'a> {
             if index >= fields.len() {
                 return Err(self.error(&function.owner, "record base is shorter than TypeDesc"));
             }
-            fields[index] = value;
+            let Some(slot) = fields.get_mut(index) else {
+                return Err(self.error(&function.owner, "record base field is out of bounds"));
+            };
+            *slot = value;
         }
         Ok(MirRuntimeValue::Record {
             nominal: expected_nominal.clone(),
@@ -7444,9 +7447,22 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "record move update receipt field disagrees with layout",
                 ));
             }
-            let old = std::mem::replace(&mut fields[index], MirRuntimeValue::Unit);
+            let old = {
+                let Some(slot) = fields.get_mut(index) else {
+                    return Err(
+                        self.error(&function.owner, "record move update field is out of bounds")
+                    );
+                };
+                std::mem::replace(slot, MirRuntimeValue::Unit)
+            };
             self.drop_runtime_value(function, &field_desc.ty, old)?;
-            fields[index] = value;
+            let Some(slot) = fields.get_mut(index) else {
+                return Err(self.error(
+                    &function.owner,
+                    "record move update field is out of bounds after drop",
+                ));
+            };
+            *slot = value;
         }
         Ok(MirRuntimeValue::Record {
             nominal: expected_nominal.clone(),
