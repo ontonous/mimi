@@ -2294,8 +2294,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::StringListData { slot, list_ty });
         } else {
-            mimi_debug_assert!(false, "register_returned_string_list with no active scope");
-            guard.push(vec![HeapEntry::StringListData { slot, list_ty }]);
+            return Err(CompileError::LlvmError(
+                "register_returned_string_list has no active heap scope".into(),
+            ));
         }
         Ok(())
     }
@@ -2322,15 +2323,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 elem_list_ty,
             });
         } else {
-            mimi_debug_assert!(
-                false,
-                "register_returned_string_list_list with no active scope"
-            );
-            guard.push(vec![HeapEntry::StringListListData {
-                slot,
-                list_ty,
-                elem_list_ty,
-            }]);
+            return Err(CompileError::LlvmError(
+                "register_returned_string_list_list has no active heap scope".into(),
+            ));
         }
         Ok(())
     }
