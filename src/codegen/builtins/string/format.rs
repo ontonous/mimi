@@ -339,12 +339,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // String values are {i8*, i64} structs in codegen.
                 // Return as-is since to_string on a string is identity.
                 let fields = sv.get_type().get_field_types();
-                let is_string_struct = fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(
-                        fields[1],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                    );
+                let is_string_struct = matches!(
+                    fields.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                        if t.get_bit_width() == 64
+                );
                 if is_string_struct {
                     return Ok(BasicValueEnum::StructValue(sv));
                 }

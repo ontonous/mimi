@@ -193,12 +193,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         {
                             if let BasicTypeEnum::StructType(sty) = elem_ty {
                                 let ffields = sty.get_field_types();
-                                let is_list_struct = ffields.len() == 2
-                                    && matches!(
-                                        ffields[0],
-                                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                                    )
-                                    && matches!(ffields[1], BasicTypeEnum::PointerType(_));
+                                let is_list_struct = matches!(
+                                    ffields.as_slice(),
+                                    [BasicTypeEnum::IntType(t), BasicTypeEnum::PointerType(_)]
+                                        if t.get_bit_width() == 64
+                                );
                                 if is_list_struct {
                                     // 0.35.20 (#6): List<T> element — deep-copy the
                                     // data array so the pushed element owns its
@@ -330,9 +329,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .pending_push_elem_type
                     .as_deref()
                     .map_or(true, |element_type| element_type == "string")
-                    && fields.len() == 2
-                    && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(fields[1], BasicTypeEnum::IntType(_));
+                    && matches!(
+                        fields.as_slice(),
+                        [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(_)]
+                    );
                 if is_string_struct {
                     // String list elements are fat `MimiStr` boxes since
                     // 0.38.26. Copy the source bytes before boxing so pushed
@@ -397,12 +397,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // array. Without this, `push(rows, row)` in a loop would
                     // alias `row`'s buffer; later freeing the loop-local `row`
                     // would leave `rows` dangling (0.37.30 nested-list push).
-                    let is_list_struct = fields.len() == 2
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                        )
-                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    let is_list_struct = matches!(
+                        fields.as_slice(),
+                        [BasicTypeEnum::IntType(t), BasicTypeEnum::PointerType(_)]
+                            if t.get_bit_width() == 64
+                    );
                     if is_list_struct {
                         let len = self
                             .builder
@@ -461,23 +460,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // per-loop-iteration temporary inside an `if` arm), the list
                         // element dangled → use-after-free at display / double-free.
                         // Deep-copy the inner string payload for this shape.
-                        let is_option_string = fields.len() == 2
-                            && matches!(
-                                fields[0],
-                                BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                            )
-                            && matches!(
-                                fields[1],
-                                BasicTypeEnum::StructType(st) if {
+                        let is_option_string = matches!(
+                            fields.as_slice(),
+                            [BasicTypeEnum::IntType(t), BasicTypeEnum::StructType(st)]
+                                if t.get_bit_width() == 1 && {
                                     let inner = st.get_field_types();
-                                    inner.len() == 2
-                                        && matches!(inner[0], BasicTypeEnum::PointerType(_))
-                                        && matches!(
-                                            inner[1],
-                                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                                        )
+                                    matches!(
+                                        inner.as_slice(),
+                                        [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
+                                            if t.get_bit_width() == 64
+                                    )
                                 }
-                            );
+                        );
                         if is_option_string {
                             let disc = self
                                 .builder

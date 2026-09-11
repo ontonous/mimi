@@ -213,9 +213,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             BasicMetadataValueEnum::StructValue(sv) => {
                 let ftys = sv.get_type().get_field_types();
-                let is_str_layout = ftys.len() == 2
-                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
-                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                let is_str_layout = matches!(
+                    ftys.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                        if it.get_bit_width() == 64
+                );
                 if !is_str_layout {
                     return Err(CompileError::TypeMismatch(format!(
                         "{}: string argument expected (found a non-string struct)",
@@ -586,9 +588,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicMetadataValueEnum::PointerValue(pv) => Ok(*pv),
             BasicMetadataValueEnum::StructValue(sv) => {
                 let ftys = sv.get_type().get_field_types();
-                let is_str_layout = ftys.len() == 2
-                    && matches!(ftys[0], BasicTypeEnum::PointerType(_))
-                    && matches!(ftys[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64);
+                let is_str_layout = matches!(
+                    ftys.as_slice(),
+                    [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                        if it.get_bit_width() == 64
+                );
                 if !is_str_layout {
                     return Err(CompileError::TypeMismatch(format!(
                         "{}: string argument expected (found a non-string struct)",
