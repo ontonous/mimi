@@ -614,7 +614,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             self.values.insert(parameter.clone(), value);
         }
         for block in &blocks {
-            let llvm_block = *self.blocks.get(&block.id).expect("created above");
+            let llvm_block = *self.blocks.get(&block.id).ok_or_else(|| {
+                NativeMirError::new(block.id.to_string(), "LLVM block was not created")
+            })?;
             self.generator.builder.position_at_end(llvm_block);
             for parameter in &block.parameters {
                 let info = self.function.values.get(&parameter.value).ok_or_else(|| {

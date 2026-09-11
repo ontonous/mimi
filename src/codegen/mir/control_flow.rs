@@ -19,9 +19,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 target, arguments, ..
             } => {
                 self.queue_edge(target, arguments, current, subject)?;
+                let target_block = *self.blocks.get(target).ok_or_else(|| {
+                    NativeMirError::new(subject.to_string(), "goto target LLVM block is absent")
+                })?;
                 self.generator
                     .builder
-                    .build_unconditional_branch(*self.blocks.get(target).expect("validated target"))
+                    .build_unconditional_branch(target_block)
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
             }
             MirTerminator::Branch {
@@ -37,13 +40,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .into_int_value();
                 self.queue_edge(then_target, then_arguments, current, subject)?;
                 self.queue_edge(else_target, else_arguments, current, subject)?;
+                let then_block = *self.blocks.get(then_target).ok_or_else(|| {
+                    NativeMirError::new(subject.to_string(), "then target LLVM block is absent")
+                })?;
+                let else_block = *self.blocks.get(else_target).ok_or_else(|| {
+                    NativeMirError::new(subject.to_string(), "else target LLVM block is absent")
+                })?;
                 self.generator
                     .builder
-                    .build_conditional_branch(
-                        condition,
-                        *self.blocks.get(then_target).expect("validated target"),
-                        *self.blocks.get(else_target).expect("validated target"),
-                    )
+                    .build_conditional_branch(condition, then_block, else_block)
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
             }
             MirTerminator::Switch { scrutinee, arms } => {
@@ -159,6 +164,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             };
 
             if has_payload && arm.bindings.is_empty() {
+                let payload_slot = payload_slot.as_ref().ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        "payload variant has no native ABI payload slot",
+                    )
+                })?;
                 let drop_payload = self
                     .generator
                     .context
@@ -178,21 +189,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_extract_value(
                         scrutinee_value.into_struct_value(),
-                        payload_slot
-                            .as_ref()
-                            .expect("payload slot exists for a payload variant")
-                            .physical_field,
+                        payload_slot.physical_field,
                         "mir_variant_move_drop_payload",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
-                self.emit_drop_value(
-                    payload,
-                    &payload_slot
-                        .as_ref()
-                        .expect("payload slot exists for a payload variant")
-                        .ty,
-                    &subject.to_string(),
-                )?;
+                self.emit_drop_value(payload, &payload_slot.ty, &subject.to_string())?;
                 let drop_predecessor =
                     self.generator.builder.get_insert_block().ok_or_else(|| {
                         NativeMirError::new(
@@ -292,14 +293,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 current,
                 subject,
             )?;
+            let default_block = *self.blocks.get(&default_arm.target).ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "default target LLVM block is absent")
+            })?;
             self.generator
                 .builder
-                .build_unconditional_branch(
-                    *self
-                        .blocks
-                        .get(&default_arm.target)
-                        .expect("validated default target"),
-                )
+                .build_unconditional_branch(default_block)
                 .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
             return Ok(());
         }
@@ -369,10 +368,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 current,
                 subject,
             )?;
-            let target = *self
-                .blocks
-                .get(&arm.target)
-                .expect("validated variant target");
+            let target = *self.blocks.get(&arm.target).ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "variant target LLVM block is absent")
+            })?;
             if index + 1 < variant_arms.len() {
                 let next = self
                     .generator
@@ -390,16 +388,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     current,
                     subject,
                 )?;
+                let default_block = *self.blocks.get(&default_arm.target).ok_or_else(|| {
+                    NativeMirError::new(subject.to_string(), "default target LLVM block is absent")
+                })?;
                 self.generator
                     .builder
-                    .build_conditional_branch(
-                        condition,
-                        target,
-                        *self
-                            .blocks
-                            .get(&default_arm.target)
-                            .expect("validated default target"),
-                    )
+                    .build_conditional_branch(condition, target, default_block)
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
             } else {
                 let unreachable = self
@@ -432,6 +426,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .blocks
             .get(target)
             .ok_or_else(|| NativeMirError::new(subject.to_string(), "edge target is absent"))?;
+        if block.parameters.len() != arguments.len() {
+            return Err(NativeMirError::new(
+                subject.to_string(),
+                "edge arguments do not match target block parameter arity",
+            ));
+        }
         for (parameter, argument) in block.parameters.iter().zip(arguments) {
             if self.is_unit_value(&parameter.value) {
                 continue;
@@ -463,7 +463,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .blocks
             .get(target)
             .ok_or_else(|| NativeMirError::new(subject.to_string(), "edge target is absent"))?;
-        if block.parameters.len() != arguments.len() + bindings.len() {
+        let binding_start = arguments.len().checked_add(bindings.len()).ok_or_else(|| {
+            NativeMirError::new(
+                subject.to_string(),
+                "variant edge parameter arity overflows",
+            )
+        })?;
+        if block.parameters.len() != binding_start {
             return Err(NativeMirError::new(
                 subject.to_string(),
                 "variant edge does not match target block parameter arity",
@@ -513,7 +519,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 };
                 let parameter = block
                     .parameters
-                    .get(arguments.len() + index)
+                    .get(arguments.len().checked_add(index).ok_or_else(|| {
+                        NativeMirError::new(
+                            subject.to_string(),
+                            "nested tuple binding parameter index overflows",
+                        )
+                    })?)
                     .and_then(|parameter| self.function.values.get(&parameter.value))
                     .ok_or_else(|| {
                         NativeMirError::new(
@@ -562,6 +573,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let payload = if bindings.is_empty() {
             None
         } else {
+            let binding = bindings.first().ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "variant payload binding is absent")
+            })?;
             let parameter = block
                 .parameters
                 .get(arguments.len())
@@ -579,7 +593,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         scrutinee_ty,
                         &variant.id,
                         &parameter.ty,
-                        &bindings[0].projection,
+                        &binding.projection,
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             } else {
@@ -589,7 +603,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         scrutinee_ty,
                         &variant.id,
                         &parameter.ty,
-                        &bindings[0].projection,
+                        &binding.projection,
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             };
@@ -621,7 +635,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         };
         if let Some(payload) = payload {
             for (index, binding) in bindings.iter().enumerate() {
-                let parameter = &block.parameters[arguments.len() + index];
+                let parameter_index = arguments.len().checked_add(index).ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        "variant payload binding parameter index overflows",
+                    )
+                })?;
+                let parameter = block.parameters.get(parameter_index).ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        "variant payload binding target parameter is absent",
+                    )
+                })?;
                 if index != 0 || binding.parameter != parameter.value {
                     return Err(NativeMirError::new(
                         subject.to_string(),

@@ -628,9 +628,14 @@ impl<'a> NativeMirValidator<'a> {
                     (MirAbiClass::Bool, ResolvedLiteral::Bool(_)) => true,
                     (MirAbiClass::Float { bits: 32 | 64 }, ResolvedLiteral::FloatBits(_)) => true,
                     (MirAbiClass::StringHandle, ResolvedLiteral::String(_)) => {
-                        if let Err(message) = catalog.validate_owned_string(
-                            &function.values.get(result).expect("validated result").ty,
-                        ) {
+                        let Some(value) = function.values.get(result) else {
+                            self.errors.push(NativeMirError::new(
+                                subject,
+                                "constant result is absent from MIR value table",
+                            ));
+                            return;
+                        };
+                        if let Err(message) = catalog.validate_owned_string(&value.ty) {
                             self.errors.push(NativeMirError::new(subject, message));
                             false
                         } else {
@@ -1137,7 +1142,10 @@ impl<'a> NativeMirValidator<'a> {
                             "String-field borrow receipt is attached to a non-String builtin",
                         ));
                     } else if arguments.len() == 1 {
-                        let Some(source) = function.values.get(&arguments[0]) else {
+                        let Some(argument) = arguments.first() else {
+                            return;
+                        };
+                        let Some(source) = function.values.get(argument) else {
                             return;
                         };
                         if let Err(message) = self
@@ -1157,10 +1165,13 @@ impl<'a> NativeMirValidator<'a> {
                         else {
                             continue;
                         };
+                        let Some(argument_value) = function.values.get(argument) else {
+                            continue;
+                        };
                         let ownership_ok = if *kind == MirBuiltinKind::PrintlnString {
                             self.program
                                 .type_catalog()
-                                .validate_owned_string(&function.values[argument].ty)
+                                .validate_owned_string(&argument_value.ty)
                                 .is_ok()
                         } else {
                             desc.is_canonical_copy_scalar(true)
@@ -1980,7 +1991,8 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                 }
             }
-            if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+            let binding_start = arm.arguments.len().checked_add(arm.bindings.len());
+            if binding_start != Some(target.parameters.len()) {
                 self.errors.push(NativeMirError::new(
                     subject,
                     "switch edge arguments and payload bindings disagree with block parameter arity",
@@ -2001,9 +2013,16 @@ impl<'a> NativeMirValidator<'a> {
                         ),
                     ));
                 }
+                let Some(parameter_index) = arm.arguments.len().checked_add(index) else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch binding parameter index overflows",
+                    ));
+                    continue;
+                };
                 let Some(parameter) = target
                     .parameters
-                    .get(arm.arguments.len() + index)
+                    .get(parameter_index)
                     .and_then(|parameter| function.values.get(&parameter.value))
                 else {
                     continue;
@@ -2011,7 +2030,7 @@ impl<'a> NativeMirValidator<'a> {
                 let Some(variant_id) = variant_id else {
                     continue;
                 };
-                if binding.parameter != target.parameters[arm.arguments.len() + index].value {
+                if binding.parameter != parameter.id {
                     self.errors.push(NativeMirError::new(
                         subject,
                         "switch binding parameter disagrees with target block parameter",
@@ -2139,7 +2158,8 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                 }
             }
-            if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+            let binding_start = arm.arguments.len().checked_add(arm.bindings.len());
+            if binding_start != Some(target.parameters.len()) {
                 self.errors.push(NativeMirError::new(
                     subject,
                     "switch-move edge arguments and payload bindings disagree with block parameter arity",
@@ -2148,11 +2168,13 @@ impl<'a> NativeMirValidator<'a> {
             // The native non-Copy TypeDesc gate has already proved the
             // complete admitted variant shape. Only this edge's own
             // single-binding physical shape remains to be checked here.
-            let nested_group = arm.bindings.len() > 1
-                && arm.bindings.iter().all(|binding| {
-                    binding.nested_tuple.is_some()
-                        && binding.projection.field == arm.bindings[0].projection.field
-                });
+            let nested_group = arm.bindings.first().is_some_and(|first| {
+                arm.bindings.len() > 1
+                    && arm.bindings.iter().all(|binding| {
+                        binding.nested_tuple.is_some()
+                            && binding.projection.field == first.projection.field
+                    })
+            });
             if arm.bindings.len() > 1 && !nested_group {
                 self.errors.push(NativeMirError::new(
                     subject,
@@ -2172,14 +2194,21 @@ impl<'a> NativeMirValidator<'a> {
                         ),
                     ));
                 }
+                let Some(parameter_index) = arm.arguments.len().checked_add(index) else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch-move binding parameter index overflows",
+                    ));
+                    continue;
+                };
                 let Some(parameter) = target
                     .parameters
-                    .get(arm.arguments.len() + index)
+                    .get(parameter_index)
                     .and_then(|parameter| function.values.get(&parameter.value))
                 else {
                     continue;
                 };
-                if binding.parameter != target.parameters[arm.arguments.len() + index].value {
+                if binding.parameter != parameter.id {
                     self.errors.push(NativeMirError::new(
                         subject,
                         "switch-move binding parameter disagrees with target block parameter",
@@ -2227,11 +2256,10 @@ impl<'a> NativeMirValidator<'a> {
         subject: &str,
     ) {
         self.validate_same_copy_values(function, result, operand, subject);
-        let Some(desc) = function
-            .values
-            .get(operand)
-            .and_then(|value| self.program.type_catalog().get(&value.ty))
-        else {
+        let Some(operand_value) = function.values.get(operand) else {
+            return;
+        };
+        let Some(desc) = self.program.type_catalog().get(&operand_value.ty) else {
             return;
         };
         if op == ResolvedUnaryOp::Negate && desc.abi == (MirAbiClass::Float { bits: 64 }) {
@@ -2240,7 +2268,7 @@ impl<'a> NativeMirValidator<'a> {
             };
             if let Err(message) = self.program.type_catalog().validate_copy_float_unary(
                 result_ty,
-                &function.values[operand].ty,
+                &operand_value.ty,
                 op,
             ) {
                 self.errors.push(NativeMirError::new(subject, message));

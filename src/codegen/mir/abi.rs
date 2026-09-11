@@ -233,13 +233,16 @@ pub(super) fn native_copy_variant_payload_type(
         catalog
             .validate_copy_option_variant(ty, expected)
             .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
-        if let MirLayout::Option { inner, .. } = &catalog
-            .get(ty)
-            .expect("validated Option TypeDesc remains present")
-            .layout
-        {
+        let descriptor = catalog.get(ty).ok_or_else(|| {
+            NativeMirError::new(ty.as_str(), "validated Option TypeDesc is absent")
+        })?;
+        if let MirLayout::Option { inner, .. } = &descriptor.layout {
             return Ok(inner.clone());
         }
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "validated Option TypeDesc is no longer an Option layout",
+        ));
     }
     catalog
         .validate_flat_copy_variant(ty)
@@ -494,19 +497,25 @@ fn generic_result_copy_variant(catalog: &MirTypeCatalog, ty: &crate::core::Resol
         return false;
     };
     let Some(selected) = variants.iter().find(|variant| {
+        let Some(field) = variant.fields.first() else {
+            return false;
+        };
         variant.id.0 == "builtin:variant:Result::Ok"
             && variant.name == "Ok"
             && variant.discriminant == 0
             && variant.fields.len() == 1
-            && variant.fields[0].ty == *ok
+            && field.ty == *ok
     }) else {
+        return false;
+    };
+    let Some(selected_field) = selected.fields.first() else {
         return false;
     };
     catalog
         .validated_generic_result_scalar_projection_trap_contract(
             ty,
             &selected.id,
-            &selected.fields[0].id,
+            &selected_field.id,
             ok,
         )
         .is_ok()
