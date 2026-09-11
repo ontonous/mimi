@@ -2810,17 +2810,28 @@ fn canonical_ffi_type_id_inner(
 
     match ty.unlocated() {
         Type::Name(name, arguments) if name == "Option" && arguments.len() == 1 => {
-            let inner =
-                canonical_ffi_type_id_inner(&arguments[0], table, program, visiting_aliases)?;
+            let inner = arguments
+                .first()
+                .ok_or_else(|| "canonical Option type argument is absent".to_owned())
+                .and_then(|inner| {
+                    canonical_ffi_type_id_inner(inner, table, program, visiting_aliases)
+                })?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Option(candidate) if *candidate == inner)
             })
             .ok_or_else(|| format!("canonical Option type for '{name}' is absent"))
         }
         Type::Name(name, arguments) if name == "Result" && arguments.len() == 2 => {
-            let ok = canonical_ffi_type_id_inner(&arguments[0], table, program, visiting_aliases)?;
-            let error =
-                canonical_ffi_type_id_inner(&arguments[1], table, program, visiting_aliases)?;
+            let ok = arguments
+                .first()
+                .ok_or_else(|| "canonical Result success type argument is absent".to_owned())
+                .and_then(|ok| canonical_ffi_type_id_inner(ok, table, program, visiting_aliases))?;
+            let error = arguments
+                .get(1)
+                .ok_or_else(|| "canonical Result error type argument is absent".to_owned())
+                .and_then(|error| {
+                    canonical_ffi_type_id_inner(error, table, program, visiting_aliases)
+                })?;
             find_type(table, |candidate| {
                 matches!(candidate, ResolvedType::Result { ok: candidate_ok, error: candidate_error } if *candidate_ok == ok && *candidate_error == error)
             })
