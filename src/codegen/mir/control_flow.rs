@@ -332,7 +332,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .into_int_value();
         for (index, arm) in variant_arms.iter().enumerate() {
             let MirSwitchCase::Variant(variant_id) = &arm.case else {
-                unreachable!("variant arms were filtered above")
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "native variant switch arm lost its variant case",
+                ));
             };
             let variant = self
                 .program

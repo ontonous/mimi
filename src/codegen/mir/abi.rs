@@ -422,7 +422,10 @@ pub(super) fn native_variant_abi_with_generic_result(
             || (allow_generic_result && generic_result_copy_variant(catalog, ty)))
     {
         let MirLayout::Result { ok, error, .. } = &descriptor.layout else {
-            unreachable!("Result layout checked above");
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                "Result TypeDesc layout changed during native ABI materialization",
+            ));
         };
         vec![ok.clone(), error.clone()]
     } else {

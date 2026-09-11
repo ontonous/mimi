@@ -469,7 +469,12 @@ fn native_ffi_scalar_type<'ctx>(
             ),
         )
     })?;
-    Ok(shape.llvm_type(context))
+    shape.llvm_type(context).ok_or_else(|| {
+        NativeMirError::new(
+            subject,
+            "native FFI scalar shape has an unsupported physical width",
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -490,18 +495,16 @@ impl NativeFfiScalarShape {
         }
     }
 
-    fn llvm_type<'ctx>(self, context: &'ctx Context) -> BasicTypeEnum<'ctx> {
+    fn llvm_type<'ctx>(self, context: &'ctx Context) -> Option<BasicTypeEnum<'ctx>> {
         match self {
-            Self::SignedInteger(32) => context.i32_type().into(),
-            Self::SignedInteger(64) => context.i64_type().into(),
-            Self::Bool => context.bool_type().into(),
-            Self::Float(64) => context.f64_type().into(),
+            Self::SignedInteger(32) => Some(context.i32_type().into()),
+            Self::SignedInteger(64) => Some(context.i64_type().into()),
+            Self::Bool => Some(context.bool_type().into()),
+            Self::Float(64) => Some(context.f64_type().into()),
             // `native_ffi_scalar_shape` is the sole constructor and admits
             // only the widths above. Keep this total so a future shape-map
-            // edit cannot silently invent an LLVM ABI.
-            Self::SignedInteger(_) | Self::Float(_) => {
-                unreachable!("unsupported native scalar FFI width")
-            }
+            // edit fails closed instead of inventing an LLVM ABI.
+            Self::SignedInteger(_) | Self::Float(_) => None,
         }
     }
 }

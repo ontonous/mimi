@@ -190,7 +190,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let operation = match op {
                 ResolvedBinaryOp::Add => "add",
                 ResolvedBinaryOp::Subtract => "subtract",
-                _ => unreachable!("finite-only float binary contract checked above"),
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!("float binary operator {op:?} is outside the finite-only contract"),
+                    ))
+                }
             };
             let result = match op {
                 ResolvedBinaryOp::Add => {
@@ -203,7 +208,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         .builder
                         .build_float_sub(left_value, right_value, "mir_fsub")
                 }
-                _ => unreachable!("finite-only float binary contract checked above"),
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!("float binary operator {op:?} is outside the finite-only contract"),
+                    ))
+                }
             }
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
             self.emit_float_finite_guard(result, operation, subject)?;

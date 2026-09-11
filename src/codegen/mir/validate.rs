@@ -695,7 +695,13 @@ impl<'a> NativeMirValidator<'a> {
                             MirInstructionKind::Clone { .. } => {
                                 crate::core::mir::types::MirGlueOperation::Clone
                             }
-                            _ => unreachable!(),
+                            _ => {
+                                self.errors.push(NativeMirError::new(
+                                    subject,
+                                    "copy/move/clone instruction has an unsupported ownership operation",
+                                ));
+                                return;
+                            }
                         };
                         if desc.ownership != MirOwnership::Copy {
                             if let Err(message) = catalog.validate_glue(&source_value.ty, operation)

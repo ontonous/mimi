@@ -721,23 +721,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_int_compare(predicate, left, right, "mir_minmax_cmp")
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let name = if kind == MirBuiltinKind::Min {
+                    "mir_min"
+                } else {
+                    "mir_max"
+                };
                 self.generator
                     .builder
-                    .build_select(
-                        condition,
-                        left,
-                        right,
-                        match kind {
-                            MirBuiltinKind::Min => "mir_min",
-                            MirBuiltinKind::Max => "mir_max",
-                            MirBuiltinKind::Abs => unreachable!(),
-                            MirBuiltinKind::PrintlnBool => unreachable!(),
-                            MirBuiltinKind::PrintlnInt => unreachable!(),
-                            MirBuiltinKind::PrintlnString => unreachable!(),
-                            MirBuiltinKind::SessionOpen => unreachable!(),
-                            MirBuiltinKind::SessionPair => unreachable!(),
-                        },
-                    )
+                    .build_select(condition, left, right, name)
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
             }
             MirBuiltinKind::PrintlnBool => {
@@ -826,15 +817,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 // placeholder convention as PrintlnBool for the value map.
                 Ok(self.generator.context.i64_type().const_zero().into())
             }
-            MirBuiltinKind::PrintlnString => {
-                unreachable!("PrintlnString handled before scalar dispatch")
-            }
-            MirBuiltinKind::SessionOpen => {
-                unreachable!("SessionOpen handled before scalar dispatch")
-            }
-            MirBuiltinKind::SessionPair => {
-                unreachable!("SessionPair handled before scalar dispatch")
-            }
+            MirBuiltinKind::PrintlnString => Err(NativeMirError::new(
+                subject,
+                "PrintlnString must use the owned or borrowed String dispatch path",
+            )),
+            MirBuiltinKind::SessionOpen | MirBuiltinKind::SessionPair => Err(NativeMirError::new(
+                subject,
+                "session builtin must use the session dispatch path",
+            )),
         }
         .map(|value| {
             let _ = result;
@@ -1164,7 +1154,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let ResolvedCallee::Extern(_) = callee else {
-            unreachable!("emit_ffi_call called for non-extern callee");
+            return Err(NativeMirError::new(
+                subject,
+                "emit_ffi_call called for a non-extern callee",
+            ));
         };
         let instruction = crate::core::mir::MirInstructionId::new(subject.to_owned())
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
@@ -1503,17 +1496,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "[E0802] FFI integer result conversion out of range",
                     subject,
                 )?;
+                let result_type = match to_bits {
+                    32 => self.generator.context.i32_type(),
+                    64 => self.generator.context.i64_type(),
+                    width => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            format!("unsupported signed integer result width {width}"),
+                        ))
+                    }
+                };
                 self.generator
                     .builder
-                    .build_int_truncate(
-                        value,
-                        match to_bits {
-                            32 => self.generator.context.i32_type(),
-                            64 => self.generator.context.i64_type(),
-                            _ => unreachable!("integer width checked above"),
-                        },
-                        name,
-                    )
+                    .build_int_truncate(value, result_type, name)
                     .map(BasicValueEnum::from)
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
             }
@@ -1532,7 +1527,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let (lower, upper) = match to_bits {
                     32 => (i32::MIN as f64, 2_147_483_648.0),
                     64 => (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0),
-                    _ => unreachable!("matched integer result ABI above"),
+                    width => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            format!("unsupported signed integer result width {width}"),
+                        ))
+                    }
                 };
                 let lower = self
                     .generator
@@ -1564,17 +1564,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "[E0802] FFI integer result conversion out of range",
                     subject,
                 )?;
+                let result_type = match to_bits {
+                    32 => self.generator.context.i32_type(),
+                    64 => self.generator.context.i64_type(),
+                    width => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            format!("unsupported signed integer result width {width}"),
+                        ))
+                    }
+                };
                 self.generator
                     .builder
-                    .build_float_to_signed_int(
-                        value,
-                        match to_bits {
-                            32 => self.generator.context.i32_type(),
-                            64 => self.generator.context.i64_type(),
-                            _ => unreachable!("matched integer result ABI above"),
-                        },
-                        name,
-                    )
+                    .build_float_to_signed_int(value, result_type, name)
                     .map(BasicValueEnum::from)
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
             }
@@ -1694,19 +1696,27 @@ mod tests {
     fn native_ffi_scalar_shape_materializes_exact_llvm_type() {
         let context = Context::create();
         assert!(matches!(
-            NativeFfiScalarShape::SignedInteger(32).llvm_type(&context),
+            NativeFfiScalarShape::SignedInteger(32)
+                .llvm_type(&context)
+                .expect("valid native i32 FFI shape"),
             BasicTypeEnum::IntType(value) if value.get_bit_width() == 32
         ));
         assert!(matches!(
-            NativeFfiScalarShape::SignedInteger(64).llvm_type(&context),
+            NativeFfiScalarShape::SignedInteger(64)
+                .llvm_type(&context)
+                .expect("valid native i64 FFI shape"),
             BasicTypeEnum::IntType(value) if value.get_bit_width() == 64
         ));
         assert!(matches!(
-            NativeFfiScalarShape::Bool.llvm_type(&context),
+            NativeFfiScalarShape::Bool
+                .llvm_type(&context)
+                .expect("valid native bool FFI shape"),
             BasicTypeEnum::IntType(value) if value.get_bit_width() == 1
         ));
         assert!(matches!(
-            NativeFfiScalarShape::Float(64).llvm_type(&context),
+            NativeFfiScalarShape::Float(64)
+                .llvm_type(&context)
+                .expect("valid native f64 FFI shape"),
             BasicTypeEnum::FloatType(value) if value.get_bit_width() == 64
         ));
     }
