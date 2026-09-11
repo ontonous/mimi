@@ -894,6 +894,14 @@ pub func call_imported_alias(value: i64) -> i64 {
     );
     let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
         .expect("materialize imported alias canonical MIR");
+    let repeated_mir =
+        MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+            .expect("repeat materialize imported alias canonical MIR");
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-v1").ffi_digest,
+        repeated_mir.route_receipt("scalar-ffi-v1").ffi_digest,
+        "imported alias FFI receipt identity must be deterministic after file merge"
+    );
     let receipt = mir
         .ffi_calls()
         .values()
