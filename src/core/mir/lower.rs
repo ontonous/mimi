@@ -6457,10 +6457,10 @@ pub(crate) fn validate_scalar_set_facade_mir(
         Some(super::types::MirLayout::Set { element }) => element.clone(),
         _ => return Err("scalar Set facade receiver is not a canonical Set<T>".into()),
     };
-    if rest.len() == 1 {
+    if let [argument] = rest {
         let argument_ty = function
             .values
-            .get(&rest[0])
+            .get(argument)
             .ok_or_else(|| "scalar Set facade argument parameter is absent".to_string())?
             .ty
             .clone();
