@@ -479,9 +479,9 @@ fn native_ffi_scalar_type<'ctx>(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeFfiScalarShape {
-    SignedInteger(u16),
+    SignedInteger(u32),
     Bool,
-    Float(u16),
+    Float(u32),
 }
 
 impl NativeFfiScalarShape {

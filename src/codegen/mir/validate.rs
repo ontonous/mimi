@@ -5,6 +5,10 @@
 
 use super::*;
 
+fn exceeds_native_u32(value: usize) -> bool {
+    u64::try_from(value).map_or(true, |value| value > u64::from(u32::MAX))
+}
+
 pub(super) struct NativeMirValidator<'a> {
     program: &'a MirProgram,
     errors: Vec<NativeMirError>,
@@ -1401,7 +1405,7 @@ impl<'a> NativeMirValidator<'a> {
                 ) {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
-                if *index > u32::MAX as usize {
+                if exceeds_native_u32(*index) {
                     self.errors.push(NativeMirError::new(
                         subject,
                         "tuple projection index exceeds native aggregate ABI",
@@ -1497,7 +1501,7 @@ impl<'a> NativeMirValidator<'a> {
                     matches!(
                         step.projection,
                         crate::core::mir::types::MirReadProjectionKind::Tuple(index)
-                            if index > u32::MAX as usize
+                            if exceeds_native_u32(index)
                     )
                 }) {
                     self.errors.push(NativeMirError::new(
@@ -2954,6 +2958,15 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    #[test]
+    fn native_u32_index_boundary_check_is_width_stable() {
+        assert!(!exceeds_native_u32(0));
+        if let Ok(max) = usize::try_from(u32::MAX) {
+            assert!(!exceeds_native_u32(max));
+        }
+        assert_eq!(exceeds_native_u32(usize::MAX), usize::BITS > 32);
     }
 
     #[test]

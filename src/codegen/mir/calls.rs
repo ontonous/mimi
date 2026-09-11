@@ -1607,13 +1607,13 @@ fn native_ffi_metadata_type_matches<'ctx>(
 fn native_ffi_basic_type_matches<'ctx>(value: &BasicTypeEnum<'ctx>, abi: MirAbiClass) -> bool {
     match (native_ffi_scalar_shape(abi), value) {
         (Some(NativeFfiScalarShape::SignedInteger(bits)), BasicTypeEnum::IntType(value)) => {
-            value.get_bit_width() == bits as u32
+            value.get_bit_width() == bits
         }
         (Some(NativeFfiScalarShape::Bool), BasicTypeEnum::IntType(value)) => {
             value.get_bit_width() == 1
         }
         (Some(NativeFfiScalarShape::Float(bits)), BasicTypeEnum::FloatType(value)) => {
-            value.get_bit_width() == bits as u32
+            value.get_bit_width() == bits
         }
         _ => false,
     }
