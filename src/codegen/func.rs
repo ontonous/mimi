@@ -4571,8 +4571,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Early return: the return statement's flush already released
                 // all heap scopes down to this function's boundary. Only the
                 // boundary marker remains to be popped.
-                self.end_function_heap_scope();
+                let scope_result = self.end_function_heap_scope();
                 self.pending_result_ok_ty = saved_pending_result_ok_ty;
+                scope_result?;
                 return Ok(());
             }
             ControlFlow::Continue(last_val) => {
@@ -4585,7 +4586,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.pending_result_ok_ty = saved_pending_result_ok_ty;
 
-        self.end_function_heap_scope();
+        self.end_function_heap_scope()?;
 
         Ok(())
     }
@@ -4825,7 +4826,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr,
             )?;
         }
-        self.end_function_heap_scope();
+        self.end_function_heap_scope()?;
         // 0.39.x stdlib matrix sweep (nondeterministic-SIGSEGV root cause #2,
         // valgrind/IR-diff pinned): some body shapes can finish "successfully"
         // without a terminator in the entry block (e.g. a tail expression that

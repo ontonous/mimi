@@ -873,7 +873,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // heap flush BEFORE the ret (emit_statement Return arm). Only
             // the bookkeeping needs balancing here; emitting anything after
             // the terminator would dangle.
-            self.generator.end_function_heap_scope();
+            self.generator.end_function_heap_scope()?;
             return Ok(());
         }
         // 0.36.15 L1: fallthrough exit — deferred blocks run LIFO before the

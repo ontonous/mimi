@@ -2719,18 +2719,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// every heap scope above it. The frees for each runtime path were
     /// already emitted by the path's own `flush_heap_scopes_to_boundary`
     /// call; this only balances the compile-time bookkeeping stack.
-    pub(super) fn end_function_heap_scope(&self) {
+    pub(super) fn end_function_heap_scope(&self) -> Result<(), CompileError> {
         let boundary = match self.heap_boundaries.borrow_mut().pop() {
             Some(b) => b,
             None => {
-                mimi_debug_assert!(false, "end_function_heap_scope without begin");
-                return;
+                return Err(CompileError::LlvmError(
+                    "end_function_heap_scope has no active boundary".into(),
+                ));
             }
         };
         let mut scopes = self.heap_allocs.borrow_mut();
         while scopes.len() > boundary {
             scopes.pop();
         }
+        Ok(())
     }
 
     /// B9: emit frees for every registered allocation in the scopes from the

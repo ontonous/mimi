@@ -824,7 +824,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         self.build_return(Some(&handle_val))?;
-        self.end_function_heap_scope();
+        self.end_function_heap_scope()?;
 
         Ok(())
     }
@@ -852,8 +852,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             });
             let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val, last_expr);
-            self.end_function_heap_scope();
-            result
+            let scope_result = self.end_function_heap_scope();
+            result.and(scope_result)
         })();
         self.current_fn_ret_ty_ast = saved_ret_ty_ast;
         result

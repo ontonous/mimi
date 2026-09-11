@@ -419,7 +419,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.heap_allocs.borrow_mut().pop();
             }
         }
-        self.end_function_heap_scope();
+        self.end_function_heap_scope()?;
         Ok(())
     }
 
