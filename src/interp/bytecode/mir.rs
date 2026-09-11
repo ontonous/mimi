@@ -661,6 +661,16 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    fn u16_abi(&mut self, value: usize, role: &str) -> Option<u16> {
+        match u16::try_from(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                self.error(format!("{role} {value} exceeds bytecode u16 ABI"));
+                None
+            }
+        }
+    }
+
     fn offset_reg(&mut self, base: Reg, offset: usize, role: &str) -> Option<Reg> {
         let offset = match u16::try_from(offset) {
             Ok(offset) => offset,
@@ -1080,14 +1090,10 @@ impl<'a> FunctionEmitter<'a> {
                             return;
                         }
                     };
-                    if arity > u16::MAX as usize {
-                        self.error("aggregate drop arity exceeds bytecode ABI");
+                    let Some(arity) = self.u16_abi(arity, "aggregate drop arity") else {
                         return;
-                    }
-                    self.proto.emit(Op::DropAggregate {
-                        ra,
-                        arity: arity as u16,
-                    });
+                    };
+                    self.proto.emit(Op::DropAggregate { ra, arity });
                 } else if desc.ownership != MirOwnership::Copy {
                     self.error(format!(
                         "drop of {:?} value '{}' has no canonical drop glue",
@@ -2330,12 +2336,15 @@ impl<'a> FunctionEmitter<'a> {
             });
         }
         let instruction_idx = self.add_const(ConstValue::Str(instruction.as_str().to_owned()));
+        let Some(argc) = self.u16_abi(arguments.len(), "canonical extern argument count") else {
+            return;
+        };
         self.proto.emit(Op::CallCanonicalExtern {
             rd,
             extern_idx,
             instruction: instruction_idx,
             args_base,
-            argc: arguments.len() as u16,
+            argc,
         });
     }
 
@@ -2491,11 +2500,14 @@ impl<'a> FunctionEmitter<'a> {
                     .windows(2)
                     .all(|pair| { pair[0].checked_add(1).is_some_and(|next| pair[1] == next) })
         );
+        let Some(argc) = self.u16_abi(arguments.len(), "call argument count") else {
+            return;
+        };
         self.proto.emit(Op::CallMove {
             rd,
             func,
             args_base,
-            argc: arguments.len() as u16,
+            argc,
         });
     }
 
@@ -2626,15 +2638,20 @@ impl<'a> FunctionEmitter<'a> {
         };
         match (&base_desc.layout, projection) {
             (MirLayout::Tuple(_), MirProjection::Tuple(index)) => {
-                let Some(contract) =
-                    self.add_tuple_projection_contract(&base_desc.id, *index, &result_desc.id)
-                else {
+                let Some(index) = self.u16_abi(*index, "tuple projection field index") else {
+                    return;
+                };
+                let Some(contract) = self.add_tuple_projection_contract(
+                    &base_desc.id,
+                    index as usize,
+                    &result_desc.id,
+                ) else {
                     return;
                 };
                 self.proto.emit(Op::TupleGet {
                     rd,
                     ra,
-                    idx: *index as u16,
+                    idx: index,
                     contract: Some(contract),
                 });
             }
@@ -2880,15 +2897,21 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         if let MirProjection::Tuple(field_index) = projection {
-            let Some(contract) =
-                self.add_tuple_projection_contract(&base_desc.id, *field_index, &result_desc.id)
+            let Some(field_index) = self.u16_abi(*field_index, "tuple move projection field index")
             else {
+                return;
+            };
+            let Some(contract) = self.add_tuple_projection_contract(
+                &base_desc.id,
+                field_index as usize,
+                &result_desc.id,
+            ) else {
                 return;
             };
             self.proto.emit(Op::TupleGet {
                 rd,
                 ra,
-                idx: *field_index as u16,
+                idx: field_index,
                 contract: Some(contract),
             });
             return;
@@ -3787,6 +3810,10 @@ impl<'a> FunctionEmitter<'a> {
             self.error("record construction field/value arity disagrees with TypeDesc");
             return;
         }
+        let Some(count) = self.u16_abi(layout_fields.len(), "record construction field count")
+        else {
+            return;
+        };
         if let Err(message) = self.supported_type(&result_desc.id) {
             self.error(format!(
                 "record result '{}' is unsupported: {message}",
@@ -3858,14 +3885,14 @@ impl<'a> FunctionEmitter<'a> {
                 rd,
                 type_name,
                 base,
-                count: layout_fields.len() as u16,
+                count,
             });
         } else {
             self.proto.emit(Op::NewRecordMove {
                 rd,
                 type_name,
                 base,
-                count: layout_fields.len() as u16,
+                count,
             });
         }
     }
@@ -4792,15 +4819,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             MirGlueKind::Aggregate => match &descriptor.layout {
                 MirLayout::Tuple(elements) => {
+                    let Some(arity) = self.u16_abi(elements.len(), "drop register tuple arity")
+                    else {
+                        return;
+                    };
                     self.proto.emit(Op::DropAggregate {
                         ra: register,
-                        arity: elements.len() as u16,
+                        arity,
                     });
                 }
                 MirLayout::Record { fields, .. } => {
+                    let Some(arity) = self.u16_abi(fields.len(), "drop register record arity")
+                    else {
+                        return;
+                    };
                     self.proto.emit(Op::DropAggregate {
                         ra: register,
-                        arity: fields.len() as u16,
+                        arity,
                     });
                 }
                 MirLayout::Option { .. } | MirLayout::Result { .. } => {
@@ -5113,6 +5148,15 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.message.contains("register index overflow")));
+        assert_eq!(
+            emitter.u16_abi(u16::MAX as usize, "field index"),
+            Some(u16::MAX)
+        );
+        assert_eq!(
+            emitter.u16_abi(u16::MAX as usize + 1, "field index"),
+            None,
+            "physical u16 fields must reject an unrepresentable index"
+        );
     }
 
     #[test]
