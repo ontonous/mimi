@@ -466,6 +466,116 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
 }
 
 #[test]
+fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_alias_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let library = dir.join("ffi.so");
+    fs::write(
+        dir.join("ffi.c"),
+        "#include <stdint.h>\nint64_t mir_ffi_cli_alias(double value) { return value == 7.0 ? 42 : -1; }\n",
+    )
+    .unwrap();
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(dir.join("ffi.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    let source = dir.join("alias.mimi");
+    fs::write(
+        &source,
+        r#"
+type Scalar = f64
+type Real = Scalar
+extern "C" { func mir_ffi_cli_alias(value: Real) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_cli_alias(7 as i64))
+    0
+}
+"#,
+    )
+    .unwrap();
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"42\n", "explicit_mir={explicit_mir}");
+        assert!(
+            !String::from_utf8_lossy(&run.stderr).contains("canonical route disposition: legacy"),
+            "transparent aliases must not fall back to legacy"
+        );
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build.arg("--emit-ir").arg(&source).output().unwrap();
+        assert!(
+            build.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&build.stdout).contains("mir_ffi_cli_alias"),
+            "emitted IR must retain the checker-owned alias FFI symbol"
+        );
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            verify.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&verify.stderr)
+                .contains("canonical route disposition: legacy"),
+            "verify must use the canonical alias route"
+        );
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_default_and_explicit_mir_preserve_remainder_status() {
     if !can_link() {
         return;
