@@ -1841,10 +1841,11 @@ impl<'a> FunctionEmitter<'a> {
                         ));
                         return;
                     }
-                    if *tuple_index > u16::MAX as usize {
-                        self.error("tuple projected load index exceeds bytecode field ABI");
+                    let Some(tuple_index_abi) =
+                        self.u16_abi(*tuple_index, "tuple projected load index")
+                    else {
                         return;
-                    }
+                    };
                     let Some(contract) =
                         self.add_tuple_projection_contract(&current_ty, *tuple_index, projected_ty)
                     else {
@@ -1853,7 +1854,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::TupleGet {
                         rd: destination,
                         ra: current_reg,
-                        idx: *tuple_index as u16,
+                        idx: tuple_index_abi,
                         contract: Some(contract),
                     });
                     current_ty = projected_ty.clone();
@@ -3151,10 +3152,12 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
-        if receipt.projection.field_index > u16::MAX as usize {
-            self.error("direct variant projection field index exceeds bytecode ABI");
+        let Some(field_index) = self.u16_abi(
+            receipt.projection.field_index,
+            "direct variant projection field index",
+        ) else {
             return;
-        }
+        };
         let Some(shapes) = self.emit_variant_shape_table(&receipt.source_ty) else {
             return;
         };
@@ -3162,7 +3165,7 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(Op::VariantGet {
             rd,
             ra,
-            idx: receipt.projection.field_index as u16,
+            idx: field_index,
             variant_tag,
             shapes,
         });
@@ -3352,10 +3355,12 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
-        if receipt.projection.field_index > u16::MAX as usize {
-            self.error("variant move projection field index exceeds bytecode ABI");
+        let Some(field_index) = self.u16_abi(
+            receipt.projection.field_index,
+            "variant move projection field index",
+        ) else {
             return;
-        }
+        };
         let Some(shapes) = self.emit_variant_shape_table(&receipt.source_ty) else {
             return;
         };
@@ -3363,7 +3368,7 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(Op::VariantMoveGet {
             rd,
             ra,
-            idx: receipt.projection.field_index as u16,
+            idx: field_index,
             variant_tag,
             shapes,
         });
