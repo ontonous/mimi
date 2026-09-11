@@ -671,6 +671,20 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    fn binding_parameter_index(
+        &mut self,
+        argument_count: usize,
+        binding_index: usize,
+    ) -> Option<usize> {
+        match argument_count.checked_add(binding_index) {
+            Some(index) => Some(index),
+            None => {
+                self.error("switch binding parameter index overflows usize");
+                None
+            }
+        }
+    }
+
     fn offset_reg(&mut self, base: Reg, offset: usize, role: &str) -> Option<Reg> {
         let offset = match u16::try_from(offset) {
             Ok(offset) => offset,
@@ -4539,11 +4553,15 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("edge target '{}' is absent", target));
             return;
         };
-        if block.parameters.len() != arguments.len() + bindings.len() {
+        let Some(edge_arity) = arguments.len().checked_add(bindings.len()) else {
+            self.error(format!("edge to '{}' has parameter arity overflow", target));
+            return;
+        };
+        if block.parameters.len() != edge_arity {
             self.error(format!("edge to '{}' has wrong argument arity", target));
             return;
         }
-        let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
+        let mut sources = Vec::with_capacity(edge_arity);
         for argument in arguments {
             let Some(source) = self.reg(argument) else {
                 return;
@@ -4603,9 +4621,14 @@ impl<'a> FunctionEmitter<'a> {
             let Some(nested) = &binding.nested_tuple else {
                 continue;
             };
+            let Some(parameter_index) =
+                self.binding_parameter_index(arguments.len(), binding_index)
+            else {
+                return;
+            };
             let Some(parameter) = block
                 .parameters
-                .get(arguments.len() + binding_index)
+                .get(parameter_index)
                 .and_then(|parameter| self.function.values.get(&parameter.value))
             else {
                 self.error("nested tuple binding target type is absent");
@@ -4663,9 +4686,14 @@ impl<'a> FunctionEmitter<'a> {
             nested_bases.insert(outer_index, tuple_base);
         }
         for (binding_index, binding) in bindings.iter().enumerate() {
+            let Some(parameter_index) =
+                self.binding_parameter_index(arguments.len(), binding_index)
+            else {
+                return;
+            };
             let Some(parameter) = block
                 .parameters
-                .get(arguments.len() + binding_index)
+                .get(parameter_index)
                 .and_then(|parameter| self.function.values.get(&parameter.value))
             else {
                 self.error("switch-move binding target type is absent");
@@ -4680,15 +4708,19 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             let index = binding.projection.field_index;
-            if binding.parameter != block.parameters[arguments.len() + binding_index].value {
+            let Some(target_parameter) = block.parameters.get(parameter_index) else {
+                self.error("switch-move binding target parameter is absent");
+                return;
+            };
+            if binding.parameter != target_parameter.value {
                 self.error("switch-move binding parameter disagrees with target block parameter");
                 return;
             }
             let source = if let Some(nested) = &binding.nested_tuple {
-                let tuple_base = nested_bases
-                    .get(&index)
-                    .copied()
-                    .expect("nested tuple base materialized");
+                let Some(tuple_base) = nested_bases.get(&index).copied() else {
+                    self.error("nested tuple base was not materialized");
+                    return;
+                };
                 let Some(source) =
                     self.offset_reg(tuple_base, nested.field_index as usize, "nested tuple")
                 else {
@@ -4872,7 +4904,11 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("edge target '{}' is absent", target));
             return;
         };
-        if block.parameters.len() != arguments.len() + bindings.len() {
+        let Some(edge_arity) = arguments.len().checked_add(bindings.len()) else {
+            self.error(format!("edge to '{}' has parameter arity overflow", target));
+            return;
+        };
+        if block.parameters.len() != edge_arity {
             self.error(format!("edge to '{}' has wrong argument arity", target));
             return;
         }
@@ -4889,7 +4925,7 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         let variant_tag = self.add_const(ConstValue::Str(variant.name.clone()));
-        let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
+        let mut sources = Vec::with_capacity(edge_arity);
         for argument in arguments {
             let Some(source) = self.reg(argument) else {
                 return;
@@ -4905,9 +4941,14 @@ impl<'a> FunctionEmitter<'a> {
             sources.push(scratch);
         }
         for (binding_index, binding) in bindings.iter().enumerate() {
+            let Some(parameter_index) =
+                self.binding_parameter_index(arguments.len(), binding_index)
+            else {
+                return;
+            };
             let Some(parameter) = block
                 .parameters
-                .get(arguments.len() + binding_index)
+                .get(parameter_index)
                 .and_then(|parameter| self.function.values.get(&parameter.value))
             else {
                 self.error("switch binding target type is absent");
@@ -4922,7 +4963,11 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             let index = binding.projection.field_index;
-            if binding.parameter != block.parameters[arguments.len() + binding_index].value {
+            let Some(target_parameter) = block.parameters.get(parameter_index) else {
+                self.error("switch binding target parameter is absent");
+                return;
+            };
+            if binding.parameter != target_parameter.value {
                 self.error("switch binding parameter disagrees with target block parameter");
                 return;
             }
@@ -5156,6 +5201,11 @@ mod tests {
             emitter.u16_abi(u16::MAX as usize + 1, "field index"),
             None,
             "physical u16 fields must reject an unrepresentable index"
+        );
+        assert_eq!(
+            emitter.binding_parameter_index(usize::MAX, 1),
+            None,
+            "switch binding parameter arithmetic must not wrap"
         );
     }
 
