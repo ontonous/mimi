@@ -56,6 +56,41 @@ const IMPORTED_ALIAS_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_import_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
 "#;
+const ALIASED_SCALAR_MATRIX_C_SOURCE: &str = r#"
+#include <stdbool.h>
+#include <stdint.h>
+int32_t mir_ffi_alias_i32(int32_t x) { return x + 1; }
+int64_t mir_ffi_alias_i64(int64_t x) { return x + 1; }
+bool mir_ffi_alias_bool(bool x) { return !x; }
+double mir_ffi_alias_f64(double x) { return x; }
+void mir_ffi_alias_unit(void) {}
+"#;
+const ALIASED_SCALAR_MATRIX_SOURCE: &str = r#"
+type AliasI32 = i32
+type AliasI64 = i64
+type AliasBool = bool
+type AliasF64 = f64
+type AliasUnit = ()
+extern "C" {
+    func mir_ffi_alias_i32(value: AliasI32) -> AliasI32;
+    func mir_ffi_alias_i64(value: AliasI64) -> AliasI64;
+    func mir_ffi_alias_bool(value: AliasBool) -> AliasBool;
+    func mir_ffi_alias_f64(value: AliasF64) -> AliasF64;
+    func mir_ffi_alias_unit() -> AliasUnit;
+}
+func main() -> i64 {
+    let i32_value = mir_ffi_alias_i32(41 as i32)
+    let i64_value = mir_ffi_alias_i64(41 as i64)
+    let bool_value = mir_ffi_alias_bool(false)
+    let float_value = mir_ffi_alias_f64(7.0)
+    mir_ffi_alias_unit()
+    if bool_value {
+        i64_value + (i32_value as i64)
+    } else {
+        0
+    }
+}
+"#;
 
 struct Oracle(Cell<i64>);
 
@@ -609,6 +644,131 @@ func main() -> i64 {
         .expect("native transparent alias FFI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_transparent_aliases_cover_every_scalar_endpoint_across_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, ALIASED_SCALAR_MATRIX_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(ALIASED_SCALAR_MATRIX_SOURCE)
+            .tokenize()
+            .expect("lex scalar alias matrix"),
+    )
+    .parse_file()
+    .expect("parse scalar alias matrix");
+    let checked = crate::core::check_program(&file).expect("check scalar alias matrix");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "every transparent primitive alias must share scalar FFI admission"
+    );
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize scalar alias matrix");
+    assert_eq!(mir.ffi_calls().len(), 5);
+    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    assert!(receipts.iter().all(|receipt| receipt.abi == "C"));
+    let i32_receipt = receipts
+        .iter()
+        .find(|receipt| receipt.symbol == "mir_ffi_alias_i32")
+        .expect("i32 alias receipt");
+    assert_eq!(
+        i32_receipt.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        }]
+    );
+    let bool_receipt = receipts
+        .iter()
+        .find(|receipt| receipt.symbol == "mir_ffi_alias_bool")
+        .expect("bool alias receipt");
+    assert_eq!(
+        bool_receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Bool,
+            to: MirAbiClass::Bool,
+        })
+    );
+    let unit_receipt = receipts
+        .iter()
+        .find(|receipt| receipt.symbol == "mir_ffi_alias_unit")
+        .expect("unit alias receipt");
+    assert!(unit_receipt.result.is_some());
+    assert_eq!(
+        unit_receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Unit,
+            to: MirAbiClass::Unit,
+        })
+    );
+
+    struct ScalarAliasOracle;
+    impl MirReferenceFfiResolver for ScalarAliasOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_alias_i32" | "mir_ffi_alias_i64", [MirRuntimeValue::Int(value)]) => {
+                    Ok(MirRuntimeValue::Int(value + 1))
+                }
+                ("mir_ffi_alias_bool", [MirRuntimeValue::Bool(value)]) => {
+                    Ok(MirRuntimeValue::Bool(!value))
+                }
+                ("mir_ffi_alias_f64", [MirRuntimeValue::FloatBits(bits)]) => {
+                    Ok(MirRuntimeValue::FloatBits(*bits))
+                }
+                ("mir_ffi_alias_unit", []) => Ok(MirRuntimeValue::Unit),
+                _ => Err("unexpected transparent alias scalar FFI call".into()),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&ScalarAliasOracle)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference scalar alias matrix");
+    assert_eq!(reference, MirRuntimeValue::Int(84));
+
+    let bytecode = compile_mir_program(&mir).expect("bytecode scalar alias matrix");
+    assert!(bytecode.ast.is_none());
+    assert!(matches!(
+        BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode scalar alias matrix"),
+        Value::Int(84)
+    ));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_alias_matrix");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native scalar alias matrix");
+    generator
+        .module
+        .verify()
+        .expect("valid scalar alias matrix LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(ALIASED_SCALAR_MATRIX_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native scalar alias matrix");
+    assert_eq!(native.exit_code, Some(84));
+    assert_eq!(native.stdout, "");
     assert_eq!(native.stderr, "");
 }
 
