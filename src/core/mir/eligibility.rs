@@ -194,7 +194,10 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
     );
     let local_retry = transition.silent_transition
         && transition.targets.len() == 1
-        && transition.targets[0] == transition.id.source
+        && transition
+            .targets
+            .first()
+            .is_some_and(|target| target == &transition.id.source)
         && !transition.is_ffi_pinned
         && flow
             .states
@@ -205,10 +208,19 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
         && flow.persistent_fields.is_empty()
         && source_state.payload.len() == 1
         && target_state.payload.len() == 1
-        && is_supported_local_retry_state_type(&source_state.payload[0].1)
-        && is_supported_local_retry_state_type(&target_state.payload[0].1)
+        && source_state
+            .payload
+            .first()
+            .is_some_and(|(_, ty)| is_supported_local_retry_state_type(ty))
+        && target_state
+            .payload
+            .first()
+            .is_some_and(|(_, ty)| is_supported_local_retry_state_type(ty))
         && transition.params.len() == 1
-        && is_concrete_i32_type(&transition.params[0].1)
+        && transition
+            .params
+            .first()
+            .is_some_and(|(_, ty)| is_concrete_i32_type(ty))
         && result_is_result
         && program
             .resolved_body(&transition.node_id)
@@ -261,7 +273,10 @@ fn is_exact_cross_state_f64_failure_receipt_for_transition(
 ) -> bool {
     if transition.silent_transition
         || transition.targets.len() != 1
-        || transition.targets[0] == transition.id.source
+        || transition
+            .targets
+            .first()
+            .is_some_and(|target| target == &transition.id.source)
         || transition.params.len() != 1
         || transition
             .fails
@@ -282,7 +297,10 @@ fn is_exact_cross_state_f64_failure_receipt_for_transition(
             .filter(|item| !item.is_fallback && program.resolved_body(&item.node_id).is_some())
             .count()
             != 1
-        || !is_concrete_i32_type(&transition.params[0].1)
+        || !transition
+            .params
+            .first()
+            .is_some_and(|(_, ty)| is_concrete_i32_type(ty))
     {
         return false;
     }
@@ -338,7 +356,10 @@ fn is_exact_multifield_cross_state_record_receipt(
 ) -> bool {
     if transition.silent_transition
         || transition.targets.len() != 1
-        || transition.targets[0] == transition.id.source
+        || transition
+            .targets
+            .first()
+            .is_some_and(|target| target == &transition.id.source)
         || transition.params.len() != 1
         || transition
             .fails
@@ -359,7 +380,10 @@ fn is_exact_multifield_cross_state_record_receipt(
             .filter(|item| !item.is_fallback && program.resolved_body(&item.node_id).is_some())
             .count()
             != 1
-        || !is_concrete_i32_type(&transition.params[0].1)
+        || !transition
+            .params
+            .first()
+            .is_some_and(|(_, ty)| is_concrete_i32_type(ty))
     {
         return false;
     }
