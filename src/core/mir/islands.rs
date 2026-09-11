@@ -210,12 +210,14 @@ fn checker_managed_result_shape(program: &CheckedProgram, ty: &ResolvedTypeId) -
         Some(ResolvedType::Nominal {
             item, arguments, ..
         }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
-            matches!(
-                program.resolved_types().get(&arguments[0]),
-                Some(ResolvedType::Primitive(
-                    PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool,
-                ))
-            )
+            arguments.first().is_some_and(|argument| {
+                matches!(
+                    program.resolved_types().get(argument),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool,
+                    ))
+                )
+            })
         }
         _ => false,
     }
@@ -434,14 +436,7 @@ fn mentions_generic_option_callable(
     if callable.signature.generic_parameters.len() != 1 {
         return false;
     }
-    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(
-            ty,
-            ResolvedType::GenericParameter(parameter)
-                if parameter == &callable.signature.generic_parameters[0]
-        )
-        .then_some(id.clone())
-    }) else {
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
         return false;
     };
     callable.signature.parameters.iter().any(|parameter| {
@@ -527,13 +522,17 @@ fn is_generic_option_projection_fallback_callable(
     {
         return false;
     }
-    let Some(ResolvedType::Option(inner)) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    let Some(option_parameter) = callable.signature.parameters.first() else {
+        return false;
+    };
+    let Some(fallback_parameter) = callable.signature.parameters.get(1) else {
+        return false;
+    };
+    let Some(ResolvedType::Option(inner)) = program.resolved_types().get(&option_parameter.ty)
     else {
         return false;
     };
-    if inner != &generic_ty || callable.signature.parameters[1].ty != generic_ty {
+    if inner != &generic_ty || fallback_parameter.ty != generic_ty {
         return false;
     }
     let Some(ResolvedExpr {
@@ -548,8 +547,14 @@ fn is_generic_option_projection_fallback_callable(
         ResolvedCallee::Builtin(name)
             if name.as_str() == "builtin.method.option.unwrap_or"
     ) && call.arguments.len() == 2
-        && call.arguments[0].value.ty == callable.signature.parameters[0].ty
-        && call.arguments[1].value.ty == generic_ty
+        && call
+            .arguments
+            .first()
+            .is_some_and(|argument| argument.value.ty == option_parameter.ty)
+        && call
+            .arguments
+            .get(1)
+            .is_some_and(|argument| argument.value.ty == generic_ty)
         && call.result == generic_ty
 }
 
@@ -568,9 +573,11 @@ pub(crate) fn is_generic_result_projection_callable(
     {
         return false;
     }
-    let Some(ResolvedType::Result { ok, error }) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    let Some(result_parameter) = callable.signature.parameters.first() else {
+        return false;
+    };
+    let Some(ResolvedType::Result { ok, error }) =
+        program.resolved_types().get(&result_parameter.ty)
     else {
         return false;
     };
@@ -612,9 +619,14 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
     {
         return false;
     }
-    let Some(ResolvedType::Result { ok, error }) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    let Some(result_parameter) = callable.signature.parameters.first() else {
+        return false;
+    };
+    let Some(fallback_parameter) = callable.signature.parameters.get(1) else {
+        return false;
+    };
+    let Some(ResolvedType::Result { ok, error }) =
+        program.resolved_types().get(&result_parameter.ty)
     else {
         return false;
     };
@@ -627,7 +639,7 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
     );
     if ok != &generic_ty
         || (!error_is_same_generic && !error_is_scalar)
-        || callable.signature.parameters[1].ty != generic_ty
+        || fallback_parameter.ty != generic_ty
     {
         return false;
     }
@@ -643,8 +655,14 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
         ResolvedCallee::Builtin(name)
             if name.as_str() == "builtin.method.result.unwrap_or"
     ) && call.arguments.len() == 2
-        && call.arguments[0].value.ty == callable.signature.parameters[0].ty
-        && call.arguments[1].value.ty == generic_ty
+        && call
+            .arguments
+            .first()
+            .is_some_and(|argument| argument.value.ty == result_parameter.ty)
+        && call
+            .arguments
+            .get(1)
+            .is_some_and(|argument| argument.value.ty == generic_ty)
         && call.result == generic_ty
 }
 
@@ -1231,7 +1249,9 @@ fn is_scalar_collection_type(
         }) if matches!(item.as_str(), "builtin:type:List" | "builtin:type:Set")
             && arguments.len() == 1 =>
         {
-            is_scalar_collection_type(program, &arguments[0], seen)
+            arguments
+                .first()
+                .is_some_and(|argument| is_scalar_collection_type(program, argument, seen))
         }
         _ => false,
     }
@@ -1243,7 +1263,9 @@ fn is_list_len_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCa
     };
     matches!(builtin.as_str(), "len" | "builtin.method.list.len")
         && call.arguments.len() == 1
-        && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+        && call.arguments.first().is_some_and(|argument| {
+            is_resolved_list_type(program, &argument.value.ty, &mut BTreeSet::new())
+        })
 }
 
 fn is_list_reverse_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
@@ -1252,7 +1274,9 @@ fn is_list_reverse_call(program: &CheckedProgram, call: &crate::core::ir::Resolv
     };
     matches!(builtin.as_str(), "reverse" | "builtin.method.list.reverse")
         && call.arguments.len() == 1
-        && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+        && call.arguments.first().is_some_and(|argument| {
+            is_resolved_list_type(program, &argument.value.ty, &mut BTreeSet::new())
+        })
 }
 
 fn is_list_concat_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
@@ -1275,8 +1299,10 @@ fn is_scalar_set_contains_call(
     };
     builtin.as_str() == "contains"
         && call.arguments.len() == 2
-        && is_resolved_set_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
-        && is_scalar_collection_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+        && call.arguments.first().is_some_and(|argument| {
+            is_resolved_set_type(program, &argument.value.ty, &mut BTreeSet::new())
+                && is_scalar_collection_type(program, &argument.value.ty, &mut BTreeSet::new())
+        })
 }
 
 fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
@@ -1286,12 +1312,14 @@ fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::Reso
     if builtin.as_str() != "println" || call.arguments.len() != 1 {
         return false;
     }
-    matches!(
-        program.resolved_types().get(&call.arguments[0].value.ty),
-        Some(ResolvedType::Primitive(PrimitiveType::Bool))
-            | Some(ResolvedType::Primitive(PrimitiveType::I32))
-            | Some(ResolvedType::Primitive(PrimitiveType::I64))
-    )
+    call.arguments.first().is_some_and(|argument| {
+        matches!(
+            program.resolved_types().get(&argument.value.ty),
+            Some(ResolvedType::Primitive(PrimitiveType::Bool))
+                | Some(ResolvedType::Primitive(PrimitiveType::I32))
+                | Some(ResolvedType::Primitive(PrimitiveType::I64))
+        )
+    })
 }
 
 fn is_resolved_set_type(
@@ -1345,14 +1373,16 @@ fn is_resolved_nested_list_type(
     if item.as_str() != "builtin:type:List" || arguments.len() != 1 {
         return false;
     }
-    matches!(
-        program.resolved_types().get(&arguments[0]),
-        Some(ResolvedType::Nominal {
-            item: child_item,
-            arguments: child_arguments,
-            ..
-        }) if child_item.as_str() == "builtin:type:List" && child_arguments.len() == 1
-    )
+    arguments.first().is_some_and(|inner_id| {
+        matches!(
+            program.resolved_types().get(inner_id),
+            Some(ResolvedType::Nominal {
+                item: child_item,
+                arguments: child_arguments,
+                ..
+            }) if child_item.as_str() == "builtin:type:List" && child_arguments.len() == 1
+        )
+    })
 }
 
 fn is_scalar_set_facade_call(
@@ -1968,21 +1998,17 @@ pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProg
         {
             return false;
         }
-        let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
-            matches!(
-                ty,
-                ResolvedType::GenericParameter(candidate)
-                    if candidate == &callable.signature.generic_parameters[0]
-            )
-            .then_some(id.clone())
-        }) else {
+        let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+            return false;
+        };
+        let Some(parameter) = callable.signature.parameters.first() else {
             return false;
         };
         let Some(ResolvedType::Nominal {
             item, arguments, ..
         }) = program
             .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
+            .get(&parameter.ty)
         else {
             return false;
         };
@@ -2075,7 +2101,9 @@ fn is_scalar_generic_record_definition(
     {
         return false;
     }
-    let binder = &definition.generic_parameters[0].1;
+    let Some((_, binder)) = definition.generic_parameters.first() else {
+        return false;
+    };
     let mut has_generic_field = false;
     let fields_valid = definition.fields.iter().all(|(name, _)| {
         let Some(field_ty) = definition
@@ -2120,7 +2148,9 @@ fn is_owned_generic_record_definition(
     {
         return false;
     }
-    let binder = &definition.generic_parameters[0].1;
+    let Some((_, binder)) = definition.generic_parameters.first() else {
+        return false;
+    };
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
     let mut owned_list_fields = 0usize;
@@ -2147,12 +2177,14 @@ fn is_owned_generic_record_definition(
                 item, arguments, ..
             } if item.as_str() == "builtin:type:List"
                 && arguments.len() == 1
-                && matches!(
-                    program.resolved_types().get(&arguments[0]),
-                    Some(ResolvedType::Primitive(
-                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-                    ))
-                ) =>
+                && arguments.first().is_some_and(|argument| {
+                    matches!(
+                        program.resolved_types().get(argument),
+                        Some(ResolvedType::Primitive(
+                            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                        ))
+                    )
+                }) =>
             {
                 owned_list_fields += 1;
                 true
@@ -2161,12 +2193,14 @@ fn is_owned_generic_record_definition(
                 item, arguments, ..
             } if item.as_str() == "builtin:type:Set"
                 && arguments.len() == 1
-                && matches!(
-                    program.resolved_types().get(&arguments[0]),
-                    Some(ResolvedType::Primitive(
-                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-                    ))
-                ) =>
+                && arguments.first().is_some_and(|argument| {
+                    matches!(
+                        program.resolved_types().get(argument),
+                        Some(ResolvedType::Primitive(
+                            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                        ))
+                    )
+                }) =>
             {
                 owned_set_fields += 1;
                 true
@@ -2216,7 +2250,9 @@ fn is_owned_generic_record_update_definition(
     {
         return false;
     }
-    let binder = &definition.generic_parameters[0].1;
+    let Some((_, binder)) = definition.generic_parameters.first() else {
+        return false;
+    };
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
     let fields_admitted = definition.fields.iter().all(|(name, _)| {
@@ -2270,21 +2306,15 @@ fn is_owned_generic_record_projection_callable(
     {
         return false;
     }
-    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(
-            ty,
-            ResolvedType::GenericParameter(candidate)
-                if candidate == &callable.signature.generic_parameters[0]
-        )
-        .then_some(id.clone())
-    }) else {
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+        return false;
+    };
+    let Some(parameter) = callable.signature.parameters.first() else {
         return false;
     };
     let Some(ResolvedType::Nominal {
         item, arguments, ..
-    }) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    }) = program.resolved_types().get(&parameter.ty)
     else {
         return false;
     };
@@ -2314,21 +2344,15 @@ fn is_scalar_generic_record_projection_callable(
     {
         return false;
     }
-    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(
-            ty,
-            ResolvedType::GenericParameter(candidate)
-                if candidate == &callable.signature.generic_parameters[0]
-        )
-        .then_some(id.clone())
-    }) else {
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+        return false;
+    };
+    let Some(parameter) = callable.signature.parameters.first() else {
         return false;
     };
     let Some(ResolvedType::Nominal {
         item, arguments, ..
-    }) = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)
+    }) = program.resolved_types().get(&parameter.ty)
     else {
         return false;
     };
@@ -2357,19 +2381,11 @@ fn generic_record_update_envelope<'a>(
     {
         return None;
     }
-    let generic_ty = program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(
-            ty,
-            ResolvedType::GenericParameter(candidate)
-                if candidate == &callable.signature.generic_parameters[0]
-        )
-        .then_some(id.clone())
-    })?;
+    let generic_ty = generic_parameter_type_id(program, callable)?;
+    let parameter = callable.signature.parameters.first()?;
     let ResolvedType::Nominal {
         item, arguments, ..
-    } = program
-        .resolved_types()
-        .get(&callable.signature.parameters[0].ty)?
+    } = program.resolved_types().get(&parameter.ty)?
     else {
         return None;
     };
@@ -2378,7 +2394,7 @@ fn generic_record_update_envelope<'a>(
     }
     let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
     let definition = program.type_def(qualified_name)?;
-    if callable.signature.result != callable.signature.parameters[0].ty {
+    if callable.signature.result != parameter.ty {
         return None;
     }
     let Some(ResolvedExprKind::Record {
@@ -2458,7 +2474,9 @@ pub(crate) fn is_owned_generic_record_update_callable(
     {
         return false;
     }
-    let binder = &definition.generic_parameters[0].1;
+    let Some((_, binder)) = definition.generic_parameters.first() else {
+        return false;
+    };
     let mut generic_fields = 0usize;
     let mut string_fields = 0usize;
     for (name, _) in &definition.fields {
@@ -2490,11 +2508,14 @@ pub(crate) fn is_owned_generic_record_update_callable(
         definition.fields.len() == 3 && generic_fields == 1 && string_fields == 2;
     let heterogeneous_four =
         definition.fields.len() == 4 && generic_fields == 1 && string_fields == 3;
+    let Some(field) = fields.first() else {
+        return false;
+    };
     (homogeneous || heterogeneous_two || heterogeneous_three || heterogeneous_four)
         && fields.len() == 1
-        && fields[0].value.ty != generic_ty
+        && field.value.ty != generic_ty
         && matches!(
-            &fields[0].value.kind,
+            &field.value.kind,
             ResolvedExprKind::Literal(crate::core::ir::ResolvedLiteral::String(_))
         )
 }
@@ -2538,12 +2559,14 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         {
             return false;
         }
-        matches!(
-            program.resolved_types().get(&arguments[0]),
-            Some(ResolvedType::Primitive(
-                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-            ))
-        )
+        arguments.first().is_some_and(|argument| {
+            matches!(
+                program.resolved_types().get(argument),
+                Some(ResolvedType::Primitive(
+                    PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                ))
+            )
+        })
     }
 
     fn expr_has_unmigrated_shape(
@@ -3414,16 +3437,25 @@ impl<'a> ScalarCollectionValidator<'a> {
                     instance.id,
                     instance.arguments.len()
                 ));
-            } else if let Err(message) = match &instance.contract {
+                continue;
+            }
+            let Some(argument) = instance.arguments.first() else {
+                self.error(format!(
+                    "instance '{}' has no type argument after arity validation",
+                    instance.id
+                ));
+                continue;
+            };
+            if let Err(message) = match &instance.contract {
                 MirGenericInstanceContract::OwnedRecordUpdate { .. } => self
                     .program
                     .type_catalog()
-                    .validate_owned_record_update_generic_argument(&instance.arguments[0]),
+                    .validate_owned_record_update_generic_argument(argument),
                 MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => self
                     .program
                     .type_catalog()
-                    .validate_move_owned_record_payload(&instance.arguments[0])
+                    .validate_move_owned_record_payload(argument)
                     .map(|_| ()),
                 // Generic Option and heterogeneous generic Result projection
                 // islands share the concrete float leaf contract with their
@@ -3448,10 +3480,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                         &instance.arguments,
                         contract,
                     ),
-                _ => self
-                    .program
-                    .type_catalog()
-                    .validate_copy_scalar(&instance.arguments[0]),
+                _ => self.program.type_catalog().validate_copy_scalar(argument),
             } {
                 self.error(format!(
                     "instance '{}' argument is outside the Copy scalar contract: {message}",
@@ -3995,7 +4024,14 @@ impl<'a> ScalarCollectionValidator<'a> {
                     ));
                     return;
                 }
-                let Some(argument_ty) = self.value_type(function, &arguments[0], subject) else {
+                let Some(argument) = arguments.first() else {
+                    self.error(format!(
+                        "{subject} builtin '{}' has no argument after arity validation",
+                        contract.name
+                    ));
+                    return;
+                };
+                let Some(argument_ty) = self.value_type(function, argument, subject) else {
                     return;
                 };
                 let Some(result_ty) = self.value_type(function, result, subject) else {
