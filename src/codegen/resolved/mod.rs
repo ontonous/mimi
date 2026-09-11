@@ -1578,7 +1578,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     && matches!(fields[0], BasicTypeEnum::PointerType(_))
                                     && matches!(fields[1], BasicTypeEnum::IntType(_));
                                 if is_plain_string && self.generator.pop_last_heap_ptr().is_some() {
-                                    self.generator.register_heap_slot(entry.storage, st, 0);
+                                    self.generator.register_heap_slot(entry.storage, st, 0)?;
                                 }
                             }
                         }
@@ -1616,7 +1616,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     // storage is still avoided for defensive
                                     // compatibility with direct-list bindings.
                                     if !self.generator.has_heap_slot(entry.storage) {
-                                        self.generator.register_heap_slot(entry.storage, st, 1);
+                                        self.generator.register_heap_slot(entry.storage, st, 1)?;
                                     }
                                 }
                             }
@@ -2108,7 +2108,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_store(data_gep, data_void_ptr)?;
                 // The LOCAL is the buffer owner: push/pop reallocs write this
                 // slot, so the scope-exit free must read this slot.
-                self.generator.register_heap_slot(storage, list_ty, 1);
+                self.generator.register_heap_slot(storage, list_ty, 1)?;
                 Ok(storage.into())
             }
         }

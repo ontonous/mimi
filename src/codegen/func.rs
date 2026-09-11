@@ -3621,7 +3621,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             )
                                             .is_ok()
                                     {
-                                        self.register_heap_slot(alloca, st, 0);
+                                        self.register_heap_slot(alloca, st, 0)?;
                                     }
                                 }
                             }

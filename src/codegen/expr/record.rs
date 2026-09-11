@@ -652,7 +652,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "data_void",
         )?;
         self.build_store(data_gep, data_void_ptr)?;
-        self.register_heap_slot(list_alloca, list_ty, 1);
+        self.register_heap_slot(list_alloca, list_ty, 1)?;
         Ok(list_alloca.into())
     }
 

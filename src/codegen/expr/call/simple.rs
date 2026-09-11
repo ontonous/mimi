@@ -7626,7 +7626,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(sty, slot, 0, "call_str_data_gep")
             .is_ok()
         {
-            self.register_heap_slot(slot, sty, 0);
+            self.register_heap_slot(slot, sty, 0)?;
         }
         let loaded = self.build_load(sty, slot, "call_str_load")?;
         Ok(loaded.into_struct_value().into())
@@ -7710,7 +7710,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_struct_gep(sty, slot, 1, "call_closure_env_gep")
             .is_ok()
         {
-            self.register_heap_slot(slot, sty, 1);
+            self.register_heap_slot(slot, sty, 1)?;
         }
         let loaded = self.build_load(sty, slot, "call_closure_load")?;
         Ok(loaded.into_struct_value().into())

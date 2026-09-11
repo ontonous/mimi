@@ -808,7 +808,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_store(ptr_gep, buf)
             .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-        self.register_heap_slot(str_alloca, string_ty, 0);
+        self.register_heap_slot(str_alloca, string_ty, 0)?;
         let len_gep = self
             .gep()
             .build_struct_gep(string_ty, str_alloca, 1, "str_len")

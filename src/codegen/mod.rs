@@ -2394,7 +2394,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         base: inkwell::values::PointerValue<'ctx>,
         struct_ty: inkwell::types::StructType<'ctx>,
         field: u32,
-    ) {
+    ) -> Result<(), CompileError> {
         // Null-initialise the pointer field in the entry block so that
         // free_heap_allocs on a never-allocated path is a safe no-op free(null).
         self.emit_null_field_store_at_entry(base, struct_ty, field);
@@ -2402,9 +2402,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::Slot(base, struct_ty, field));
         } else {
-            mimi_debug_assert!(false, "register_heap_slot called with no active scope");
-            guard.push(vec![HeapEntry::Slot(base, struct_ty, field)]);
+            return Err(CompileError::LlvmError(
+                "register_heap_slot has no active heap scope".into(),
+            ));
         }
+        Ok(())
     }
 
     /// Remove and return the most recently registered raw heap pointer from

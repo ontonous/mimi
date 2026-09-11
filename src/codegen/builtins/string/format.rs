@@ -238,7 +238,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder
                         .build_store(ptr_gep, buf)
                         .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                    self.register_heap_slot(alloca, str_ty, 0);
+                    self.register_heap_slot(alloca, str_ty, 0)?;
                     let strlen_fn = self
                         .module
                         .get_function("strlen")
@@ -306,7 +306,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, raw)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.register_heap_slot(alloca, str_ty, 0);
+                self.register_heap_slot(alloca, str_ty, 0)?;
                 let strlen_fn = self
                     .module
                     .get_function("strlen")
@@ -388,7 +388,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, raw)
                     .map_err(|e| CompileError::LlvmError(format!("store error: {}", e)))?;
-                self.register_heap_slot(alloca, str_ty, 0);
+                self.register_heap_slot(alloca, str_ty, 0)?;
                 let strlen_fn = self
                     .module
                     .get_function("strlen")
@@ -457,7 +457,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder
                         .build_store(ptr_gep, raw)
                         .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                    self.register_heap_slot(alloca, str_ty, 0);
+                    self.register_heap_slot(alloca, str_ty, 0)?;
                     let strlen_fn = self
                         .module
                         .get_function("strlen")
@@ -524,7 +524,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder
                     .build_store(ptr_gep, buf)
                     .map_err(|e| CompileError::LlvmError(format!("store: {}", e)))?;
-                self.register_heap_slot(alloca, str_ty, 0);
+                self.register_heap_slot(alloca, str_ty, 0)?;
                 let len_gep = self
                     .gep()
                     .build_struct_gep(str_ty, alloca, 1, "str_len")
