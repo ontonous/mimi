@@ -281,7 +281,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::FloatType(t) => t.fn_type(&tramp_meta, false),
             BasicTypeEnum::PointerType(t) => t.fn_type(&tramp_meta, false),
             BasicTypeEnum::StructType(t) => t.fn_type(&tramp_meta, false),
-            _ => unreachable!(),
+            _ => {
+                return Err(CompileError::Generic(
+                    "fnptr trampoline: unsupported trampoline return type class".to_string(),
+                ))
+            }
         };
 
         let safe_fp = fingerprint.replace([' ', '(', ')', ',', '[', ']', '<', '>'], "_");
