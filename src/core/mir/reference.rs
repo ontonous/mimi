@@ -3019,7 +3019,9 @@ fn canonical_ffi_type_id_inner(
         Type::Nothing => table
             .unit_type_id()
             .ok_or_else(|| "canonical unit type is absent".into()),
-        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+        Type::Located { .. } => {
+            Err("extern declaration type retained source location after normalization".into())
+        }
         Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) | Type::TyErr => {
             Err("extern declaration type contains unresolved inference".into())
         }
