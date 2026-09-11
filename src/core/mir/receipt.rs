@@ -169,7 +169,8 @@ impl CanonicalMirRouteReceipt {
             let value = self.manifest_value(field).ok_or_else(|| {
                 format!("invalid MIR route receipt: unknown manifest field '{field}'")
             })?;
-            writeln!(text, "{field}={value}").expect("String write");
+            writeln!(text, "{field}={value}")
+                .map_err(|_| "failed to render MIR route receipt manifest".to_string())?;
         }
         Ok(text)
     }
@@ -452,13 +453,12 @@ fn canonical_ffi_text(program: &MirProgram) -> String {
         }
         text.push_str(" parameter_conversions=");
         for conversion in &contract.parameter_conversions {
-            write!(
+            let _ = write!(
                 text,
                 "{}->{};",
                 conversion.from.canonical_text(),
                 conversion.to.canonical_text()
-            )
-            .expect("String write");
+            );
         }
         text.push_str(" result=");
         text.push_str(
@@ -472,13 +472,12 @@ fn canonical_ffi_text(program: &MirProgram) -> String {
         text.push_str(contract.result_type.as_str());
         text.push_str(" result_conversion=");
         if let Some(conversion) = contract.result_conversion {
-            write!(
+            let _ = write!(
                 text,
                 "{}->{}",
                 conversion.from.canonical_text(),
                 conversion.to.canonical_text()
-            )
-            .expect("String write");
+            );
         } else {
             text.push_str("none");
         }
