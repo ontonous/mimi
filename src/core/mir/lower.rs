@@ -7665,6 +7665,13 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::Constant(item) if item.0.as_str() == "builtin:value:None" => {
+                let nominal = match NominalTypeId::new("builtin:type:Option") {
+                    Ok(nominal) => nominal,
+                    Err(error) => {
+                        self.error(&expression.node_id, error.to_string());
+                        return result;
+                    }
+                };
                 let move_owned = self.type_catalog.is_some_and(|catalog| {
                     catalog.get(&expression.ty).is_some_and(|descriptor| {
                         descriptor.ownership != super::types::MirOwnership::Copy
@@ -7673,16 +7680,14 @@ impl<'a> Lowerer<'a> {
                 let instruction = if move_owned {
                     MirInstructionKind::ConstructVariantMove {
                         result: result.clone(),
-                        nominal: NominalTypeId::new("builtin:type:Option")
-                            .expect("static Option nominal"),
+                        nominal: nominal.clone(),
                         variant: NodeId("builtin:variant:Option::None".into()),
                         fields: Vec::new(),
                     }
                 } else {
                     MirInstructionKind::ConstructVariant {
                         result: result.clone(),
-                        nominal: NominalTypeId::new("builtin:type:Option")
-                            .expect("static Option nominal"),
+                        nominal,
                         variant: NodeId("builtin:variant:Option::None".into()),
                         fields: Vec::new(),
                     }
