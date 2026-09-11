@@ -1717,6 +1717,57 @@ fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
 }
 
 #[test]
+fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-alias-negative-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported alias negative fixture directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64 requires: value >= 0; }\npub func imported_alias(value: i64) -> i64 { mir_ffi_cli_import_alias(value) }\n",
+    )
+    .expect("write imported alias negative helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use ffi_types;\nfunc main() -> i64 { imported_alias(-7 as i64) }\n",
+    )
+    .expect("write imported alias negative entry");
+
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .expect("spawn imported alias negative verification");
+        assert!(
+            !verify.status.success(),
+            "invalid imported alias contract must fail verification (explicit_mir={explicit_mir})"
+        );
+        let stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            stderr.contains("canonical MIR extern requires contract disproven"),
+            "negative imported alias lost canonical disproven diagnostic: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "negative imported alias must not be reclassified as legacy: {stderr}"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-receipt-multi-failure-{}-{}",
