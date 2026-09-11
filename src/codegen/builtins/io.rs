@@ -5772,12 +5772,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicValueEnum::StructValue(psv) => {
                 let pfields = psv.get_type().get_field_types();
                 // Nested Result {i1, ok, err} inside Option.
-                if pfields.len() >= 3
-                    && matches!(
-                        pfields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                    )
-                {
+                if matches!(
+                    pfields.as_slice(),
+                    [BasicTypeEnum::IntType(disc), _, _, ..]
+                        if disc.get_bit_width() == 1
+                ) {
                     let res_ty = Self::strip_first_type_arg(arg_type, "Option")
                         .unwrap_or_else(|| "Result".to_string());
                     let ok_rec = res_ty
@@ -5792,28 +5791,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                         });
                     let nested = self.emit_result_to_string_typed(psv, ok_rec, &res_ty)?;
                     OptPay::StrPtr(nested)
-                } else if pfields.len() == 2
-                    && matches!(
-                        pfields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                    )
-                {
+                } else if matches!(
+                    pfields.as_slice(),
+                    [BasicTypeEnum::IntType(disc), _] if disc.get_bit_width() == 1
+                ) {
                     // Nested Option {i1, ...}: recursive Display via emit_option_to_string.
                     // Strip one Option layer: Option<Option<List<i32>>> → Option<List<i32>>
                     let inner_ty = Self::strip_first_type_arg(arg_type, "Option")
                         .unwrap_or_else(|| "Option".to_string());
                     let nested = self.emit_option_to_string(psv, None, &inner_ty)?;
                     OptPay::StrPtr(nested)
-                } else if pfields.len() == 2
-                    && matches!(
-                        pfields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 32
-                    )
-                    && matches!(
-                        pfields[1],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                    )
-                {
+                } else if matches!(
+                    pfields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(tag),
+                        BasicTypeEnum::IntType(payload)
+                    ] if tag.get_bit_width() == 32 && payload.get_bit_width() == 64
+                ) {
                     // Nested custom enum {i32 tag, i64 payload}.
                     let enum_ty = arg_type
                         .strip_prefix("Option<")
@@ -5839,8 +5833,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         OptPay::Int(i64_ty.const_int(0, false))
                     }
-                } else if pfields.len() >= 1 && matches!(pfields[0], BasicTypeEnum::PointerType(_))
-                {
+                } else if matches!(pfields.as_slice(), [BasicTypeEnum::PointerType(_), ..]) {
                     // string {ptr,len}
                     let dp = self
                         .build_extract_value(psv.into(), 0, "opt_str_ptr")?
@@ -5862,13 +5855,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.build_store(tmp, psv)?;
                     let rec_str = self.emit_record_display(rec_name, tmp)?;
                     OptPay::StrPtr(rec_str)
-                } else if pfields.len() == 2
-                    && matches!(
-                        pfields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                    )
-                    && matches!(pfields[1], BasicTypeEnum::PointerType(_))
-                {
+                } else if matches!(
+                    pfields.as_slice(),
+                    [
+                        BasicTypeEnum::IntType(len),
+                        BasicTypeEnum::PointerType(_)
+                    ] if len.get_bit_width() == 64
+                ) {
                     // List by-value in Option payload: {i64,ptr}.
                     let list_str = if arg_type.contains("List<string>") {
                         self.emit_list_string_to_string(psv)?
@@ -5896,8 +5889,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     OptPay::StrPtr(list_str)
                 } else if pfields.len() >= 2
                     && !matches!(
-                        pfields[0],
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
+                        pfields.as_slice(),
+                        [BasicTypeEnum::IntType(disc), ..] if disc.get_bit_width() == 1
                     )
                 {
                     // Product tuple / multi-field struct by-value (not nested
