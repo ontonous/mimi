@@ -10753,7 +10753,10 @@ fn variant_projection_builtin(
                     variant.name == "Some"
                         && variant.discriminant == 1
                         && variant.fields.len() == 1
-                        && variant.fields[0].ty == *inner_id
+                        && variant
+                            .fields
+                            .first()
+                            .is_some_and(|field| field.ty == *inner_id)
                 })?;
                 let field = variant.fields.first()?;
                 if call.result == field.ty {
@@ -10826,7 +10829,7 @@ fn variant_projection_builtin(
                     variant.name == "Ok"
                         && variant.discriminant == 0
                         && variant.fields.len() == 1
-                        && variant.fields[0].ty == *ok
+                        && variant.fields.first().is_some_and(|field| field.ty == *ok)
                 })?;
                 let field = variant.fields.first()?;
                 if call.result == field.ty {
