@@ -2840,10 +2840,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })?
                         .into_pointer_value()
                 }
-                HeapEntry::EnumBox { .. } => unreachable!("handled above"),
-                HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
-                HeapEntry::StringListListData { .. } => {
-                    unreachable!("string-list-list handled above")
+                HeapEntry::EnumBox { .. }
+                | HeapEntry::StringListData { .. }
+                | HeapEntry::StringListListData { .. } => {
+                    return Err(CompileError::LlvmError(
+                        "specialized heap entry reached generic boundary flush".into(),
+                    ))
                 }
             };
             if claimed.is_empty()
@@ -3014,10 +3016,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         (ptr, Some(gep))
                     }
-                    HeapEntry::EnumBox { .. } => unreachable!("handled above"),
-                    HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
-                    HeapEntry::StringListListData { .. } => {
-                        unreachable!("string-list-list handled above")
+                    HeapEntry::EnumBox { .. }
+                    | HeapEntry::StringListData { .. }
+                    | HeapEntry::StringListListData { .. } => {
+                        return Err(CompileError::LlvmError(
+                            "specialized heap entry reached generic scope free".into(),
+                        ))
                     }
                 };
                 // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
@@ -3220,10 +3224,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value();
                         (ptr, Some(gep))
                     }
-                    HeapEntry::EnumBox { .. } => unreachable!("handled above"),
-                    HeapEntry::StringListData { .. } => unreachable!("string-list handled above"),
-                    HeapEntry::StringListListData { .. } => {
-                        unreachable!("string-list-list handled above")
+                    HeapEntry::EnumBox { .. }
+                    | HeapEntry::StringListData { .. }
+                    | HeapEntry::StringListListData { .. } => {
+                        return Err(CompileError::LlvmError(
+                            "specialized heap entry reached top-scope free".into(),
+                        ))
                     }
                 };
                 // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
