@@ -96,6 +96,12 @@ fn lower_body_impl(
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
+    let entry = MirBlockId::new("bb.entry").map_err(|error| {
+        vec![MirLoweringError {
+            node_id: body.owner.clone(),
+            message: error.to_string(),
+        }]
+    })?;
     let mut lowerer = Lowerer {
         body,
         type_catalog,
@@ -103,12 +109,11 @@ fn lower_body_impl(
         values: BTreeMap::new(),
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
-        current: MirBlockId::new("bb.entry").expect("static MIR block id"),
+        current: entry.clone(),
         loops: Vec::new(),
         transition_result,
         errors: Vec::new(),
     };
-    let entry = lowerer.current.clone();
     lowerer.blocks.insert(
         entry.clone(),
         BlockDraft {
