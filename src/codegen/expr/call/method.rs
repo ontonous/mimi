@@ -2198,7 +2198,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         type_args: &[Type],
         raw_ptr: inkwell::values::PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match type_args[0].unlocated() {
+        let Some(type_arg) = type_args.first() else {
+            return Err(CompileError::WrongArgCount(
+                "from_json::<T> expects one type argument".into(),
+            ));
+        };
+        match type_arg.unlocated() {
             Type::Name(n, _) if n == "i32" || n == "i64" => {
                 let func = self.get_runtime_fn("mimi_json_as_i64")?;
                 let result = self.build_call(
@@ -3306,7 +3311,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         "mimi_map_from_json_result_product_i64",
                                         "map_from_json_result_product",
                                     ),
-                                    _ => unreachable!("from_json_result: only Option/Result product types reach this dispatch"),
+                                    _ => {
+                                        return Err(CompileError::Unsupported(format!(
+                                            "from_json product type '{ln}' is unsupported"
+                                        )))
+                                    }
                                 };
                                 let func = self.get_runtime_fn(fn_name)?;
                                 let result = self.build_call(
