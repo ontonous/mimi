@@ -8764,7 +8764,14 @@ fn move_project_record_drop_value(
         ));
     }
     let projected = std::mem::replace(
-        &mut fields[receipt.projection.field_index],
+        fields
+            .get_mut(receipt.projection.field_index)
+            .ok_or_else(|| {
+                execution_error(
+                    function,
+                    "record move/drop projection field is out of bounds",
+                )
+            })?,
         MirRuntimeValue::Unit,
     );
     let mut residual = Vec::with_capacity(receipt.residual.len());
@@ -8778,7 +8785,18 @@ fn move_project_record_drop_value(
                 ),
             ));
         }
-        let value = std::mem::replace(&mut fields[field.index], MirRuntimeValue::Unit);
+        let value = std::mem::replace(
+            fields.get_mut(field.index).ok_or_else(|| {
+                execution_error(
+                    function,
+                    format!(
+                        "record move/drop projection residual field '{}' is out of bounds",
+                        field.name
+                    ),
+                )
+            })?,
+            MirRuntimeValue::Unit,
+        );
         residual.push((field.ty.clone(), value));
     }
     if fields
