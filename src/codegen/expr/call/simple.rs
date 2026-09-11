@@ -428,7 +428,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.builder
                         .build_return(Some(&raw))
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    self.builder.position_at_end(saved.unwrap());
+                    let saved = saved.ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "to_json Option callback: no insertion block to restore".into(),
+                        )
+                    })?;
+                    self.builder.position_at_end(saved);
                     cb_fn
                 };
                 let callback_ptr = callback.as_global_value().as_pointer_value();
@@ -9472,7 +9477,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(f, "entry");
         let saved = self.builder.get_insert_block();
         self.builder.position_at_end(entry);
-        let slot = f.get_first_param().unwrap().into_pointer_value();
+        let slot = f
+            .get_first_param()
+            .ok_or_else(|| {
+                CompileError::LlvmError("json serializer: missing slot parameter".into())
+            })?
+            .into_pointer_value();
         let raw = self.emit_ser_body(ty, slot, actual_ty, is_boxed)?;
         self.builder
             .build_return(Some(&raw))
@@ -9486,7 +9496,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             eprintln!("=== IR for {} ===", san);
             f.print_to_stderr();
         }
-        self.builder.position_at_end(saved.unwrap());
+        let saved = saved.ok_or_else(|| {
+            CompileError::LlvmError("json serializer: no insertion block to restore".into())
+        })?;
+        self.builder.position_at_end(saved);
         Ok(f)
     }
 
@@ -9805,9 +9818,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let cur_fn = self
                     .builder
                     .get_insert_block()
-                    .unwrap()
-                    .get_parent()
-                    .unwrap();
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "json Option serializer: no enclosing function".into(),
+                        )
+                    })?;
                 let some_bb = self.context.append_basic_block(cur_fn, "json_o_some");
                 let none_bb = self.context.append_basic_block(cur_fn, "json_o_none");
                 let merge_bb = self.context.append_basic_block(cur_fn, "json_o_merge");
@@ -9900,9 +9916,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let cur_fn = self
                     .builder
                     .get_insert_block()
-                    .unwrap()
-                    .get_parent()
-                    .unwrap();
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(
+                            "json Result serializer: no enclosing function".into(),
+                        )
+                    })?;
                 let ok_bb = self.context.append_basic_block(cur_fn, "json_r_ok");
                 let err_bb = self.context.append_basic_block(cur_fn, "json_r_err");
                 let merge_bb = self.context.append_basic_block(cur_fn, "json_r_merge");
