@@ -8059,9 +8059,15 @@ impl<'a> MirReferenceInterpreter<'a> {
                 ));
             }
             for index in 0..fields.len() {
+                let child = fields.get_mut(index).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "switch-move nested tuple payload field is out of bounds",
+                    )
+                })?;
                 nested_values.insert(
                     (outer_index, index),
-                    std::mem::replace(&mut fields[index], MirRuntimeValue::Unit),
+                    std::mem::replace(child, MirRuntimeValue::Unit),
                 );
             }
         }
