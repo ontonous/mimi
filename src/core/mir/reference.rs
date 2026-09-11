@@ -8835,7 +8835,12 @@ fn evaluate_binary(
             let value = match op {
                 ResolvedBinaryOp::Add => left + right,
                 ResolvedBinaryOp::Subtract => left - right,
-                _ => unreachable!("finite-only float binary contract checked above"),
+                _ => {
+                    return Err(execution_error(
+                        function,
+                        "unsupported floating-point binary operation",
+                    ))
+                }
             };
             if !value.is_finite() {
                 return Err(execution_error(
