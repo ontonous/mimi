@@ -83,6 +83,8 @@ echo ""
 
 # 1. Lint
 echo "--- 1. Lint ---"
+run_matrix_cell "native-mir-production-audit" bash "$SCRIPT_DIR/audit-mir-native-production.sh"
+run_matrix_cell "mir-legacy-owner-audit" bash "$SCRIPT_DIR/audit-mir-legacy-owners.sh"
 run_matrix_cell "clippy" cargo clippy --manifest-path "$PROJECT_DIR/Cargo.toml" -- -D warnings 2>&1 || true
 
 # 2. 解释器矩阵 (Debug, 3 allocators)
