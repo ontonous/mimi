@@ -107,7 +107,7 @@ pub fn compile_mir_program(
                 .iter()
                 .find(|(owner, _)| owner.0.ends_with("::main"))
         })
-        .map(|(owner, _)| indices[owner])
+        .and_then(|(owner, _)| indices.get(owner).copied())
         .ok_or_else(|| {
             vec![MirBytecodeError {
                 function: NodeId("mir-program".into()),
@@ -282,8 +282,16 @@ fn materialize_canonical_ffi_bindings(
                 });
             }
             let descriptor_index = *extern_idx as usize;
-            if let Some((previous_function, previous_pc)) = descriptor_references[descriptor_index]
-            {
+            let Some(descriptor_reference) = descriptor_references.get_mut(descriptor_index) else {
+                errors.push(MirBytecodeError {
+                    function: NodeId(proto.name.clone()),
+                    message: format!(
+                        "canonical FFI descriptor index {extern_idx} has no reference slot"
+                    ),
+                });
+                continue;
+            };
+            if let Some((previous_function, previous_pc)) = *descriptor_reference {
                 errors.push(MirBytecodeError {
                     function: NodeId(proto.name.clone()),
                     message: format!(
@@ -291,7 +299,7 @@ fn materialize_canonical_ffi_bindings(
                     ),
                 });
             } else {
-                descriptor_references[descriptor_index] = Some((function, pc));
+                *descriptor_reference = Some((function, pc));
             }
             let Some(ConstValue::Str(instruction_text)) =
                 proto.constants.get(*instruction as usize)
@@ -1360,7 +1368,11 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("borrowed String-field receipt has an invalid println shape");
                 return;
             }
-            let Some(source_info) = self.function.values.get(&arguments[0]) else {
+            let Some(source_argument) = arguments.first() else {
+                self.error("borrowed String-field source argument is absent");
+                return;
+            };
+            let Some(source_info) = self.function.values.get(source_argument) else {
                 self.error("borrowed String-field source is absent from MIR values");
                 return;
             };
@@ -1381,7 +1393,7 @@ impl<'a> FunctionEmitter<'a> {
                 ));
                 return;
             }
-            let Some(source_reg) = self.reg(&arguments[0]) else {
+            let Some(source_reg) = self.reg(source_argument) else {
                 return;
             };
             let field = self.add_const(ConstValue::Str(receipt.projection.name.clone()));
@@ -3816,12 +3828,12 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         let base = self.alloc_reg();
-        for (index, field) in fields.iter().enumerate() {
+        for (index, (field, element_ty)) in fields.iter().zip(elements).enumerate() {
             let Some(source) = self.reg(field) else {
                 return;
             };
             let destination = if index == 0 { base } else { self.alloc_reg() };
-            if !self.emit_value_transfer(destination, source, &elements[index]) {
+            if !self.emit_value_transfer(destination, source, element_ty) {
                 return;
             }
         }
