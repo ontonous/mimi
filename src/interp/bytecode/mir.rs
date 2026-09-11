@@ -152,6 +152,30 @@ fn materialize_canonical_ffi_bindings(
             else {
                 continue;
             };
+            let function_index = match FuncIdx::try_from(function) {
+                Ok(index) => index,
+                Err(_) => {
+                    errors.push(MirBytecodeError {
+                        function: NodeId(proto.name.clone()),
+                        message: format!(
+                            "canonical FFI binding at pc {pc} function ordinal {function} exceeds u32 ABI"
+                        ),
+                    });
+                    continue;
+                }
+            };
+            let pc_index = match u32::try_from(pc) {
+                Ok(index) => index,
+                Err(_) => {
+                    errors.push(MirBytecodeError {
+                        function: NodeId(proto.name.clone()),
+                        message: format!(
+                            "canonical FFI binding instruction pc {pc} exceeds u32 ABI"
+                        ),
+                    });
+                    continue;
+                }
+            };
             let Some(descriptor) = descriptors.get(*extern_idx as usize) else {
                 errors.push(MirBytecodeError {
                     function: NodeId(proto.name.clone()),
@@ -291,8 +315,8 @@ fn materialize_canonical_ffi_bindings(
                 });
             }
             bindings.push(CanonicalFfiBinding {
-                function: function as FuncIdx,
-                pc: pc as u32,
+                function: function_index,
+                pc: pc_index,
                 extern_idx: *extern_idx,
                 instruction: *instruction,
                 rd: *rd,
