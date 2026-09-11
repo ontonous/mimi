@@ -2336,11 +2336,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ok_pay = self.build_extract_value(loaded.into(), 1, "list_res_prod_ok")?;
                 let piece = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
                     let ok_fields = ok_sv.get_type().get_field_types();
-                    let ok_is_nested_result = ok_fields.len() >= 3
-                        && matches!(
-                            ok_fields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                        );
+                    let ok_is_nested_result = matches!(
+                        ok_fields.as_slice(),
+                        [BasicTypeEnum::IntType(disc), _, _, ..]
+                            if disc.get_bit_width() == 1
+                    );
                     let ok_json = if ok_is_nested_result {
                         self.emit_result_struct_to_json_cstr(ok_sv, &ok_inner)?
                     } else if is_named_record {
@@ -2559,17 +2559,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let snprintf_fn = self.get_runtime_fn("snprintf")?;
                 let piece = if let BasicValueEnum::StructValue(pay_sv) = pay {
                     let pfields = pay_sv.get_type().get_field_types();
-                    let is_result_layout = pfields.len() >= 3
-                        && matches!(
-                            pfields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                        );
-                    let is_list_layout = pfields.len() == 2
-                        && matches!(
-                            pfields[0],
-                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                        )
-                        && matches!(pfields[1], BasicTypeEnum::PointerType(_));
+                    let is_result_layout = matches!(
+                        pfields.as_slice(),
+                        [BasicTypeEnum::IntType(disc), _, _, ..]
+                            if disc.get_bit_width() == 1
+                    );
+                    let is_list_layout = matches!(
+                        pfields.as_slice(),
+                        [
+                            BasicTypeEnum::IntType(len),
+                            BasicTypeEnum::PointerType(_)
+                        ] if len.get_bit_width() == 64
+                    );
                     let pay_json = if is_result_layout {
                         self.emit_result_struct_to_json_cstr(pay_sv, inner_name)?
                     } else if is_list_layout {
@@ -4172,20 +4173,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
         let ok_json = if let BasicValueEnum::StructValue(ok_sv) = ok_pay {
             let ofields = ok_sv.get_type().get_field_types();
-            let ok_is_nested_result = ofields.len() >= 3
-                && matches!(
-                    ofields[0],
-                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 1
-                );
-            let ok_is_list = ofields.len() == 2
-                && matches!(
-                    ofields[0],
-                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                )
-                && matches!(ofields[1], BasicTypeEnum::PointerType(_));
-            let ok_is_string = ofields.len() == 2
-                && matches!(ofields[0], BasicTypeEnum::PointerType(_))
-                && matches!(ofields[1], BasicTypeEnum::IntType(t) if t.get_bit_width() == 64);
+            let ok_is_nested_result = matches!(
+                ofields.as_slice(),
+                [BasicTypeEnum::IntType(disc), _, _, ..]
+                    if disc.get_bit_width() == 1
+            );
+            let ok_is_list = matches!(
+                ofields.as_slice(),
+                [
+                    BasicTypeEnum::IntType(len),
+                    BasicTypeEnum::PointerType(_)
+                ] if len.get_bit_width() == 64
+            );
+            let ok_is_string = matches!(
+                ofields.as_slice(),
+                [
+                    BasicTypeEnum::PointerType(_),
+                    BasicTypeEnum::IntType(len)
+                ] if len.get_bit_width() == 64
+            );
             if ok_is_string {
                 // D-3: heap-string Ok payload {ptr,i64} is NOT a 2-field
                 // product tuple — emit a JSON string literal instead of
