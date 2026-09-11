@@ -7745,8 +7745,9 @@ impl MirTypeCatalog {
         Ok(MirVariantPredicateContract {
             variant_ty: variant_ty.clone(),
             result_ty: result_ty.clone(),
-            nominal: NominalTypeId::new(expected_nominal)
-                .expect("static canonical variant nominal"),
+            nominal: NominalTypeId::new(expected_nominal).map_err(|_| {
+                "canonical variant predicate nominal has invalid identity".to_string()
+            })?,
             variant: variant.id.clone(),
             variant_name: variant.name.clone(),
             alternate_variant: alternate.id.clone(),
@@ -7868,8 +7869,9 @@ impl MirTypeCatalog {
         Ok(MirVariantPredicateContract {
             variant_ty: variant_ty.clone(),
             result_ty: result_ty.clone(),
-            nominal: NominalTypeId::new(expected_nominal)
-                .expect("static canonical variant nominal"),
+            nominal: NominalTypeId::new(expected_nominal).map_err(|_| {
+                "generic canonical variant predicate nominal has invalid identity".to_string()
+            })?,
             variant: variant.id.clone(),
             variant_name: variant.name.clone(),
             alternate_variant: alternate.id.clone(),
@@ -7952,7 +7954,9 @@ impl MirTypeCatalog {
             source_ty: source_ty.clone(),
             result_ty: result_ty.clone(),
             projection: MirVariantProjectionContract {
-                nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
+                nominal: NominalTypeId::new("builtin:type:Option").map_err(|_| {
+                    "generic Option projection nominal has invalid identity".to_string()
+                })?,
                 variant: selected.id.clone(),
                 field: selected_field.id.clone(),
                 field_index: 0,
@@ -8058,7 +8062,9 @@ impl MirTypeCatalog {
             result_ty: result_ty.clone(),
             fallback_ty: fallback_ty.clone(),
             projection: MirVariantProjectionContract {
-                nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
+                nominal: NominalTypeId::new("builtin:type:Option").map_err(|_| {
+                    "generic Option fallback nominal has invalid identity".to_string()
+                })?,
                 variant: selected.id.clone(),
                 field: selected_field.id.clone(),
                 field_index: 0,
@@ -8191,7 +8197,9 @@ impl MirTypeCatalog {
             source_ty: source_ty.clone(),
             result_ty: result_ty.clone(),
             projection: MirVariantProjectionContract {
-                nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
+                nominal: NominalTypeId::new("builtin:type:Result").map_err(|_| {
+                    "generic Result projection nominal has invalid identity".to_string()
+                })?,
                 variant: selected.id.clone(),
                 field: selected_field.id.clone(),
                 field_index: 0,
@@ -8536,7 +8544,9 @@ impl MirTypeCatalog {
             result_ty: result_ty.clone(),
             fallback_ty: fallback_ty.clone(),
             projection: MirVariantProjectionContract {
-                nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
+                nominal: NominalTypeId::new("builtin:type:Result").map_err(|_| {
+                    "generic Result fallback nominal has invalid identity".to_string()
+                })?,
                 variant: selected.id.clone(),
                 field: selected_field.id.clone(),
                 field_index: 0,
@@ -8615,7 +8625,12 @@ impl MirTypeCatalog {
             return_mode: MirVariantCallReturnMode::FlatCopyMerge,
             payload_ty: payload_ty.clone(),
             payload_types: vec![payload_ty.clone()],
-            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            nominal: NominalTypeId::new(nominal).map_err(|_| {
+                format!(
+                    "variant call result '{}' has invalid canonical nominal",
+                    result_ty.as_str()
+                )
+            })?,
             variants,
         })
     }
@@ -8667,7 +8682,12 @@ impl MirTypeCatalog {
             return_mode: MirVariantCallReturnMode::OwnershipPathExclusiveMerge,
             payload_ty: ok.clone(),
             payload_types: vec![ok, error],
-            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            nominal: NominalTypeId::new(nominal).map_err(|_| {
+                format!(
+                    "move-owned Result call result '{}' has invalid canonical nominal",
+                    result_ty.as_str()
+                )
+            })?,
             variants,
         })
     }
@@ -8719,7 +8739,12 @@ impl MirTypeCatalog {
             return_mode: MirVariantCallReturnMode::AggregateEnvelopeMerge,
             payload_ty: ok.clone(),
             payload_types: vec![ok, error],
-            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            nominal: NominalTypeId::new(nominal).map_err(|_| {
+                format!(
+                    "recoverable Result call result '{}' has invalid canonical nominal",
+                    result_ty.as_str()
+                )
+            })?,
             variants,
         })
     }
