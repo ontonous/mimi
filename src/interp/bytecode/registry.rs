@@ -113,6 +113,25 @@ impl BuiltinRegistry {
         (desc.func, desc.arity, desc.name)
     }
 
+    /// Get a builtin descriptor without indexing through an untrusted opcode.
+    ///
+    /// Bytecode may come from a forged or stale producer, so the VM must turn
+    /// an invalid builtin index into a normal interpreter error even in
+    /// release builds where debug assertions are disabled.
+    pub fn get_func_checked(
+        &self,
+        idx: u32,
+    ) -> Result<(BuiltinFn, usize, &'static str), InterpError> {
+        let Some(desc) = self.descs.get(idx as usize) else {
+            return Err(InterpError::new(format!(
+                "builtin index {} out of range (len {})",
+                idx,
+                self.descs.len()
+            )));
+        };
+        Ok((desc.func, desc.arity, desc.name))
+    }
+
     /// Get all builtin names in index order (for compiler registration).
     pub fn names(&self) -> Vec<String> {
         self.descs.iter().map(|d| d.name.to_string()).collect()

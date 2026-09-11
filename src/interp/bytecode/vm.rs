@@ -5990,7 +5990,7 @@ impl BytecodeVM {
     // ── Builtin dispatch (D1: registry, not giant match) ─────
 
     fn call_builtin(&mut self, idx: BuiltinIdx, args: &[Value]) -> Result<Value, InterpError> {
-        let (func, arity, name) = self.registry.get_func(idx);
+        let (func, arity, name) = self.registry.get_func_checked(idx)?;
         if arity != usize::MAX && args.len() != arity {
             return Err(InterpError::new(format!(
                 "{} expects {} argument(s), got {}",

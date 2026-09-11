@@ -1373,6 +1373,25 @@ func main() -> i32 {
     }
 
     #[test]
+    fn vm_rejects_forged_builtin_index() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let result = main.alloc_reg();
+        main.emit(Op::CallBuiltin {
+            rd: result,
+            builtin: u32::MAX,
+            args_base: result,
+            argc: 0,
+        });
+        main.emit(Op::Ret { ra: result });
+
+        let error = run_single_op(main).expect_err("a forged builtin index must fail closed");
+        assert!(
+            error.contains("builtin index 4294967295 out of range"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn vm_rejects_forged_call_indirect_argument_window() {
         let source = r#"
         func main() -> i32 {
