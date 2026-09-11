@@ -602,12 +602,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             self.blocks.insert(block.id.clone(), llvm_block);
         }
         for (index, parameter) in self.function.parameters.iter().enumerate() {
-            let value = self
-                .llvm_function
-                .get_nth_param(index as u32)
-                .ok_or_else(|| {
-                    NativeMirError::new(parameter.to_string(), "LLVM function parameter is absent")
-                })?;
+            let index = u32::try_from(index).map_err(|_| {
+                NativeMirError::new(
+                    parameter.to_string(),
+                    format!("function parameter index {index} exceeds the native u32 ABI"),
+                )
+            })?;
+            let value = self.llvm_function.get_nth_param(index).ok_or_else(|| {
+                NativeMirError::new(parameter.to_string(), "LLVM function parameter is absent")
+            })?;
             self.values.insert(parameter.clone(), value);
         }
         for block in &blocks {
@@ -1048,6 +1051,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .get(&ty)
             .ok_or_else(|| NativeMirError::new(subject, format!("value '{id}' has no TypeDesc")))
+    }
+
+    fn u32_abi(&self, value: usize, role: &str, subject: &str) -> Result<u32, NativeMirError> {
+        u32::try_from(value).map_err(|_| {
+            NativeMirError::new(
+                subject,
+                format!("{role} {value} exceeds the native u32 aggregate ABI"),
+            )
+        })
     }
 }
 

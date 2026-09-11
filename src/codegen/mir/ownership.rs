@@ -102,10 +102,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 };
                 let mut aggregate = value.into_struct_value();
                 for (index, element_ty) in elements.iter().enumerate() {
+                    let field_index = self.u32_abi(index, "product clone field index", subject)?;
                     let field = self
                         .generator
                         .builder
-                        .build_extract_value(aggregate, index as u32, "mir_product_clone_field")
+                        .build_extract_value(aggregate, field_index, "mir_product_clone_field")
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
                     let cloned = self.emit_clone_value(field, element_ty, subject)?;
                     aggregate = self
@@ -114,7 +115,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         .build_insert_value(
                             aggregate,
                             cloned,
-                            index as u32,
+                            field_index,
                             "mir_product_clone_insert",
                         )
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?

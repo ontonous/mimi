@@ -577,11 +577,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .type_catalog()
                     .validate_string_field_borrow_receipt(&source_ty, receipt)
                     .map_err(|message| NativeMirError::new(subject, message))?;
+                let field_index = self.u32_abi(
+                    receipt.projection.field_index,
+                    "borrowed String field index",
+                    subject,
+                )?;
                 self.generator
                     .builder
                     .build_extract_value(
                         self.value(argument, subject)?.into_struct_value(),
-                        receipt.projection.field_index as u32,
+                        field_index,
                         "mir_println_borrowed_string_field",
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?

@@ -416,14 +416,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 }
                 let aggregate = value.into_struct_value();
                 for field in plan.fields {
+                    let field_index =
+                        self.u32_abi(field.index, "product drop field index", subject)?;
                     let child = self
                         .generator
                         .builder
-                        .build_extract_value(
-                            aggregate,
-                            field.index as u32,
-                            "mir_product_drop_field",
-                        )
+                        .build_extract_value(aggregate, field_index, "mir_product_drop_field")
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
                     self.emit_drop_value(child, &field.ty, subject)?;
                 }

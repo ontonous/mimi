@@ -65,7 +65,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map(|byte| i8_ty.const_int(u64::from(*byte), false))
             .collect::<Vec<_>>();
         bytes.push(i8_ty.const_zero());
-        let array_ty = i8_ty.array_type(bytes.len() as u32);
+        let array_len = self.u32_abi(bytes.len(), "String literal byte length", subject)?;
+        let array_ty = i8_ty.array_type(array_len);
         let global_name = format!(
             "__mimi_mir_string_{}_{}",
             native_symbol_fragment(&self.function.owner.0),

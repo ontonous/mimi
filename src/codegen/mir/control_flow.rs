@@ -537,12 +537,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         "nested tuple binding parameter disagrees with target block parameter",
                     ));
                 }
+                let field_index = self.u32_abi(
+                    nested.field_index,
+                    "nested tuple payload field index",
+                    &subject.to_string(),
+                )?;
                 let element = self
                     .generator
                     .builder
                     .build_extract_value(
                         payload.into_struct_value(),
-                        nested.field_index as u32,
+                        field_index,
                         "mir_nested_tuple_payload_load",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;

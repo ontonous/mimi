@@ -40,26 +40,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )?
             .into_struct_type();
             let mut aggregate = struct_ty.get_undef();
-            for (index, source) in fields.iter().enumerate() {
+            for (index, (source, expected_ty)) in fields.iter().zip(&elements).enumerate() {
                 let source_ty = self.value_type(source, subject)?;
-                if source_ty != elements[index] {
+                if &source_ty != expected_ty {
                     return Err(NativeMirError::new(
                         subject,
                         format!(
                             "tuple field {} type '{}' disagrees with TypeDesc type '{}'",
                             index,
                             source_ty.as_str(),
-                            elements[index].as_str()
+                            expected_ty.as_str()
                         ),
                     ));
                 }
+                let index = self.u32_abi(index, "tuple field index", subject)?;
                 aggregate = self
                     .generator
                     .builder
                     .build_insert_value(
                         aggregate,
                         self.value(source, subject)?,
-                        index as u32,
+                        index,
                         "mir_tuple_insert",
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?
@@ -115,11 +116,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         format!("record field '{}' is absent from TypeDesc", field_id.0),
                     )
                 })?;
+            let index = self.u32_abi(index, "record field index", subject)?;
             let value = self.value(source, subject)?;
             aggregate = self
                 .generator
                 .builder
-                .build_insert_value(aggregate, value, index as u32, "mir_record_insert")
+                .build_insert_value(aggregate, value, index, "mir_record_insert")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_struct_value();
         }
@@ -192,14 +194,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
                 .map_err(|message| NativeMirError::new(subject, message))?;
             for update in &receipt.updates {
+                let field_index = self.u32_abi(
+                    update.projection.field_index,
+                    "record update field index",
+                    subject,
+                )?;
                 let old = self
                     .generator
                     .builder
-                    .build_extract_value(
-                        base_value,
-                        update.projection.field_index as u32,
-                        "mir_record_update_old",
-                    )
+                    .build_extract_value(base_value, field_index, "mir_record_update_old")
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
                 self.emit_drop_value(old, &update.projection.field_ty, subject)?;
             }
@@ -233,14 +236,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let index = layout_fields
                 .iter()
                 .position(|candidate| candidate.id == *field_id)
-                .expect("record update field was found above");
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        format!(
+                            "record update field '{}' is absent from TypeDesc",
+                            field_id.0
+                        ),
+                    )
+                })?;
+            let index = self.u32_abi(index, "record update field index", subject)?;
             aggregate = self
                 .generator
                 .builder
                 .build_insert_value(
                     aggregate,
                     self.value(source, subject)?,
-                    index as u32,
+                    index,
                     "mir_record_update",
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
@@ -315,15 +327,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 payload_ty,
             )?
             .const_zero();
+            let index = index.checked_add(1).ok_or_else(|| {
+                NativeMirError::new(subject, "variant payload field index overflows usize")
+            })?;
+            let index = self.u32_abi(index, "variant payload field index", subject)?;
             aggregate = self
                 .generator
                 .builder
-                .build_insert_value(
-                    aggregate,
-                    zero,
-                    index as u32 + 1,
-                    "mir_variant_zero_payload",
-                )
+                .build_insert_value(aggregate, zero, index, "mir_variant_zero_payload")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_struct_value();
         }
@@ -570,11 +581,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .type_catalog()
                 .validated_tuple_field_projection_contract(&base_ty, *field_index, &result_ty)
                 .map_err(|message| NativeMirError::new(subject, message))?;
+            let field_index =
+                self.u32_abi(receipt.field_index, "tuple projection field index", subject)?;
             let aggregate = self.value(base, subject)?.into_struct_value();
             return self
                 .generator
                 .builder
-                .build_extract_value(aggregate, receipt.field_index as u32, "mir_tuple_project")
+                .build_extract_value(aggregate, field_index, "mir_tuple_project")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()));
         }
         let MirProjection::Field(field_id) = projection else {
@@ -590,11 +603,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validated_record_field_projection_contract(&base_ty, field_id, &result_ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let index = receipt.field_index;
+        let index = self.u32_abi(
+            receipt.field_index,
+            "record projection field index",
+            subject,
+        )?;
         let aggregate = self.value(base, subject)?.into_struct_value();
         self.generator
             .builder
-            .build_extract_value(aggregate, index as u32, "mir_record_project")
+            .build_extract_value(aggregate, index, "mir_record_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
@@ -635,11 +652,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             &step.result_ty,
                         )
                         .map_err(|message| NativeMirError::new(subject, message))?;
+                    let field_index = self.u32_abi(
+                        contract.field_index,
+                        "tuple read projection field index",
+                        subject,
+                    )?;
                     self.generator
                         .builder
                         .build_extract_value(
                             current.into_struct_value(),
-                            contract.field_index as u32,
+                            field_index,
                             "mir_read_tuple_project",
                         )
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?
@@ -654,11 +676,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             &step.result_ty,
                         )
                         .map_err(|message| NativeMirError::new(subject, message))?;
+                    let field_index = self.u32_abi(
+                        contract.field_index,
+                        "record read projection field index",
+                        subject,
+                    )?;
                     self.generator
                         .builder
                         .build_extract_value(
                             current.into_struct_value(),
-                            contract.field_index as u32,
+                            field_index,
                             "mir_read_record_project",
                         )
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?
@@ -689,11 +716,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if let MirProjection::Tuple(field_index) = projection {
             validate_native_recursive_tuple_type(self.program.type_catalog(), &base_ty)
                 .map_err(|message| NativeMirError::new(subject, message))?;
+            let field_index =
+                self.u32_abi(*field_index, "tuple move projection field index", subject)?;
             let aggregate = self.value(base, subject)?.into_struct_value();
             return self
                 .generator
                 .builder
-                .build_extract_value(aggregate, *field_index as u32, "mir_tuple_move_project")
+                .build_extract_value(aggregate, field_index, "mir_tuple_move_project")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()));
         }
         validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
@@ -709,11 +738,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validated_record_field_projection_contract(&base_ty, field_id, &result_ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let index = receipt.field_index;
+        let index = self.u32_abi(
+            receipt.field_index,
+            "record move projection field index",
+            subject,
+        )?;
         let aggregate = self.value(base, subject)?.into_struct_value();
         self.generator
             .builder
-            .build_extract_value(aggregate, index as u32, "mir_record_move_project")
+            .build_extract_value(aggregate, index, "mir_record_move_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
@@ -758,24 +791,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|message| NativeMirError::new(subject, message))?;
         let aggregate = self.value(base, subject)?.into_struct_value();
         for residual in &receipt.residual {
+            let field_index =
+                self.u32_abi(residual.index, "record residual field index", subject)?;
             let child = self
                 .generator
                 .builder
-                .build_extract_value(
-                    aggregate,
-                    residual.index as u32,
-                    "mir_record_move_drop_residual",
-                )
+                .build_extract_value(aggregate, field_index, "mir_record_move_drop_residual")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
             self.emit_drop_value(child, &residual.ty, subject)?;
         }
+        let field_index = self.u32_abi(
+            receipt.projection.field_index,
+            "record move/drop projection field index",
+            subject,
+        )?;
         self.generator
             .builder
-            .build_extract_value(
-                aggregate,
-                receipt.projection.field_index as u32,
-                "mir_record_move_drop_project",
-            )
+            .build_extract_value(aggregate, field_index, "mir_record_move_drop_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
