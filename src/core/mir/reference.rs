@@ -6882,7 +6882,9 @@ impl<'a> MirReferenceInterpreter<'a> {
                             let index = arguments.iter().position(|value| value == id).ok_or_else(
                                 || "FFI precondition references a non-argument".to_string(),
                             )?;
-                            match &runtime_arguments[index] {
+                            match runtime_arguments.get(index).ok_or_else(|| {
+                                "FFI precondition argument index is out of range".to_string()
+                            })? {
                                 MirRuntimeValue::Int(value) => {
                                     Ok(super::MirContractScalar::Int(*value))
                                 }
@@ -6915,7 +6917,9 @@ impl<'a> MirReferenceInterpreter<'a> {
                     if let Some(condition) = receipt.ensures.as_ref().filter(|_| self.verify_ffi) {
                         super::evaluate_ffi_ensures(condition, |id| {
                             if let Some(index) = arguments.iter().position(|value| value == id) {
-                                return match &runtime_arguments[index] {
+                                return match runtime_arguments.get(index).ok_or_else(|| {
+                                    "FFI postcondition argument index is out of range".to_string()
+                                })? {
                                     MirRuntimeValue::Int(value) => {
                                         Ok(super::MirContractScalar::Int(*value))
                                     }
