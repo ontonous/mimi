@@ -691,26 +691,41 @@ fn rewrite_scalar_list_facade_call_arguments(
     };
     let arguments = arguments.clone();
     for argument in arguments {
-        let Some(producer_index) =
-            block.instructions[..call_index]
-                .iter()
-                .rposition(|instruction| {
-                    matches!(
-                        &instruction.kind,
-                        MirInstructionKind::Move { result, .. }
-                            | MirInstructionKind::Clone { result, .. }
-                            if result == &argument
-                    )
-                })
+        let Some(producer_index) = block
+            .instructions
+            .get(..call_index)
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject.clone(),
+                    message: "generic List facade call index is outside its block".into(),
+                }]
+            })?
+            .iter()
+            .rposition(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Move { result, .. }
+                        | MirInstructionKind::Clone { result, .. }
+                        if result == &argument
+                )
+            })
         else {
             // A fresh rvalue is already a new owned value.  Only a direct
             // local Move needs to be rewritten at this boundary.
             continue;
         };
-        if let MirInstructionKind::Move { result, source } =
-            block.instructions[producer_index].kind.clone()
+        if let Some(MirInstructionKind::Move { result, source }) = block
+            .instructions
+            .get(producer_index)
+            .map(|instruction| instruction.kind.clone())
         {
-            block.instructions[producer_index].kind = MirInstructionKind::Clone { result, source };
+            let Some(instruction) = block.instructions.get_mut(producer_index) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject.clone(),
+                    message: "generic List facade producer disappeared during rewrite".into(),
+                }]);
+            };
+            instruction.kind = MirInstructionKind::Clone { result, source };
         }
     }
     Ok(())
@@ -755,7 +770,15 @@ fn rewrite_scalar_set_facade_call_arguments(
             message: "read-only generic Set facade call has no receiver argument".into(),
         }]);
     };
-    let Some(producer_index) = block.instructions[..call_index]
+    let Some(producer_index) = block
+        .instructions
+        .get(..call_index)
+        .ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: "generic Set facade call index is outside its block".into(),
+            }]
+        })?
         .iter()
         .rposition(|instruction| {
             matches!(
@@ -770,10 +793,18 @@ fn rewrite_scalar_set_facade_call_arguments(
         // needs a call-site clone to preserve the caller's source.
         return Ok(());
     };
-    if let MirInstructionKind::Move { result, source } =
-        block.instructions[producer_index].kind.clone()
+    if let Some(MirInstructionKind::Move { result, source }) = block
+        .instructions
+        .get(producer_index)
+        .map(|instruction| instruction.kind.clone())
     {
-        block.instructions[producer_index].kind = MirInstructionKind::Clone { result, source };
+        let Some(instruction) = block.instructions.get_mut(producer_index) else {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "generic Set facade producer disappeared during rewrite".into(),
+            }]);
+        };
+        instruction.kind = MirInstructionKind::Clone { result, source };
     }
     Ok(())
 }
@@ -2846,12 +2877,24 @@ fn materialize_generic_instance(
                             .into(),
                 }]);
             }
-            block.instructions[previous].kind = MirInstructionKind::Move {
+            let Some(instruction) = block.instructions.get_mut(previous) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection Clone producer disappeared during specialization".into(),
+                }]);
+            };
+            instruction.kind = MirInstructionKind::Move {
                 result: clone_result,
                 source: clone_source,
             };
-            let MirInstructionKind::VariantProject { contract: slot, .. } =
-                &mut block.instructions[instruction_index].kind
+            let Some(instruction) = block.instructions.get_mut(instruction_index) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection disappeared during specialization"
+                        .into(),
+                }]);
+            };
+            let MirInstructionKind::VariantProject { contract: slot, .. } = &mut instruction.kind
             else {
                 return Err(vec![MirLoweringError {
                     node_id: subject(),
@@ -2859,15 +2902,39 @@ fn materialize_generic_instance(
                 }]);
             };
             *slot = Some(receipt);
+            let Some(instruction_kind) = block
+                .instructions
+                .get(instruction_index)
+                .map(|instruction| instruction.kind.clone())
+            else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic owned Option projection disappeared after receipt specialization"
+                            .into(),
+                }]);
+            };
             let MirInstructionKind::VariantProject {
                 result,
                 base,
                 contract,
-            } = block.instructions[instruction_index].kind.clone()
+            } = instruction_kind
             else {
-                unreachable!("matched immediately above")
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic owned Option projection changed during receipt specialization"
+                            .into(),
+                }]);
             };
-            block.instructions[instruction_index].kind = MirInstructionKind::VariantProjectMove {
+            let Some(instruction) = block.instructions.get_mut(instruction_index) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection disappeared before finalization"
+                        .into(),
+                }]);
+            };
+            instruction.kind = MirInstructionKind::VariantProjectMove {
                 result,
                 base,
                 contract,
@@ -3075,7 +3142,13 @@ fn materialize_generic_instance(
                             .into(),
                 }]);
             }
-            let mut project = block.instructions[2].clone();
+            let Some(project_instruction) = block.instructions.get(2) else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "managed variant fallback project instruction is absent during specialization".into(),
+                }]);
+            };
+            let mut project = project_instruction.clone();
             let MirInstructionKind::VariantProjectOr {
                 base: project_base,
                 fallback: project_fallback,
@@ -3088,11 +3161,25 @@ fn materialize_generic_instance(
                     message: "managed variant fallback body changed during specialization".into(),
                 }]);
             };
-            *project_base = function.parameters[0].clone();
-            *project_fallback = function.parameters[1].clone();
+            let Some(parameter) = function.parameters.first().cloned() else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "managed variant fallback source parameter is absent".into(),
+                }]);
+            };
+            let Some(fallback_parameter) = function.parameters.get(1).cloned() else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "managed variant fallback operand parameter is absent".into(),
+                }]);
+            };
+            *project_base = parameter;
+            *project_fallback = fallback_parameter;
             *project_contract = Some(receipt);
-            let clone_ids = block.instructions[..2]
+            let clone_ids = block
+                .instructions
                 .iter()
+                .take(2)
                 .filter_map(|instruction| match &instruction.kind {
                     MirInstructionKind::Clone { result, .. } => Some(result.clone()),
                     _ => None,
@@ -5085,15 +5172,26 @@ fn detect_scalar_record_update_contract(
                 .into(),
         }]);
     };
+    let instruction = block.instructions.get(*update_index).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record update instruction is absent".into(),
+        }]
+    })?;
     let MirInstructionKind::UpdateRecord {
         result,
         base,
-        kind: MirAggregateKind::Record { .. },
-        fields,
+        kind: kind @ MirAggregateKind::Record {
+            fields: field_ids, ..
+        },
+        fields: update_values,
         ..
-    } = &block.instructions[*update_index].kind
+    } = &instruction.kind
     else {
-        unreachable!("update index is selected from receipt-free record updates");
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record update instruction changed during validation".into(),
+        }]);
     };
     if base != parameter {
         return Err(vec![MirLoweringError {
@@ -5101,7 +5199,7 @@ fn detect_scalar_record_update_contract(
             message: "generic record update must update its record parameter".into(),
         }]);
     }
-    if !matches!(fields.len(), 1 | 2) {
+    if !matches!(update_values.len(), 1 | 2) {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: "generic record update requires one or two explicit field overrides".into(),
@@ -5127,7 +5225,7 @@ fn detect_scalar_record_update_contract(
         .map_err(|error| vec![error])?
         .ty
         .clone();
-    let field_types = fields
+    let field_types = update_values
         .iter()
         .map(|value| {
             function
@@ -5141,14 +5239,6 @@ fn detect_scalar_record_update_contract(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| vec![error])?;
-    let MirInstructionKind::UpdateRecord {
-        kind,
-        fields: update_values,
-        ..
-    } = &block.instructions[*update_index].kind
-    else {
-        unreachable!("shape matched above");
-    };
     let contract = type_catalog
         .validated_record_update_contract(&result_ty, &base_ty, kind, &field_types)
         .map_err(|message| {
@@ -5178,12 +5268,6 @@ fn detect_scalar_record_update_contract(
             message: "generic record update return value is not the UpdateRecord result".into(),
         }]);
     }
-    let crate::core::mir::MirAggregateKind::Record {
-        fields: field_ids, ..
-    } = kind
-    else {
-        unreachable!("shape matched above");
-    };
     if update_values.len() != field_ids.len()
         || contract
             .fields
@@ -5251,17 +5335,26 @@ fn detect_owned_record_update_contract(
                     .into(),
         }]);
     };
+    let instruction = block.instructions.get(*update_index).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update instruction is absent".into(),
+        }]
+    })?;
     let MirInstructionKind::UpdateRecord {
         result,
         base,
-        kind: MirAggregateKind::Record { .. },
-        fields,
+        kind: kind @ MirAggregateKind::Record { .. },
+        fields: update_values,
         ..
-    } = &block.instructions[*update_index].kind
+    } = &instruction.kind
     else {
-        unreachable!("update index is selected from receipt-free record updates");
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update instruction changed during validation".into(),
+        }]);
     };
-    if base != parameter || fields.len() != 1 {
+    if base != parameter || update_values.len() != 1 {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: "generic record move update must update its parameter with one field".into(),
@@ -5287,7 +5380,7 @@ fn detect_owned_record_update_contract(
         .map_err(|error| vec![error])?
         .ty
         .clone();
-    let field_types = fields
+    let field_types = update_values
         .iter()
         .map(|value| {
             function
@@ -5301,14 +5394,6 @@ fn detect_owned_record_update_contract(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| vec![error])?;
-    let MirInstructionKind::UpdateRecord {
-        kind,
-        fields: update_values,
-        ..
-    } = &block.instructions[*update_index].kind
-    else {
-        unreachable!("shape matched above");
-    };
     let contract = type_catalog
         .validated_record_update_move_contract(&result_ty, &base_ty, kind, &field_types)
         .map_err(|message| {
@@ -5366,6 +5451,10 @@ pub(crate) fn validate_scalar_record_projection_mir(
     if block.instructions.len() != 1 {
         return Err("generic record projection body may contain only one field Project".into());
     }
+    let instruction = block
+        .instructions
+        .first()
+        .ok_or_else(|| "generic record projection instruction is absent".to_string())?;
     let MirInstruction {
         kind:
             MirInstructionKind::Project {
@@ -5375,7 +5464,7 @@ pub(crate) fn validate_scalar_record_projection_mir(
                 ..
             },
         ..
-    } = &block.instructions[0]
+    } = instruction
     else {
         return Err("generic record projection must contain exactly one field Project".into());
     };
@@ -5457,6 +5546,10 @@ pub(crate) fn validate_scalar_record_update_mir(
             "generic record update must contain exactly one receipt-bearing UpdateRecord".into(),
         );
     };
+    let instruction = block
+        .instructions
+        .get(*update_index)
+        .ok_or_else(|| "generic record update instruction is absent".to_string())?;
     let MirInstructionKind::UpdateRecord {
         result,
         base,
@@ -5464,9 +5557,9 @@ pub(crate) fn validate_scalar_record_update_mir(
         fields,
         record_update_contract: Some(receipt),
         record_update_move_contract: None,
-    } = &block.instructions[*update_index].kind
+    } = &instruction.kind
     else {
-        unreachable!("update index is selected from receipt-bearing record updates");
+        return Err("generic record update instruction changed during validation".into());
     };
     if base != parameter {
         return Err("generic record update must update its record parameter".into());
@@ -5554,6 +5647,10 @@ pub(crate) fn validate_owned_record_update_mir(
                 .into(),
         );
     };
+    let instruction = block
+        .instructions
+        .get(*update_index)
+        .ok_or_else(|| "generic record move update instruction is absent".to_string())?;
     let MirInstructionKind::UpdateRecord {
         result,
         base,
@@ -5561,9 +5658,9 @@ pub(crate) fn validate_owned_record_update_mir(
         fields,
         record_update_contract: None,
         record_update_move_contract: Some(receipt),
-    } = &block.instructions[*update_index].kind
+    } = &instruction.kind
     else {
-        unreachable!("update index is selected from Move receipt-bearing record updates");
+        return Err("generic record move update instruction changed during validation".into());
     };
     if base != parameter || fields.len() != 1 {
         return Err("generic record move update must update its parameter with one field".into());
@@ -5639,6 +5736,10 @@ pub(crate) fn validate_scalar_tuple_projection_mir(
     if block.instructions.len() != 1 {
         return Err("generic tuple projection body may contain only one tuple Project".into());
     }
+    let instruction = block
+        .instructions
+        .first()
+        .ok_or_else(|| "generic tuple projection instruction is absent".to_string())?;
     let MirInstruction {
         kind:
             MirInstructionKind::Project {
@@ -5648,7 +5749,7 @@ pub(crate) fn validate_scalar_tuple_projection_mir(
                 ..
             },
         ..
-    } = &block.instructions[0]
+    } = instruction
     else {
         return Err("generic tuple projection must contain exactly one tuple Project".into());
     };
@@ -5722,6 +5823,10 @@ pub(crate) fn validate_owned_record_projection_mir(
             "owned generic record projection body may contain only one field MoveProject".into(),
         );
     }
+    let instruction = block
+        .instructions
+        .first()
+        .ok_or_else(|| "owned generic record projection instruction is absent".to_string())?;
     let MirInstruction {
         kind:
             MirInstructionKind::MoveProject {
@@ -5730,7 +5835,7 @@ pub(crate) fn validate_owned_record_projection_mir(
                 projection: MirProjection::Field(field),
             },
         ..
-    } = &block.instructions[0]
+    } = instruction
     else {
         return Err(
             "owned generic record projection must contain exactly one field MoveProject".into(),
@@ -5817,6 +5922,9 @@ pub(crate) fn validate_owned_record_projection_drop_mir(
                 .into(),
         );
     }
+    let instruction = block.instructions.first().ok_or_else(|| {
+        "owned generic record move/drop projection instruction is absent".to_string()
+    })?;
     let MirInstruction {
         kind:
             MirInstructionKind::MoveProjectDrop {
@@ -5826,7 +5934,7 @@ pub(crate) fn validate_owned_record_projection_drop_mir(
                 contract: Some(receipt),
             },
         ..
-    } = &block.instructions[0]
+    } = instruction
     else {
         return Err(
             "owned generic record move/drop projection must contain exactly one field MoveProjectDrop"
