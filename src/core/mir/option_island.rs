@@ -269,7 +269,10 @@ fn is_option_string_unwrap_call(
     matches!(&call.callee, ResolvedCallee::Builtin(name)
         if name.as_str() == "builtin.method.option.unwrap")
         && call.arguments.len() == 1
-        && is_option_string_type_in_checked(program, &call.arguments[0].value.ty)
+        && call
+            .arguments
+            .first()
+            .is_some_and(|argument| is_option_string_type_in_checked(program, &argument.value.ty))
 }
 
 pub(crate) fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
@@ -468,11 +471,12 @@ impl<'a> OptionStringVariantValidator<'a> {
                             MirGlueKind::OwnedString | MirGlueKind::List
                         )
                         && instance.arguments.len() == 1
-                        && self
-                            .program
-                            .type_catalog()
-                            .validate_move_owned_payload(&instance.arguments[0])
-                            .is_ok()
+                        && instance.arguments.first().is_some_and(|argument| {
+                            self.program
+                                .type_catalog()
+                                .validate_move_owned_payload(argument)
+                                .is_ok()
+                        })
             );
             if !admitted_owned_projection {
                 self.error(format!(

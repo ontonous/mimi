@@ -1326,22 +1326,40 @@ impl MirTypeDesc {
             ),
             ResolvedType::Nominal {
                 item, arguments, ..
-            } if item.as_str() == "builtin:type:List" && arguments.len() == 1 => (
-                MirTypeKind::List,
-                MirAbiClass::OpaqueHandle,
-                MirLayout::List {
-                    element: arguments[0].clone(),
-                },
-            ),
+            } if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
+                match arguments.first() {
+                    Some(element) => (
+                        MirTypeKind::List,
+                        MirAbiClass::OpaqueHandle,
+                        MirLayout::List {
+                            element: element.clone(),
+                        },
+                    ),
+                    None => (
+                        MirTypeKind::Nominal,
+                        MirAbiClass::OpaqueHandle,
+                        MirLayout::Opaque,
+                    ),
+                }
+            }
             ResolvedType::Nominal {
                 item, arguments, ..
-            } if item.as_str() == "builtin:type:Set" && arguments.len() == 1 => (
-                MirTypeKind::Set,
-                MirAbiClass::SetHandle,
-                MirLayout::Set {
-                    element: arguments[0].clone(),
-                },
-            ),
+            } if item.as_str() == "builtin:type:Set" && arguments.len() == 1 => {
+                match arguments.first() {
+                    Some(element) => (
+                        MirTypeKind::Set,
+                        MirAbiClass::SetHandle,
+                        MirLayout::Set {
+                            element: element.clone(),
+                        },
+                    ),
+                    None => (
+                        MirTypeKind::Nominal,
+                        MirAbiClass::OpaqueHandle,
+                        MirLayout::Opaque,
+                    ),
+                }
+            }
             ResolvedType::Nominal {
                 item, arguments, ..
             } if item.as_str() == "builtin:type:SessionChan" && arguments.len() == 1 => (
@@ -4990,7 +5008,12 @@ impl MirTypeCatalog {
                     ));
                 }
                 for (expected_index, field) in (0..variant.fields.len()).rev().zip(&plan.fields) {
-                    if field.index != expected_index || field.ty != variant.fields[field.index].ty {
+                    if field.index != expected_index
+                        || !variant
+                            .fields
+                            .get(field.index)
+                            .is_some_and(|expected_field| expected_field.ty == field.ty)
+                    {
                         return Err(format!(
                             "type '{}' variant '{}' drop plan is not in reverse declaration order",
                             ty.as_str(),

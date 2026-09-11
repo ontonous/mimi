@@ -132,10 +132,12 @@ fn call_is_result_unwrap(
     if !is_unwrap_or {
         return false;
     }
-    matches!(
-        program.resolved_types().get(&call.arguments[1].value.ty),
-        Some(crate::core::ir::ResolvedType::Primitive(PrimitiveType::I32))
-    )
+    call.arguments.get(1).is_some_and(|argument| {
+        matches!(
+            program.resolved_types().get(&argument.value.ty),
+            Some(crate::core::ir::ResolvedType::Primitive(PrimitiveType::I32))
+        )
+    })
 }
 
 fn body_has_result_unwrap(
