@@ -1474,7 +1474,10 @@ fn expr_contains_unsupported_f64_shape(
         | ResolvedExprKind::DefaultArgument { .. }
         | ResolvedExprKind::ComptimeValue(_)
         | ResolvedExprKind::TypeValue(_) => false,
-        ResolvedExprKind::Binary { .. } | ResolvedExprKind::Cast { .. } => unreachable!(),
+        // Binary and Cast expressions are handled by the shape-sensitive
+        // fast paths above. Keep this arm total so a future expression
+        // representation change cannot turn eligibility probing into a panic.
+        ResolvedExprKind::Binary { .. } | ResolvedExprKind::Cast { .. } => false,
     }
 }
 
