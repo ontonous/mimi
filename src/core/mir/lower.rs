@@ -6354,11 +6354,11 @@ pub(crate) fn validate_scalar_list_construct_mir(
     };
     let receipt = receipt
         .ok_or_else(|| "scalar generic List construction has no canonical receipt".to_string())?;
-    if elements.len() != 1 {
+    let [element] = elements.as_slice() else {
         return Err(
             "scalar generic List construction must have exactly one transferred element".into(),
         );
-    }
+    };
     if receipt != *contract {
         return Err(
             "scalar generic List construction receipt disagrees with its instance contract".into(),
@@ -6372,7 +6372,7 @@ pub(crate) fn validate_scalar_list_construct_mir(
         .clone();
     let element_ty = function
         .values
-        .get(&elements[0])
+        .get(element)
         .ok_or_else(|| "scalar generic List construction element value is absent".to_string())?
         .ty
         .clone();
@@ -6380,21 +6380,35 @@ pub(crate) fn validate_scalar_list_construct_mir(
         .validate_move_owned_list_payload(&element_ty)
         .is_ok();
     let transfer_result = if nested_element {
-        if clones.is_empty() && moves.len() == 1 && moves[0].1 == *parameter {
-            moves[0].0.clone()
+        if clones.is_empty() && moves.len() == 1 {
+            match moves.first() {
+                Some((result, source)) if source == parameter => result.clone(),
+                _ => return Err(
+                    "nested generic List construction must move its List parameter exactly once"
+                        .into(),
+                ),
+            }
         } else {
             return Err(
                 "nested generic List construction must move its List parameter exactly once".into(),
             );
         }
-    } else if moves.is_empty() && clones.len() == 1 && clones[0].1 == *parameter {
-        clones[0].0.clone()
+    } else if moves.is_empty() && clones.len() == 1 {
+        match clones.first() {
+            Some((result, source)) if source == parameter => result.clone(),
+            _ => {
+                return Err(
+                    "scalar generic List construction must clone its scalar parameter exactly once"
+                        .into(),
+                )
+            }
+        }
     } else {
         return Err(
             "scalar generic List construction must clone its scalar parameter exactly once".into(),
         );
     };
-    if elements.len() != 1 || elements[0] != transfer_result {
+    if element != &transfer_result {
         return Err(
             "scalar generic List construction must place its parameter transfer as its sole element"
                 .into(),
