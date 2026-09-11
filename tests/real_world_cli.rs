@@ -1510,6 +1510,91 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
 }
 
 #[test]
+fn canonical_mir_cli_receipt_manifest_imported_transparent_alias_matches_checker_route() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-import-alias-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported alias receipt fixture directory");
+    let helper = dir.join("ffi_types.mimi");
+    fs::write(
+        &helper,
+        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64; }\npub func imported_alias(value: i64) -> i64 { mir_ffi_cli_import_alias(value) }\n",
+    )
+    .expect("write imported alias receipt helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use ffi_types;\nfunc main() -> i64 { imported_alias(7 as i64) }\n",
+    )
+    .expect("write imported alias receipt entry");
+
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn imported alias MIR receipt")
+    };
+    let first = run();
+    let second = run();
+    assert!(
+        first.status.success(),
+        "imported alias MIR receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert!(
+        second.status.success(),
+        "repeated imported alias MIR receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&second.stderr),
+        String::from_utf8_lossy(&second.stdout)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "imported transparent alias receipt must be byte-deterministic"
+    );
+
+    let checked = checked_route_receipt(&main);
+    let manifest_text = String::from_utf8_lossy(&first.stdout);
+    let manifest = parse_route_receipt_manifest(&first.stdout);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest_text)
+        .expect("imported alias receipt must round-trip through the public API");
+    assert_eq!(manifest_receipt, checked);
+    assert_eq!(manifest.get("ffi_digest"), Some(&checked.ffi_digest));
+    assert_eq!(manifest.get("mir_digest"), Some(&checked.mir_digest));
+    assert_eq!(manifest.get("abi_digest"), Some(&checked.abi_digest));
+    assert!(
+        manifest
+            .get("root_owners")
+            .is_some_and(|owners| owners.contains("function:main")
+                && owners.contains("function:imported_alias")),
+        "imported alias receipt lost merged callable owners: {manifest:?}"
+    );
+    assert_eq!(
+        manifest.len(),
+        mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+    );
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        stderr.contains("lowered") && stderr.contains("canonical MIR"),
+        "imported alias receipt lost lowering diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "imported transparent alias receipt must not report legacy: {stderr}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-receipt-multi-failure-{}-{}",
