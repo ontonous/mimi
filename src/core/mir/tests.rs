@@ -450,6 +450,90 @@ fn scalar_ffi_integer_narrow_bounds_are_shared_and_closed() {
 }
 
 #[test]
+fn scalar_ffi_result_conversion_factory_is_inverse_and_closed() {
+    use crate::core::mir::reference::MirProgram;
+    use crate::core::mir::types::MirAbiClass;
+
+    let checked = checked_program(
+        r#"
+extern "C" { func result_factory(value: i64) -> i64; }
+func i32_marker(value: i32) -> i32 { value }
+func main() -> i64 { result_factory(7) }
+"#,
+    );
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("result conversion factory fixture materialization");
+    let receipt = program
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("result conversion factory receipt");
+    let actual = receipt
+        .result
+        .as_ref()
+        .and_then(|value| program.functions()[&receipt.caller].values.get(value))
+        .map(|value| value.ty.clone())
+        .expect("result conversion factory actual type");
+    let declared = receipt.result_type.clone();
+    assert_eq!(
+        crate::core::mir::MirFfiAbiConversion::for_result(
+            program.type_catalog(),
+            &actual,
+            &declared,
+        )
+        .expect("same ABI result identity"),
+        crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        }
+    );
+    let i32_type = program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i32 marker TypeDesc");
+    assert_eq!(
+        crate::core::mir::MirFfiAbiConversion::for_result(
+            program.type_catalog(),
+            &i32_type,
+            &declared,
+        ),
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        })
+    );
+    assert_eq!(
+        crate::core::mir::MirFfiAbiConversion::for_result(
+            program.type_catalog(),
+            &declared,
+            &i32_type,
+        ),
+        None,
+        "result widening remains outside the closed scalar result contract"
+    );
+}
+
+#[test]
 fn materializes_terminal_session_close_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"
