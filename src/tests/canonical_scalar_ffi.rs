@@ -6405,6 +6405,76 @@ func main() -> i64 { let first = span_order(7 as i64); let second = span_order(8
 }
 
 #[test]
+fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
+    use std::fs;
+
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-duplicate-provenance-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create duplicate declaration project");
+    let main_path = project.join("main.mimi");
+    let left_path = project.join("left.mimi");
+    let right_path = project.join("right.mimi");
+    fs::write(
+        &main_path,
+        "use left;\nuse right;\nfunc main() -> i64 { 0 }\n",
+    )
+    .expect("write duplicate declaration main");
+    fs::write(
+        &left_path,
+        "extern \"C\" {\n    func clash(value: i64) -> i64;\n}\npub func call_left(value: i64) -> i64 { clash(value) }\n",
+    )
+    .expect("write left duplicate declaration");
+    fs::write(
+        &right_path,
+        "extern \"C\" {\n    func clash(value: i64) -> i64;\n}\npub func call_right(value: i64) -> i64 { clash(value) }\n",
+    )
+    .expect("write right duplicate declaration");
+
+    let source = fs::read_to_string(&main_path).expect("read duplicate declaration main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex duplicate declaration main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select duplicate declaration parser")
+        .parse_file()
+        .expect("parse duplicate declaration main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load duplicate declaration graph");
+    let mut merged = loader
+        .merge_all()
+        .expect("merge duplicate declaration graph");
+    crate::loader::merge_prelude_into(&mut merged);
+
+    let diagnostics = crate::core::check_program(&merged)
+        .expect_err("duplicate imported extern declarations must fail checker");
+    let duplicate = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0402))
+        .expect("duplicate imported extern diagnostic");
+    assert!(duplicate
+        .message
+        .contains("duplicate extern function 'clash'"));
+    let source_record = merged
+        .sources
+        .record(duplicate.span.source_id)
+        .expect("duplicate diagnostic source record");
+    assert_eq!(
+        source_record.disk_path.as_deref(),
+        right_path.canonicalize().ok().as_deref(),
+        "duplicate declaration diagnostic must point at the later imported declaration"
+    );
+    assert_ne!(
+        source_record.disk_path.as_deref(),
+        Some(main_path.as_path())
+    );
+    fs::remove_dir_all(project).expect("remove duplicate declaration project");
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
