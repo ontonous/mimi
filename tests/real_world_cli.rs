@@ -3462,12 +3462,12 @@ fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() 
     fs::create_dir_all(&dir).expect("create transitive scalar FFI directory");
     fs::write(
         dir.join("leaf.mimi"),
-        "extern \"C\" {\n    func labs(x: i64) -> i64 requires: x >= 0;\n}\npub func imported_labs(x: i64) -> i64 {\n    requires: x >= 0\n    labs(x)\n}\n",
+        "pub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" {\n    func labs(x: i64) -> ResultId requires: x >= 0;\n}\npub func imported_labs(x: i64) -> ResultId {\n    requires: x >= 0\n    labs(x)\n}\n",
     )
     .expect("write transitive scalar FFI leaf");
     fs::write(
         dir.join("mid.mimi"),
-        "use leaf;\npub func mid(x: i64) -> i64 {\n    requires: x >= 0\n    imported_labs(x)\n}\n",
+        "use leaf;\npub func mid(x: i64) -> ResultId {\n    requires: x >= 0\n    imported_labs(x)\n}\n",
     )
     .expect("write transitive scalar FFI middle module");
     let main = dir.join("main.mimi");
