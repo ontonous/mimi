@@ -998,15 +998,23 @@ impl<'a> Checker<'a> {
                     // same symbol silently overwrote the first signature. Emit a
                     // duplicate-definition diagnostic instead of swallowing it.
                     if self.funcs.contains_key(&func.name) {
-                        self.emit_code(
+                        let duplicate_span = self.diagnostic_span();
+                        let mut diagnostic = Diagnostic::error_code(
                             crate::diagnostic::codes::E0402,
                             format!(
                                 "duplicate extern function '{}' (conflicting declarations across extern blocks)",
                                 func.name
                             ),
+                            duplicate_span,
                         );
+                        if let Some(previous_span) = self.extern_spans.get(&func.name).copied() {
+                            diagnostic = diagnostic
+                                .with_note("previous extern declaration is here", previous_span);
+                        }
+                        self.errors.push(diagnostic);
                     } else {
                         self.funcs.insert(func.name.clone(), (params, ret));
+                        self.extern_spans.insert(func.name.clone(), func.meta.span);
                     }
                     // 追加 C: track extern functions for `?` rejection
                     self.extern_funcs.insert(func.name.clone());

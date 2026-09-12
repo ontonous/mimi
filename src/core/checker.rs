@@ -28,6 +28,11 @@ pub(crate) struct Checker<'a> {
     pub(crate) errors: Vec<Diagnostic>,
     pub(crate) warnings: Vec<Diagnostic>,
     pub(crate) funcs: HashMap<String, (Vec<Type>, Type)>,
+    /// Source spans for the first checker-owned extern declaration of each
+    /// symbol. Duplicate declarations use this anchor for a stable
+    /// cross-file "previous declaration" note instead of losing provenance
+    /// in the merged function directory.
+    pub(crate) extern_spans: HashMap<String, Span>,
     pub(crate) aliases: HashMap<String, Type>,
     /// Declaration anchors for aliases. Alias-cycle validation runs after the
     /// whole (possibly multi-source) declaration graph is collected, so it
@@ -294,6 +299,7 @@ impl<'a> Checker<'a> {
             errors: Vec::new(),
             warnings: Vec::new(),
             funcs: HashMap::new(),
+            extern_spans: HashMap::new(),
             aliases: HashMap::new(),
             alias_spans: HashMap::new(),
             types: HashMap::new(),

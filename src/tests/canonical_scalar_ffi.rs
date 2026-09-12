@@ -6471,6 +6471,24 @@ fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
         source_record.disk_path.as_deref(),
         Some(main_path.as_path())
     );
+    assert_eq!(
+        duplicate.notes.len(),
+        1,
+        "duplicate declaration keeps prior span note"
+    );
+    assert_eq!(
+        duplicate.notes[0].message,
+        "previous extern declaration is here"
+    );
+    let previous_record = merged
+        .sources
+        .record(duplicate.notes[0].span.source_id)
+        .expect("previous duplicate declaration source record");
+    assert_eq!(
+        previous_record.disk_path.as_deref(),
+        left_path.canonicalize().ok().as_deref(),
+        "duplicate declaration note must point at the first imported declaration"
+    );
     fs::remove_dir_all(project).expect("remove duplicate declaration project");
 }
 
