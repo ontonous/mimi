@@ -330,6 +330,7 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     let error = BytecodeVM::new(bytecode.clone())
         .run_value()
         .expect_err("missing library");
+    assert_eq!(error.code(), "E0800");
     assert!(error.to_string().contains("failed to load"), "{error}");
 
     std::env::set_var("MIMI_FFI_LIB", &library);
@@ -2754,6 +2755,7 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     let bytecode_error = vm
         .run_value()
         .expect_err("bytecode must reject an absent symbol after loading the fixture library");
+    assert_eq!(bytecode_error.code(), "E0800");
     assert!(bytecode_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));

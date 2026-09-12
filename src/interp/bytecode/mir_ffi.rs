@@ -1146,6 +1146,8 @@ mod tests {
                 .expect_err("invalid arguments/symbol cannot execute");
             if expected == "outside i32" {
                 assert_eq!(error.code(), "E0802", "{error}");
+            } else {
+                assert_eq!(error.code(), "E0800", "{error}");
             }
             assert!(error.to_string().contains(expected), "{error}");
         }
@@ -1172,6 +1174,7 @@ mod tests {
                 &[Value::Int(-41)],
             )
             .expect_err("a missing dynamic library must fail before caching a handle");
+        assert_eq!(error.code(), "E0800");
         assert!(error.to_string().contains("failed to load"), "{error}");
         assert!(runtime.loaded_libs.is_empty());
 
@@ -1217,6 +1220,7 @@ mod tests {
                 &[Value::Int(1)],
             )
             .expect_err("an absent symbol must fail at symbol lookup");
+        assert_eq!(missing.code(), "E0800");
         assert!(missing
             .to_string()
             .contains("failed to find canonical MIR FFI symbol"));
