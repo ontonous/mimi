@@ -6360,6 +6360,51 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_source_order_tie_break_uses_call_span_columns() {
+    const SOURCE: &str = r#"
+extern "C" { func span_order(value: i64) -> i64; }
+func main() -> i64 { let first = span_order(7 as i64); let second = span_order(8 as i64); first + second }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("FFI span-order fixture check");
+    let program =
+        MirProgram::from_checked_program(&checked).expect("FFI span-order fixture materialization");
+    let ordered = program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.caller, ordered[1].1.caller);
+    assert_eq!(ordered[0].1.span.start_line, ordered[1].1.span.start_line);
+    assert!(
+        ordered[0].1.span.start_col < ordered[1].1.span.start_col,
+        "same-line FFI calls must be ordered by their source span columns"
+    );
+    assert_ne!(ordered[0].1.instruction, ordered[1].1.instruction);
+
+    let reversed = program
+        .ffi_calls()
+        .iter()
+        .rev()
+        .map(|(instruction, receipt)| (instruction.clone(), receipt.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut rebuilt = program.clone();
+    rebuilt.replace_ffi_calls_for_test_only(reversed);
+    let rebuilt_ordered = rebuilt.ffi_call_entries_in_source_order();
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|(_, receipt)| receipt.instruction.clone())
+            .collect::<Vec<_>>(),
+        rebuilt_ordered
+            .iter()
+            .map(|(_, receipt)| receipt.instruction.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        program.route_receipt("scalar-ffi-span-order-v1"),
+        rebuilt.route_receipt("scalar-ffi-span-order-v1")
+    );
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
