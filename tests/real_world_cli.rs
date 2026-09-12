@@ -928,6 +928,107 @@ fn canonical_scalar_ffi_cli_non_utf8_output_path_cleans_staging() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_missing_output_parent_cleans_staging() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_missing_output_parent_cli_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI missing output parent directory");
+    let source = dir.join("missing-parent.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI missing output parent source");
+    let stem = format!("missing-parent-output-{nonce}");
+    let binary = dir.join("absent-parent").join(&stem);
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["build", "--mir"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn scalar FFI missing output parent build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("cannot open output file"),
+        "missing output parent lost linker path diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        !binary.exists(),
+        "missing output parent failure created a binary"
+    );
+    assert!(
+        staging_dirs_for_output_stem(&stem).is_empty(),
+        "missing output parent failure left staging directories for {stem}"
+    );
+    assert!(!binary.parent().expect("missing output parent").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_staging_creation_failure_preserves_temp_file() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_staging_creation_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI staging creation failure directory");
+    let source = dir.join("staging-failure.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI staging creation failure source");
+    let temp_file = dir.join("tmp-file");
+    fs::write(&temp_file, b"keep this user file").expect("write TMPDIR file");
+    let binary = dir.join("staging-failure");
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["build", "--mir"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .env("TMPDIR", &temp_file)
+        .output()
+        .expect("spawn scalar FFI staging creation failure build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("failed to create temp build dir"),
+        "staging creation failure lost its diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        !binary.exists(),
+        "staging creation failure created a binary"
+    );
+    assert_eq!(
+        fs::read(&temp_file).expect("read preserved TMPDIR file"),
+        b"keep this user file"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_contract_failure_precedes_unresolved_linker_symbol() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_contract_before_link_failure_cli_{}_{}",
