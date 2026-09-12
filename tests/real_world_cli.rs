@@ -420,6 +420,74 @@ fn canonical_scalar_ffi_cli_verify_is_checker_only_before_native_link_failure() 
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_multiple_linker_symbols_preserve_failure_order() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_multi_link_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI multi-link failure directory");
+    let source = dir.join("multi-unlinked.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func mir_ffi_unlinked_alpha(value: i64) -> i64; func mir_ffi_unlinked_beta(value: i64) -> i64; }\nfunc main() -> i64 { let alpha = mir_ffi_unlinked_alpha(7 as i64); let beta = mir_ffi_unlinked_beta(8 as i64); alpha + beta }\n",
+    )
+    .expect("write scalar FFI multi-link failure source");
+
+    let build = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .unwrap_or_else(|error| panic!("multi-symbol build {explicit_mir}: {error}"))
+    };
+    let default_binary = dir.join("multi-default");
+    let mir_binary = dir.join("multi-mir");
+    let builds = [build(false, &default_binary), build(true, &mir_binary)];
+    let normalize_linker_stderr = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter(|line| !line.contains("mimi-build-"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        normalize_linker_stderr(&builds[0].stderr),
+        normalize_linker_stderr(&builds[1].stderr),
+        "default and --mir multi-symbol linker diagnostics must match after path normalization"
+    );
+    for output in &builds {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches("undefined symbol:").count(), 2, "{stderr}");
+        let alpha = stderr
+            .find("undefined symbol: mir_ffi_unlinked_alpha")
+            .expect("alpha linker diagnostic");
+        let beta = stderr
+            .find("undefined symbol: mir_ffi_unlinked_beta")
+            .expect("beta linker diagnostic");
+        assert!(alpha < beta, "{stderr}");
+        assert!(!stderr.contains("FFI contract verification failed"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert!(!default_binary.exists());
+    assert!(!mir_binary.exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
     if !can_link() {
         return;
