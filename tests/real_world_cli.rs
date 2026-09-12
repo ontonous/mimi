@@ -1028,6 +1028,68 @@ fn canonical_scalar_ffi_cli_staging_creation_failure_preserves_temp_file() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_fallback_stem_cleanup_preserves_tmp_root() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_fallback_stem_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI fallback stem directory");
+    let source = dir.join("fallback-stem.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI fallback stem source");
+    let temp_root = dir.join("isolated-tmp");
+    fs::create_dir_all(&temp_root).expect("create isolated TMPDIR");
+    let sentinel = temp_root.join("keep.txt");
+    fs::write(&sentinel, b"preserve this root file").expect("write isolated TMPDIR sentinel");
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["build", "--mir", "--shared"])
+        .arg(&source)
+        .arg("-o")
+        .arg("/")
+        .env("TMPDIR", &temp_root)
+        .output()
+        .expect("spawn scalar FFI fallback stem build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("cannot open output file /"),
+        "fallback stem failure lost linker path diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert_eq!(
+        fs::read(&sentinel).expect("read preserved isolated TMPDIR sentinel"),
+        b"preserve this root file"
+    );
+    let staging = fs::read_dir(&temp_root)
+        .expect("read isolated TMPDIR")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("mimi-build-")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        staging.is_empty(),
+        "fallback stem failure left staging entries: {staging:?}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn canonical_scalar_ffi_cli_contract_failure_precedes_unresolved_linker_symbol() {
     let dir = std::env::temp_dir().join(format!(
