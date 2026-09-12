@@ -583,6 +583,108 @@ fn canonical_scalar_ffi_cli_contract_failure_precedes_unresolved_linker_symbol()
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_multiple_contract_failures_precede_linker_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_multi_contract_link_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI multi-contract failure directory");
+    let source = dir.join("multi-contract-before-link.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func mir_ffi_first_disproved(value: i64) -> i64 requires: value >= 0;\n    func mir_ffi_second_disproved(value: i64) -> i64 requires: value >= 0;\n    func mir_ffi_unlinked_third(value: i64) -> i64;\n}\nfunc main() -> i64 {\n    mir_ffi_first_disproved(-1 as i64)\n    mir_ffi_second_disproved(-2 as i64)\n    mir_ffi_unlinked_third(0 as i64)\n}\n",
+    )
+    .expect("write scalar FFI multi-contract failure source");
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("multi-contract verify {explicit_mir}: {error}"))
+    };
+    let verifies = [verify(false), verify(true)];
+    let stable_verify_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&output.stderr).lines())
+            .filter(|line| line.contains("verified") || line.contains("canonical MIR extern"))
+            .map(|line| line.split(" in ").next().unwrap_or(line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        stable_verify_summary(&verifies[0]),
+        stable_verify_summary(&verifies[1])
+    );
+    for output in &verifies {
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}{stderr}");
+        assert!(combined.contains("0/2 verified"), "{combined}");
+        assert_eq!(
+            combined
+                .matches("canonical MIR extern requires contract disproven")
+                .count(),
+            2,
+            "{combined}"
+        );
+        let first = combined
+            .find("first_disproved(-1 as i64)")
+            .expect("first contract diagnostic source");
+        let second = combined
+            .find("second_disproved(-2 as i64)")
+            .expect("second contract diagnostic source");
+        assert!(first < second, "{combined}");
+        assert!(!combined.contains("mir_ffi_unlinked_third"));
+        assert!(!combined.contains("canonical route disposition: legacy"));
+    }
+
+    let build = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .unwrap_or_else(|error| panic!("multi-contract build {explicit_mir}: {error}"))
+    };
+    let default_binary = dir.join("multi-contract-default");
+    let mir_binary = dir.join("multi-contract-mir");
+    let builds = [build(false, &default_binary), build(true, &mir_binary)];
+    assert_eq!(builds[0].stderr, builds[1].stderr);
+    for output in &builds {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches("FFI violation").count(), 2, "{stderr}");
+        assert!(
+            stderr.contains("canonical MIR extern requires contract disproven"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("undefined symbol: mir_ffi_unlinked_third"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert!(!default_binary.exists());
+    assert!(!mir_binary.exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
     if !can_link() {
         return;
