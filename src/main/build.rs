@@ -253,6 +253,8 @@ fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
 
 #[cfg(windows)]
 fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
     path.as_os_str()
         .encode_wide()
         .flat_map(u16::to_le_bytes)
