@@ -1934,6 +1934,78 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
 }
 
 #[test]
+fn scalar_ffi_branch_merge_preserves_per_callsite_result_cardinality() {
+    let source = r#"
+extern "C" { func mir_ffi_branch(value: i64) -> i64 requires: value >= 0; }
+func branch(flag: bool) -> i64 {
+    if flag {
+        mir_ffi_branch(7 as i64)
+    } else {
+        mir_ffi_branch(-7 as i64)
+    }
+}
+func main() -> i64 {
+    branch(true)
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex branch-merge FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse branch-merge FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check branch-merge FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize branch-merge FFI fixture MIR");
+    let receipts = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(
+        receipts[0].caller,
+        crate::core::NodeId("function:branch".into())
+    );
+    assert_eq!(
+        receipts[1].caller,
+        crate::core::NodeId("function:branch".into())
+    );
+    assert!(receipts[0].span.start_line < receipts[1].span.start_line);
+
+    let results = crate::verifier::verify_mir(&mir, "branch-merge-ffi".into())
+        .expect("verify branch-merge FFI fixture");
+    assert_eq!(results.len(), receipts.len());
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.status.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            crate::verifier::VerifStatus::Proven,
+            crate::verifier::VerifStatus::Disproven,
+        ],
+        "each mutually exclusive branch call-site must retain one proof result"
+    );
+    assert!(results.iter().all(|result| {
+        result.func_name == "function:branch"
+            && result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == mir.canonical_digest()
+            })
+    }));
+    assert_eq!(
+        results[1]
+            .diagnostic
+            .as_ref()
+            .expect("disproven branch call diagnostic")
+            .span,
+        receipts[1].span
+    );
+}
+
+#[test]
 fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     let _guard = super::FfiEnvLock::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
