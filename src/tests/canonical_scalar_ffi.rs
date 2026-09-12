@@ -1110,6 +1110,132 @@ pub func call_imported_alias(first: i64, second: i64) -> i64 {
         .collect::<Vec<_>>();
     assert_eq!(receipt_instruction_ids, repeated_instruction_ids);
 
+    // The imported alias path must keep the receipt table itself authoritative:
+    // moving a receipt under a forged key is rejected by every direct consumer.
+    let baseline_route = mir.route_receipt("scalar-ffi-sequence-v1");
+    let first_id = mir
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("first imported alias receipt key");
+    let forged_map_key =
+        crate::core::mir::MirInstructionId::new("inst:call:forged-imported-alias-map-key")
+            .expect("forged imported alias receipt key");
+    let mut key_forged_receipts = mir.ffi_calls().clone();
+    let key_forged_receipt = key_forged_receipts
+        .remove(&first_id)
+        .expect("first imported alias receipt");
+    key_forged_receipts.insert(forged_map_key, key_forged_receipt);
+    let mut key_forged = mir.clone();
+    key_forged.replace_ffi_calls_for_test_only(key_forged_receipts);
+    let key_forged_route = key_forged.route_receipt("scalar-ffi-sequence-v1");
+    assert_ne!(baseline_route.ffi_digest, key_forged_route.ffi_digest);
+    assert_ne!(baseline_route.mir_digest, key_forged_route.mir_digest);
+    let key_table_errors = crate::core::mir::validate_ffi_receipt_table(
+        key_forged.functions(),
+        key_forged.ffi_calls(),
+    );
+    assert!(key_table_errors
+        .iter()
+        .any(|error| error.contains("orphaned from a MIR extern call")));
+    let key_reference_error = MirReferenceInterpreter::new(&key_forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged imported alias receipt key");
+    assert!(key_reference_error.to_string().contains("receipt key"));
+    let key_bytecode_error = compile_mir_program(&key_forged)
+        .expect_err("bytecode must reject a forged imported alias receipt key");
+    assert!(key_bytecode_error.iter().any(|error| {
+        error.message.contains("identity/ABI validation")
+            || error.message.contains("orphaned from a MIR extern call")
+    }));
+    let key_native_error = crate::codegen::mir::validate_mir_native(&key_forged)
+        .expect_err("native validator must reject a forged imported alias receipt key");
+    assert!(key_native_error.iter().any(|error| {
+        error.message.contains("orphaned from a MIR extern call")
+            || error.message.contains("receipt key")
+    }));
+    let key_capability_error = crate::verifier::validate_mir_capabilities(&key_forged)
+        .expect_err("capability gate must reject a forged imported alias receipt key");
+    assert!(key_capability_error.iter().any(|error| {
+        error.contains("orphaned from a MIR extern call") || error.contains("receipt key")
+    }));
+    let key_verifier_error =
+        crate::verifier::verify_mir(&key_forged, "forged-imported-alias-receipt-key".into())
+            .expect_err("verifier must reject a forged imported alias receipt key");
+    assert!(
+        key_verifier_error.contains("orphaned from a MIR extern call")
+            || key_verifier_error.contains("receipt key")
+    );
+
+    // Mutating one declaration descriptor must be rejected as a cross-call
+    // declaration-shape mismatch, even though the symbol and call order stay intact.
+    let first_argument = mir
+        .ffi_calls()
+        .get(&first_id)
+        .and_then(|call| call.arguments.first())
+        .expect("first imported alias argument value");
+    let actual_first_type = wrapper
+        .values
+        .get(first_argument)
+        .map(|value| value.ty.clone())
+        .expect("first imported alias argument TypeDesc");
+    let declared_first_type = mir
+        .ffi_calls()
+        .get(&first_id)
+        .and_then(|call| call.parameter_types.first())
+        .expect("first imported alias parameter TypeDesc");
+    assert_ne!(actual_first_type, *declared_first_type);
+    let mut descriptor_forged_receipts = mir.ffi_calls().clone();
+    let descriptor_forged = descriptor_forged_receipts
+        .get_mut(&first_id)
+        .expect("first imported alias receipt for descriptor forgery");
+    descriptor_forged.parameter_types[0] = actual_first_type.clone();
+    descriptor_forged.parameter_conversions[0] =
+        crate::core::mir::MirFfiAbiConversion::for_argument(
+            mir.type_catalog(),
+            &actual_first_type,
+            &actual_first_type,
+        )
+        .expect("identity conversion for forged descriptor");
+    let mut descriptor_forged_program = mir.clone();
+    descriptor_forged_program.replace_ffi_calls_for_test_only(descriptor_forged_receipts);
+    let descriptor_table_errors = crate::core::mir::validate_ffi_symbol_declaration_shapes(
+        descriptor_forged_program.ffi_calls(),
+    );
+    assert!(descriptor_table_errors
+        .iter()
+        .any(|error| error.contains("incompatible declaration TypeDescs")));
+    let descriptor_reference_error = MirReferenceInterpreter::new(&descriptor_forged_program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged imported alias descriptor");
+    assert!(descriptor_reference_error
+        .to_string()
+        .contains("incompatible declaration TypeDescs"));
+    let descriptor_bytecode_error = compile_mir_program(&descriptor_forged_program)
+        .expect_err("bytecode must reject a forged imported alias descriptor");
+    assert!(descriptor_bytecode_error
+        .iter()
+        .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+    let descriptor_native_error =
+        crate::codegen::mir::validate_mir_native(&descriptor_forged_program)
+            .expect_err("native validator must reject a forged imported alias descriptor");
+    assert!(descriptor_native_error
+        .iter()
+        .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+    let descriptor_capability_error =
+        crate::verifier::validate_mir_capabilities(&descriptor_forged_program)
+            .expect_err("capability gate must reject a forged imported alias descriptor");
+    assert!(descriptor_capability_error
+        .iter()
+        .any(|error| error.contains("incompatible declaration TypeDescs")));
+    let descriptor_verifier_error = crate::verifier::verify_mir(
+        &descriptor_forged_program,
+        "forged-imported-alias-descriptor".into(),
+    )
+    .expect_err("verifier must reject a forged imported alias descriptor");
+    assert!(descriptor_verifier_error.contains("incompatible declaration TypeDescs"));
+
     struct ImportedAliasSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for ImportedAliasSequenceOracle {
         fn call(
