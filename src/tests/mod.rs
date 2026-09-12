@@ -179,8 +179,6 @@ pub(crate) mod error_co_h2;
 pub(crate) mod fmt_corpus_eval;
 
 use crate::{core, interp, lexer, parser};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::sync::Arc;
 
 /// Probe the system linker once per test process.
@@ -218,12 +216,47 @@ pub(crate) fn linker_flag() -> &'static [&'static str] {
     })
 }
 
-/// Cache the compiled runtime static library across test cases.
-/// Returns path to a cached `.a` compiled from `standalone.rs`.
-/// The cache key is a hash of `standalone.rs` + `mod.rs` sources.
+/// Cache the compiled test runtime static library across test cases.
+///
+/// This cache is deliberately separate from the production native cache: test
+/// FFI probes compile the extra `mimi_test_ub_symbols` cfg.  Its identity still
+/// follows the production framing rules (compiler identity, exact arguments,
+/// source paths and bytes) so a test-only archive cannot silently survive a
+/// runtime or toolchain change.  The external `trap_msgs.rs` include is part of
+/// the effective standalone source graph and is therefore included explicitly.
+#[cfg(unix)]
+fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
+    path.as_os_str().as_encoded_bytes().to_vec()
+}
+
+struct TestRuntimeTempGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TestRuntimeTempGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
-    use std::hash::Hash;
-    use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
 
@@ -231,30 +264,79 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     let runtime_rs = manifest.join("src/runtime/standalone.rs");
     let runtime_dir = manifest.join("src/runtime");
 
-    let mut hasher = DefaultHasher::new();
-    // The standalone build is `include!("mod.rs")` which pulls in every
-    // `src/runtime/*.rs` module — the cache key must cover all of them, or a
-    // change to e.g. regex.rs/net.rs would silently link a stale runtime.
-    let mut runtime_files: Vec<_> = std::fs::read_dir(&runtime_dir)
-        .map_err(|e| format!("read runtime dir: {}", e))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "rs").unwrap_or(false))
-        .collect();
-    runtime_files.push(runtime_rs.clone());
+    let mut runtime_files = std::fs::read_dir(&runtime_dir)
+        .map_err(|e| format!("read runtime dir: {e}"))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| format!("read runtime dir entry: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect::<Vec<_>>();
+    // The standalone build is `include!("mod.rs")`, and `mod.rs` includes the
+    // diagnostic trap messages from outside the runtime directory.
+    runtime_files.push(manifest.join("src/diagnostic/trap_msgs.rs"));
     runtime_files.sort();
-    for path in runtime_files {
-        let mut f = std::fs::File::open(&path).map_err(|e| format!("open {:?}: {}", path, e))?;
-        let mut buf = Vec::with_capacity(8192);
-        f.read_to_end(&mut buf)
-            .map_err(|e| format!("read {:?}: {}", path, e))?;
-        buf.hash(&mut hasher);
+
+    let mut compiler = std::process::Command::new("rustc");
+    compiler.args(["--version", "--verbose"]);
+    let compiler = compiler
+        .output()
+        .map_err(|e| format!("runtime compiler identity (rustc): {e}"))?;
+    if !compiler.status.success() {
+        return Err(format!(
+            "runtime compiler identity failed with exit code {:?}",
+            compiler.status.code()
+        ));
     }
-    let hash = hasher.finish();
+    let compiler_identity = String::from_utf8(compiler.stdout)
+        .map_err(|e| format!("runtime compiler identity is not UTF-8: {e}"))?;
+
+    let compiler_args = [
+        "--edition",
+        "2021",
+        "--crate-type",
+        "staticlib",
+        "--cfg",
+        "standalone",
+        "--cfg",
+        "mimi_test_ub_symbols",
+        "--crate-name",
+        "mimi_runtime",
+        "-A",
+        "dead_code",
+    ];
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mimi-test-runtime-v2\0");
+    hasher.update(b"rustc\0");
+    hasher.update(compiler_identity.trim_end().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(b"rustc-args\0");
+    for arg in compiler_args {
+        let bytes = arg.as_bytes();
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    for path in runtime_files {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("inspect runtime source {:?}: {e}", path))?;
+        if !metadata.file_type().is_file() {
+            return Err(format!("runtime source is not a regular file: {path:?}"));
+        }
+        let path_bytes = test_runtime_cache_path_bytes(&path);
+        hasher.update(&(path_bytes.len() as u64).to_le_bytes());
+        hasher.update(&path_bytes);
+        let contents = std::fs::read(&path).map_err(|e| format!("read {:?}: {e}", path))?;
+        hasher.update(&(contents.len() as u64).to_le_bytes());
+        hasher.update(&contents);
+    }
+    let hash = hasher.finalize().to_hex().to_string();
 
     let cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("mkdir cache: {}", e))?;
-    let lib_path = cache_dir.join(format!("libmimi_runtime_{:016x}.a", hash));
+    let lib_path = cache_dir.join(format!("libmimi_runtime_{hash}.a"));
     let lock_path = cache_dir.join("_build.lock");
 
     // File lock to serialize runtime compilation across parallel tests
@@ -281,20 +363,12 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     }
 
     // Write a temp file then atomically rename to avoid partial writes
-    let tmp_path = cache_dir.join(format!("libmimi_runtime_{:016x}.tmp", hash));
+    let tmp_path = cache_dir.join(format!("libmimi_runtime_{hash}.tmp"));
+    let _tmp_guard = TestRuntimeTempGuard {
+        path: tmp_path.clone(),
+    };
     let output = std::process::Command::new("rustc")
-        .arg("--edition")
-        .arg("2021")
-        .arg("--crate-type")
-        .arg("staticlib")
-        .arg("--cfg")
-        .arg("standalone")
-        // M2: enable deliberate UB test symbols only for FFI e2e .so builds.
-        // Production `mimi build` does not pass this cfg.
-        .arg("--cfg")
-        .arg("mimi_test_ub_symbols")
-        .arg("--crate-name")
-        .arg("mimi_runtime")
+        .args(compiler_args)
         .arg("-o")
         .arg(&tmp_path)
         .arg(&runtime_rs)

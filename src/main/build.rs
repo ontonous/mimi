@@ -250,6 +250,16 @@ fn runtime_cache_attempt_should_retry(error: &str, attempt: u8) -> bool {
         && error.starts_with(RUNTIME_CACHE_IDENTITY_CHANGED_PREFIX)
 }
 
+/// Return whether a build can use the host-native content-addressed runtime.
+///
+/// The cache archive is intentionally limited to the exact default executable
+/// path.  A target triple, shared-library relocation model, or `no_std` link
+/// mode changes the runtime artifact or its link contract, so those builds
+/// must compile their own per-build archive in the staging directory.
+fn native_runtime_cache_eligible(target: Option<&str>, shared: bool, no_std: bool) -> bool {
+    target.is_none() && !shared && !no_std
+}
+
 fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
     let mut command = std::process::Command::new("rustc");
     command.args(["--version", "--verbose"]);
@@ -933,7 +943,7 @@ pub(crate) fn build(
     // Native executable builds share an immutable, content-addressed runtime
     // archive. Cross/shared builds keep their per-build archive because target
     // and relocation flags change the artifact ABI.
-    let use_native_cache = cfg!(unix) && target.is_none() && !shared && !no_std;
+    let use_native_cache = cfg!(unix) && native_runtime_cache_eligible(target, shared, no_std);
     let runtime_lib = if use_native_cache {
         #[cfg(unix)]
         {
@@ -1059,10 +1069,10 @@ pub(crate) fn build(
 mod tests {
     use super::{
         cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
-        ensure_runtime_cache_key_stable, publish_runtime_cache, runtime_cache_attempt_should_retry,
-        runtime_cache_hit, runtime_cache_key, runtime_cache_key_with_asan,
-        runtime_cache_key_with_asan_and_args, runtime_cache_temp_path, runtime_compiler_args,
-        runtime_include_literals,
+        ensure_runtime_cache_key_stable, native_runtime_cache_eligible, publish_runtime_cache,
+        runtime_cache_attempt_should_retry, runtime_cache_hit, runtime_cache_key,
+        runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args, runtime_cache_temp_path,
+        runtime_compiler_args, runtime_include_literals,
     };
     use std::fs;
 
@@ -1322,6 +1332,23 @@ mod tests {
         assert!(!runtime_cache_attempt_should_retry(
             "runtime compile (rustc): unavailable",
             0
+        ));
+    }
+
+    #[test]
+    fn native_runtime_cache_isolation_rejects_non_default_artifact_modes() {
+        assert!(native_runtime_cache_eligible(None, false, false));
+        assert!(!native_runtime_cache_eligible(
+            Some("x86_64-unknown-linux-gnu"),
+            false,
+            false
+        ));
+        assert!(!native_runtime_cache_eligible(None, true, false));
+        assert!(!native_runtime_cache_eligible(None, false, true));
+        assert!(!native_runtime_cache_eligible(
+            Some("x86_64-unknown-linux-gnu"),
+            true,
+            true
         ));
     }
 
