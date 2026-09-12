@@ -185,11 +185,7 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
 }
 
 #[cfg(unix)]
-fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
-    let key = runtime_cache_key(runtime_rs)?;
-    let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
-    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
-    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
+fn acquire_runtime_cache_lock(cache_dir: &Path) -> Result<std::fs::File, String> {
     let lock_path = cache_dir.join("build.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -207,6 +203,16 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
             ));
         }
     }
+    Ok(lock_file)
+}
+
+#[cfg(unix)]
+fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
+    let key = runtime_cache_key(runtime_rs)?;
+    let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
+    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
+    let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
     cleanup_runtime_cache_temps(&cache_dir, &key);
     if cache_path.exists() {
         return Ok(cache_path);
@@ -762,6 +768,26 @@ mod tests {
             runtime_cache_key_with_asan(&runtime_rs, true)
                 .expect("recompute ASan runtime cache key")
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_open_failure_is_structured() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-lock-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("build.lock")).expect("create runtime cache lock directory");
+
+        let error = super::acquire_runtime_cache_lock(&dir)
+            .expect_err("directory lock path must fail to open as a file");
+        assert!(error.starts_with("open runtime cache lock:"), "{error}");
 
         fs::remove_dir_all(&dir).ok();
     }
