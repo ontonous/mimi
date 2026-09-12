@@ -449,6 +449,27 @@ pub(crate) fn verify_ffi_program(
         }
     }
 
+    let expected_instructions = program
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .filter(|(_, contract)| contract.requires.is_some() || contract.ensures.is_some())
+        .map(|(instruction, _)| instruction.clone())
+        .collect::<BTreeSet<_>>();
+    let observed_instructions = checks_by_instruction
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing_instructions = expected_instructions
+        .difference(&observed_instructions)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !missing_instructions.is_empty() {
+        return Err(format!(
+            "canonical MIR FFI verifier missing proof observations for call-sites: {}",
+            missing_instructions.join(", ")
+        ));
+    }
+
     let mut results = Vec::new();
     // The FFI receipt table is keyed by instruction identity for lookup, but
     // that identity is not the execution order.  Emit verifier observations
@@ -536,6 +557,16 @@ pub(crate) fn verify_ffi_program(
             artifact,
             trusted_subset_domain,
         });
+    }
+    if !checks_by_instruction.is_empty() {
+        let extra_instructions = checks_by_instruction
+            .keys()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "canonical MIR FFI verifier found observations without receipt call-sites: {}",
+            extra_instructions.join(", ")
+        ));
     }
     Ok(results)
 }
