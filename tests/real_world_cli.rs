@@ -863,6 +863,80 @@ fn canonical_scalar_ffi_cli_reuses_runtime_cache_identity_across_default_and_mir
     fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_parallel_builds_reuse_locked_runtime_cache() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_runtime_cache_parallel_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create parallel runtime cache directory");
+    let source = dir.join("parallel-cache.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n").expect("write parallel runtime cache source");
+    let default_binary = dir.join("default");
+    let mir_binary = dir.join("mir");
+
+    let mut default_command = Command::new(mimi_bin());
+    default_command
+        .current_dir(project_root())
+        .args(["build"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&default_binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let default_child = default_command
+        .spawn()
+        .expect("spawn parallel default cache build");
+
+    let mut mir_command = Command::new(mimi_bin());
+    mir_command
+        .current_dir(project_root())
+        .args(["build", "--mir"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&mir_binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mir_child = mir_command.spawn().expect("spawn parallel MIR cache build");
+
+    let default_build = default_child
+        .wait_with_output()
+        .expect("wait for parallel default cache build");
+    let mir_build = mir_child
+        .wait_with_output()
+        .expect("wait for parallel MIR cache build");
+    for (label, output) in [("default", &default_build), ("MIR", &mir_build)] {
+        assert!(
+            output.status.success(),
+            "parallel {label} cache build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(default_binary.is_file(), "parallel default binary missing");
+    assert!(mir_binary.is_file(), "parallel MIR binary missing");
+
+    let cache_path = native_runtime_cache_path();
+    let cache_bytes = fs::read(&cache_path).expect("read parallel runtime cache archive");
+    assert_eq!(
+        cache_bytes.get(..8),
+        Some(b"!<arch>\n".as_slice()),
+        "parallel builds left an invalid runtime cache archive"
+    );
+
+    fs::remove_file(&default_binary).ok();
+    fs::remove_file(&mir_binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn canonical_scalar_ffi_cli_successful_builds_clean_staging_directories() {
     if !can_link() {

@@ -1575,6 +1575,16 @@ mod tests {
                 fs::write(marker, b"acquired").expect("write child lock marker");
                 drop(lock);
             }
+            "lock-exit" => {
+                let directory = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_DIR")
+                    .expect("runtime cache holder-exit probe directory");
+                let marker = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_MARKER")
+                    .expect("runtime cache holder-exit probe marker");
+                let _lock = acquire_runtime_cache_lock(std::path::Path::new(&directory))
+                    .expect("acquire exiting runtime cache lock");
+                fs::write(marker, b"held").expect("write holder-exit lock marker");
+                std::process::exit(23);
+            }
             "stale" => {
                 let temporary = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_TEMP")
                     .expect("runtime cache stale probe temporary");
@@ -1665,6 +1675,68 @@ mod tests {
         assert!(status.success(), "child lock probe failed: {status}");
         assert_eq!(
             fs::read(&marker).expect("read child lock marker"),
+            b"acquired"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_file_survives_holder_exit_and_reacquires() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-holder-exit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create holder-exit cache directory");
+        let first_marker = root.join("holder-exited");
+        let first_status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "build::tests::runtime_cache_cross_process_probe",
+                "--nocapture",
+            ])
+            .env("MIMI_RUNTIME_CACHE_PROBE_MODE", "lock-exit")
+            .env("MIMI_RUNTIME_CACHE_PROBE_DIR", &root)
+            .env("MIMI_RUNTIME_CACHE_PROBE_MARKER", &first_marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn holder-exit runtime cache probe");
+        assert_eq!(first_status.code(), Some(23));
+        assert_eq!(
+            fs::read(&first_marker).expect("read holder-exit marker"),
+            b"held"
+        );
+        let lock_path = root.join("build.lock");
+        assert!(
+            lock_path.is_file(),
+            "cache lock file disappeared with holder"
+        );
+
+        let second_marker = root.join("reacquired");
+        let second_status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "build::tests::runtime_cache_cross_process_probe",
+                "--nocapture",
+            ])
+            .env("MIMI_RUNTIME_CACHE_PROBE_MODE", "lock")
+            .env("MIMI_RUNTIME_CACHE_PROBE_DIR", &root)
+            .env("MIMI_RUNTIME_CACHE_PROBE_MARKER", &second_marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn post-exit runtime cache probe");
+        assert!(
+            second_status.success(),
+            "post-exit lock probe failed: {second_status}"
+        );
+        assert_eq!(
+            fs::read(&second_marker).expect("read post-exit lock marker"),
             b"acquired"
         );
         fs::remove_dir_all(&root).ok();
