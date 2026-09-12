@@ -65,6 +65,15 @@ const RESULT_RANGE_I64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_i64_overflow(x: i64) -> i64; }
 func main() -> i64 { mir_ffi_result_i64_overflow(7 as i64) }
 "#;
+const RESULT_RANGE_F64_C_SOURCE: &str = r#"
+#include <math.h>
+#include <stdint.h>
+double mir_ffi_result_f64_nan(int64_t x) { (void)x; return NAN; }
+"#;
+const RESULT_RANGE_F64_SOURCE: &str = r#"
+extern "C" { func mir_ffi_result_f64_nan(x: i64) -> f64; }
+func main() -> f64 { mir_ffi_result_f64_nan(7 as i64) }
+"#;
 const MULTI_CALL_REQUIRES_C_SOURCE: &str = r#"
 #include <stdint.h>
 static int64_t call_count;
@@ -942,6 +951,152 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
     };
     let native = super::link_and_observe_module(&generator, &config, counter)
         .expect("native integer narrow range FFI execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+}
+
+#[test]
+fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, RESULT_RANGE_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(RESULT_RANGE_F64_SOURCE)
+        .tokenize()
+        .expect("lex non-finite result conversion fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse non-finite result conversion fixture");
+    let checked = crate::core::check_program(&file).expect("check non-finite result conversion");
+    let mut mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize non-finite result conversion MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt
+                    .result
+                    .clone()
+                    .expect("non-finite result conversion value"),
+            )
+        })
+        .expect("non-finite result conversion receipt");
+    let i64_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i64 non-finite result target TypeDesc");
+    // Model the caller-side integer result slot so this test reaches the
+    // checker-owned FloatToSignedInteger receipt in every consumer.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Float { bits: 64 },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("non-finite result conversion receipt")
+        .result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct NonFiniteResultOracle;
+    impl MirReferenceFfiResolver for NonFiniteResultOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_result_f64_nan" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::Int(7)] {
+                return Err(format!("unexpected non-finite arguments {arguments:?}"));
+            }
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Float { bits: 64 },
+                    to: MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("non-finite result conversion receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::FloatBits(f64::NAN.to_bits()))
+        }
+    }
+
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&NonFiniteResultOracle)
+        .execute(&owner, &[])
+        .expect_err("reference must reject a non-finite FFI result conversion");
+    assert!(reference_error
+        .to_string()
+        .contains("outside target integer range"));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-nonfinite".into())
+        .expect("verify non-finite result conversion MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free non-finite result bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject a non-finite FFI result conversion");
+    assert!(bytecode_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(vm.stdout(), "");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_nonfinite");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native non-finite result conversion lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid non-finite result conversion LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(RESULT_RANGE_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native non-finite result conversion execution");
     assert_ne!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "");
     assert!(
