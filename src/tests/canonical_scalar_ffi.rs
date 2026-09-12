@@ -3178,6 +3178,29 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
             crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
         )
     }));
+    let ffi_verified = verified
+        .iter()
+        .filter(|result| result.message.contains("canonical MIR extern"))
+        .collect::<Vec<_>>();
+    assert_eq!(ffi_verified.len(), receipts.len());
+    assert_eq!(
+        ffi_verified
+            .iter()
+            .map(|result| result.func_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "function:call_imported_alias",
+            "function:call_imported_alias",
+            "function:call_imported_alias_extra",
+        ],
+        "verifier FFI results must preserve canonical receipt caller order"
+    );
+    assert!(ffi_verified.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == receipt.mir_digest
+        })
+    }));
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free imported alias sequence bytecode");
