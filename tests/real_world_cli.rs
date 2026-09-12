@@ -1337,6 +1337,114 @@ fn canonical_scalar_ffi_cli_verify_orders_diagnostics_and_roundtrips_receipt() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_verify_repeats_and_rejects_reordered_manifest() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_verify_repeat_manifest_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create verifier-repeat CLI fixture directory");
+    let source = dir.join("verify-repeat.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: true;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    0\n}\n",
+    )
+    .expect("write verifier-repeat CLI source");
+
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn verifier-repeat receipt inspection");
+    assert!(inspect.status.success());
+    let manifest_text = String::from_utf8_lossy(&inspect.stdout);
+    let manifest_lines = manifest_text.lines().collect::<Vec<_>>();
+    assert_eq!(
+        manifest_lines.len(),
+        10,
+        "receipt manifest must be complete"
+    );
+    let mut reordered = manifest_lines[1..]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    reordered.reverse();
+    let reordered = std::iter::once(manifest_lines[0].to_owned())
+        .chain(reordered)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&reordered),
+        Err("invalid MIR route manifest: field 'root_owners' at row 0, expected 'schema'".into())
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .expect("spawn verifier-repeat CLI verifier")
+    };
+    let runs = [verify(false), verify(false), verify(true), verify(true)];
+    for (index, output) in runs.iter().enumerate() {
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "verifier run {index} exit code"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("canonical MIR extern requires contract disproven"),
+            "verifier run {index} must retain the failed receipt diagnostic"
+        );
+    }
+    assert_eq!(
+        runs[0].stderr, runs[1].stderr,
+        "repeated default verifier runs must retain byte-identical diagnostics"
+    );
+    assert_eq!(
+        runs[2].stderr, runs[3].stderr,
+        "repeated explicit MIR verifier runs must retain byte-identical diagnostics"
+    );
+    assert_eq!(
+        runs[0].stderr, runs[2].stderr,
+        "default and explicit MIR verifier diagnostics must remain identical"
+    );
+    let stable_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains("canonical MIR extern requires contract")
+                    || line.contains("verified in")
+            })
+            .map(|line| {
+                let semantic = line.split(" (").next().unwrap_or(line);
+                semantic.split(" in ").next().unwrap_or(semantic).to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    for (index, output) in runs.iter().enumerate().skip(1) {
+        assert_eq!(
+            stable_summary(&runs[0]),
+            stable_summary(output),
+            "verifier run {index} changed the semantic summary"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
