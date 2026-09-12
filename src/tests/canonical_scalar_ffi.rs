@@ -2046,7 +2046,10 @@ func main() -> i64 {
         first[0].constraint_count, second[0].constraint_count,
         "joined-path proof summary must be stable across repeated verification"
     );
-    assert!(first[0].constraint_count > 0);
+    assert_eq!(
+        first[0].constraint_count, 4,
+        "one joined receipt must aggregate exactly one path condition plus the call condition per branch"
+    );
     assert_eq!(first[0].func_name, "function:join");
     assert!(first[0].artifact.as_ref().is_some_and(|artifact| {
         artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
