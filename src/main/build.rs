@@ -215,6 +215,7 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
             Ok(path)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    files.extend(runtime_cache_included_sources(runtime_rs, runtime_dir)?);
     files.push(runtime_rs.to_path_buf());
     files.sort();
 
@@ -242,6 +243,42 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
         hasher.update(&contents);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn runtime_cache_included_sources(
+    runtime_rs: &Path,
+    runtime_dir: &Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let is_standalone_runtime = runtime_rs
+        .file_name()
+        .is_some_and(|name| name == "standalone.rs")
+        && runtime_dir
+            .file_name()
+            .is_some_and(|name| name == "runtime")
+        && runtime_dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "src");
+    if !is_standalone_runtime {
+        return Ok(Vec::new());
+    }
+
+    // standalone.rs includes runtime/mod.rs, which in turn includes this
+    // shared trap wording file outside src/runtime.  It is part of the
+    // compiled archive and therefore part of the cache identity.
+    let trap_msgs = runtime_dir
+        .parent()
+        .expect("standalone runtime source parent is src")
+        .join("diagnostic")
+        .join("trap_msgs.rs");
+    let metadata = std::fs::symlink_metadata(&trap_msgs)
+        .map_err(|error| format!("inspect runtime included source: {trap_msgs:?}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "runtime included source is not a regular file: {trap_msgs:?}"
+        ));
+    }
+    Ok(vec![trap_msgs])
 }
 
 #[cfg(unix)]
@@ -875,6 +912,93 @@ mod tests {
         assert_ne!(changed_content, changed_file_set);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_includes_standalone_external_source() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-included-source-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let runtime_dir = root.join("src/runtime");
+        let diagnostic_dir = root.join("src/diagnostic");
+        fs::create_dir_all(&runtime_dir).expect("create included runtime directory");
+        fs::create_dir_all(&diagnostic_dir).expect("create included diagnostic directory");
+        let runtime_rs = runtime_dir.join("standalone.rs");
+        let trap_msgs = diagnostic_dir.join("trap_msgs.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write included runtime source");
+        fs::write(runtime_dir.join("mod.rs"), b"fn module() {}\n")
+            .expect("write runtime module source");
+        fs::write(&trap_msgs, b"const MESSAGE: &str = \"before\";\n")
+            .expect("write included trap source");
+
+        let first = runtime_cache_key(&runtime_rs).expect("compute key with included source");
+        fs::write(&trap_msgs, b"const MESSAGE: &str = \"after\";\n")
+            .expect("change included trap source");
+        let second = runtime_cache_key(&runtime_rs).expect("recompute key with included source");
+        assert_ne!(
+            first, second,
+            "included runtime source must affect cache identity"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_rejects_missing_standalone_external_source() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-missing-included-source-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let runtime_dir = root.join("src/runtime");
+        fs::create_dir_all(&runtime_dir).expect("create missing included runtime directory");
+        let runtime_rs = runtime_dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let error = runtime_cache_key(&runtime_rs)
+            .expect_err("missing standalone included source must fail closed");
+        assert!(
+            error.starts_with("inspect runtime included source:"),
+            "{error}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_rejects_non_regular_standalone_external_source() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-non-regular-included-source-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let runtime_dir = root.join("src/runtime");
+        let diagnostic_dir = root.join("src/diagnostic");
+        fs::create_dir_all(&runtime_dir).expect("create non-regular included runtime directory");
+        fs::create_dir_all(diagnostic_dir.join("trap_msgs.rs"))
+            .expect("create non-regular included trap source");
+        let runtime_rs = runtime_dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let error = runtime_cache_key(&runtime_rs)
+            .expect_err("non-regular standalone included source must fail closed");
+        assert!(
+            error.starts_with("runtime included source is not a regular file:"),
+            "{error}"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

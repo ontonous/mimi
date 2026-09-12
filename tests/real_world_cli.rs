@@ -168,6 +168,12 @@ fn native_runtime_cache_path() -> PathBuf {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect::<Vec<_>>();
+    files.push(
+        runtime_dir
+            .parent()
+            .expect("runtime source src parent")
+            .join("diagnostic/trap_msgs.rs"),
+    );
     files.push(runtime_rs);
     files.sort();
 
