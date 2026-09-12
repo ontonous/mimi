@@ -1851,22 +1851,38 @@ fn canonical_scalar_ffi_native_multi_module_declaration_failure_is_source_ordere
         "use left;\nuse right;\nfunc main() -> i64 { left(1 as i64) + right(2 as i64) }\n",
     )
     .expect("write multi-module native FFI entry");
-    let binary = dir.join("out");
-
-    let build = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("build")
-        .arg("--mir")
-        .arg(&source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .expect("spawn multi-module native FFI build");
-    assert!(
-        !build.status.success(),
-        "reserved multi-module FFI symbols unexpectedly built"
+    let run_build = |explicit_mir: bool, output: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .arg("-o")
+            .arg(output)
+            .output()
+            .expect("spawn multi-module native FFI build")
+    };
+    let default_binary = dir.join("default.out");
+    let mir_binary = dir.join("mir.out");
+    let build_default = run_build(false, &default_binary);
+    let build_mir = run_build(true, &mir_binary);
+    for (label, build) in [("default", &build_default), ("mir", &build_mir)] {
+        assert!(
+            !build.status.success(),
+            "reserved multi-module FFI symbols unexpectedly built ({label})"
+        );
+        assert!(
+            build.stdout.is_empty(),
+            "failed multi-module FFI build emitted stdout ({label})"
+        );
+    }
+    assert_eq!(
+        build_default.stderr, build_mir.stderr,
+        "default and explicit MIR builds changed multi-module native FFI diagnostics"
     );
-    let stderr = String::from_utf8_lossy(&build.stderr);
+    let stderr = String::from_utf8_lossy(&build_default.stderr);
     assert!(
         stderr.contains("left.mimi")
             && stderr.contains("left.mimi:2:")
@@ -1883,7 +1899,7 @@ fn canonical_scalar_ffi_native_multi_module_declaration_failure_is_source_ordere
         "multi-module native FFI failure fell back to legacy: {stderr}"
     );
     assert!(
-        !binary.exists(),
+        !default_binary.exists() && !mir_binary.exists(),
         "failed multi-module native FFI build left an output binary"
     );
 
