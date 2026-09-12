@@ -2348,6 +2348,82 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_public_verifier_artifacts_bind_source_hash_by_entrypoint() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_source_hash_first(value: i64) -> i64 requires: value >= 0 ensures: true;
+    func mir_ffi_source_hash_second(value: i64) -> i64 requires: value >= 0 ensures: result == value;
+}
+func main() -> i64 {
+    mir_ffi_source_hash_first(7 as i64);
+    mir_ffi_source_hash_second(-8 as i64);
+    0
+}
+"#;
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("check source-hash FFI verifier fixture");
+
+    let assert_results = |label: &str, results: &[crate::verifier::VerificationResult]| {
+        assert_eq!(results.len(), 2, "{label} must retain both FFI receipts");
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash.len() == 64
+            })
+        }));
+    };
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect("checked source-hash FFI verifier");
+    assert_results("verify_checked", &checked_results);
+    assert!(checked_results.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.source_hash == source_hash)
+    }));
+
+    let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash.clone())
+        .expect("dual source-hash FFI verifier");
+    assert_results("verify_checked_dual", &dual_results);
+    assert!(dual_results.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.source_hash == source_hash)
+    }));
+
+    let ffi_results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("FFI-only source-hash boundary verifier");
+    assert_results("verify_ffi_checked", &ffi_results);
+    assert!(ffi_results.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.source_hash.is_empty())
+    }));
+
+    let source_results =
+        crate::verifier::verify_ffi_source(SOURCE).expect("source entrypoint FFI verifier");
+    assert_results("verify_ffi_source", &source_results);
+    assert!(source_results.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.source_hash == source_hash)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_branch_merge_preserves_per_callsite_result_cardinality() {
     let source = r#"
 extern "C" { func mir_ffi_branch(value: i64) -> i64 requires: value >= 0; }

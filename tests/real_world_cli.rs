@@ -1063,6 +1063,83 @@ fn canonical_scalar_ffi_cli_multi_callsite_mixed_verdict_matches_receipt_and_mir
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_build_verify_reports_only_failed_receipt() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_build_verify_multi_callsite_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create build-verify multi-callsite fixture directory");
+    let source = dir.join("mixed.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    0\n}\n",
+    )
+    .expect("write build-verify multi-callsite source");
+
+    let mut outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "mixed-mir-output"
+        } else {
+            "mixed-default-output"
+        });
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg("--verify-ffi")
+            .arg("--emit-ir")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("spawn multi-callsite build verifier");
+        assert!(
+            !output.status.success(),
+            "build --verify-ffi {:?} must reject the second receipt",
+            explicit_mir
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failed build --verify-ffi {:?} emitted an artifact on stdout",
+            explicit_mir
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("FFI contract verification failed")
+                && stderr.contains("canonical MIR extern requires contract disproven")
+                && stderr.contains("second(-8 as i64)"),
+            "build --verify-ffi {:?} lost the failed receipt diagnostic: {stderr}",
+            explicit_mir
+        );
+        assert!(
+            !stderr.contains("first(7 as i64)"),
+            "build --verify-ffi {:?} reported the already-proven receipt as failed: {stderr}",
+            explicit_mir
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(
+            !binary.exists(),
+            "failed build --verify-ffi {:?} left an output binary",
+            explicit_mir
+        );
+        outputs.push(output);
+    }
+    assert_eq!(
+        outputs[0].stderr, outputs[1].stderr,
+        "default and explicit MIR build verifier diagnostics must match"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
