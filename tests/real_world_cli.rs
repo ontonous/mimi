@@ -670,6 +670,18 @@ fn canonical_scalar_ffi_cli_multiple_contract_failures_precede_linker_diagnostic
         stable_verify_summary(&verifies[0]),
         stable_verify_summary(&verifies[1])
     );
+    let default_verify_repeat = verify(false);
+    let mir_verify_repeat = verify(true);
+    assert_eq!(
+        stable_verify_summary(&verifies[0]),
+        stable_verify_summary(&default_verify_repeat)
+    );
+    assert_eq!(
+        stable_verify_summary(&verifies[1]),
+        stable_verify_summary(&mir_verify_repeat)
+    );
+    assert_eq!(verifies[0].stderr, default_verify_repeat.stderr);
+    assert_eq!(verifies[1].stderr, mir_verify_repeat.stderr);
     for output in &verifies {
         assert!(!output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -711,7 +723,11 @@ fn canonical_scalar_ffi_cli_multiple_contract_failures_precede_linker_diagnostic
     let default_binary = dir.join("multi-contract-default");
     let mir_binary = dir.join("multi-contract-mir");
     let builds = [build(false, &default_binary), build(true, &mir_binary)];
+    let default_build_repeat = build(false, &default_binary);
+    let mir_build_repeat = build(true, &mir_binary);
     assert_eq!(builds[0].stderr, builds[1].stderr);
+    assert_eq!(builds[0].stderr, default_build_repeat.stderr);
+    assert_eq!(builds[1].stderr, mir_build_repeat.stderr);
     for output in &builds {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
