@@ -600,6 +600,34 @@ fn canonical_scalar_ffi_cli_multiple_contract_failures_precede_linker_diagnostic
     )
     .expect("write scalar FFI multi-contract failure source");
 
+    let receipt = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn multi-contract receipt inspection");
+    assert!(receipt.status.success());
+    assert_eq!(
+        mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&String::from_utf8_lossy(
+            &receipt.stdout
+        ),)
+        .expect("multi-contract receipt manifest"),
+        checked_route_receipt(&source)
+    );
+    let mir_text = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .output()
+        .expect("spawn multi-contract MIR inspection");
+    assert!(mir_text.status.success());
+    let mir_text = String::from_utf8_lossy(&mir_text.stdout);
+    assert_eq!(mir_text.matches("    inst:call:").count(), 3, "{mir_text}");
+    assert!(!mir_text.contains("canonical route disposition: legacy"));
+
     let verify = |explicit_mir: bool| {
         let mut command = Command::new(mimi_bin());
         command.current_dir(project_root()).arg("verify");
