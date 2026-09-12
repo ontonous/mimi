@@ -231,14 +231,23 @@ fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
     runtime_cache_key_with_asan(runtime_rs, asan_enabled())
 }
 
+const RUNTIME_CACHE_IDENTITY_CHANGED_PREFIX: &str =
+    "runtime cache inputs changed while compiling cached archive";
+const RUNTIME_CACHE_MAX_IDENTITY_RETRIES: u8 = 1;
+
 fn ensure_runtime_cache_key_stable(runtime_rs: &Path, expected_key: &str) -> Result<(), String> {
     let actual_key = runtime_cache_key(runtime_rs)?;
     if actual_key == expected_key {
         return Ok(());
     }
     Err(format!(
-        "runtime sources changed while compiling cached archive (expected key {expected_key}, found {actual_key}); retry"
+        "{RUNTIME_CACHE_IDENTITY_CHANGED_PREFIX} (expected key {expected_key}, found {actual_key}); retry"
     ))
+}
+
+fn runtime_cache_attempt_should_retry(error: &str, attempt: u8) -> bool {
+    attempt < RUNTIME_CACHE_MAX_IDENTITY_RETRIES
+        && error.starts_with(RUNTIME_CACHE_IDENTITY_CHANGED_PREFIX)
 }
 
 fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
@@ -628,35 +637,53 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
-    let key = runtime_cache_key(runtime_rs)?;
-    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
-    cleanup_runtime_cache_stale_temps(&cache_dir)?;
-    if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
-        ensure_runtime_cache_key_stable(runtime_rs, &key)?;
-        return Ok(cache_path);
-    }
+    let mut attempt = 0_u8;
+    loop {
+        let key = runtime_cache_key(runtime_rs)?;
+        let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
+        cleanup_runtime_cache_stale_temps(&cache_dir)?;
+        if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
+            match ensure_runtime_cache_key_stable(runtime_rs, &key) {
+                Ok(()) => return Ok(cache_path),
+                Err(error) if runtime_cache_attempt_should_retry(&error, attempt) => {
+                    attempt += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
 
-    let tmp_path = runtime_cache_temp_path(&cache_dir, &key);
-    let _tmp_guard = TempFileGuard::new(tmp_path.clone());
-    let mut rt_cmd = std::process::Command::new("rustc");
-    rt_cmd
-        .args(runtime_compiler_args(asan_enabled()))
-        .arg("-o")
-        .arg(&tmp_path)
-        .arg(runtime_rs);
-    if asan_enabled() {
-        // `-Z sanitizer=address` requires the nightly compiler; the host `mimi`
-        // may have been built with stable, so pin the spawned rustc to nightly.
-        rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
+        let tmp_path = runtime_cache_temp_path(&cache_dir, &key);
+        let attempt_result = (|| {
+            let _tmp_guard = TempFileGuard::new(tmp_path.clone());
+            let mut rt_cmd = std::process::Command::new("rustc");
+            rt_cmd
+                .args(runtime_compiler_args(asan_enabled()))
+                .arg("-o")
+                .arg(&tmp_path)
+                .arg(runtime_rs);
+            if asan_enabled() {
+                // `-Z sanitizer=address` requires the nightly compiler; the host `mimi`
+                // may have been built with stable, so pin the spawned rustc to nightly.
+                rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
+            }
+            let status = rt_cmd
+                .status()
+                .map_err(|e| format!("runtime compile (rustc): {e}"))?;
+            if !status.success() {
+                return Err("Rust runtime compilation failed".into());
+            }
+            ensure_runtime_cache_key_stable(runtime_rs, &key)?;
+            publish_runtime_cache(&tmp_path, &cache_path)
+        })();
+        match attempt_result {
+            Ok(cache_path) => return Ok(cache_path),
+            Err(error) if runtime_cache_attempt_should_retry(&error, attempt) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
-    let status = rt_cmd
-        .status()
-        .map_err(|e| format!("runtime compile (rustc): {e}"))?;
-    if !status.success() {
-        return Err("Rust runtime compilation failed".into());
-    }
-    ensure_runtime_cache_key_stable(runtime_rs, &key)?;
-    publish_runtime_cache(&tmp_path, &cache_path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1032,9 +1059,10 @@ pub(crate) fn build(
 mod tests {
     use super::{
         cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
-        ensure_runtime_cache_key_stable, publish_runtime_cache, runtime_cache_hit,
-        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args,
-        runtime_cache_temp_path, runtime_compiler_args, runtime_include_literals,
+        ensure_runtime_cache_key_stable, publish_runtime_cache, runtime_cache_attempt_should_retry,
+        runtime_cache_hit, runtime_cache_key, runtime_cache_key_with_asan,
+        runtime_cache_key_with_asan_and_args, runtime_cache_temp_path, runtime_compiler_args,
+        runtime_include_literals,
     };
     use std::fs;
 
@@ -1278,11 +1306,23 @@ mod tests {
         let error = ensure_runtime_cache_key_stable(&runtime_rs, &expected)
             .expect_err("changed runtime source must reject publication");
         assert!(
-            error.starts_with("runtime sources changed while compiling cached archive"),
+            error.starts_with("runtime cache inputs changed while compiling cached archive"),
             "{error}"
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_retry_is_bounded_and_only_identity_changes_retry() {
+        let identity_change =
+            "runtime cache inputs changed while compiling cached archive (expected key a, found b); retry";
+        assert!(runtime_cache_attempt_should_retry(identity_change, 0));
+        assert!(!runtime_cache_attempt_should_retry(identity_change, 1));
+        assert!(!runtime_cache_attempt_should_retry(
+            "runtime compile (rustc): unavailable",
+            0
+        ));
     }
 
     #[test]
