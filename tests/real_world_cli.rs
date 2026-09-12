@@ -133,6 +133,23 @@ fn temp_build_dir_from_linker_stderr(stderr: &[u8]) -> PathBuf {
     PathBuf::from(&token[..marker + separator])
 }
 
+fn staging_dirs_for_output_stem(stem: &str) -> Vec<PathBuf> {
+    let suffix = format!("-{stem}");
+    fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path.file_name().is_some_and(|name| {
+                    name.to_string_lossy().starts_with("mimi-build-")
+                        && name.to_string_lossy().ends_with(&suffix)
+                })
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 fn native_runtime_cache_path() -> PathBuf {
     let runtime_rs = project_root().join("src/runtime/standalone.rs");
@@ -792,6 +809,63 @@ fn canonical_scalar_ffi_cli_reuses_runtime_cache_identity_across_default_and_mir
 
     fs::remove_file(&default_binary).ok();
     fs::remove_file(&mir_binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn canonical_scalar_ffi_cli_successful_builds_clean_staging_directories() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_success_staging_cli_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI success staging directory");
+    let source = dir.join("success-staging.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI success staging source");
+
+    let build = |explicit_mir: bool, stem: &str| {
+        let binary = dir.join(stem);
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("successful staging build {explicit_mir}: {error}"));
+        (output, binary)
+    };
+
+    for (explicit_mir, stem) in [
+        (false, format!("success-default-{nonce}")),
+        (true, format!("success-mir-{nonce}")),
+    ] {
+        let (output, binary) = build(explicit_mir, &stem);
+        assert!(
+            output.status.success(),
+            "successful build failed (mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(binary.is_file(), "successful build did not create output");
+        assert!(
+            staging_dirs_for_output_stem(&stem).is_empty(),
+            "successful build left staging directories for {stem}"
+        );
+        fs::remove_file(&binary).ok();
+    }
+
     fs::remove_dir_all(&dir).ok();
 }
 
