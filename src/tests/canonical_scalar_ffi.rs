@@ -1236,6 +1236,140 @@ pub func call_imported_alias(first: i64, second: i64) -> i64 {
     .expect_err("verifier must reject a forged imported alias descriptor");
     assert!(descriptor_verifier_error.contains("incompatible declaration TypeDescs"));
 
+    // Result identity and result ABI conversion are independent receipt
+    // dimensions.  Each must be checked even when the declaration shape and
+    // symbol remain valid.
+    let result_type = mir
+        .ffi_calls()
+        .get(&first_id)
+        .expect("first imported alias receipt")
+        .result_type
+        .clone();
+    let result_value = mir
+        .ffi_calls()
+        .get(&first_id)
+        .and_then(|call| call.result.as_ref())
+        .expect("first imported alias result value");
+    assert_eq!(
+        wrapper
+            .values
+            .get(result_value)
+            .map(|value| value.ty.clone())
+            .expect("first imported alias result TypeDesc"),
+        result_type
+    );
+
+    let mut result_identity_receipts = mir.ffi_calls().clone();
+    result_identity_receipts
+        .get_mut(&first_id)
+        .expect("first imported alias receipt for result identity forgery")
+        .result = Some(
+        crate::core::mir::MirValueId::new("value:forged-imported-alias-result")
+            .expect("forged imported alias result identity"),
+    );
+    let mut result_identity_forged = mir.clone();
+    result_identity_forged.replace_ffi_calls_for_test_only(result_identity_receipts);
+    assert_ne!(
+        baseline_route.ffi_digest,
+        result_identity_forged
+            .route_receipt("scalar-ffi-sequence-v1")
+            .ffi_digest
+    );
+    let result_identity_reference_error = MirReferenceInterpreter::new(&result_identity_forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged imported alias result identity");
+    assert!(
+        result_identity_reference_error
+            .to_string()
+            .contains("result")
+            || result_identity_reference_error
+                .to_string()
+                .contains("identity")
+    );
+    let result_identity_bytecode_error = compile_mir_program(&result_identity_forged)
+        .expect_err("bytecode must reject a forged imported alias result identity");
+    assert!(result_identity_bytecode_error.iter().any(|error| {
+        error.message.contains("result") || error.message.contains("identity/ABI validation")
+    }));
+    let result_identity_native_error =
+        crate::codegen::mir::validate_mir_native(&result_identity_forged)
+            .expect_err("native validator must reject a forged imported alias result identity");
+    assert!(result_identity_native_error
+        .iter()
+        .any(|error| { error.message.contains("result") || error.message.contains("identity") }));
+    let result_identity_capability_error =
+        crate::verifier::validate_mir_capabilities(&result_identity_forged)
+            .expect_err("capability gate must reject a forged imported alias result identity");
+    assert!(result_identity_capability_error
+        .iter()
+        .any(|error| { error.contains("result") || error.contains("identity") }));
+    let result_identity_verifier_error = crate::verifier::verify_mir(
+        &result_identity_forged,
+        "forged-imported-alias-result-identity".into(),
+    )
+    .expect_err("verifier must reject a forged imported alias result identity");
+    assert!(
+        result_identity_verifier_error.contains("result")
+            || result_identity_verifier_error.contains("identity")
+    );
+
+    let mut result_conversion_receipts = mir.ffi_calls().clone();
+    result_conversion_receipts
+        .get_mut(&first_id)
+        .expect("first imported alias receipt for result conversion forgery")
+        .result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    });
+    let mut result_conversion_forged = mir.clone();
+    result_conversion_forged.replace_ffi_calls_for_test_only(result_conversion_receipts);
+    let result_conversion_reference_error = MirReferenceInterpreter::new(&result_conversion_forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged imported alias result conversion");
+    assert!(
+        result_conversion_reference_error
+            .to_string()
+            .contains("conversion receipt")
+            || result_conversion_reference_error
+                .to_string()
+                .contains("conversion from"),
+        "{result_conversion_reference_error}"
+    );
+    let result_conversion_bytecode_error = compile_mir_program(&result_conversion_forged)
+        .expect_err("bytecode must reject a forged imported alias result conversion");
+    assert!(result_conversion_bytecode_error.iter().any(|error| {
+        error.message.contains("conversion receipt")
+            || error.message.contains("identity/ABI validation")
+    }));
+    let result_conversion_native_error =
+        crate::codegen::mir::validate_mir_native(&result_conversion_forged)
+            .expect_err("native validator must reject a forged imported alias result conversion");
+    assert!(result_conversion_native_error
+        .iter()
+        .any(|error| error.message.contains("conversion receipt")));
+    let result_conversion_capability_error =
+        crate::verifier::validate_mir_capabilities(&result_conversion_forged)
+            .expect_err("capability gate must reject a forged imported alias result conversion");
+    assert!(result_conversion_capability_error
+        .iter()
+        .any(|error| error.contains("conversion receipt")));
+    let result_conversion_verifier_error = crate::verifier::verify_mir(
+        &result_conversion_forged,
+        "forged-imported-alias-result-conversion".into(),
+    )
+    .expect_err("verifier must reject a forged imported alias result conversion");
+    assert!(
+        result_conversion_verifier_error.contains("conversion receipt")
+            || result_conversion_verifier_error.contains("conversion from"),
+        "{result_conversion_verifier_error}"
+    );
+
     struct ImportedAliasSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for ImportedAliasSequenceOracle {
         fn call(
