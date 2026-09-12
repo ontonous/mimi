@@ -74,6 +74,23 @@ const RESULT_RANGE_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_f64_nan(x: i64) -> f64; }
 func main() -> f64 { mir_ffi_result_f64_nan(7 as i64) }
 "#;
+const MULTI_CALL_NONFINITE_C_SOURCE: &str = r#"
+#include <math.h>
+#include <stdint.h>
+int64_t mir_ffi_prefix_value(int64_t x) { return x + 100; }
+double mir_ffi_nonfinite(int64_t x) { (void)x; return NAN; }
+"#;
+const MULTI_CALL_NONFINITE_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_prefix_value(x: i64) -> i64;
+    func mir_ffi_nonfinite(x: i64) -> f64;
+}
+func main() -> f64 {
+    let first = mir_ffi_prefix_value(7 as i64)
+    println(first)
+    mir_ffi_nonfinite(8 as i64)
+}
+"#;
 const MULTI_CALL_REQUIRES_C_SOURCE: &str = r#"
 #include <stdint.h>
 static int64_t call_count;
@@ -1099,6 +1116,169 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
         .expect("native non-finite result conversion execution");
     assert_ne!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+}
+
+#[test]
+fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MULTI_CALL_NONFINITE_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MULTI_CALL_NONFINITE_SOURCE)
+        .tokenize()
+        .expect("lex multi-call non-finite FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse multi-call non-finite FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check multi-call non-finite FFI");
+    let mut mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize multi-call non-finite FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .find_map(|(instruction, receipt)| {
+            (receipt.symbol == "mir_ffi_nonfinite").then(|| {
+                (
+                    instruction.clone(),
+                    receipt
+                        .result
+                        .clone()
+                        .expect("multi-call non-finite result value"),
+                )
+            })
+        })
+        .expect("multi-call non-finite receipt");
+    let i64_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i64 multi-call non-finite result target TypeDesc");
+    // The source function is f64 because the second extern declaration owns
+    // that call result.  Rebind only the tail result slot to i64 so the
+    // checker-owned result conversion is exercised after the first call has
+    // already produced observable output.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Float { bits: 64 },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("multi-call non-finite receipt")
+        .result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct PrefixThenNonFiniteOracle(Cell<i64>);
+    impl MirReferenceFfiResolver for PrefixThenNonFiniteOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_prefix_value", [MirRuntimeValue::Int(7)]) => {
+                    self.0.set(self.0.get() + 1);
+                    Ok(MirRuntimeValue::Int(107))
+                }
+                ("mir_ffi_nonfinite", [MirRuntimeValue::Int(8)]) => {
+                    self.0.set(self.0.get() + 1);
+                    if receipt.result_conversion
+                        != Some(crate::core::mir::MirFfiAbiConversion {
+                            from: MirAbiClass::Float { bits: 64 },
+                            to: MirAbiClass::Integer {
+                                bits: 64,
+                                signed: true,
+                            },
+                        })
+                    {
+                        return Err("multi-call non-finite receipt mismatch".into());
+                    }
+                    Ok(MirRuntimeValue::FloatBits(f64::NAN.to_bits()))
+                }
+                _ => Err(format!(
+                    "unexpected multi-call non-finite invocation: {} {arguments:?}",
+                    receipt.symbol
+                )),
+            }
+        }
+    }
+
+    let oracle = PrefixThenNonFiniteOracle(Cell::new(0));
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&owner, &[])
+        .expect_err("reference must reject the second non-finite result conversion");
+    assert!(reference_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(
+        oracle.0.get(),
+        2,
+        "reference must invoke the successful prefix and then the failing call"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-multi-nonfinite".into())
+        .expect("verify multi-call non-finite result conversion MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free multi-call non-finite bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject the second non-finite result conversion");
+    assert!(bytecode_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(vm.stdout(), "107\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_multi_nan");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-call non-finite result conversion lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid multi-call non-finite result conversion LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MULTI_CALL_NONFINITE_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native multi-call non-finite result conversion execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "107\n");
     assert!(
         native.stderr.contains("E0802")
             && native
