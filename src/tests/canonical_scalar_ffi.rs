@@ -2006,6 +2006,55 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_joined_paths_share_one_instruction_result_and_summary() {
+    let source = r#"
+extern "C" { func mir_ffi_join(value: i64) -> i64 requires: value >= 0; }
+func join(flag: bool) -> i64 {
+    let value = if flag { 7 as i64 } else { 8 as i64 }
+    mir_ffi_join(value)
+}
+func main() -> i64 {
+    join(true)
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex joined-path FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse joined-path FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check joined-path FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize joined-path FFI fixture MIR");
+    let receipts = mir.ffi_call_entries_in_source_order();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "the join has one canonical call-site receipt"
+    );
+
+    let first = crate::verifier::verify_mir(&mir, "joined-path-ffi".into())
+        .expect("verify joined-path FFI fixture");
+    let second = crate::verifier::verify_mir(&mir, "joined-path-ffi-repeat".into())
+        .expect("repeat verify joined-path FFI fixture");
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(first[0].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(second[0].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(
+        first[0].constraint_count, second[0].constraint_count,
+        "joined-path proof summary must be stable across repeated verification"
+    );
+    assert!(first[0].constraint_count > 0);
+    assert_eq!(first[0].func_name, "function:join");
+    assert!(first[0].artifact.as_ref().is_some_and(|artifact| {
+        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            && artifact.mir_hash == mir.canonical_digest()
+    }));
+}
+
+#[test]
 fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     let _guard = super::FfiEnvLock::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
