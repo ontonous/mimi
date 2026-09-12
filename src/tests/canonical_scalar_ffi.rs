@@ -1934,6 +1934,162 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
 }
 
 #[test]
+fn scalar_ffi_combined_ensures_failure_preserves_prefix_and_receipt_cardinality() {
+    use std::cell::RefCell;
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_prefix_mark(int64_t value) { return value; }
+int64_t mir_ffi_combined_bad(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_prefix_mark(value: i64) -> i64;
+    func mir_ffi_combined_bad(value: i64) -> i64 requires: value >= 0 ensures: result == value;
+}
+func main() -> i64 {
+    println(mir_ffi_prefix_mark(4 as i64));
+    mir_ffi_combined_bad(7 as i64)
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(SOURCE)
+        .tokenize()
+        .expect("lex combined ensures prefix fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse combined ensures prefix fixture");
+    let checked = crate::core::check_program(&file).expect("check combined ensures prefix fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize combined ensures prefix fixture MIR");
+    assert_eq!(
+        mir.ffi_calls().len(),
+        2,
+        "both call-sites must retain receipts"
+    );
+    let combined_receipt = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .find(|(_, receipt)| receipt.symbol == "mir_ffi_combined_bad")
+        .map(|(_, receipt)| receipt)
+        .expect("combined contract receipt");
+
+    struct PrefixOracle(RefCell<Vec<String>>);
+    impl MirReferenceFfiResolver for PrefixOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("combined prefix arguments {arguments:?}"));
+            };
+            self.0.borrow_mut().push(receipt.symbol.clone());
+            match receipt.symbol.as_str() {
+                "mir_ffi_prefix_mark" => Ok(MirRuntimeValue::Int(*value)),
+                "mir_ffi_combined_bad" => Ok(MirRuntimeValue::Int(*value + 1)),
+                symbol => Err(format!("unexpected combined prefix symbol {symbol}")),
+            }
+        }
+    }
+
+    let oracle = PrefixOracle(RefCell::new(Vec::new()));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the combined postcondition");
+    assert!(
+        reference.message.contains("FFI postcondition failed"),
+        "{reference}"
+    );
+    assert_eq!(
+        oracle.0.borrow().as_slice(),
+        ["mir_ffi_prefix_mark", "mir_ffi_combined_bad"],
+        "reference must preserve prefix call order before the postcondition failure"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-combined-prefix".into())
+        .expect("verify combined ensures prefix MIR");
+    assert_eq!(
+        verification.len(),
+        1,
+        "only the contract-bearing receipt contributes a verifier result"
+    );
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+    assert_eq!(verification[0].func_name, "function:main");
+    assert!(verification[0]
+        .message
+        .contains("extern ensures contract disproven"));
+    assert_eq!(
+        verification[0]
+            .diagnostic
+            .as_ref()
+            .expect("combined ensures diagnostic")
+            .span,
+        combined_receipt.span
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("combined ensures prefix bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject the combined postcondition");
+    assert_eq!(bytecode_error.code(), "E0808");
+    assert!(bytecode_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(
+        vm.stdout(),
+        "4\n",
+        "bytecode must preserve the prefix output"
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_combined_prefix");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native combined ensures prefix lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native combined ensures prefix module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native combined ensures prefix execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(
+        native.stdout, "4\n",
+        "native must preserve the prefix output"
+    );
+    assert!(
+        native.stderr.contains("E0808") && native.stderr.contains("FFI postcondition failed"),
+        "{}",
+        native.stderr
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_branch_merge_preserves_per_callsite_result_cardinality() {
     let source = r#"
 extern "C" { func mir_ffi_branch(value: i64) -> i64 requires: value >= 0; }
