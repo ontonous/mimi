@@ -3979,6 +3979,28 @@ fn canonical_scalar_ffi_multi_source_same_symbol_verifier_order_matches_mir() {
     };
     verifier_markers("default", &default_verify);
     verifier_markers("mir", &mir_verify);
+    let semantic_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains("canonical MIR verifier: no ensures contract")
+                    || line.contains("canonical MIR extern requires contract proven")
+            })
+            .map(|line| line.split(" (").next().unwrap_or(line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let repeated_default = verify(false);
+    assert!(repeated_default.status.success());
+    assert_eq!(
+        semantic_summary(&default_verify),
+        semantic_summary(&repeated_default),
+        "repeated verifier runs must preserve caller/status/constraint summaries"
+    );
+    assert_eq!(
+        semantic_summary(&default_verify),
+        semantic_summary(&mir_verify),
+        "default and explicit MIR must preserve semantic verifier summaries"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
