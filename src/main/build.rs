@@ -215,7 +215,7 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
             Ok(path)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    files.extend(runtime_cache_included_sources(runtime_rs, runtime_dir)?);
+    files.extend(runtime_cache_included_sources(runtime_rs, &files)?);
     files.push(runtime_rs.to_path_buf());
     files.sort();
 
@@ -247,38 +247,69 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
 
 fn runtime_cache_included_sources(
     runtime_rs: &Path,
-    runtime_dir: &Path,
+    known_sources: &[std::path::PathBuf],
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    let is_standalone_runtime = runtime_rs
-        .file_name()
-        .is_some_and(|name| name == "standalone.rs")
-        && runtime_dir
-            .file_name()
-            .is_some_and(|name| name == "runtime")
-        && runtime_dir
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == "src");
-    if !is_standalone_runtime {
-        return Ok(Vec::new());
-    }
+    let mut known = known_sources
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut pending = known_sources.to_vec();
+    pending.push(runtime_rs.to_path_buf());
+    let mut scanned = std::collections::HashSet::new();
+    let mut included = Vec::new();
 
-    // standalone.rs includes runtime/mod.rs, which in turn includes this
-    // shared trap wording file outside src/runtime.  It is part of the
-    // compiled archive and therefore part of the cache identity.
-    let trap_msgs = runtime_dir
-        .parent()
-        .expect("standalone runtime source parent is src")
-        .join("diagnostic")
-        .join("trap_msgs.rs");
-    let metadata = std::fs::symlink_metadata(&trap_msgs)
-        .map_err(|error| format!("inspect runtime included source: {trap_msgs:?}: {error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err(format!(
-            "runtime included source is not a regular file: {trap_msgs:?}"
-        ));
+    while let Some(source) = pending.pop() {
+        if !scanned.insert(source.clone()) {
+            continue;
+        }
+        let source_text = std::fs::read_to_string(&source)
+            .map_err(|error| format!("read runtime include source {source:?}: {error}"))?;
+        for include in runtime_include_literals(&source_text) {
+            let include_path = source
+                .parent()
+                .ok_or_else(|| format!("runtime include source has no parent: {source:?}"))?
+                .join(include);
+            if known.insert(include_path.clone()) {
+                let metadata = std::fs::symlink_metadata(&include_path).map_err(|error| {
+                    format!("inspect runtime included source: {include_path:?}: {error}")
+                })?;
+                if !metadata.file_type().is_file() {
+                    return Err(format!(
+                        "runtime included source is not a regular file: {include_path:?}"
+                    ));
+                }
+                included.push(include_path.clone());
+            }
+            if !scanned.contains(&include_path) {
+                pending.push(include_path);
+            }
+        }
     }
-    Ok(vec![trap_msgs])
+    Ok(included)
+}
+
+fn runtime_include_literals(source: &str) -> Vec<&str> {
+    let mut literals = Vec::new();
+    let mut remaining = source;
+    while let Some(index) = remaining.find("include!") {
+        let after_macro = &remaining[index + "include!".len()..];
+        let after_macro = after_macro.trim_start();
+        let Some(after_open) = after_macro.strip_prefix('(') else {
+            remaining = after_macro;
+            continue;
+        };
+        let after_open = after_open.trim_start();
+        let Some(after_quote) = after_open.strip_prefix('"') else {
+            remaining = after_open;
+            continue;
+        };
+        let Some(end) = after_quote.find('"') else {
+            break;
+        };
+        literals.push(&after_quote[..end]);
+        remaining = &after_quote[end + 1..];
+    }
+    literals
 }
 
 #[cfg(unix)]
@@ -930,9 +961,13 @@ mod tests {
         fs::create_dir_all(&diagnostic_dir).expect("create included diagnostic directory");
         let runtime_rs = runtime_dir.join("standalone.rs");
         let trap_msgs = diagnostic_dir.join("trap_msgs.rs");
-        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write included runtime source");
-        fs::write(runtime_dir.join("mod.rs"), b"fn module() {}\n")
-            .expect("write runtime module source");
+        fs::write(&runtime_rs, b"include!(\"mod.rs\");\nfn runtime() {}\n")
+            .expect("write included runtime source");
+        fs::write(
+            runtime_dir.join("mod.rs"),
+            b"include!(\"../diagnostic/trap_msgs.rs\");\nfn module() {}\n",
+        )
+        .expect("write runtime module source");
         fs::write(&trap_msgs, b"const MESSAGE: &str = \"before\";\n")
             .expect("write included trap source");
 
@@ -961,7 +996,13 @@ mod tests {
         let runtime_dir = root.join("src/runtime");
         fs::create_dir_all(&runtime_dir).expect("create missing included runtime directory");
         let runtime_rs = runtime_dir.join("standalone.rs");
-        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+        fs::write(&runtime_rs, b"include!(\"mod.rs\");\nfn runtime() {}\n")
+            .expect("write runtime source");
+        fs::write(
+            runtime_dir.join("mod.rs"),
+            b"include!(\"../diagnostic/trap_msgs.rs\");\nfn module() {}\n",
+        )
+        .expect("write runtime module source");
 
         let error = runtime_cache_key(&runtime_rs)
             .expect_err("missing standalone included source must fail closed");
@@ -989,7 +1030,13 @@ mod tests {
         fs::create_dir_all(diagnostic_dir.join("trap_msgs.rs"))
             .expect("create non-regular included trap source");
         let runtime_rs = runtime_dir.join("standalone.rs");
-        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+        fs::write(&runtime_rs, b"include!(\"mod.rs\");\nfn runtime() {}\n")
+            .expect("write runtime source");
+        fs::write(
+            runtime_dir.join("mod.rs"),
+            b"include!(\"../diagnostic/trap_msgs.rs\");\nfn module() {}\n",
+        )
+        .expect("write runtime module source");
 
         let error = runtime_cache_key(&runtime_rs)
             .expect_err("non-regular standalone included source must fail closed");
