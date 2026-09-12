@@ -3888,6 +3888,102 @@ fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() 
 }
 
 #[test]
+fn canonical_scalar_ffi_multi_source_same_symbol_verifier_order_matches_mir() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-multi-source-same-symbol-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create same-symbol verifier fixture directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type ResultId = i64\nextern \"C\" { func mir_ffi_cli_shared(value: Scalar) -> ResultId requires: value >= 0; }\n",
+    )
+    .expect("write shared FFI declaration module");
+    fs::write(
+        dir.join("left.mimi"),
+        "use ffi_types\npub func left_call(value: i64) -> i64 {\n    requires: value >= 0\n    mir_ffi_cli_shared(value)\n}\n",
+    )
+    .expect("write left shared-symbol caller");
+    fs::write(
+        dir.join("right.mimi"),
+        "use ffi_types\npub func right_call(value: i64) -> i64 {\n    requires: value >= 0\n    mir_ffi_cli_shared(value)\n}\n",
+    )
+    .expect("write right shared-symbol caller");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use left\nuse right\nfunc main() -> i64 {\n    let left_value = left_call(1 as i64)\n    let right_value = right_call(2 as i64)\n    println(left_value)\n    println(right_value)\n    0\n}\n",
+    )
+    .expect("write same-symbol verifier entry");
+
+    let receipt = checked_route_receipt(&main);
+    assert_eq!(receipt.ffi_digest.len(), 64);
+    let receipt_output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn same-symbol receipt inspection");
+    assert!(
+        receipt_output.status.success(),
+        "same-symbol receipt inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&receipt_output.stdout),
+        String::from_utf8_lossy(&receipt_output.stderr)
+    );
+    assert_eq!(
+        parse_route_receipt_manifest(&receipt_output.stdout).get("ffi_digest"),
+        Some(&receipt.ffi_digest)
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn same-symbol verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    let left_marker = "function:left_call: canonical MIR extern requires contract proven";
+    let right_marker = "function:right_call: canonical MIR extern requires contract proven";
+    let verifier_markers = |label: &str, output: &std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{label} same-symbol verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(text.matches(left_marker).count(), 1, "{label}: {text}");
+        assert_eq!(text.matches(right_marker).count(), 1, "{label}: {text}");
+        let left = text.find(left_marker).expect("left caller verifier marker");
+        let right = text
+            .find(right_marker)
+            .expect("right caller verifier marker");
+        assert!(
+            left < right,
+            "{label}: verifier caller order changed: {text}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    };
+    verifier_markers("default", &default_verify);
+    verifier_markers("mir", &mir_verify);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transitive_import_graph_merges_mixed_width_call_sites() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
