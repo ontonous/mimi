@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -578,6 +578,100 @@ fn canonical_scalar_ffi_cli_runtime_failure_cleans_staging_directory() {
     assert!(
         !staging_dir.exists(),
         "runtime compiler failure left staging directory {staging_dir:?}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn canonical_scalar_ffi_cli_parallel_link_failures_keep_staging_isolated() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_parallel_link_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI parallel link failure directory");
+    let source = dir.join("parallel-unlinked.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func mir_ffi_parallel_unlinked(value: i64) -> i64; }\nfunc main() -> i64 { mir_ffi_parallel_unlinked(1 as i64) }\n",
+    )
+    .expect("write scalar FFI parallel link failure source");
+    let default_binary = dir.join("one").join("same-stem");
+    let mir_binary = dir.join("two").join("same-stem");
+    fs::create_dir_all(default_binary.parent().expect("default output parent"))
+        .expect("create default output directory");
+    fs::create_dir_all(mir_binary.parent().expect("MIR output parent"))
+        .expect("create MIR output directory");
+
+    let mut default_command = Command::new(mimi_bin());
+    default_command
+        .current_dir(project_root())
+        .args(["build", "--verify-ffi"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&default_binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let default_child = default_command
+        .spawn()
+        .expect("spawn parallel default linker failure build");
+
+    let mut mir_command = Command::new(mimi_bin());
+    mir_command
+        .current_dir(project_root())
+        .args(["build", "--mir", "--verify-ffi"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&mir_binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mir_child = mir_command
+        .spawn()
+        .expect("spawn parallel MIR linker failure build");
+
+    let default_build = default_child
+        .wait_with_output()
+        .expect("wait for parallel default linker failure build");
+    let mir_build = mir_child
+        .wait_with_output()
+        .expect("wait for parallel MIR linker failure build");
+    for output in [&default_build, &mir_build] {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("undefined symbol: mir_ffi_parallel_unlinked"),
+            "parallel linker failure lost its symbol diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let default_staging = temp_build_dir_from_linker_stderr(&default_build.stderr);
+    let mir_staging = temp_build_dir_from_linker_stderr(&mir_build.stderr);
+    assert_ne!(
+        default_staging, mir_staging,
+        "parallel builds with the same output stem must use isolated staging directories"
+    );
+    assert!(
+        !default_staging.exists(),
+        "default staging directory remained"
+    );
+    assert!(!mir_staging.exists(), "MIR staging directory remained");
+    assert!(
+        !default_binary.exists(),
+        "parallel default build left an output binary"
+    );
+    assert!(
+        !mir_binary.exists(),
+        "parallel MIR build left an output binary"
     );
 
     fs::remove_dir_all(&dir).ok();
