@@ -91,6 +91,22 @@ func main() -> f64 {
     mir_ffi_nonfinite(8 as i64)
 }
 "#;
+const F64_I32_RANGE_C_SOURCE: &str = r#"
+#include <stdint.h>
+double mir_ffi_f64_i32_edge(int64_t x) { (void)x; return 2147483647.75; }
+double mir_ffi_f64_i32_oob(int64_t x) { (void)x; return 2147483648.0; }
+"#;
+const F64_I32_RANGE_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f64_i32_edge(x: i64) -> f64;
+    func mir_ffi_f64_i32_oob(x: i64) -> f64;
+}
+func main() -> f64 {
+    mir_ffi_f64_i32_edge(1 as i64)
+    println(0 as i64)
+    mir_ffi_f64_i32_oob(2 as i64)
+}
+"#;
 const MULTI_CALL_REQUIRES_C_SOURCE: &str = r#"
 #include <stdint.h>
 static int64_t call_count;
@@ -1628,6 +1644,184 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
                 .then(|| id.clone())
             })
             .expect("mixed conversion argument TypeDesc")
+    );
+}
+
+#[test]
+fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F64_I32_RANGE_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(F64_I32_RANGE_SOURCE)
+        .tokenize()
+        .expect("lex floating narrow result range fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse floating narrow result range fixture");
+    let checked = crate::core::check_program(&file).expect("check floating narrow result range");
+    let mut mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize floating narrow result range MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let owner = crate::core::NodeId("function:main".into());
+    let mut call_values = mir
+        .ffi_calls()
+        .iter()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt.symbol.clone(),
+                receipt
+                    .result
+                    .clone()
+                    .expect("floating narrow result range value"),
+            )
+        })
+        .collect::<Vec<_>>();
+    call_values.sort_by(|left, right| left.1.cmp(&right.1));
+    let (edge_instruction, _, edge_result) = call_values
+        .iter()
+        .find(|(_, symbol, _)| symbol == "mir_ffi_f64_i32_edge")
+        .cloned()
+        .expect("floating narrow result edge call");
+    let (oob_instruction, _, oob_result) = call_values
+        .iter()
+        .find(|(_, symbol, _)| symbol == "mir_ffi_f64_i32_oob")
+        .cloned()
+        .expect("floating narrow result out-of-range call");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i32 floating narrow result range target TypeDesc");
+    mir.replace_function_result_and_value_type_for_test_only(
+        &owner,
+        &edge_result,
+        i32_type.clone(),
+    );
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &oob_result, i32_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Float { bits: 64 },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    receipts
+        .get_mut(&edge_instruction)
+        .expect("floating narrow edge receipt")
+        .result_conversion = Some(result_conversion);
+    receipts
+        .get_mut(&oob_instruction)
+        .expect("floating narrow out-of-range receipt")
+        .result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct FloatNarrowRangeOracle(Cell<i64>);
+    impl MirReferenceFfiResolver for FloatNarrowRangeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let expected = match receipt.symbol.as_str() {
+                "mir_ffi_f64_i32_edge" => {
+                    if arguments != [MirRuntimeValue::Int(1)] {
+                        return Err(format!("unexpected edge arguments {arguments:?}"));
+                    }
+                    2_147_483_647.75_f64
+                }
+                "mir_ffi_f64_i32_oob" => {
+                    if arguments != [MirRuntimeValue::Int(2)] {
+                        return Err(format!("unexpected out-of-range arguments {arguments:?}"));
+                    }
+                    2_147_483_648.0_f64
+                }
+                symbol => return Err(format!("unexpected floating narrow symbol {symbol}")),
+            };
+            self.0.set(self.0.get() + 1);
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Float { bits: 64 },
+                    to: MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("floating narrow result range receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::FloatBits(expected.to_bits()))
+        }
+    }
+
+    let oracle = FloatNarrowRangeOracle(Cell::new(0));
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&owner, &[])
+        .expect_err("reference must reject the second floating narrow result");
+    assert!(reference_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(oracle.0.get(), 2);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-float-narrow-range".into())
+        .expect("verify floating narrow result range MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free floating narrow range bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject the second floating narrow result");
+    assert!(bytecode_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(vm.stdout(), "0\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f64_i32_range");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native floating narrow result range lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid floating narrow result range LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F64_I32_RANGE_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native floating narrow result range execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "0\n");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
     );
 }
 
