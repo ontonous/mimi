@@ -450,7 +450,21 @@ pub(crate) fn verify_ffi_program(
     }
 
     let mut results = Vec::new();
-    for (instruction, (caller, checks)) in checks_by_instruction {
+    // The FFI receipt table is keyed by instruction identity for lookup, but
+    // that identity is not the execution order.  Emit verifier observations
+    // through the same canonical source-order view consumed by the route
+    // receipt, bytecode descriptors, and native declarations.  This keeps a
+    // multi-call proof artifact aligned with the checker-owned call sequence
+    // even when instruction IDs sort lexically differently from source spans.
+    let ordered_instructions = program
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(instruction, _)| instruction.clone())
+        .collect::<Vec<_>>();
+    for instruction in ordered_instructions {
+        let Some((caller, checks)) = checks_by_instruction.remove(&instruction) else {
+            continue;
+        };
         let contract = program
             .ffi_calls()
             .get(&instruction)

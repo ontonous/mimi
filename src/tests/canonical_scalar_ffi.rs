@@ -6512,6 +6512,83 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_symbol_verifier_artifacts_follow_receipt_source_order() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    // Keep the calls on different source lines whose numeric order differs
+    // from their instruction-id lexical order (`:10:` sorts before `:7:`).
+    // The receipt/source order must remain the one observable order shared by
+    // bytecode descriptors and verifier proof results.
+    const SOURCE: &str = r#"
+extern "C" {
+    func first(value: i64) -> i64 requires: value < 0;
+    func second(value: i64) -> i64 requires: value != 0;
+}
+func main() -> i32 {
+    let first_value = first(7 as i64);
+
+
+
+
+
+
+
+
+
+    let second_value = second(8 as i64);
+    println(first_value);
+    println(second_value);
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-symbol verifier source-order fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("multi-symbol verifier source-order fixture materialization");
+    let ordered = program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.symbol, "first");
+    assert_eq!(ordered[1].1.symbol, "second");
+    assert!(ordered[0].1.span.start_line < ordered[1].1.span.start_line);
+    assert!(ordered[0].1.instruction > ordered[1].1.instruction);
+
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("multi-symbol scalar FFI capability gate");
+    let receipt = program.route_receipt("scalar-ffi-multi-symbol-v1");
+    let bytecode = compile_mir_program(&program).expect("multi-symbol scalar FFI bytecode");
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(bytecode.canonical_ffi[0].symbol, "first");
+    assert_eq!(bytecode.canonical_ffi[1].symbol, "second");
+
+    let results = crate::verifier::verify_mir(&program, "multi-symbol-proof".into())
+        .expect("multi-symbol scalar FFI verifier");
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::Disproven,
+        "the first source-order call must be the first verifier result"
+    );
+    assert_eq!(results[1].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(
+        results[0]
+            .diagnostic
+            .as_ref()
+            .expect("disproven first call diagnostic")
+            .span,
+        ordered[0].1.span,
+        "verifier diagnostic must retain the first receipt source span"
+    );
+    assert!(results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == receipt.mir_digest
+        })
+    }));
+}
+
+#[test]
 fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
     use std::fs;
 
