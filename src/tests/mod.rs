@@ -222,29 +222,8 @@ pub(crate) fn linker_flag() -> &'static [&'static str] {
 /// FFI probes compile the extra `mimi_test_ub_symbols` cfg.  Its identity still
 /// follows the production framing rules (compiler identity, exact arguments,
 /// source paths and bytes) so a test-only archive cannot silently survive a
-/// runtime or toolchain change.  The external `trap_msgs.rs` include is part of
-/// the effective standalone source graph and is therefore included explicitly.
-#[cfg(unix)]
-fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn test_runtime_cache_path_bytes(path: &std::path::Path) -> Vec<u8> {
-    path.as_os_str().as_encoded_bytes().to_vec()
-}
+/// runtime or toolchain change.  The shared recursive include scanner keeps
+/// external sources such as `trap_msgs.rs` aligned with production identity.
 
 struct TestRuntimeTempGuard {
     path: std::path::PathBuf,
@@ -275,9 +254,11 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .into_iter()
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect::<Vec<_>>();
-    // The standalone build is `include!("mod.rs")`, and `mod.rs` includes the
-    // diagnostic trap messages from outside the runtime directory.
-    runtime_files.push(manifest.join("src/diagnostic/trap_msgs.rs"));
+    let included_sources = crate::runtime_cache::included_sources(&runtime_rs, &runtime_files)?;
+    runtime_files.extend(included_sources);
+    // Keep the entry source in the same framed source set as production, even
+    // if a future runtime layout stops listing it in the directory scan.
+    runtime_files.push(runtime_rs.clone());
     runtime_files.sort();
 
     let mut compiler = std::process::Command::new("rustc");
@@ -325,7 +306,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         if !metadata.file_type().is_file() {
             return Err(format!("runtime source is not a regular file: {path:?}"));
         }
-        let path_bytes = test_runtime_cache_path_bytes(&path);
+        let path_bytes = crate::runtime_cache::path_bytes(&path);
         hasher.update(&(path_bytes.len() as u64).to_le_bytes());
         hasher.update(&path_bytes);
         let contents = std::fs::read(&path).map_err(|e| format!("read {:?}: {e}", path))?;

@@ -115,6 +115,7 @@ pub mod pkg_registry;
 pub mod pkg_resolve;
 #[allow(clippy::not_unsafe_ptr_arg_deref, clippy::unwrap_used, dead_code)]
 pub mod runtime;
+pub mod runtime_cache;
 pub mod source_scan;
 
 #[cfg(test)]
