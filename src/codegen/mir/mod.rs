@@ -344,32 +344,25 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     /// This keeps the external boundary AST-free while retaining the current
     /// fail-closed scalar-only island.
     fn declare_ffi_functions(&mut self) -> Result<(), NativeMirError> {
-        let mut declarations: BTreeMap<
-            String,
-            (
-                Vec<crate::core::ResolvedTypeId>,
-                crate::core::ResolvedTypeId,
-                crate::span::Span,
-            ),
-        > = BTreeMap::new();
+        let mut declarations = Vec::new();
+        let mut seen_symbols = BTreeSet::new();
         // `compile_mir_native` has already run the shared receipt gate and
         // native admission validator.  Use the same canonical source-order
         // receipt view as the route manifest and bytecode descriptor table so
-        // a symbol's representative span is independent of BTreeMap identity
-        // order or MIR block storage order.
+        // a symbol's representative span and declaration order are independent
+        // of BTreeMap identity order or MIR block storage order.
         for (_, receipt) in self.program.ffi_call_entries_in_source_order() {
-            declarations
-                .entry(receipt.symbol.clone())
-                .or_insert_with(|| {
-                    (
-                        receipt.parameter_types.clone(),
-                        receipt.result_type.clone(),
-                        receipt.span,
-                    )
-                });
+            if seen_symbols.insert(receipt.symbol.clone()) {
+                declarations.push((
+                    receipt.symbol.clone(),
+                    receipt.parameter_types.clone(),
+                    receipt.result_type.clone(),
+                    receipt.span,
+                ));
+            }
         }
 
-        for (symbol, (parameter_type_ids, result_type, symbol_span)) in declarations {
+        for (symbol, parameter_type_ids, result_type, symbol_span) in declarations {
             let parameter_types = parameter_type_ids
                 .iter()
                 .map(|ty| {
@@ -1075,6 +1068,7 @@ mod tests {
     use crate::interp::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use crate::span::Span;
     use inkwell::context::Context;
 
     fn canonical_program(source: &str) -> MirProgram {
@@ -2801,6 +2795,10 @@ func main() -> i32 {
                     .contains("canonical MIR native backend rejected")
                     && diagnostic.message.contains("finite-only")
             }));
+            assert!(diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("finite-only"))
+                .all(|diagnostic| diagnostic.span == Span::UNKNOWN));
             assert!(generator.module.get_function("main").is_none());
         }
     }

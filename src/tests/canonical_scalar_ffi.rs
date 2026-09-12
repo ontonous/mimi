@@ -6471,6 +6471,47 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_native_multi_symbol_declaration_span_uses_global_source_order() {
+    const SOURCE: &str = r#"
+extern "C" {
+    func mimi_session_pair(value: i64) -> i64;
+    func mimi_channel_drop(value: i64) -> i64;
+}
+func main() -> i64 {
+    let first = mimi_session_pair(7 as i64);
+    let second = mimi_channel_drop(8 as i64);
+    first + second
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-symbol reserved FFI source-order fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("multi-symbol reserved FFI source-order fixture materialization");
+    let ordered = program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.symbol, "mimi_session_pair");
+    assert_eq!(ordered[1].1.symbol, "mimi_channel_drop");
+    assert!(
+        (ordered[0].1.span.start_line, ordered[0].1.span.start_col)
+            < (ordered[1].1.span.start_line, ordered[1].1.span.start_col)
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_multi_symbol_span");
+    let diagnostics = generator
+        .compile_mir_native(&program)
+        .expect_err("reserved FFI symbols must fail native declaration admission");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].span, ordered[0].1.span,
+        "the first native declaration diagnostic must use the first canonical receipt span"
+    );
+    assert!(diagnostics[0]
+        .message
+        .contains("FFI symbol collides with an already-declared native MIR function"));
+}
+
+#[test]
 fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
     use std::fs;
 
