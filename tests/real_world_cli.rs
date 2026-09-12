@@ -3446,6 +3446,103 @@ fn canonical_mir_alias_qualified_import_call_fails_closed_before_consumers() {
 }
 
 #[test]
+fn canonical_scalar_ffi_duplicate_imported_declarations_fail_closed_across_cli_consumers() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-duplicate-imported-ffi-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create duplicate imported FFI directory");
+    fs::write(
+        dir.join("left.mimi"),
+        "pub type LeftArg = i64\npub type LeftResult = i64\nextern \"C\" {\n    func clash(value: LeftArg) -> LeftResult;\n}\npub func call_left(value: i64) -> LeftResult { clash(value) }\n",
+    )
+    .expect("write left duplicate imported FFI declaration");
+    fs::write(
+        dir.join("right.mimi"),
+        "pub type RightArg = i64\npub type RightResult = i64\nextern \"C\" {\n    func clash(value: RightArg) -> RightResult;\n}\npub func call_right(value: i64) -> RightResult { clash(value) }\n",
+    )
+    .expect("write right duplicate imported FFI declaration");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use left;\nuse right;\nfunc main() -> i32 { println(call_left(1)); println(call_right(2)); 0 }\n",
+    )
+    .expect("write duplicate imported FFI entry");
+    let binary = dir.join("duplicate-imported-ffi-output");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--receipt")
+        .arg("--all")
+        .output()
+        .expect("spawn duplicate imported FFI MIR inspection");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn duplicate imported FFI MIR run");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn duplicate imported FFI MIR build");
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn duplicate imported FFI MIR verify");
+
+    for (label, output) in [
+        ("mir", &mir),
+        ("run", &run),
+        ("build", &build),
+        ("verify", &verify),
+    ] {
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label} unexpectedly accepted duplicate imported FFI declarations:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label} emitted a partial artifact before rejecting duplicate imported FFI declarations: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("E0402") && stderr.contains("duplicate extern function 'clash'"),
+            "{label} lost the checker-owned duplicate declaration diagnostic: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "{label} emitted a legacy disposition or receipt manifest after duplicate declaration failure: {stderr}"
+        );
+    }
+    assert!(
+        !binary.exists(),
+        "failed duplicate imported FFI build left an output binary"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
