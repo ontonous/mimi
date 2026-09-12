@@ -211,7 +211,19 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
 
 fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
     match std::fs::symlink_metadata(cache_path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(cache_path.to_path_buf())),
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let mut file = std::fs::File::open(cache_path)
+                .map_err(|error| format!("open runtime cache archive: {error}"))?;
+            let mut magic = [0_u8; 8];
+            std::io::Read::read_exact(&mut file, &mut magic)
+                .map_err(|error| format!("read runtime cache archive header: {error}"))?;
+            if &magic != b"!<arch>\n" {
+                return Err(format!(
+                    "runtime cache archive header is invalid: {cache_path:?}"
+                ));
+            }
+            Ok(Some(cache_path.to_path_buf()))
+        }
         Ok(_) => Err(format!(
             "runtime cache path is not a regular file: {cache_path:?}"
         )),
@@ -826,10 +838,18 @@ mod tests {
         );
 
         let archive = dir.join("runtime.a");
-        fs::write(&archive, b"runtime archive").expect("write runtime archive");
+        fs::write(&archive, b"!<arch>\nruntime archive").expect("write runtime archive");
         assert_eq!(
             runtime_cache_hit(&archive).expect("regular archive is a cache hit"),
             Some(archive.clone())
+        );
+
+        let corrupt = dir.join("corrupt.a");
+        fs::write(&corrupt, b"not an archive").expect("write corrupt runtime archive");
+        let error = runtime_cache_hit(&corrupt).expect_err("corrupt archive must fail closed");
+        assert!(
+            error.starts_with("runtime cache archive header is invalid:"),
+            "{error}"
         );
 
         let collision = dir.join("collision.a");
