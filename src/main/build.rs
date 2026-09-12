@@ -151,8 +151,7 @@ fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) {
     }
 }
 
-#[cfg(unix)]
-fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
+fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
     let runtime_dir = runtime_rs
         .parent()
         .ok_or_else(|| "runtime source has no parent directory".to_string())?;
@@ -178,7 +177,12 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
             std::fs::read(&path).map_err(|e| format!("read runtime file {path:?}: {e}"))?;
         hasher.update(&contents);
     }
-    let key = hasher.finalize().to_hex();
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(unix)]
+fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
+    let key = runtime_cache_key(runtime_rs)?;
     let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
     let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
@@ -606,7 +610,7 @@ pub(crate) fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_runtime_cache_temps, publish_runtime_cache};
+    use super::{cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_key};
     use std::fs;
 
     #[test]
@@ -685,6 +689,39 @@ mod tests {
         assert!(!stale.exists());
         assert!(other.exists());
         assert!(archive.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_changes_with_source_content_and_file_set() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache key directory");
+        let runtime_rs = dir.join("standalone.rs");
+        let helper_rs = dir.join("helper.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+        fs::write(&helper_rs, b"fn helper() {}\n").expect("write helper source");
+
+        let first = runtime_cache_key(&runtime_rs).expect("compute initial runtime cache key");
+        assert_eq!(
+            first,
+            runtime_cache_key(&runtime_rs).expect("recompute initial runtime cache key")
+        );
+        fs::write(&helper_rs, b"fn helper_changed() {}\n").expect("change helper source");
+        let changed_content =
+            runtime_cache_key(&runtime_rs).expect("compute changed-content runtime cache key");
+        assert_ne!(first, changed_content);
+        fs::write(dir.join("extra.rs"), b"fn extra() {}\n").expect("add runtime source");
+        let changed_file_set =
+            runtime_cache_key(&runtime_rs).expect("compute changed-file-set runtime cache key");
+        assert_ne!(changed_content, changed_file_set);
 
         fs::remove_dir_all(&dir).ok();
     }
