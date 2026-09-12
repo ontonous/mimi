@@ -3984,6 +3984,83 @@ fn canonical_scalar_ffi_multi_source_same_symbol_verifier_order_matches_mir() {
 }
 
 #[test]
+fn canonical_scalar_ffi_multi_source_same_symbol_mixed_verdict_keeps_caller_span() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-multi-source-same-symbol-mixed-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create mixed-verdict fixture directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type ResultId = i64\nextern \"C\" { func mir_ffi_cli_shared(value: Scalar) -> ResultId requires: value > 10; }\n",
+    )
+    .expect("write mixed-verdict FFI declaration module");
+    fs::write(
+        dir.join("left.mimi"),
+        "use ffi_types\npub func left_call(value: i64) -> i64 {\n    requires: value > 10\n    mir_ffi_cli_shared(value)\n}\n",
+    )
+    .expect("write proven shared-symbol caller");
+    fs::write(
+        dir.join("right.mimi"),
+        "use ffi_types\npub func right_call(value: i64) -> i64 {\n    requires: value >= 0\n    mir_ffi_cli_shared(value)\n}\n",
+    )
+    .expect("write disproven shared-symbol caller");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use left\nuse right\nfunc main() -> i64 {\n    let left_value = left_call(20 as i64)\n    let right_value = right_call(2 as i64)\n    println(left_value)\n    println(right_value)\n    0\n}\n",
+    )
+    .expect("write mixed-verdict verifier entry");
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn mixed-verdict verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert!(
+            !output.status.success(),
+            "{label} mixed-verdict verifier unexpectedly passed"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("function:left_call: canonical MIR extern requires contract proven"),
+            "{label} lost the proven caller result: {stdout}"
+        );
+        assert!(
+            !stdout.contains("function:right_call: canonical MIR extern requires contract proven"),
+            "{label} reported a proven result for the failing caller: {stdout}"
+        );
+        assert!(
+            stderr.contains("right.mimi")
+                && stderr.contains("canonical MIR extern requires contract disproven")
+                && stderr.contains("mir_ffi_cli_shared(value)"),
+            "{label} lost failing caller source provenance: {stderr}"
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(
+        default_verify.stderr, mir_verify.stderr,
+        "default and explicit MIR must preserve mixed-verdict diagnostic identity"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transitive_import_graph_merges_mixed_width_call_sites() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
