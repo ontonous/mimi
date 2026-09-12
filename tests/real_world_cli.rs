@@ -1628,7 +1628,7 @@ fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     );
     fs::write(
         dir.join("ffi_types.mimi"),
-        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64 requires: value >= 0; }\npub func imported_alias(value: i64) -> i64 { requires: value > 0\n    mir_ffi_cli_import_alias(value)\n}\n",
+        "pub type Scalar = f64\npub type Real = Scalar\npub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> ResultId requires: value >= 0; }\npub func imported_alias(value: i64) -> ResultId { requires: value > 0\n    mir_ffi_cli_import_alias(value)\n}\n",
     )
     .expect("write imported alias consumer helper");
     let source = dir.join("main.mimi");
