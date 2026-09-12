@@ -23,6 +23,12 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+
+#[cfg(unix)]
+use std::ffi::OsString;
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -865,6 +871,58 @@ fn canonical_scalar_ffi_cli_successful_builds_clean_staging_directories() {
         );
         fs::remove_file(&binary).ok();
     }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_non_utf8_output_path_cleans_staging() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_non_utf8_output_cli_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI non-UTF-8 output directory");
+    let source = dir.join("non-utf8-output.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI non-UTF-8 output source");
+    let non_utf8_parent = dir.join(OsString::from_vec(b"non-utf8-parent-\xff".to_vec()));
+    fs::create_dir_all(&non_utf8_parent).expect("create non-UTF-8 output parent");
+    let stem = format!("non-utf8-output-{nonce}");
+    let binary = non_utf8_parent.join(&stem);
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["build", "--mir"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn scalar FFI non-UTF-8 output build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("output path is not valid UTF-8"),
+        "non-UTF-8 output lost its path diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        !binary.exists(),
+        "non-UTF-8 output failure created a binary"
+    );
+    assert!(
+        staging_dirs_for_output_stem(&stem).is_empty(),
+        "non-UTF-8 output failure left staging directories for {stem}"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
