@@ -352,42 +352,21 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 crate::span::Span,
             ),
         > = BTreeMap::new();
-        for function in self.program.functions().values() {
-            for block in function.blocks.values() {
-                for instruction in &block.instructions {
-                    let MirInstructionKind::Call {
-                        callee: ResolvedCallee::Extern(_),
-                        ..
-                    } = &instruction.kind
-                    else {
-                        continue;
-                    };
-                    let receipt =
-                        self.program
-                            .ffi_calls()
-                            .get(&instruction.id)
-                            .ok_or_else(|| {
-                                NativeMirError::new(
-                                    instruction.id.as_str(),
-                                    "extern call has no canonical FFI receipt",
-                                )
-                            })?;
-                    // `compile_mir_native` has already run the shared
-                    // receipt gate and native admission validator.  At this
-                    // point the receipt is trusted as the canonical
-                    // declaration identity; this loop only collects the
-                    // physical LLVM signatures needed by the emitter.
-                    declarations
-                        .entry(receipt.symbol.clone())
-                        .or_insert_with(|| {
-                            (
-                                receipt.parameter_types.clone(),
-                                receipt.result_type.clone(),
-                                receipt.span,
-                            )
-                        });
-                }
-            }
+        // `compile_mir_native` has already run the shared receipt gate and
+        // native admission validator.  Use the same canonical source-order
+        // receipt view as the route manifest and bytecode descriptor table so
+        // a symbol's representative span is independent of BTreeMap identity
+        // order or MIR block storage order.
+        for (_, receipt) in self.program.ffi_call_entries_in_source_order() {
+            declarations
+                .entry(receipt.symbol.clone())
+                .or_insert_with(|| {
+                    (
+                        receipt.parameter_types.clone(),
+                        receipt.result_type.clone(),
+                        receipt.span,
+                    )
+                });
         }
 
         for (symbol, (parameter_type_ids, result_type, symbol_span)) in declarations {

@@ -6405,6 +6405,72 @@ func main() -> i64 { let first = span_order(7 as i64); let second = span_order(8
 }
 
 #[test]
+fn scalar_ffi_native_declaration_span_uses_canonical_source_order() {
+    const SOURCE: &str = r#"
+extern "C" { func mimi_session_pair(value: i64) -> i64; }
+func main() -> i64 {
+    let first = mimi_session_pair(7 as i64);
+    let second = mimi_session_pair(8 as i64);
+    first + second
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("reserved-symbol source-order fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("reserved-symbol source-order fixture materialization");
+    let ordered = program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    let instruction_order = program
+        .functions()
+        .values()
+        .flat_map(|function| function.blocks.values())
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Call {
+                    callee: crate::core::ir::ResolvedCallee::Extern(_),
+                    ..
+                }
+            )
+        })
+        .map(|instruction| instruction.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(instruction_order.len(), 2);
+
+    let mut swapped_receipts = program.ffi_calls().clone();
+    let first_span = swapped_receipts
+        .get(&instruction_order[0])
+        .expect("first FFI receipt")
+        .span;
+    let second_span = swapped_receipts
+        .get(&instruction_order[1])
+        .expect("second FFI receipt")
+        .span;
+    swapped_receipts
+        .get_mut(&instruction_order[0])
+        .expect("first mutable FFI receipt")
+        .span = second_span;
+    swapped_receipts
+        .get_mut(&instruction_order[1])
+        .expect("second mutable FFI receipt")
+        .span = first_span;
+    let mut forged = program.clone();
+    forged.replace_ffi_calls_for_test_only(swapped_receipts);
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_source_order_span");
+    let diagnostics = generator
+        .compile_mir_native(&forged)
+        .expect_err("reserved FFI symbol must fail native declaration admission");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].span, ordered[0].1.span,
+        "native declaration diagnostics must use canonical source-order span"
+    );
+}
+
+#[test]
 fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
     use std::fs;
 
