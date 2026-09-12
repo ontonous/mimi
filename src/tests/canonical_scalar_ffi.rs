@@ -1603,6 +1603,33 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+    let verification_again =
+        crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-conversion".into())
+            .expect("repeat verify mixed argument/result conversion MIR");
+    let projection = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .map(|result| {
+                (
+                    result.status.clone(),
+                    result.message.clone(),
+                    result.constraint_count,
+                    result.diagnostic.as_ref().map(|diagnostic| diagnostic.span),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        projection(&verification),
+        projection(&verification_again),
+        "mixed conversion verifier projection must be repeatable"
+    );
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed conversion bytecode");
