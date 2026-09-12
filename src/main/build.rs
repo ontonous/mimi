@@ -12,6 +12,7 @@ use mimi::diagnostic::format::{
 #[cfg(test)]
 use mimi::runtime_cache::include_literals as runtime_include_literals;
 use mimi::runtime_cache::{
+    compiler_environment_frame as runtime_compiler_environment_frame,
     included_sources as runtime_cache_included_sources, path_bytes as runtime_cache_path_bytes,
 };
 use mimi::{lexer, loader, verifier};
@@ -331,7 +332,7 @@ fn runtime_cache_key_with_asan_and_args(
     // this identity hardening.  The compiler argument frame is part of the
     // domain so changing the standalone runtime invocation cannot reuse an
     // archive built with a different ABI or cfg set.
-    hasher.update(b"mimi-native-runtime-v3\0");
+    hasher.update(b"mimi-native-runtime-v4\0");
     if asan {
         // Invalidate the cache for ASan builds so a non-ASan runtime is never
         // reused for an ASan-instrumented link.
@@ -346,6 +347,7 @@ fn runtime_cache_key_with_asan_and_args(
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
+    hasher.update(&runtime_compiler_environment_frame(asan));
     for path in files {
         let path_bytes = runtime_cache_path_bytes(&path);
         hasher.update(&(path_bytes.len() as u64).to_le_bytes());
@@ -838,7 +840,7 @@ mod tests {
         ensure_runtime_cache_key_stable, native_runtime_cache_eligible, publish_runtime_cache,
         runtime_cache_attempt_should_retry, runtime_cache_hit, runtime_cache_key,
         runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args, runtime_cache_temp_path,
-        runtime_compiler_args, runtime_include_literals,
+        runtime_compiler_args, runtime_compiler_environment_frame, runtime_include_literals,
     };
     use std::fs;
 
@@ -1116,6 +1118,18 @@ mod tests {
             true,
             true
         ));
+    }
+
+    #[test]
+    fn runtime_compiler_environment_frame_is_stable_and_framed() {
+        let normal = runtime_compiler_environment_frame(false);
+        assert_eq!(normal, runtime_compiler_environment_frame(false));
+        assert!(normal.starts_with(b"rustc-env\0"));
+        assert!(normal
+            .windows(b"RUSTUP_TOOLCHAIN".len())
+            .any(|window| { window == b"RUSTUP_TOOLCHAIN" }));
+        let asan = runtime_compiler_environment_frame(true);
+        assert!(asan.starts_with(b"rustc-env\0"));
     }
 
     #[test]

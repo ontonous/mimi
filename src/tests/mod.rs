@@ -290,7 +290,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         "dead_code",
     ];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mimi-test-runtime-v2\0");
+    hasher.update(b"mimi-test-runtime-v3\0");
     hasher.update(b"rustc\0");
     hasher.update(compiler_identity.trim_end().as_bytes());
     hasher.update(b"\0");
@@ -300,6 +300,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
+    hasher.update(&crate::runtime_cache::compiler_environment_frame(false));
     for path in runtime_files {
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|e| format!("inspect runtime source {:?}: {e}", path))?;

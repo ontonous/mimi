@@ -3,6 +3,7 @@
 //! Both production builds and test-only runtime archives must discover the
 //! same `include!` source graph and encode paths without lossy conversion.
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 pub fn included_sources(
@@ -222,24 +223,67 @@ fn parse_rust_raw_literal(
     Err("unterminated Rust raw string literal".into())
 }
 
+const RUSTC_ENVIRONMENT_KEYS: &[&str] = &[
+    "RUSTUP_TOOLCHAIN",
+    "RUSTC_BOOTSTRAP",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTUP_HOME",
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+];
+
+/// Encode the effective environment inherited by the standalone `rustc`
+/// invocation.  The presence marker distinguishes an unset variable from an
+/// explicitly empty one, and ASan mirrors the production command's explicit
+/// `RUSTUP_TOOLCHAIN=nightly` override.
+pub fn compiler_environment_frame(asan: bool) -> Vec<u8> {
+    let mut frame = b"rustc-env\0".to_vec();
+    for key in RUSTC_ENVIRONMENT_KEYS {
+        let value = if asan && *key == "RUSTUP_TOOLCHAIN" {
+            Some(b"nightly".to_vec())
+        } else {
+            std::env::var_os(key).map(|value| os_str_bytes(&value))
+        };
+        append_len_framed(&mut frame, key.as_bytes());
+        match value {
+            Some(value) => {
+                frame.push(1);
+                append_len_framed(&mut frame, &value);
+            }
+            None => frame.push(0),
+        }
+    }
+    frame
+}
+
+fn append_len_framed(frame: &mut Vec<u8>, bytes: &[u8]) {
+    frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    frame.extend_from_slice(bytes);
+}
+
 #[cfg(unix)]
-pub fn path_bytes(path: &Path) -> Vec<u8> {
+pub fn os_str_bytes(value: &OsStr) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
 
-    path.as_os_str().as_bytes().to_vec()
+    value.as_bytes().to_vec()
 }
 
 #[cfg(windows)]
-pub fn path_bytes(path: &Path) -> Vec<u8> {
+pub fn os_str_bytes(value: &OsStr) -> Vec<u8> {
     use std::os::windows::ffi::OsStrExt;
 
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
+    value.encode_wide().flat_map(u16::to_le_bytes).collect()
 }
 
 #[cfg(not(any(unix, windows)))]
+pub fn os_str_bytes(value: &OsStr) -> Vec<u8> {
+    value.as_encoded_bytes().to_vec()
+}
+
 pub fn path_bytes(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_encoded_bytes().to_vec()
+    os_str_bytes(path.as_os_str())
 }

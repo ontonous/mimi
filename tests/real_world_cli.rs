@@ -158,8 +158,6 @@ fn staging_dirs_for_output_stem(stem: &str) -> Vec<PathBuf> {
 
 #[cfg(unix)]
 fn native_runtime_cache_path() -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-
     let runtime_rs = project_root().join("src/runtime/standalone.rs");
     let runtime_dir = runtime_rs.parent().expect("runtime source parent");
     let mut files = fs::read_dir(runtime_dir)
@@ -168,18 +166,21 @@ fn native_runtime_cache_path() -> PathBuf {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect::<Vec<_>>();
-    files.push(runtime_dir.join("../diagnostic/trap_msgs.rs"));
-    files.push(runtime_rs);
+    let included = mimi::runtime_cache::included_sources(&runtime_rs, &files)
+        .expect("discover runtime include sources");
+    files.extend(included);
+    files.push(runtime_rs.clone());
     files.sort();
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mimi-native-runtime-v3\0");
-    if std::env::var_os("MIMI_ASAN").is_some() {
+    hasher.update(b"mimi-native-runtime-v4\0");
+    let asan = std::env::var_os("MIMI_ASAN").is_some();
+    if asan {
         hasher.update(b"asan\0");
     }
     let mut compiler = Command::new("rustc");
     compiler.args(["--version", "--verbose"]);
-    if std::env::var_os("MIMI_ASAN").is_some() {
+    if asan {
         compiler.env("RUSTUP_TOOLCHAIN", "nightly");
     }
     let compiler = compiler
@@ -206,7 +207,7 @@ fn native_runtime_cache_path() -> PathBuf {
         "-A",
         "dead_code",
     ];
-    if std::env::var_os("MIMI_ASAN").is_some() {
+    if asan {
         compiler_args.extend(["-Z", "sanitizer=address"]);
     }
     hasher.update(b"rustc-args\0");
@@ -215,10 +216,11 @@ fn native_runtime_cache_path() -> PathBuf {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
+    hasher.update(&mimi::runtime_cache::compiler_environment_frame(asan));
     for path in files {
-        let path_bytes = path.as_os_str().as_bytes();
+        let path_bytes = mimi::runtime_cache::path_bytes(&path);
         hasher.update(&(path_bytes.len() as u64).to_le_bytes());
-        hasher.update(path_bytes);
+        hasher.update(&path_bytes);
         let contents = fs::read(path).expect("read runtime source");
         hasher.update(&(contents.len() as u64).to_le_bytes());
         hasher.update(&contents);
