@@ -2710,6 +2710,7 @@ use ffi_types
 use ffi_extra
 func main() -> i64 {
     println(call_imported_alias(7 as i64, 8 as i64))
+    println(call_imported_alias_extra(9 as i64))
     0
 }
 "#,
@@ -3121,7 +3122,9 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
             receipt: &MirFfiCallContract,
             arguments: &[MirRuntimeValue],
         ) -> Result<MirRuntimeValue, String> {
-            if receipt.symbol != "mir_ffi_import_alias_sequence" {
+            if receipt.symbol != "mir_ffi_import_alias_sequence"
+                && receipt.symbol != "mir_ffi_import_alias_sequence_extra"
+            {
                 return Err(format!("unexpected symbol {}", receipt.symbol));
             }
             let [MirRuntimeValue::FloatBits(bits)] = arguments else {
@@ -3131,6 +3134,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
             let expected_input = match self.0.get() {
                 0 => 7.0,
                 1 => 8.0,
+                2 => 9.0,
                 count => return Err(format!("unexpected sequence call count {count}")),
             };
             if input != expected_input {
@@ -3150,11 +3154,11 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
         .expect("reference imported alias sequence execution");
     assert_eq!(reference.value, MirRuntimeValue::Int(0));
-    assert_eq!(reference.output, "208\n");
+    assert_eq!(reference.output, "208\n309\n");
     assert_eq!(
         oracle.0.get(),
-        2,
-        "reference must observe both calls in order"
+        3,
+        "reference must observe all imported callers in order"
     );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
@@ -3190,7 +3194,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
             .expect("bytecode imported alias sequence execution"),
         Value::Int(0)
     ));
-    assert_eq!(vm.stdout(), "208\n");
+    assert_eq!(vm.stdout(), "208\n309\n");
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_imported_alias_sequence");
@@ -3212,7 +3216,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     )
     .expect("native imported alias sequence execution");
     assert_eq!(native.exit_code, Some(0));
-    assert_eq!(native.stdout, "208\n");
+    assert_eq!(native.stdout, "208\n309\n");
     assert_eq!(native.stderr, "");
     fs::remove_dir_all(project).expect("remove imported alias sequence project");
 }
