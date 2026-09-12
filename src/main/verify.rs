@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use crate::resolve_path;
-use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::diagnostic::format::{
+    colors_enabled, format_diagnostic, format_diagnostic_with_registry, strip_ansi,
+};
 use mimi::verifier::{TrustedSubsetDomain, VerifStatus};
 use mimi::{lexer, loader};
 
@@ -59,7 +61,8 @@ pub(crate) fn verify(
             let src_ref = Some(source.as_str());
             let filename = path.display().to_string();
             for d in &diags {
-                let formatted = format_diagnostic(d, src_ref, &filename);
+                let formatted =
+                    format_diagnostic_with_registry(d, &merged_file.sources, src_ref, &filename);
                 if use_color {
                     eprint!("{}", formatted);
                 } else {

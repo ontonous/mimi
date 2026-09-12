@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::{is_production, is_sketch, resolve_path};
-use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::diagnostic::format::{
+    colors_enabled, format_diagnostic, format_diagnostic_with_registry, strip_ansi,
+};
 use mimi::{lexer, loader};
 
 #[allow(clippy::too_many_arguments)]
@@ -129,7 +131,12 @@ fn run_once(
             let src = mimi::path_safety::read_source_capped(path).ok();
             let src_ref = src.as_deref();
             for d in &diagnostics {
-                let formatted = format_diagnostic(d, src_ref, &path.display().to_string());
+                let formatted = format_diagnostic_with_registry(
+                    d,
+                    &merged_file.sources,
+                    src_ref,
+                    &path.display().to_string(),
+                );
                 if use_color {
                     eprint!("{}", formatted);
                 } else {

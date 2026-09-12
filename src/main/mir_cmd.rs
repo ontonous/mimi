@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::{is_production, resolve_path};
+use mimi::diagnostic::format::{format_diagnostic_with_registry, strip_ansi};
 
 pub(crate) fn mir(
     path: Option<&Path>,
@@ -43,19 +44,28 @@ pub(crate) fn mir(
     };
     mimi::loader::merge_prelude_into(&mut file);
 
-    let checked = if strict {
+    let checked = match if strict {
         mimi::core::check_program_strict(&file)
     } else {
         mimi::core::check_program(&file)
-    }
-    .map_err(|diagnostics| {
-        let messages = diagnostics
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("MIR input failed type checking:\n{messages}")
-    })?;
+    } {
+        Ok(checked) => checked,
+        Err(diagnostics) => {
+            let fallback_filename = path.display().to_string();
+            let messages = diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    strip_ansi(&format_diagnostic_with_registry(
+                        diagnostic,
+                        &file.sources,
+                        Some(&source),
+                        &fallback_filename,
+                    ))
+                })
+                .collect::<String>();
+            return Err(format!("MIR input failed type checking:\n{messages}"));
+        }
+    };
 
     let source_ids = if all {
         None

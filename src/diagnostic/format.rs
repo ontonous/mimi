@@ -1,5 +1,5 @@
 use super::{Diagnostic, Severity};
-use crate::span::Span;
+use crate::span::{SourceRegistry, Span};
 
 /// ANSI color codes for terminal output.
 mod colors {
@@ -28,6 +28,74 @@ const MAX_SRC_SNIPPET_CHARS: usize = 200;
 /// density. Colors apply to the severity prefix only when the output is a
 /// terminal (see [`colors_enabled`]).
 pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename: &str) -> String {
+    let default_filename = filename.to_string();
+    format_diagnostic_with_note_filenames(diagnostic, source, filename, |_| {
+        default_filename.clone()
+    })
+}
+
+/// Format a diagnostic using the source registry carried by a merged file.
+///
+/// A CLI entry point usually starts with the entry file's source text, but a
+/// checker diagnostic may belong to an imported module. Resolve the primary
+/// source and every note from the registry so the rendered filename and
+/// source snippet preserve cross-file provenance instead of relabeling an
+/// imported span as the entry file.
+pub fn format_diagnostic_with_registry(
+    diagnostic: &Diagnostic,
+    registry: &SourceRegistry,
+    fallback_source: Option<&str>,
+    fallback_filename: &str,
+) -> String {
+    let primary = source_location(
+        registry,
+        &diagnostic.span,
+        fallback_source,
+        fallback_filename,
+    );
+    format_diagnostic_with_note_filenames(
+        diagnostic,
+        primary.source.as_deref(),
+        &primary.filename,
+        |span| source_location(registry, span, None, fallback_filename).filename,
+    )
+}
+
+struct SourceLocation {
+    source: Option<String>,
+    filename: String,
+}
+
+fn source_location(
+    registry: &SourceRegistry,
+    span: &Span,
+    fallback_source: Option<&str>,
+    fallback_filename: &str,
+) -> SourceLocation {
+    let Some(record) = registry.record(span.source_id) else {
+        return SourceLocation {
+            source: fallback_source.map(str::to_owned),
+            filename: fallback_filename.to_string(),
+        };
+    };
+    let filename = record
+        .disk_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| record.key.as_str().to_string());
+    let source = record
+        .disk_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    SourceLocation { source, filename }
+}
+
+fn format_diagnostic_with_note_filenames(
+    diagnostic: &Diagnostic,
+    source: Option<&str>,
+    filename: &str,
+    note_filename: impl Fn(&Span) -> String,
+) -> String {
     let severity_color = match diagnostic.severity {
         Severity::Error => colors::RED,
         Severity::Warning => colors::YELLOW,
@@ -90,11 +158,12 @@ pub fn format_diagnostic(diagnostic: &Diagnostic, source: Option<&str>, filename
 
     // Notes inline, each with its own coordinates when available.
     for note in &diagnostic.notes {
+        let note_filename = note_filename(&note.span);
         if note.span.start_line > 0 {
             out.push_str(&format!(
                 " | note: {} @ {}:{}{}",
                 note.message,
-                filename,
+                note_filename,
                 note.span.start_line,
                 span_columns(&note.span)
             ));

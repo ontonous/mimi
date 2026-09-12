@@ -3529,6 +3529,12 @@ fn canonical_scalar_ffi_duplicate_imported_declarations_fail_closed_across_cli_c
             "{label} lost the checker-owned duplicate declaration diagnostic: {stderr}"
         );
         assert!(
+            stderr.contains("right.mimi")
+                && stderr.contains("left.mimi")
+                && stderr.contains("previous extern declaration is here"),
+            "{label} lost cross-file duplicate declaration provenance: {stderr}"
+        );
+        assert!(
             !stderr.contains("canonical route disposition: legacy")
                 && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
             "{label} emitted a legacy disposition or receipt manifest after duplicate declaration failure: {stderr}"
