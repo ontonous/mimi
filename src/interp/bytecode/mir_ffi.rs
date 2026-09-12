@@ -37,6 +37,24 @@ fn ffi_contract_runtime_error(
     }
 }
 
+/// Classify the runtime failures raised by the physical scalar conversion
+/// guards.  Conversion helpers intentionally return strings so they can stay
+/// independent of the bytecode error type, but a range failure is still a
+/// typed integer-overflow trap at the VM boundary (the native MIR emitter
+/// emits E0802 for the same guard).
+fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
+    let is_integer_range_failure = (message.contains("canonical MIR FFI argument")
+        && message.contains("outside i32"))
+        || (message.contains("canonical MIR FFI result")
+            && (message.contains("outside i32")
+                || message.contains("outside target integer range")));
+    if is_integer_range_failure {
+        crate::interp::InterpError::integer_overflow(message)
+    } else {
+        crate::interp::InterpError::new(message)
+    }
+}
+
 /// Candidate system libc paths for the no-configuration scalar FFI profile.
 fn default_libc_candidates() -> [&'static str; 5] {
     [
@@ -125,7 +143,7 @@ impl CanonicalMirFfiRuntime {
             .map_err(crate::interp::InterpError::new)?;
         let converted_args = self
             .convert_arguments(descriptor, args)
-            .map_err(crate::interp::InterpError::new)?;
+            .map_err(ffi_runtime_error)?;
         if let Some(condition) = descriptor
             .requires
             .as_ref()
@@ -151,7 +169,7 @@ impl CanonicalMirFfiRuntime {
 
         let output = self
             .call_abi(descriptor, &converted_args)
-            .map_err(crate::interp::InterpError::new)?;
+            .map_err(ffi_runtime_error)?;
         if let Some(condition) = descriptor.ensures.as_ref().filter(|_| self.verify_requires) {
             crate::core::mir::evaluate_ffi_ensures(condition, |id| {
                 if let Some(index) = descriptor
@@ -1126,6 +1144,9 @@ mod tests {
             let error = runtime
                 .call(&descriptor(symbol, scalar), &[value])
                 .expect_err("invalid arguments/symbol cannot execute");
+            if expected == "outside i32" {
+                assert_eq!(error.code(), "E0802", "{error}");
+            }
             assert!(error.to_string().contains(expected), "{error}");
         }
     }

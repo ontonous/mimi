@@ -5539,7 +5539,12 @@ mod tests {
         if message.contains("division by zero") {
             return "runtime:E0801".into();
         }
-        if message.contains("overflow") {
+        if message.contains("overflow")
+            || (message.contains("canonical MIR FFI argument") && message.contains("outside i32"))
+            || (message.contains("canonical MIR FFI result")
+                && (message.contains("outside i32")
+                    || message.contains("outside target integer range")))
+        {
             return "runtime:E0802".into();
         }
         if message.contains("E0803") || message.contains("index out of bounds") {

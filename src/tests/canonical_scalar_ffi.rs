@@ -963,6 +963,7 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
     let bytecode_error = vm
         .run_value()
         .expect_err("bytecode must reject an out-of-range FFI result");
+    assert_eq!(bytecode_error.code(), "E0802");
     assert!(
         bytecode_error.to_string().contains("outside i32"),
         "{bytecode_error}"
@@ -1110,6 +1111,7 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
     let bytecode_error = vm
         .run_value()
         .expect_err("bytecode must reject a non-finite FFI result conversion");
+    assert_eq!(bytecode_error.code(), "E0802");
     assert!(bytecode_error
         .to_string()
         .contains("outside target integer range"));
@@ -1273,6 +1275,7 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
     let bytecode_error = vm
         .run_value()
         .expect_err("bytecode must reject the second non-finite result conversion");
+    assert_eq!(bytecode_error.code(), "E0802");
     assert!(bytecode_error
         .to_string()
         .contains("outside target integer range"));
@@ -1819,6 +1822,7 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
     let bytecode_error = vm
         .run_value()
         .expect_err("bytecode must reject the second floating narrow result");
+    assert_eq!(bytecode_error.code(), "E0802");
     assert!(bytecode_error
         .to_string()
         .contains("outside target integer range"));
