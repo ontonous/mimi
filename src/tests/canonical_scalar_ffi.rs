@@ -1849,6 +1849,46 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
     );
     let receipt_ids = mir.ffi_calls().keys().cloned().collect::<Vec<_>>();
     assert_ne!(receipt_ids[0], receipt_ids[1]);
+    let ordered = mir.ffi_call_entries_in_source_order();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-multi-call-public".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-multi-call-public".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public multi-call requires verifier");
+        assert_eq!(
+            results.len(),
+            2,
+            "each call receipt must produce one result"
+        );
+        assert_eq!(
+            results[0].status,
+            crate::verifier::VerifStatus::Proven,
+            "the first call must remain proven"
+        );
+        assert_eq!(
+            results[1].status,
+            crate::verifier::VerifStatus::Disproven,
+            "the second call must remain disproven"
+        );
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == mir.canonical_digest()
+            })
+        }));
+        assert_eq!(
+            results[1]
+                .diagnostic
+                .as_ref()
+                .expect("second call diagnostic")
+                .span,
+            ordered[1].1.span,
+            "the failed call must retain its receipt span"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct RequiresSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for RequiresSequenceOracle {
