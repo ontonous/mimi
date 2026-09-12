@@ -435,6 +435,21 @@ fn scalar_ffi_float_result_bounds_are_shared_and_half_open() {
 }
 
 #[test]
+fn scalar_ffi_integer_narrow_bounds_are_shared_and_closed() {
+    use crate::core::mir::MirFfiAbiConversion;
+
+    assert_eq!(
+        MirFfiAbiConversion::signed_integer_narrow_bounds(32),
+        Some((i32::MIN as i64, i32::MAX as i64))
+    );
+    assert_eq!(
+        MirFfiAbiConversion::signed_integer_narrow_bounds(64),
+        Some((i64::MIN, i64::MAX))
+    );
+    assert!(MirFfiAbiConversion::signed_integer_narrow_bounds(16).is_none());
+}
+
+#[test]
 fn materializes_terminal_session_close_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"

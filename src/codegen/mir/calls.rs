@@ -1455,16 +1455,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|error| NativeMirError::new(subject, error.to_string())),
             (Some(MirFfiConversionKind::SignedIntegerNarrow { to_bits, .. }), value) => {
                 let value = value.into_int_value();
-                let (minimum, maximum) = match to_bits {
-                    32 => (i32::MIN as i64, i32::MAX as i64),
-                    64 => (i64::MIN, i64::MAX),
-                    _ => {
-                        return Err(NativeMirError::new(
-                            subject,
-                            format!("FFI integer width {to_bits} is unsupported"),
-                        ))
-                    }
-                };
+                let (minimum, maximum) =
+                    crate::core::mir::MirFfiAbiConversion::signed_integer_narrow_bounds(to_bits)
+                        .ok_or_else(|| {
+                            NativeMirError::new(
+                                subject,
+                                format!("FFI integer width {to_bits} is unsupported"),
+                            )
+                        })?;
                 let i64_ty = self.generator.context.i64_type();
                 let minimum = self
                     .generator

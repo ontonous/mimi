@@ -1414,6 +1414,18 @@ impl MirFfiAbiConversion {
         }
     }
 
+    /// Return the closed mathematical range accepted by the canonical
+    /// signed-integer narrowing result conversion.  The MIR contract owns
+    /// these bounds so native's generated guard cannot drift from the
+    /// reference and bytecode `i32::try_from` paths at either edge.
+    pub(crate) fn signed_integer_narrow_bounds(to_bits: u16) -> Option<(i64, i64)> {
+        match to_bits {
+            32 => Some((i32::MIN as i64, i32::MAX as i64)),
+            64 => Some((i64::MIN, i64::MAX)),
+            _ => None,
+        }
+    }
+
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
         desc.is_canonical_ffi_scalar()
     }

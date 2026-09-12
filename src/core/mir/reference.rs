@@ -5197,13 +5197,26 @@ impl<'a> MirReferenceInterpreter<'a> {
         match (kind, value) {
             (MirFfiConversionKind::Identity { .. }, value) => Ok(value),
             (
-                MirFfiConversionKind::SignedIntegerNarrow { to_bits: 32, .. },
+                MirFfiConversionKind::SignedIntegerNarrow { to_bits, .. },
                 MirRuntimeValue::Int(value),
-            ) => i32::try_from(value)
-                .map(|value| MirRuntimeValue::Int(i64::from(value)))
-                .map_err(|_| {
-                    self.error(&function.owner, "canonical MIR FFI result is outside i32")
-                }),
+            ) => {
+                let (lower, upper) = MirFfiAbiConversion::
+                    signed_integer_narrow_bounds(to_bits)
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!(
+                                "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
+                            ),
+                        )
+                    })?;
+                if value < lower || value > upper {
+                    return Err(
+                        self.error(&function.owner, "canonical MIR FFI result is outside i32")
+                    );
+                }
+                Ok(MirRuntimeValue::Int(value))
+            }
             (
                 MirFfiConversionKind::FloatToSignedInteger { to_bits },
                 MirRuntimeValue::FloatBits(bits),

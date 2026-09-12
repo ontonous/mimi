@@ -550,10 +550,18 @@ fn apply_result_conversion(
     };
     match (kind, value) {
         (MirFfiConversionKind::Identity { .. }, value) => Ok(value),
-        (MirFfiConversionKind::SignedIntegerNarrow { to_bits: 32, .. }, Value::Int(value)) => {
-            i32::try_from(value)
-                .map(|value| Value::Int(value as i64))
-                .map_err(|_| "canonical MIR FFI result is outside i32".into())
+        (MirFfiConversionKind::SignedIntegerNarrow { to_bits, .. }, Value::Int(value)) => {
+            let (lower, upper) = crate::core::mir::MirFfiAbiConversion::
+                signed_integer_narrow_bounds(to_bits)
+                .ok_or_else(|| {
+                    format!(
+                        "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
+                    )
+                })?;
+            if value < lower || value > upper {
+                return Err("canonical MIR FFI result is outside i32".into());
+            }
+            Ok(Value::Int(value))
         }
         (MirFfiConversionKind::FloatToSignedInteger { to_bits }, Value::Float(value)) => {
             let (lower, upper) = crate::core::mir::MirFfiAbiConversion::
