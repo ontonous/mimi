@@ -264,7 +264,9 @@ fn runtime_cache_included_sources(
         }
         let source_text = std::fs::read_to_string(&source)
             .map_err(|error| format!("read runtime include source {source:?}: {error}"))?;
-        for include in runtime_include_literals(&source_text) {
+        let includes = runtime_include_literals(&source_text)
+            .map_err(|error| format!("parse runtime include source {source:?}: {error}"))?;
+        for include in includes {
             let include_path = source
                 .parent()
                 .ok_or_else(|| format!("runtime include source has no parent: {source:?}"))?
@@ -288,28 +290,176 @@ fn runtime_cache_included_sources(
     Ok(included)
 }
 
-fn runtime_include_literals(source: &str) -> Vec<&str> {
+fn runtime_include_literals(source: &str) -> Result<Vec<String>, String> {
+    let bytes = source.as_bytes();
     let mut literals = Vec::new();
-    let mut remaining = source;
-    while let Some(index) = remaining.find("include!") {
-        let after_macro = &remaining[index + "include!".len()..];
-        let after_macro = after_macro.trim_start();
-        let Some(after_open) = after_macro.strip_prefix('(') else {
-            remaining = after_macro;
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
+            cursor += 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
             continue;
-        };
-        let after_open = after_open.trim_start();
-        let Some(after_quote) = after_open.strip_prefix('"') else {
-            remaining = after_open;
+        }
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+            cursor = skip_rust_block_comment(bytes, cursor)?;
             continue;
-        };
-        let Some(end) = after_quote.find('"') else {
-            break;
-        };
-        literals.push(&after_quote[..end]);
-        remaining = &after_quote[end + 1..];
+        }
+        if bytes[cursor] == b'"' {
+            cursor = skip_rust_quoted_literal(bytes, cursor)?;
+            continue;
+        }
+        if bytes[cursor] == b'r' {
+            if let Some(next) = skip_rust_raw_literal(bytes, cursor)? {
+                cursor = next;
+                continue;
+            }
+        }
+        if bytes[cursor] == b'\'' {
+            let escaped = bytes.get(cursor + 1) == Some(&b'\\');
+            let ascii_char = bytes.get(cursor + 2) == Some(&b'\'');
+            if escaped || ascii_char {
+                cursor = skip_rust_char_literal(bytes, cursor)?;
+                continue;
+            }
+        }
+
+        let macro_name = b"include!";
+        let is_macro = bytes[cursor..].starts_with(macro_name)
+            && (cursor == 0 || !is_rust_ident_byte(bytes[cursor - 1]));
+        if !is_macro {
+            cursor += 1;
+            continue;
+        }
+
+        let macro_end = cursor + macro_name.len();
+        cursor = macro_end;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'(') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+
+        if bytes.get(cursor) == Some(&b'"') {
+            let start = cursor + 1;
+            let end = find_rust_quoted_literal_end(bytes, cursor)?;
+            let literal = &source[start..end];
+            if literal.as_bytes().contains(&b'\\') {
+                return Err(
+                    "include! path literal contains an escape; use a raw string literal".into(),
+                );
+            }
+            literals.push(literal.to_owned());
+            cursor = end + 1;
+            continue;
+        }
+        if bytes.get(cursor) == Some(&b'r') {
+            if let Some((start, end, next)) = parse_rust_raw_literal(bytes, cursor)? {
+                literals.push(source[start..end].to_owned());
+                cursor = next;
+                continue;
+            }
+        }
+        return Err("include! path must be a direct string literal".into());
     }
-    literals
+    Ok(literals)
+}
+
+fn is_rust_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_rust_block_comment(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
+    let mut depth = 1_u32;
+    cursor += 2;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+            depth = depth
+                .checked_add(1)
+                .ok_or_else(|| "nested Rust block comments overflowed".to_string())?;
+            cursor += 2;
+        } else if bytes[cursor] == b'*' && bytes.get(cursor + 1) == Some(&b'/') {
+            depth -= 1;
+            cursor += 2;
+            if depth == 0 {
+                return Ok(cursor);
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    Err("unterminated Rust block comment".into())
+}
+
+fn skip_rust_quoted_literal(bytes: &[u8], cursor: usize) -> Result<usize, String> {
+    Ok(find_rust_quoted_literal_end(bytes, cursor)? + 1)
+}
+
+fn find_rust_quoted_literal_end(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
+    cursor += 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => {
+                cursor += 2;
+            }
+            b'"' => return Ok(cursor),
+            _ => cursor += 1,
+        }
+    }
+    Err("unterminated Rust string literal".into())
+}
+
+fn skip_rust_char_literal(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
+    cursor += 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor += 2,
+            b'\'' => return Ok(cursor + 1),
+            _ => cursor += 1,
+        }
+    }
+    Err("unterminated Rust character literal".into())
+}
+
+fn skip_rust_raw_literal(bytes: &[u8], cursor: usize) -> Result<Option<usize>, String> {
+    Ok(parse_rust_raw_literal(bytes, cursor)?.map(|(_, _, next)| next))
+}
+
+fn parse_rust_raw_literal(
+    bytes: &[u8],
+    cursor: usize,
+) -> Result<Option<(usize, usize, usize)>, String> {
+    if bytes.get(cursor) != Some(&b'r') {
+        return Ok(None);
+    }
+    let mut quote = cursor + 1;
+    while bytes.get(quote) == Some(&b'#') {
+        quote += 1;
+    }
+    if bytes.get(quote) != Some(&b'"') {
+        return Ok(None);
+    }
+    let hash_count = quote - cursor - 1;
+    let start = quote + 1;
+    let mut end = start;
+    while end < bytes.len() {
+        if bytes[end] == b'"'
+            && bytes
+                .get(end + 1..end + 1 + hash_count)
+                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+        {
+            return Ok(Some((start, end, end + 1 + hash_count)));
+        }
+        end += 1;
+    }
+    Err("unterminated Rust raw string literal".into())
 }
 
 #[cfg(unix)]
@@ -795,7 +945,7 @@ pub(crate) fn build(
 mod tests {
     use super::{
         cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_hit, runtime_cache_key,
-        runtime_cache_key_with_asan,
+        runtime_cache_key_with_asan, runtime_include_literals,
     };
     use std::fs;
 
@@ -943,6 +1093,31 @@ mod tests {
         assert_ne!(changed_content, changed_file_set);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_include_literals_ignore_comments_and_strings() {
+        let source = r####"
+            // include!("comment.rs")
+            /* nested /* include!("nested-comment.rs") */ comment */
+            const TEXT: &str = "include!(\"string.rs\")";
+            const RAW: &str = r#"include!("raw-string.rs")"#;
+            include!("real.rs");
+            include! (r##"raw.rs"##);
+        "####;
+        let literals = runtime_include_literals(source).expect("parse include literals");
+        assert_eq!(literals, vec!["real.rs", "raw.rs"]);
+    }
+
+    #[test]
+    fn runtime_include_literals_reject_unsupported_path_forms() {
+        let escaped = runtime_include_literals(r#"include!("foo\n.rs");"#)
+            .expect_err("escaped include path must fail closed");
+        assert!(escaped.contains("escape"), "{escaped}");
+
+        let composed = runtime_include_literals(r#"include!(concat!("foo", "bar"));"#)
+            .expect_err("composed include path must fail closed");
+        assert!(composed.contains("direct string literal"), "{composed}");
     }
 
     #[test]
