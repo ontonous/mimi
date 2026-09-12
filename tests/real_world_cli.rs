@@ -1825,6 +1825,72 @@ fn canonical_scalar_ffi_native_declaration_error_keeps_call_span() {
 }
 
 #[test]
+fn canonical_scalar_ffi_native_multi_module_declaration_failure_is_source_ordered() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-native-ffi-multi-module-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-module native FFI directory");
+    fs::write(
+        dir.join("left.mimi"),
+        "extern \"C\" { func mimi_session_pair(value: i64) -> i64; }\npub func left(value: i64) -> i64 { mimi_session_pair(value) }\n",
+    )
+    .expect("write first reserved FFI module");
+    fs::write(
+        dir.join("right.mimi"),
+        "extern \"C\" { func mimi_channel_drop(value: i64) -> i64; }\npub func right(value: i64) -> i64 { mimi_channel_drop(value) }\n",
+    )
+    .expect("write second reserved FFI module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use left;\nuse right;\nfunc main() -> i64 { left(1 as i64) + right(2 as i64) }\n",
+    )
+    .expect("write multi-module native FFI entry");
+    let binary = dir.join("out");
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn multi-module native FFI build");
+    assert!(
+        !build.status.success(),
+        "reserved multi-module FFI symbols unexpectedly built"
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("left.mimi")
+            && stderr.contains("left.mimi:2:")
+            && stderr.contains("mimi_session_pair(value)")
+            && stderr.contains("FFI symbol collides with an already-declared native MIR function"),
+        "multi-module native FFI diagnostic did not use the first canonical caller span: {stderr}"
+    );
+    assert!(
+        stderr.contains("canonical MIR native backend capability check failed"),
+        "multi-module native FFI failure lost canonical capability stage: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "multi-module native FFI failure fell back to legacy: {stderr}"
+    );
+    assert!(
+        !binary.exists(),
+        "failed multi-module native FFI build left an output binary"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-receipt-multi-failure-{}-{}",
