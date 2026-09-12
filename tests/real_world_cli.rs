@@ -1230,6 +1230,113 @@ fn canonical_scalar_ffi_cli_build_verify_counts_all_failed_receipts() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_verify_orders_diagnostics_and_roundtrips_receipt() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_verify_receipt_order_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create verifier-order CLI fixture directory");
+    let source = dir.join("verify-order.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n    func third(value: i64) -> i64 requires: value >= 0 ensures: true;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    third(-9 as i64);\n    0\n}\n",
+    )
+    .expect("write verifier-order CLI source");
+
+    let checked = checked_route_receipt(&source);
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn verifier-order receipt inspection");
+    assert!(inspect.status.success());
+    let manifest_text = String::from_utf8_lossy(&inspect.stdout);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest_text)
+        .expect("verifier-order receipt manifest round-trip");
+    assert_eq!(manifest_receipt, checked);
+    assert_eq!(
+        manifest_receipt.root_owners,
+        vec![mimi::core::NodeId("function:main".into())]
+    );
+    assert!(
+        !String::from_utf8_lossy(&inspect.stderr).contains("canonical route disposition: legacy")
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .expect("spawn verifier-order CLI verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert_eq!(output.status.code(), Some(1), "{label} verifier exit code");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("canonical MIR extern requires contract proven"));
+        assert!(stdout.contains("1/3 verified"));
+        assert_eq!(
+            stderr
+                .matches("canonical MIR extern requires contract disproven")
+                .count(),
+            2,
+            "{label} must retain both disproven diagnostics: {stderr}"
+        );
+        let second = stderr
+            .find("second(-8 as i64)")
+            .expect("second diagnostic source");
+        let third = stderr
+            .find("third(-9 as i64)")
+            .expect("third diagnostic source");
+        assert!(
+            second < third,
+            "{label} diagnostics changed receipt source order"
+        );
+        assert_eq!(stderr.matches("second(-8 as i64)").count(), 1);
+        assert_eq!(stderr.matches("third(-9 as i64)").count(), 1);
+        assert!(!stderr.contains("first(7 as i64)"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    let stable_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains("canonical MIR extern requires contract")
+                    || line.contains("verified in")
+            })
+            .map(|line| {
+                let semantic = line.split(" (").next().unwrap_or(line);
+                semantic.split(" in ").next().unwrap_or(semantic).to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        stable_summary(&default_verify),
+        stable_summary(&mir_verify),
+        "default and explicit MIR verifier summaries must match without duration"
+    );
+    assert_eq!(
+        default_verify.stderr, mir_verify.stderr,
+        "default and explicit MIR verifier diagnostics must match byte-for-byte"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
