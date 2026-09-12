@@ -115,6 +115,30 @@ impl Drop for TempBuildDirGuard {
     }
 }
 
+/// Owns a content-addressed runtime cache's temporary archive until it has
+/// been atomically renamed into place.
+struct TempFileGuard {
+    path: std::path::PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path::PathBuf, String> {
+    let _tmp_guard = TempFileGuard::new(tmp_path.to_path_buf());
+    std::fs::rename(tmp_path, cache_path).map_err(|e| format!("publish runtime cache: {e}"))?;
+    Ok(cache_path.to_path_buf())
+}
+
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
     let runtime_dir = runtime_rs
@@ -195,8 +219,7 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
         let _ = std::fs::remove_file(&tmp_path);
         return Err("Rust runtime compilation failed".into());
     }
-    std::fs::rename(&tmp_path, &cache_path).map_err(|e| format!("publish runtime cache: {e}"))?;
-    Ok(cache_path)
+    publish_runtime_cache(&tmp_path, &cache_path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -566,4 +589,37 @@ pub(crate) fn build(
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::publish_runtime_cache;
+    use std::fs;
+
+    #[test]
+    fn runtime_cache_publish_failure_removes_temporary_archive() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-publish-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache publish test directory");
+        let tmp_path = dir.join("runtime.tmp");
+        let cache_path = dir.join("missing-parent").join("runtime.a");
+        fs::write(&tmp_path, b"temporary runtime archive")
+            .expect("write temporary runtime archive");
+
+        let result = publish_runtime_cache(&tmp_path, &cache_path);
+        assert!(result.is_err(), "missing cache parent must reject publish");
+        assert!(
+            !tmp_path.exists(),
+            "failed runtime cache publish left temporary archive {tmp_path:?}"
+        );
+        assert!(!cache_path.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
