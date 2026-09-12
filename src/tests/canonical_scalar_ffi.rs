@@ -2348,6 +2348,97 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_repeated_public_verifiers_pin_three_receipts_to_one_mir_digest() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_repeat_first(value: i64) -> i64 requires: value >= 0 ensures: true;
+    func mir_ffi_repeat_second(value: i64) -> i64 requires: value >= 0;
+    func mir_ffi_repeat_third(value: i64) -> i64 requires: value >= 0;
+}
+func main() -> i64 {
+    mir_ffi_repeat_first(7 as i64);
+    mir_ffi_repeat_second(-8 as i64);
+    mir_ffi_repeat_third(-9 as i64);
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("check repeated public verifier fixture");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize repeated public verifier route");
+    let receipt = route
+        .program
+        .route_receipt("r6-466-repeat-public-verifiers");
+    let ordered = route.program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 3);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let first = crate::verifier::verify_checked(&checked, "r6-466-repeat-public-verifiers".into())
+        .expect("first repeated public verifier run");
+    let second = crate::verifier::verify_checked(&checked, "r6-466-repeat-public-verifiers".into())
+        .expect("second repeated public verifier run");
+    let dual =
+        crate::verifier::verify_checked_dual(&checked, "r6-466-repeat-public-verifiers".into())
+            .expect("dual repeated public verifier run");
+    for (label, results) in [("first", &first), ("second", &second), ("dual", &dual)] {
+        assert_eq!(
+            results.len(),
+            3,
+            "{label} must retain one result per receipt"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.status.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::verifier::VerifStatus::Proven,
+                crate::verifier::VerifStatus::Disproven,
+                crate::verifier::VerifStatus::Disproven,
+            ],
+            "{label} changed receipt verdict order"
+        );
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == receipt.mir_digest
+            })
+        }));
+        for (index, result) in results.iter().enumerate().skip(1) {
+            assert_eq!(
+                result
+                    .diagnostic
+                    .as_ref()
+                    .expect("failed receipt diagnostic")
+                    .span,
+                ordered[index].1.span,
+                "{label} changed receipt {index} diagnostic span"
+            );
+        }
+    }
+    let projection = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .map(|result| {
+                (
+                    result.status.clone(),
+                    result.message.clone(),
+                    result.constraint_count,
+                    result.diagnostic.as_ref().map(|diagnostic| diagnostic.span),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(projection(&first), projection(&second));
+    assert_eq!(projection(&first), projection(&dual));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_public_verifier_artifacts_bind_source_hash_by_entrypoint() {
     if !crate::verifier::is_z3_available() {
         eprintln!("SKIP: Z3 unavailable");
