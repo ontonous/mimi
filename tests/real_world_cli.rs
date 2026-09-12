@@ -800,6 +800,167 @@ fn canonical_scalar_ffi_cli_postcondition_phase_stability() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_combined_requires_ensures_runtime_verify_boundary() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_combined_contract_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create combined-contract CLI fixture directory");
+    let source = dir.join("combined.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func labs(x: i64) -> i64 requires: x >= 0 ensures: result == x; }\nfunc main() -> i64 { println(labs(7 as i64)); 0 }\n",
+    )
+    .expect("write combined-contract CLI source");
+
+    let mut verify_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("combined run {:?}: {error}", explicit_mir));
+        assert!(
+            run.status.success(),
+            "combined run {:?} must succeed:\n{}\n{}",
+            explicit_mir,
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"7\n");
+        assert!(run.stderr.is_empty());
+
+        let binary = dir.join(if explicit_mir {
+            "combined-mir"
+        } else {
+            "combined-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("combined build {:?}: {error}", explicit_mir));
+        assert!(
+            build.status.success(),
+            "combined build {:?} must succeed:\n{}\n{}",
+            explicit_mir,
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy")
+        );
+        let native = Command::new(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("combined binary {:?}: {error}", explicit_mir));
+        assert!(
+            native.status.success(),
+            "combined binary {:?} failed",
+            explicit_mir
+        );
+        assert_eq!(native.stdout, b"7\n");
+        assert!(native.stderr.is_empty());
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("combined verify {:?}: {error}", explicit_mir));
+        assert!(
+            !verify.status.success(),
+            "combined verify {:?} must reject the unconstrained external result",
+            explicit_mir
+        );
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            verify_stdout.contains("0/1 verified") || verify_stderr.contains("0/1 verified"),
+            "combined verify {:?}: stdout={verify_stdout} stderr={verify_stderr}",
+            explicit_mir
+        );
+        assert!(
+            verify_stderr.contains("canonical MIR extern ensures contract disproven"),
+            "combined verify {:?}: {verify_stderr}",
+            explicit_mir
+        );
+        assert!(!verify_stdout.contains("canonical route disposition: legacy"));
+        assert!(!verify_stderr.contains("canonical route disposition: legacy"));
+        verify_outputs.push(verify);
+
+        let mut build_verify = Command::new(mimi_bin());
+        build_verify
+            .current_dir(project_root())
+            .arg("build")
+            .arg("--verify-ffi");
+        if explicit_mir {
+            build_verify.arg("--mir");
+        }
+        let build_verify = build_verify
+            .arg("--emit-ir")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("combined build --verify-ffi {:?}: {error}", explicit_mir)
+            });
+        assert!(
+            !build_verify.status.success(),
+            "combined build --verify-ffi {:?} must reject the unconstrained external result",
+            explicit_mir
+        );
+        let build_verify_stderr = String::from_utf8_lossy(&build_verify.stderr);
+        assert!(
+            build_verify_stderr.contains("FFI contract verification failed")
+                && build_verify_stderr.contains("canonical MIR extern ensures contract disproven"),
+            "combined build --verify-ffi {:?}: {build_verify_stderr}",
+            explicit_mir
+        );
+        assert!(!build_verify_stderr.contains("canonical route disposition: legacy"));
+        fs::remove_file(&binary).ok();
+    }
+    let semantic_summary = |stdout: &[u8]| {
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .filter_map(|line| {
+                let (status, timing) = line.split_once(" in ")?;
+                let constraints = timing.find(" (").map(|index| &timing[index..])?;
+                Some(format!("{status}{constraints}"))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        semantic_summary(&verify_outputs[0].stdout),
+        semantic_summary(&verify_outputs[1].stdout),
+        "default and explicit MIR combined verifier semantic summaries must match"
+    );
+    assert_eq!(
+        verify_outputs[0].stderr, verify_outputs[1].stderr,
+        "default and explicit MIR combined verifier diagnostics must match"
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
