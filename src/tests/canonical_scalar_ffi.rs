@@ -3750,6 +3750,107 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_requires_and_ensures_share_one_result_with_ordered_summary() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_i64(x: i64) -> i64 requires: x >= 0 ensures: result == x;
+}
+func main() -> i64 {
+    println(mir_ffi_i64(42 as i64));
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex scalar FFI requires-and-ensures fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse scalar FFI requires-and-ensures fixture");
+    let checked =
+        crate::core::check_program(&file).expect("check scalar FFI requires-and-ensures fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize scalar FFI requires-and-ensures fixture");
+    let receipt = mir.ffi_calls().values().next().expect("FFI receipt");
+    assert!(receipt.requires.is_some());
+    assert!(receipt.ensures.is_some());
+    let digest = mir.canonical_digest();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-requires-ensures".into())
+        .expect("MIR FFI requires-and-ensures verifier");
+    assert_eq!(results.len(), 1, "one receipt produces one combined result");
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
+    assert!(results[0]
+        .message
+        .contains("extern ensures contract disproven"));
+    assert_eq!(
+        results[0].constraint_count, 3,
+        "combined requires/ensures proof must retain the canonical path and result-definedness constraints"
+    );
+    assert_eq!(
+        results[0]
+            .diagnostic
+            .as_ref()
+            .expect("combined result diagnostic")
+            .span,
+        receipt.span
+    );
+    assert!(results[0].artifact.as_ref().is_some_and(|artifact| {
+        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR && artifact.mir_hash == digest
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference scalar FFI requires-and-ensures execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n");
+
+    let bytecode =
+        compile_mir_program(&mir).expect("AST-free scalar FFI requires-and-ensures bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value()
+            .expect("bytecode scalar FFI requires-and-ensures"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "42\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_requires_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native scalar FFI requires-and-ensures");
+    generator
+        .module
+        .verify()
+        .expect("valid native scalar FFI requires-and-ensures module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native scalar FFI requires-and-ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_unit_ensures_runs_after_void_call_across_three_consumers() {
     let _guard = super::FfiEnvLock::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
