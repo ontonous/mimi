@@ -238,3 +238,90 @@ pub fn strip_ansi(s: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{format_diagnostic_with_registry, strip_ansi};
+    use crate::diagnostic::Diagnostic;
+    use crate::span::{SourceKey, SourceRecord, SourceRegistry, SourceTextOrigin, Span};
+    use std::fs;
+
+    #[test]
+    fn registry_formatter_routes_primary_and_note_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi_diagnostic_format_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create formatter test directory");
+        let left_path = root.join("left.mimi");
+        let right_path = root.join("right.mimi");
+        fs::write(&left_path, "extern \"C\" { func clash(x: i64) -> i64; }\n")
+            .expect("write left source");
+        fs::write(&right_path, "extern \"C\" { func clash(x: i64) -> i64; }\n")
+            .expect("write right source");
+
+        let mut registry = SourceRegistry::default();
+        let left = registry
+            .register(
+                SourceRecord::new(
+                    SourceKey::new("workspace:left.mimi").expect("left key"),
+                    SourceTextOrigin::Disk,
+                )
+                .with_disk_path(left_path.clone()),
+            )
+            .expect("register left source");
+        let right = registry
+            .register(
+                SourceRecord::new(
+                    SourceKey::new("workspace:right.mimi").expect("right key"),
+                    SourceTextOrigin::Disk,
+                )
+                .with_disk_path(right_path.clone()),
+            )
+            .expect("register right source");
+
+        let diagnostic = Diagnostic::error_code(
+            "E0402",
+            "duplicate extern function 'clash'",
+            Span::single(1, 22).with_source(right),
+        )
+        .with_note(
+            "previous extern declaration is here",
+            Span::single(1, 22).with_source(left),
+        );
+        let rendered = strip_ansi(&format_diagnostic_with_registry(
+            &diagnostic,
+            &registry,
+            Some("entry fallback"),
+            "main.mimi",
+        ));
+
+        assert!(rendered.contains(&format!("{}:1:22", right_path.display())));
+        assert!(rendered.contains("src: extern \"C\" { func clash(x: i64) -> i64; }"));
+        assert!(rendered.contains(&format!(
+            "previous extern declaration is here @ {}:1:22",
+            left_path.display()
+        )));
+        assert!(!rendered.contains("main.mimi"));
+
+        fs::remove_dir_all(root).expect("remove formatter test directory");
+    }
+
+    #[test]
+    fn registry_formatter_uses_fallback_for_unknown_source() {
+        let diagnostic = Diagnostic::error("unknown source", Span::single(2, 4));
+        let rendered = strip_ansi(&format_diagnostic_with_registry(
+            &diagnostic,
+            &SourceRegistry::default(),
+            Some("first\nsecond source line"),
+            "entry.mimi",
+        ));
+
+        assert!(rendered.contains("entry.mimi:2:4 unknown source"));
+        assert!(rendered.contains("src: second source line"));
+    }
+}

@@ -282,8 +282,12 @@ pub(crate) fn build(
                     if res.status == verifier::VerifStatus::Disproven {
                         eprintln!("⚠  FFI violation: {} — {}", res.func_name, res.message);
                         if let Some(diag) = &res.diagnostic {
-                            let formatted =
-                                format_diagnostic(diag, None, &path.display().to_string());
+                            let formatted = format_diagnostic_with_registry(
+                                diag,
+                                &merged_file.sources,
+                                Some(source.as_str()),
+                                &path.display().to_string(),
+                            );
                             eprint!("{}", formatted);
                         }
                     } else if res.status.is_inconclusive() {
@@ -346,7 +350,12 @@ pub(crate) fn build(
         let use_color = colors_enabled();
         let filename = path.display().to_string();
         for diagnostic in &diagnostics {
-            let formatted = format_diagnostic(diagnostic, Some(source.as_str()), &filename);
+            let formatted = format_diagnostic_with_registry(
+                diagnostic,
+                &merged_file.sources,
+                Some(source.as_str()),
+                &filename,
+            );
             if use_color {
                 eprint!("{}", formatted);
             } else {
