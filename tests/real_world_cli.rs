@@ -338,6 +338,41 @@ fn canonical_scalar_ffi_cli_verify_is_checker_only_before_native_link_failure() 
     assert_eq!(verifies[0].stdout, verifies[1].stdout);
     assert_eq!(verifies[0].stderr, verifies[1].stderr);
 
+    let emit_ir = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg("--verify-ffi")
+            .arg("--emit-ir")
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .unwrap_or_else(|error| panic!("unlinked emit-ir build {explicit_mir}: {error}"))
+    };
+    let default_ir_binary = dir.join("unlinked-default.ll");
+    let mir_ir_binary = dir.join("unlinked-mir.ll");
+    let emitted = [
+        emit_ir(false, &default_ir_binary),
+        emit_ir(true, &mir_ir_binary),
+    ];
+    for output in &emitted {
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("declare i64 @mir_ffi_unlinked_symbol(i64)"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(emitted[0].stdout, emitted[1].stdout);
+    assert!(!default_ir_binary.exists());
+    assert!(!mir_ir_binary.exists());
+
     let build = |explicit_mir: bool, binary: &Path| {
         let mut command = Command::new(mimi_bin());
         command.current_dir(project_root()).arg("build");
