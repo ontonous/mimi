@@ -2686,6 +2686,10 @@ int64_t mir_ffi_import_alias_sequence(double value) {
     ++call_count;
     return call_count * 100 + (int64_t)value;
 }
+int64_t mir_ffi_import_alias_sequence_extra(double value) {
+    ++call_count;
+    return call_count * 100 + (int64_t)value;
+}
 "#;
 
     let _guard = super::FfiEnvLock::lock();
@@ -2703,6 +2707,7 @@ int64_t mir_ffi_import_alias_sequence(double value) {
         &main_path,
         r#"
 use ffi_types
+use ffi_extra
 func main() -> i64 {
     println(call_imported_alias(7 as i64, 8 as i64))
     0
@@ -2727,6 +2732,21 @@ pub func call_imported_alias(first: i64, second: i64) -> ResultId {
 "#,
     )
     .expect("write imported alias sequence module");
+    fs::write(
+        project.join("ffi_extra.mimi"),
+        r#"
+pub type ExtraScalar = f64
+pub type ExtraReal = ExtraScalar
+pub type ExtraScalarInt = i64
+pub type ExtraResultId = ExtraScalarInt
+extern "C" { func mir_ffi_import_alias_sequence_extra(value: ExtraReal) -> ExtraResultId requires: value >= 0; }
+pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
+    requires: value >= 0
+    mir_ffi_import_alias_sequence_extra(value)
+}
+"#,
+    )
+    .expect("write imported alias extra module");
 
     let source = fs::read_to_string(&main_path).expect("read imported alias sequence main");
     let tokens = crate::lexer::Lexer::new(&source)
@@ -2768,18 +2788,35 @@ pub func call_imported_alias(first: i64, second: i64) -> ResultId {
     let repeated_receipt = repeated_mir.route_receipt("scalar-ffi-v1");
     assert_eq!(receipt.ffi_digest, repeated_receipt.ffi_digest);
     assert_eq!(receipt.mir_digest, repeated_receipt.mir_digest);
-    assert_eq!(mir.ffi_calls().len(), 2, "two calls must keep two receipts");
+    assert_eq!(
+        mir.ffi_calls().len(),
+        3,
+        "all imported callers must keep receipts"
+    );
     let receipts = mir
         .ffi_call_entries_in_source_order()
         .into_iter()
         .map(|(_, receipt)| receipt)
         .collect::<Vec<_>>();
-    assert!(receipts
-        .iter()
-        .all(|call| call.symbol == "mir_ffi_import_alias_sequence"));
-    assert_eq!(receipts[0].caller, receipts[1].caller);
+    assert_eq!(receipts[0].symbol, "mir_ffi_import_alias_sequence");
+    assert_eq!(receipts[1].symbol, "mir_ffi_import_alias_sequence");
+    assert_eq!(receipts[2].symbol, "mir_ffi_import_alias_sequence_extra");
+    assert_eq!(
+        receipts[0].caller,
+        crate::core::NodeId("function:call_imported_alias".into())
+    );
+    assert_eq!(
+        receipts[1].caller,
+        crate::core::NodeId("function:call_imported_alias".into())
+    );
+    assert_eq!(
+        receipts[2].caller,
+        crate::core::NodeId("function:call_imported_alias_extra".into())
+    );
     assert_eq!(receipts[0].callee, receipts[1].callee);
+    assert_ne!(receipts[1].callee, receipts[2].callee);
     assert_ne!(receipts[0].instruction, receipts[1].instruction);
+    assert_ne!(receipts[1].instruction, receipts[2].instruction);
 
     let wrapper = mir
         .functions()
@@ -2797,28 +2834,34 @@ pub func call_imported_alias(first: i64, second: i64) -> ResultId {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let receipt_instruction_ids = receipts
+    let wrapper_receipt_instruction_ids = receipts
         .iter()
+        .filter(|call| call.caller.0 == "function:call_imported_alias")
         .map(|call| call.instruction.clone())
         .collect::<Vec<_>>();
     assert_eq!(
-        call_instruction_ids, receipt_instruction_ids,
+        call_instruction_ids, wrapper_receipt_instruction_ids,
         "source-ordered receipt view must follow the wrapper's source call order"
     );
-    let repeated_instruction_ids = repeated_mir
+    let repeated_wrapper_instruction_ids = repeated_mir
         .ffi_call_entries_in_source_order()
         .into_iter()
+        .filter(|(_, call)| call.caller.0 == "function:call_imported_alias")
         .map(|(_, call)| call.instruction.clone())
         .collect::<Vec<_>>();
-    assert_eq!(receipt_instruction_ids, repeated_instruction_ids);
+    assert_eq!(
+        wrapper_receipt_instruction_ids,
+        repeated_wrapper_instruction_ids
+    );
 
     // The imported alias path must keep the receipt table itself authoritative:
     // moving a receipt under a forged key is rejected by every direct consumer.
     let baseline_route = mir.route_receipt("scalar-ffi-sequence-v1");
     let first_id = mir
         .ffi_call_entries_in_source_order()
-        .first()
-        .map(|(instruction, _)| (*instruction).clone())
+        .into_iter()
+        .find(|(_, call)| call.caller.0 == "function:call_imported_alias")
+        .map(|(instruction, _)| instruction.clone())
         .expect("first imported alias receipt key");
     let forged_map_key =
         crate::core::mir::MirInstructionId::new("inst:call:forged-imported-alias-map-key")
@@ -3127,6 +3170,20 @@ pub func call_imported_alias(first: i64, second: i64) -> ResultId {
 
     let bytecode = compile_mir_program(&mir).expect("AST-free imported alias sequence bytecode");
     assert!(bytecode.ast.is_none());
+    let descriptor_instruction_ids = bytecode
+        .canonical_ffi
+        .iter()
+        .map(|descriptor| descriptor.instruction.clone())
+        .collect::<Vec<_>>();
+    let source_order_instruction_ids = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, call)| call.instruction.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        descriptor_instruction_ids, source_order_instruction_ids,
+        "bytecode descriptor indices must follow canonical source-order receipts"
+    );
     let mut vm = BytecodeVM::new(bytecode);
     assert!(matches!(
         vm.run_value()
