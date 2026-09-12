@@ -139,16 +139,29 @@ fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path
     Ok(cache_path.to_path_buf())
 }
 
-fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) {
+fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) -> Result<(), String> {
     let prefix = format!("libmimi_runtime_{key}.tmp-");
-    if let Ok(entries) = std::fs::read_dir(cache_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+    let entries = std::fs::read_dir(cache_dir)
+        .map_err(|error| format!("read runtime cache temporary entries: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read runtime cache temporary entry: {error}"))?;
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(&prefix) {
+            continue;
         }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect runtime cache temporary: {error}"))?;
+        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            return Err(format!(
+                "runtime cache temporary path is not a regular file: {path:?}"
+            ));
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("remove runtime cache temporary: {error}"))?;
     }
+    Ok(())
 }
 
 fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
@@ -261,7 +274,7 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
     let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
-    cleanup_runtime_cache_temps(&cache_dir, &key);
+    cleanup_runtime_cache_temps(&cache_dir, &key)?;
     if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
         return Ok(cache_path);
     }
@@ -746,10 +759,43 @@ mod tests {
         fs::write(&other, b"other").expect("write other runtime temporary");
         fs::write(&archive, b"archive").expect("write runtime archive");
 
-        cleanup_runtime_cache_temps(&dir, "deadbeef");
+        cleanup_runtime_cache_temps(&dir, "deadbeef")
+            .expect("matching stale runtime temporary cleanup should succeed");
         assert!(!stale.exists());
         assert!(other.exists());
         assert!(archive.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_cleanup_rejects_missing_root_and_directory_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-cleanup-failure-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let missing = dir.join("missing");
+        let error = cleanup_runtime_cache_temps(&missing, "deadbeef")
+            .expect_err("missing runtime cache root must fail closed");
+        assert!(
+            error.starts_with("read runtime cache temporary entries:"),
+            "{error}"
+        );
+
+        fs::create_dir_all(&dir).expect("create runtime cache cleanup failure directory");
+        let collision = dir.join("libmimi_runtime_deadbeef.tmp-directory");
+        fs::create_dir(&collision).expect("create runtime cache temporary directory collision");
+        let error = cleanup_runtime_cache_temps(&dir, "deadbeef")
+            .expect_err("directory temporary collision must fail closed");
+        assert!(
+            error.starts_with("runtime cache temporary path is not a regular file:"),
+            "{error}"
+        );
+        assert!(collision.is_dir());
 
         fs::remove_dir_all(&dir).ok();
     }
