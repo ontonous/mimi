@@ -3169,7 +3169,7 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
     .expect("write imported alias proof main");
     fs::write(
         project.join("ffi_types.mimi"),
-        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_import_alias_proof(value: Real) -> i64 requires: value >= 0; }\npub func call_imported_alias(value: i64) -> i64 { requires: value > 0\n    mir_ffi_import_alias_proof(value)\n}\n",
+        "pub type Scalar = f64\npub type Real = Scalar\npub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" { func mir_ffi_import_alias_proof(value: Real) -> ResultId requires: value >= 0; }\npub func call_imported_alias(value: i64) -> ResultId { requires: value > 0\n    mir_ffi_import_alias_proof(value)\n}\n",
     )
     .expect("write imported alias proof module");
 

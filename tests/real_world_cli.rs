@@ -1523,7 +1523,7 @@ fn canonical_mir_cli_receipt_manifest_imported_transparent_alias_matches_checker
     let helper = dir.join("ffi_types.mimi");
     fs::write(
         &helper,
-        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> i64; }\npub func imported_alias(value: i64) -> i64 { mir_ffi_cli_import_alias(value) }\n",
+        "pub type Scalar = f64\npub type Real = Scalar\npub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> ResultId; }\npub func imported_alias(value: i64) -> ResultId { mir_ffi_cli_import_alias(value) }\n",
     )
     .expect("write imported alias receipt helper");
     let main = dir.join("main.mimi");
