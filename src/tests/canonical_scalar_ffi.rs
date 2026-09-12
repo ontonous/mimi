@@ -2789,6 +2789,14 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     let repeated_receipt = repeated_mir.route_receipt("scalar-ffi-v1");
     assert_eq!(receipt.ffi_digest, repeated_receipt.ffi_digest);
     assert_eq!(receipt.mir_digest, repeated_receipt.mir_digest);
+    let receipt_manifest = receipt
+        .manifest_text()
+        .expect("render imported alias route manifest");
+    assert_eq!(
+        crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&receipt_manifest)
+            .expect("round-trip imported alias route manifest"),
+        receipt
+    );
     assert_eq!(
         mir.ffi_calls().len(),
         3,
@@ -3188,6 +3196,17 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
         descriptor_instruction_ids, source_order_instruction_ids,
         "bytecode descriptor indices must follow canonical source-order receipts"
     );
+    let mut descriptor_reuse = (*bytecode).clone();
+    descriptor_reuse.canonical_ffi[2] = descriptor_reuse.canonical_ffi[0].clone();
+    let descriptor_reuse_error = BytecodeVM::new(std::sync::Arc::new(descriptor_reuse))
+        .run_value()
+        .expect_err("bytecode must reject a reused imported alias descriptor");
+    assert!(
+        descriptor_reuse_error
+            .to_string()
+            .contains("differs from its compiler binding")
+            || descriptor_reuse_error.to_string().contains("instruction")
+    );
     let mut vm = BytecodeVM::new(bytecode);
     assert!(matches!(
         vm.run_value()
@@ -3218,6 +3237,51 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "208\n309\n");
     assert_eq!(native.stderr, "");
+
+    let extra_id = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .find(|(_, call)| call.caller.0 == "function:call_imported_alias_extra")
+        .map(|(instruction, _)| instruction.clone())
+        .expect("extra imported alias receipt key");
+    let mut late_failure_receipts = mir.ffi_calls().clone();
+    late_failure_receipts
+        .get_mut(&extra_id)
+        .expect("extra imported alias receipt")
+        .result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    });
+    let mut late_failure = mir.clone();
+    late_failure.replace_ffi_calls_for_test_only(late_failure_receipts);
+    let late_oracle = ImportedAliasSequenceOracle(Cell::new(0));
+    let late_reference_error = MirReferenceInterpreter::new(&late_failure)
+        .with_ffi_resolver(&late_oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a late imported alias conversion forgery");
+    assert!(
+        late_reference_error
+            .to_string()
+            .contains("conversion receipt")
+            || late_reference_error.to_string().contains("conversion from"),
+        "{late_reference_error}"
+    );
+    assert_eq!(
+        late_oracle.0.get(),
+        2,
+        "late receipt failure must preserve the two-call prefix"
+    );
+    let late_bytecode_error = compile_mir_program(&late_failure)
+        .expect_err("bytecode must reject a late imported alias conversion forgery");
+    assert!(late_bytecode_error
+        .iter()
+        .any(|error| error.message.contains("conversion receipt")));
     fs::remove_dir_all(project).expect("remove imported alias sequence project");
 }
 
