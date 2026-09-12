@@ -139,29 +139,73 @@ fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path
     Ok(cache_path.to_path_buf())
 }
 
-fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) -> Result<(), String> {
-    let prefix = format!("libmimi_runtime_{key}.tmp-");
+fn cleanup_runtime_cache_entry(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect runtime cache temporary: {error}"))?;
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Err(format!(
+            "runtime cache temporary path is not a regular file: {path:?}"
+        ));
+    }
+    std::fs::remove_file(path).map_err(|error| format!("remove runtime cache temporary: {error}"))
+}
+
+fn cleanup_runtime_cache_entries<F>(cache_dir: &Path, matches: F) -> Result<(), String>
+where
+    F: Fn(&std::ffi::OsStr) -> bool,
+{
     let entries = std::fs::read_dir(cache_dir)
         .map_err(|error| format!("read runtime cache temporary entries: {error}"))?;
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("read runtime cache temporary entry: {error}"))?;
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(&prefix) {
+        if !matches(&name) {
             continue;
         }
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| format!("inspect runtime cache temporary: {error}"))?;
-        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
-            return Err(format!(
-                "runtime cache temporary path is not a regular file: {path:?}"
-            ));
-        }
-        std::fs::remove_file(&path)
-            .map_err(|error| format!("remove runtime cache temporary: {error}"))?;
+        cleanup_runtime_cache_entry(&entry.path())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) -> Result<(), String> {
+    let prefix = format!("libmimi_runtime_{key}.tmp-");
+    cleanup_runtime_cache_entries(cache_dir, |name| {
+        name.to_string_lossy().starts_with(&prefix)
+    })
+}
+
+fn is_runtime_cache_temp_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix("libmimi_runtime_") else {
+        return false;
+    };
+    let Some((key, nonce)) = rest.split_once(".tmp-") else {
+        return false;
+    };
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        && !nonce.is_empty()
+}
+
+fn cleanup_runtime_cache_stale_temps(cache_dir: &Path) -> Result<(), String> {
+    cleanup_runtime_cache_entries(cache_dir, is_runtime_cache_temp_name)
+}
+
+fn runtime_cache_temp_path(cache_dir: &Path, key: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    cache_dir.join(format!(
+        "libmimi_runtime_{key}.tmp-{}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
@@ -551,13 +595,13 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
     let key = runtime_cache_key(runtime_rs)?;
     let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
-    cleanup_runtime_cache_temps(&cache_dir, &key)?;
+    cleanup_runtime_cache_stale_temps(&cache_dir)?;
     if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
         ensure_runtime_cache_key_stable(runtime_rs, &key)?;
         return Ok(cache_path);
     }
 
-    let tmp_path = cache_dir.join(format!("libmimi_runtime_{key}.tmp-{}", std::process::id()));
+    let tmp_path = runtime_cache_temp_path(&cache_dir, &key);
     let _tmp_guard = TempFileGuard::new(tmp_path.clone());
     let mut rt_cmd = std::process::Command::new("rustc");
     rt_cmd
@@ -961,8 +1005,9 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_runtime_cache_temps, ensure_runtime_cache_key_stable, publish_runtime_cache,
-        runtime_cache_hit, runtime_cache_key, runtime_cache_key_with_asan,
+        cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
+        ensure_runtime_cache_key_stable, publish_runtime_cache, runtime_cache_hit,
+        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_temp_path,
         runtime_include_literals,
     };
     use std::fs;
@@ -1046,6 +1091,81 @@ mod tests {
         assert!(archive.exists());
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_stale_cleanup_prunes_all_valid_keys_and_preserves_non_cache_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-stale-all-keys-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache stale-all directory");
+        let first_key = "a".repeat(64);
+        let second_key = "b".repeat(64);
+        let first = runtime_cache_temp_path(&dir, &first_key);
+        let second = runtime_cache_temp_path(&dir, &second_key);
+        let archive = dir.join(format!("libmimi_runtime_{first_key}.a"));
+        let unrelated = dir.join("runtime.tmp");
+        fs::write(&first, b"first stale").expect("write first stale runtime temporary");
+        fs::write(&second, b"second stale").expect("write second stale runtime temporary");
+        fs::write(&archive, b"archive").expect("write runtime archive");
+        fs::write(&unrelated, b"unrelated").expect("write unrelated temporary");
+
+        cleanup_runtime_cache_stale_temps(&dir)
+            .expect("all valid stale runtime temporary cleanup should succeed");
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(archive.exists());
+        assert!(unrelated.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_stale_cleanup_rejects_valid_name_directory_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-stale-collision-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache stale-collision directory");
+        let key = "c".repeat(64);
+        let collision = runtime_cache_temp_path(&dir, &key);
+        fs::create_dir(&collision).expect("create valid runtime temporary directory collision");
+
+        let error = cleanup_runtime_cache_stale_temps(&dir)
+            .expect_err("directory collision must fail closed");
+        assert!(
+            error.starts_with("runtime cache temporary path is not a regular file:"),
+            "{error}"
+        );
+        assert!(collision.is_dir());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_temp_path_has_process_local_unique_suffix() {
+        let dir = std::env::temp_dir();
+        let key = "d".repeat(64);
+        let first = runtime_cache_temp_path(&dir, &key);
+        let second = runtime_cache_temp_path(&dir, &key);
+        assert_ne!(first, second);
+        assert!(first
+            .file_name()
+            .expect("first temporary file name")
+            .to_string_lossy()
+            .starts_with(&format!(
+                "libmimi_runtime_{key}.tmp-{}-",
+                std::process::id()
+            )));
     }
 
     #[test]
