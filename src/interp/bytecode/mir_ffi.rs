@@ -556,15 +556,13 @@ fn apply_result_conversion(
                 .map_err(|_| "canonical MIR FFI result is outside i32".into())
         }
         (MirFfiConversionKind::FloatToSignedInteger { to_bits }, Value::Float(value)) => {
-            let (lower, upper) = match to_bits {
-                32 => (i32::MIN as f64, (i32::MAX as f64) + 1.0),
-                64 => (i64::MIN as f64, 9_223_372_036_854_775_808.0),
-                _ => {
-                    return Err(format!(
+            let (lower, upper) = crate::core::mir::MirFfiAbiConversion::
+                float_to_signed_integer_bounds(to_bits)
+                .ok_or_else(|| {
+                    format!(
                         "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
-                    ))
-                }
-            };
+                    )
+                })?;
             if !value.is_finite() || value < lower || value >= upper {
                 return Err("canonical MIR FFI result is outside target integer range".into());
             }

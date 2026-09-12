@@ -5209,18 +5209,16 @@ impl<'a> MirReferenceInterpreter<'a> {
                 MirRuntimeValue::FloatBits(bits),
             ) => {
                 let value = f64::from_bits(bits);
-                let (lower, upper) = match to_bits {
-                    32 => (i32::MIN as f64, (i32::MAX as f64) + 1.0),
-                    64 => (i64::MIN as f64, 9_223_372_036_854_775_808.0),
-                    _ => {
-                        return Err(self.error(
+                let (lower, upper) = MirFfiAbiConversion::
+                    float_to_signed_integer_bounds(to_bits)
+                    .ok_or_else(|| {
+                        self.error(
                             &function.owner,
                             format!(
                                 "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
                             ),
-                        ))
-                    }
-                };
+                        )
+                    })?;
                 if !value.is_finite() || value < lower || value >= upper {
                     return Err(self.error(
                         &function.owner,

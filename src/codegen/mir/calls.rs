@@ -1524,16 +1524,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|error| NativeMirError::new(subject, error.to_string())),
             (Some(MirFfiConversionKind::FloatToSignedInteger { to_bits }), value) => {
                 let value = value.into_float_value();
-                let (lower, upper) = match to_bits {
-                    32 => (i32::MIN as f64, 2_147_483_648.0),
-                    64 => (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0),
-                    width => {
-                        return Err(NativeMirError::new(
-                            subject,
-                            format!("unsupported signed integer result width {width}"),
-                        ))
-                    }
-                };
+                let (lower, upper) =
+                    crate::core::mir::MirFfiAbiConversion::float_to_signed_integer_bounds(to_bits)
+                        .ok_or_else(|| {
+                            NativeMirError::new(
+                                subject,
+                                format!("unsupported signed integer result width {to_bits}"),
+                            )
+                        })?;
                 let lower = self
                     .generator
                     .builder

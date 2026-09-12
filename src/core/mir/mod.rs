@@ -1401,6 +1401,19 @@ impl MirFfiAbiConversion {
         self.result_kind().is_some()
     }
 
+    /// Return the half-open mathematical range accepted by the canonical
+    /// f64-to-signed-integer result conversion.  Keeping the bounds in the
+    /// MIR contract prevents reference, bytecode, and native consumers from
+    /// drifting at the exact representational edges (especially i64::MAX,
+    /// which is not exactly representable as f64).
+    pub(crate) fn float_to_signed_integer_bounds(to_bits: u16) -> Option<(f64, f64)> {
+        match to_bits {
+            32 => Some((i32::MIN as f64, (i32::MAX as f64) + 1.0)),
+            64 => Some((i64::MIN as f64, 9_223_372_036_854_775_808.0)),
+            _ => None,
+        }
+    }
+
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
         desc.is_canonical_ffi_scalar()
     }
