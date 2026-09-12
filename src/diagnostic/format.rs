@@ -1,5 +1,6 @@
 use super::{Diagnostic, Severity};
 use crate::span::{SourceRegistry, Span};
+use std::path::Path;
 
 /// ANSI color codes for terminal output.
 mod colors {
@@ -87,7 +88,26 @@ fn source_location(
         .disk_path
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok());
+    let source = source.or_else(|| {
+        let is_fallback_source = record
+            .disk_path
+            .as_deref()
+            .is_some_and(|path| source_path_matches(path, fallback_filename))
+            || (record.disk_path.is_none() && record.key.as_str() == fallback_filename);
+        is_fallback_source
+            .then(|| fallback_source.map(str::to_owned))
+            .flatten()
+    });
     SourceLocation { source, filename }
+}
+
+fn source_path_matches(path: &Path, fallback_filename: &str) -> bool {
+    let fallback = Path::new(fallback_filename);
+    path == fallback
+        || match (path.canonicalize(), fallback.canonicalize()) {
+            (Ok(path), Ok(fallback)) => path == fallback,
+            _ => false,
+        }
 }
 
 fn format_diagnostic_with_note_filenames(
@@ -323,5 +343,46 @@ mod tests {
 
         assert!(rendered.contains("entry.mimi:2:4 unknown source"));
         assert!(rendered.contains("src: second source line"));
+    }
+
+    #[test]
+    fn registry_formatter_uses_matching_fallback_when_disk_source_is_unreadable() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi_diagnostic_format_fallback_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create fallback formatter directory");
+        let entry_path = root.join("entry.mimi");
+        fs::write(&entry_path, "temporary source\n").expect("write temporary entry source");
+
+        let mut registry = SourceRegistry::default();
+        let entry = registry
+            .register(
+                SourceRecord::new(
+                    SourceKey::new("workspace:entry.mimi").expect("entry key"),
+                    SourceTextOrigin::Disk,
+                )
+                .with_disk_path(entry_path.clone()),
+            )
+            .expect("register entry source");
+        fs::remove_file(&entry_path).expect("remove entry source before formatting");
+
+        let diagnostic = Diagnostic::error(
+            "entry source unavailable",
+            Span::single(1, 1).with_source(entry),
+        );
+        let rendered = strip_ansi(&format_diagnostic_with_registry(
+            &diagnostic,
+            &registry,
+            Some("fallback source line"),
+            &entry_path.display().to_string(),
+        ));
+
+        assert!(rendered.contains("src: fallback source line"));
+        fs::remove_dir_all(root).expect("remove fallback formatter directory");
     }
 }
