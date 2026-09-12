@@ -1760,6 +1760,11 @@ fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() 
             "negative imported alias lost canonical disproven diagnostic: {stderr}"
         );
         assert!(
+            stderr.contains("ffi_types.mimi")
+                && stderr.contains("pub func imported_alias(value: i64)"),
+            "negative imported alias lost verifier source provenance: {stderr}"
+        );
+        assert!(
             !stderr.contains("canonical route disposition: legacy"),
             "negative imported alias must not be reclassified as legacy: {stderr}"
         );
