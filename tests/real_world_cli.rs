@@ -174,6 +174,23 @@ fn native_runtime_cache_path() -> PathBuf {
     if std::env::var_os("MIMI_ASAN").is_some() {
         hasher.update(b"asan\0");
     }
+    let mut compiler = Command::new("rustc");
+    compiler.args(["--version", "--verbose"]);
+    if std::env::var_os("MIMI_ASAN").is_some() {
+        compiler.env("RUSTUP_TOOLCHAIN", "nightly");
+    }
+    let compiler = compiler
+        .output()
+        .expect("query runtime compiler identity")
+        .stdout;
+    hasher.update(b"rustc\0");
+    hasher.update(
+        String::from_utf8(compiler)
+            .expect("runtime compiler identity must be UTF-8")
+            .trim_end()
+            .as_bytes(),
+    );
+    hasher.update(b"\0");
     for path in files {
         hasher.update(path.to_string_lossy().as_bytes());
         hasher.update(&fs::read(path).expect("read runtime source"));

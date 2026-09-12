@@ -155,6 +155,28 @@ fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
     runtime_cache_key_with_asan(runtime_rs, asan_enabled())
 }
 
+fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
+    let mut command = std::process::Command::new("rustc");
+    command.args(["--version", "--verbose"]);
+    if asan {
+        // Keep the cache identity in lockstep with the compiler used for the
+        // actual ASan runtime archive below.
+        command.env("RUSTUP_TOOLCHAIN", "nightly");
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("runtime compiler identity (rustc): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "runtime compiler identity failed with exit code {:?}",
+            output.status.code()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|identity| identity.trim_end().to_owned())
+        .map_err(|e| format!("runtime compiler identity is not UTF-8: {e}"))
+}
+
 fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, String> {
     let runtime_dir = runtime_rs
         .parent()
@@ -175,6 +197,9 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
         // reused for an ASan-instrumented link.
         hasher.update(b"asan\0");
     }
+    hasher.update(b"rustc\0");
+    hasher.update(runtime_compiler_identity(asan)?.as_bytes());
+    hasher.update(b"\0");
     for path in files {
         hasher.update(path.to_string_lossy().as_bytes());
         let contents =
@@ -182,6 +207,17 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
         hasher.update(&contents);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    match std::fs::symlink_metadata(cache_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(cache_path.to_path_buf())),
+        Ok(_) => Err(format!(
+            "runtime cache path is not a regular file: {cache_path:?}"
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("inspect runtime cache: {error}")),
+    }
 }
 
 #[cfg(unix)]
@@ -214,7 +250,7 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
     cleanup_runtime_cache_temps(&cache_dir, &key);
-    if cache_path.exists() {
+    if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
         return Ok(cache_path);
     }
 
@@ -621,7 +657,7 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_key,
+        cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_hit, runtime_cache_key,
         runtime_cache_key_with_asan,
     };
     use std::fs;
@@ -769,6 +805,66 @@ mod tests {
                 .expect("recompute ASan runtime cache key")
         );
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_hit_requires_regular_archive_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-hit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache hit directory");
+        let missing = dir.join("missing.a");
+        assert_eq!(
+            runtime_cache_hit(&missing).expect("missing cache is not an error"),
+            None
+        );
+
+        let archive = dir.join("runtime.a");
+        fs::write(&archive, b"runtime archive").expect("write runtime archive");
+        assert_eq!(
+            runtime_cache_hit(&archive).expect("regular archive is a cache hit"),
+            Some(archive.clone())
+        );
+
+        let collision = dir.join("collision.a");
+        fs::create_dir(&collision).expect("create non-file cache collision");
+        let error =
+            runtime_cache_hit(&collision).expect_err("non-file cache collision must fail closed");
+        assert!(
+            error.starts_with("runtime cache path is not a regular file:"),
+            "{error}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_hit_rejects_symlink_archive() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache symlink directory");
+        let target = dir.join("target.a");
+        let link = dir.join("link.a");
+        fs::write(&target, b"runtime archive").expect("write runtime archive target");
+        std::os::unix::fs::symlink(&target, &link).expect("create runtime cache symlink");
+        let error = runtime_cache_hit(&link).expect_err("symlink cache must fail closed");
+        assert!(
+            error.starts_with("runtime cache path is not a regular file:"),
+            "{error}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
