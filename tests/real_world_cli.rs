@@ -1445,6 +1445,148 @@ fn canonical_scalar_ffi_cli_verify_repeats_and_rejects_reordered_manifest() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_import_graph_mixed_verdict_preserves_manifest_and_source_order() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-ffi-import-verify-order-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported verifier-order directory");
+    fs::write(
+        dir.join("leaf.mimi"),
+        "pub type ScalarInt = i64\nextern \"C\" {\n    func leaf_ok(x: i64) -> ScalarInt requires: x >= 0 ensures: true;\n    func leaf_bad(x: i64) -> ScalarInt requires: x >= 0 ensures: true;\n}\npub func imported_ok(x: i64) -> ScalarInt {\n    requires: x >= 0\n    leaf_ok(x)\n}\npub func imported_bad(x: i64) -> ScalarInt {\n    leaf_bad(x)\n}\n",
+    )
+    .expect("write imported verifier-order leaf");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use leaf;\npub func mid_ok(x: i64) -> i64 {\n    requires: x >= 0\n    imported_ok(x)\n}\npub func mid_bad(x: i64) -> i64 {\n    imported_bad(x)\n}\n",
+    )
+    .expect("write imported verifier-order middle");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use mid;\nfunc main() -> i32 {\n    mid_ok(7 as i64);\n    mid_bad(-8 as i64);\n    0\n}\n",
+    )
+    .expect("write imported verifier-order entry");
+
+    let checked = checked_route_receipt(&main);
+    assert_eq!(
+        checked.root_owners,
+        vec![
+            mimi::core::NodeId("function:imported_bad".into()),
+            mimi::core::NodeId("function:imported_ok".into()),
+            mimi::core::NodeId("function:main".into()),
+            mimi::core::NodeId("function:mid_bad".into()),
+            mimi::core::NodeId("function:mid_ok".into()),
+        ]
+    );
+    let inspect = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn imported verifier-order receipt inspection")
+    };
+    let all_first = inspect(false);
+    let receipt_first = inspect(true);
+    for (label, output) in [("all-first", &all_first), ("receipt-first", &receipt_first)] {
+        assert!(
+            output.status.success(),
+            "{label} imported receipt failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = String::from_utf8_lossy(&output.stdout);
+        let parsed = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+            .unwrap_or_else(|error| panic!("{label} imported receipt round-trip failed: {error}"));
+        assert_eq!(parsed, checked);
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(all_first.stdout, receipt_first.stdout);
+    assert_eq!(all_first.stderr, receipt_first.stderr);
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn imported verifier-order verifier")
+    };
+    let runs = [verify(false), verify(false), verify(true), verify(true)];
+    for (index, output) in runs.iter().enumerate() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "imported verifier run {index}"
+        );
+        assert!(stdout.contains("1/4 verified"));
+        assert_eq!(
+            stdout
+                .matches("canonical MIR extern requires contract proven")
+                .count(),
+            1,
+            "imported verifier run {index} must report one proven FFI receipt"
+        );
+        assert_eq!(
+            stderr
+                .matches("canonical MIR extern requires contract disproven")
+                .count(),
+            1,
+            "imported verifier run {index} must report one failed FFI receipt"
+        );
+        assert!(stderr.contains("leaf.mimi"));
+        assert!(stderr.contains("leaf_bad(x)"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(
+        runs[0].stderr, runs[1].stderr,
+        "repeated imported default verifier diagnostics must match"
+    );
+    assert_eq!(
+        runs[2].stderr, runs[3].stderr,
+        "repeated imported MIR verifier diagnostics must match"
+    );
+    assert_eq!(
+        runs[0].stderr, runs[2].stderr,
+        "imported default and explicit MIR diagnostics must match"
+    );
+    let stable_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains("canonical MIR") || line.contains("verified in"))
+            .map(|line| {
+                let semantic = line.split(" (").next().unwrap_or(line);
+                semantic.split(" in ").next().unwrap_or(semantic).to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    for (index, output) in runs.iter().enumerate().skip(1) {
+        assert_eq!(
+            stable_summary(&runs[0]),
+            stable_summary(output),
+            "imported verifier run {index} changed semantic summary"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
