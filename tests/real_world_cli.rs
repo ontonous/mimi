@@ -1107,6 +1107,59 @@ fn canonical_scalar_ffi_cli_fallback_stem_cleanup_preserves_tmp_root() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_missing_runtime_compiler_cleans_staging() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_missing_runtime_compiler_cli_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI missing runtime compiler directory");
+    let source = dir.join("missing-runtime-compiler.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI missing runtime compiler source");
+    let empty_path = dir.join("empty-path");
+    fs::create_dir(&empty_path).expect("create empty PATH directory");
+    let stem = format!("missing-runtime-compiler-{nonce}");
+    let binary = dir.join(&stem);
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["build", "--mir"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .env("PATH", &empty_path)
+        .output()
+        .expect("spawn scalar FFI missing runtime compiler build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("runtime compiler identity (rustc)"),
+        "missing runtime compiler lost its structured diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        !binary.exists(),
+        "missing runtime compiler created a binary"
+    );
+    assert!(
+        staging_dirs_for_output_stem(&stem).is_empty(),
+        "missing runtime compiler left staging directories"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn canonical_scalar_ffi_cli_contract_failure_precedes_unresolved_linker_symbol() {
     let dir = std::env::temp_dir().join(format!(
