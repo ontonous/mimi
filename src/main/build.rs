@@ -263,7 +263,7 @@ fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
 
 #[cfg(not(any(unix, windows)))]
 fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
-    path.to_string_lossy().into_owned().into_bytes()
+    path.as_os_str().as_encoded_bytes().to_vec()
 }
 
 fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
