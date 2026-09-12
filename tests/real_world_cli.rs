@@ -1783,6 +1783,126 @@ fn canonical_scalar_ffi_cli_verify_counts_all_failed_receipts_and_preserves_orde
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_mixed_verify_and_build_share_receipt_failures() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-ffi-mixed-verify-build-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create mixed verifier/build directory");
+    let source = dir.join("mixed.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n    func third(value: i64) -> i64 requires: value >= 0 ensures: true;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    third(-9 as i64);\n    0\n}\n",
+    )
+    .expect("write mixed verifier/build source");
+
+    let checked = checked_route_receipt(&source);
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn mixed verifier/build receipt inspection");
+    assert!(inspect.status.success());
+    assert_eq!(
+        mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&String::from_utf8_lossy(
+            &inspect.stdout
+        )),
+        Ok(checked)
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command.arg(&source).output().expect("spawn mixed verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert_eq!(output.status.code(), Some(1), "{label} verifier exit code");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("1/3 verified"));
+        assert!(stdout.contains("11 total constraints"));
+        assert_eq!(
+            stdout
+                .matches("canonical MIR extern requires contract proven")
+                .count(),
+            1,
+            "{label} verifier must report the one proven receipt"
+        );
+        assert_eq!(
+            stderr
+                .matches("canonical MIR extern requires contract disproven")
+                .count(),
+            2,
+            "{label} verifier must report both failed receipts"
+        );
+        assert!(stderr.find("second(-8 as i64)") < stderr.find("third(-9 as i64)"));
+        assert!(!stderr.contains("first(7 as i64)"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(default_verify.stderr, mir_verify.stderr);
+
+    let build = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg("--verify-ffi")
+            .arg("--emit-ir")
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .expect("spawn mixed build verifier")
+    };
+    let default_binary = dir.join("mixed-default");
+    let mir_binary = dir.join("mixed-mir");
+    let default_build = build(false, &default_binary);
+    let mir_build = build(true, &mir_binary);
+    for (label, output, binary) in [
+        ("default", &default_build, &default_binary),
+        ("mir", &mir_build, &mir_binary),
+    ] {
+        assert_eq!(output.status.code(), Some(1), "{label} build exit code");
+        assert!(output.stdout.is_empty(), "{label} build emitted stdout");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches("FFI violation").count(), 2);
+        assert_eq!(
+            stderr.matches("FFI contract verification failed").count(),
+            1
+        );
+        assert_eq!(stderr.matches("second(-8 as i64)").count(), 1);
+        assert_eq!(stderr.matches("third(-9 as i64)").count(), 1);
+        assert!(!stderr.contains("first(7 as i64)"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!binary.exists(), "{label} build left an output binary");
+    }
+    assert_eq!(default_build.stderr, mir_build.stderr);
+    for snippet in ["second(-8 as i64)", "third(-9 as i64)"] {
+        assert!(
+            String::from_utf8_lossy(&default_verify.stderr).contains(snippet)
+                && String::from_utf8_lossy(&default_build.stderr).contains(snippet),
+            "verify/build lost the shared failed receipt source: {snippet}"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
