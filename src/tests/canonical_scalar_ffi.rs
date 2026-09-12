@@ -980,6 +980,226 @@ pub func call_imported_alias(value: i64) -> i64 {
 }
 
 #[test]
+fn scalar_ffi_imported_alias_multiple_calls_preserve_receipt_order_and_side_effects() {
+    use std::fs;
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+static int64_t call_count;
+int64_t mir_ffi_import_alias_sequence(double value) {
+    ++call_count;
+    return call_count * 100 + (int64_t)value;
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-import-alias-sequence-{}-{counter}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create imported alias sequence project");
+    let main_path = project.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(call_imported_alias(7 as i64, 8 as i64))
+    0
+}
+"#,
+    )
+    .expect("write imported alias sequence main");
+    fs::write(
+        project.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub type Real = Scalar
+extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> i64 requires: value >= 0; }
+pub func call_imported_alias(first: i64, second: i64) -> i64 {
+    requires: first >= 0 and second >= 0
+    let first_result = mir_ffi_import_alias_sequence(first)
+    let second_result = mir_ffi_import_alias_sequence(second)
+    second_result
+}
+"#,
+    )
+    .expect("write imported alias sequence module");
+
+    let source = fs::read_to_string(&main_path).expect("read imported alias sequence main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex imported alias sequence main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select imported alias sequence parser")
+        .parse_file()
+        .expect("parse imported alias sequence main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load imported alias sequence graph");
+    let mut merged = loader
+        .merge_all()
+        .expect("merge imported alias sequence graph");
+    crate::loader::merge_prelude_into(&mut merged);
+    let checked = crate::core::check_program(&merged).expect("check imported alias sequence graph");
+    let excluded_sources = merged
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+            .expect("materialize imported alias sequence route");
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+        "imported transparent primitive aliases must retain scalar FFI route"
+    );
+    let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize imported alias sequence MIR");
+    let repeated_mir =
+        MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+            .expect("repeat materialize imported alias sequence MIR");
+    let receipt = mir.route_receipt("scalar-ffi-v1");
+    let repeated_receipt = repeated_mir.route_receipt("scalar-ffi-v1");
+    assert_eq!(receipt.ffi_digest, repeated_receipt.ffi_digest);
+    assert_eq!(receipt.mir_digest, repeated_receipt.mir_digest);
+    assert_eq!(mir.ffi_calls().len(), 2, "two calls must keep two receipts");
+    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    assert!(receipts
+        .iter()
+        .all(|call| call.symbol == "mir_ffi_import_alias_sequence"));
+    assert_eq!(receipts[0].caller, receipts[1].caller);
+    assert_eq!(receipts[0].callee, receipts[1].callee);
+    assert_ne!(receipts[0].instruction, receipts[1].instruction);
+
+    let wrapper = mir
+        .functions()
+        .get(&crate::core::NodeId("function:call_imported_alias".into()))
+        .expect("imported alias sequence wrapper MIR");
+    let call_instruction_ids = wrapper
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ResolvedCallee::Extern(_),
+                ..
+            } => Some(instruction.id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let receipt_instruction_ids = receipts
+        .iter()
+        .map(|call| call.instruction.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_instruction_ids, receipt_instruction_ids,
+        "receipt map order must follow the wrapper's source call order"
+    );
+    let repeated_instruction_ids = repeated_mir
+        .ffi_calls()
+        .values()
+        .map(|call| call.instruction.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_instruction_ids, repeated_instruction_ids);
+
+    struct ImportedAliasSequenceOracle(Cell<i64>);
+    impl MirReferenceFfiResolver for ImportedAliasSequenceOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_import_alias_sequence" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::FloatBits(bits)] = arguments else {
+                return Err(format!("sequence oracle received {arguments:?}"));
+            };
+            let input = f64::from_bits(*bits);
+            let expected_input = match self.0.get() {
+                0 => 7.0,
+                1 => 8.0,
+                count => return Err(format!("unexpected sequence call count {count}")),
+            };
+            if input != expected_input {
+                return Err(format!(
+                    "sequence input order mismatch: got {input}, expected {expected_input}"
+                ));
+            }
+            let next = self.0.get() + 1;
+            self.0.set(next);
+            Ok(MirRuntimeValue::Int(next * 100 + input as i64))
+        }
+    }
+
+    let oracle = ImportedAliasSequenceOracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference imported alias sequence execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "208\n");
+    assert_eq!(
+        oracle.0.get(),
+        2,
+        "reference must observe both calls in order"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verified = crate::verifier::verify_mir(&mir, "imported-alias-sequence".into())
+        .expect("verify imported alias sequence MIR");
+    assert!(verified.iter().all(|result| {
+        matches!(
+            result.status,
+            crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+        )
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free imported alias sequence bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value()
+            .expect("bytecode imported alias sequence execution"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "208\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_imported_alias_sequence");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native imported alias sequence lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid imported alias sequence LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native imported alias sequence execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "208\n");
+    assert_eq!(native.stderr, "");
+    fs::remove_dir_all(project).expect("remove imported alias sequence project");
+}
+
+#[test]
 fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
     use crate::verifier::{ProofArtifact, VerifStatus};
     use std::fs;
