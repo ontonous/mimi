@@ -204,7 +204,17 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect::<Vec<_>>();
+        .map(|path| {
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect runtime source entry {path:?}: {error}"))?;
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "runtime source entry is not a regular file: {path:?}"
+                ));
+            }
+            Ok(path)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     files.push(runtime_rs.to_path_buf());
     files.sort();
 
@@ -852,6 +862,58 @@ mod tests {
         let error = runtime_cache_key(&runtime_rs)
             .expect_err("missing runtime source directory must fail closed");
         assert!(error.starts_with("read runtime directory:"), "{error}");
+    }
+
+    #[test]
+    fn runtime_cache_key_rejects_non_regular_rust_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-non-regular-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache non-regular directory");
+        let runtime_rs = dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+        fs::create_dir(dir.join("helper.rs")).expect("create directory with Rust suffix");
+
+        let error = runtime_cache_key(&runtime_rs)
+            .expect_err("directory with Rust suffix must fail closed");
+        assert!(
+            error.starts_with("runtime source entry is not a regular file:"),
+            "{error}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_key_rejects_symlink_rust_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache symlink source directory");
+        let runtime_rs = dir.join("standalone.rs");
+        let target = dir.join("helper-target.rs");
+        let link = dir.join("helper.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+        fs::write(&target, b"fn helper() {}\n").expect("write helper target");
+        std::os::unix::fs::symlink(&target, &link).expect("create Rust source symlink");
+
+        let error =
+            runtime_cache_key(&runtime_rs).expect_err("symlink with Rust suffix must fail closed");
+        assert!(
+            error.starts_with("runtime source entry is not a regular file:"),
+            "{error}"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
