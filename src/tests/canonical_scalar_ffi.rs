@@ -2508,7 +2508,9 @@ func main() -> i64 {
         project.join("ffi_types.mimi"),
         r#"
 pub type Real = f64
-extern "C" { func mir_ffi_import_alias_f64(value: Real) -> i64; }
+pub type ScalarInt = i64
+pub type ResultId = ScalarInt
+extern "C" { func mir_ffi_import_alias_f64(value: Real) -> ResultId; }
 pub func call_imported_alias(value: i64) -> i64 {
     mir_ffi_import_alias_f64(value)
 }
@@ -2580,6 +2582,39 @@ pub func call_imported_alias(value: i64) -> i64 {
         .get(&receipt.parameter_types[0])
         .expect("imported alias declaration TypeDesc");
     assert!(matches!(declared.abi, MirAbiClass::Float { bits: 64 }));
+    let result_value = receipt
+        .result
+        .as_ref()
+        .expect("imported alias result value");
+    let actual_result = mir
+        .functions()
+        .get(&receipt.caller)
+        .and_then(|function| function.values.get(result_value))
+        .map(|value| value.ty.clone())
+        .expect("imported alias result TypeDesc");
+    assert_eq!(actual_result, receipt.result_type);
+    assert_eq!(
+        crate::core::mir::MirFfiAbiConversion::for_result(
+            mir.type_catalog(),
+            &actual_result,
+            &receipt.result_type,
+        ),
+        receipt.result_conversion,
+        "imported transparent result aliases must use the checker-owned result conversion factory"
+    );
+    assert_eq!(
+        receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
 
     struct ImportedAliasOracle;
     impl MirReferenceFfiResolver for ImportedAliasOracle {
