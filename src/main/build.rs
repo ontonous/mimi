@@ -196,8 +196,13 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
         .ok_or_else(|| "runtime source has no parent directory".to_string())?;
     let mut files = std::fs::read_dir(runtime_dir)
         .map_err(|e| format!("read runtime directory: {e}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| format!("read runtime directory entry: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect::<Vec<_>>();
     files.push(runtime_rs.to_path_buf());
@@ -831,6 +836,22 @@ mod tests {
         assert_ne!(changed_content, changed_file_set);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_rejects_missing_runtime_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-missing-dir-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let runtime_rs = dir.join("missing").join("standalone.rs");
+        let error = runtime_cache_key(&runtime_rs)
+            .expect_err("missing runtime source directory must fail closed");
+        assert!(error.starts_with("read runtime directory:"), "{error}");
     }
 
     #[test]
