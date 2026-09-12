@@ -139,6 +139,18 @@ fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path
     Ok(cache_path.to_path_buf())
 }
 
+fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) {
+    let prefix = format!("libmimi_runtime_{key}.tmp-");
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
     let runtime_dir = runtime_rs
@@ -187,6 +199,7 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
             ));
         }
     }
+    cleanup_runtime_cache_temps(&cache_dir, &key);
     if cache_path.exists() {
         return Ok(cache_path);
     }
@@ -593,7 +606,7 @@ pub(crate) fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::publish_runtime_cache;
+    use super::{cleanup_runtime_cache_temps, publish_runtime_cache};
     use std::fs;
 
     #[test]
@@ -619,6 +632,59 @@ mod tests {
             "failed runtime cache publish left temporary archive {tmp_path:?}"
         );
         assert!(!cache_path.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_publish_success_preserves_archive_after_guard_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-publish-success-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache publish success directory");
+        let tmp_path = dir.join("runtime.tmp");
+        let cache_path = dir.join("runtime.a");
+        fs::write(&tmp_path, b"runtime archive").expect("write temporary runtime archive");
+
+        let published = publish_runtime_cache(&tmp_path, &cache_path)
+            .expect("runtime cache publish should succeed");
+        assert_eq!(published, cache_path);
+        assert!(!tmp_path.exists());
+        assert_eq!(
+            fs::read(&cache_path).expect("read published runtime archive"),
+            b"runtime archive"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_cleanup_removes_only_matching_stale_temporaries() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-cleanup-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache cleanup directory");
+        let stale = dir.join("libmimi_runtime_deadbeef.tmp-old");
+        let other = dir.join("libmimi_runtime_cafebabe.tmp-keep");
+        let archive = dir.join("libmimi_runtime_deadbeef.a");
+        fs::write(&stale, b"stale").expect("write stale runtime temporary");
+        fs::write(&other, b"other").expect("write other runtime temporary");
+        fs::write(&archive, b"archive").expect("write runtime archive");
+
+        cleanup_runtime_cache_temps(&dir, "deadbeef");
+        assert!(!stale.exists());
+        assert!(other.exists());
+        assert!(archive.exists());
 
         fs::remove_dir_all(&dir).ok();
     }
