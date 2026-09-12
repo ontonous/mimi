@@ -180,9 +180,7 @@ fn native_runtime_cache_path() -> PathBuf {
     }
     let mut compiler = Command::new("rustc");
     compiler.args(["--version", "--verbose"]);
-    if asan {
-        compiler.env("RUSTUP_TOOLCHAIN", "nightly");
-    }
+    mimi::runtime_cache::configure_rustc_command(&mut compiler, asan);
     let compiler = compiler
         .output()
         .expect("query runtime compiler identity")

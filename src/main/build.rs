@@ -13,6 +13,7 @@ use mimi::diagnostic::format::{
 use mimi::runtime_cache::include_literals as runtime_include_literals;
 use mimi::runtime_cache::{
     compiler_environment_frame as runtime_compiler_environment_frame,
+    configure_rustc_command as configure_runtime_compiler_command,
     included_sources as runtime_cache_included_sources, path_bytes as runtime_cache_path_bytes,
 };
 use mimi::{lexer, loader, verifier};
@@ -269,11 +270,9 @@ fn native_runtime_cache_eligible(target: Option<&str>, shared: bool, no_std: boo
 fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
     let mut command = std::process::Command::new("rustc");
     command.args(["--version", "--verbose"]);
-    if asan {
-        // Keep the cache identity in lockstep with the compiler used for the
-        // actual ASan runtime archive below.
-        command.env("RUSTUP_TOOLCHAIN", "nightly");
-    }
+    // Keep the cache identity in lockstep with the compiler used for the
+    // actual runtime archive below.
+    configure_runtime_compiler_command(&mut command, asan);
     let output = command
         .output()
         .map_err(|e| format!("runtime compiler identity (rustc): {e}"))?;
@@ -440,11 +439,9 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
                 .arg("-o")
                 .arg(&tmp_path)
                 .arg(runtime_rs);
-            if asan_enabled() {
-                // `-Z sanitizer=address` requires the nightly compiler; the host `mimi`
-                // may have been built with stable, so pin the spawned rustc to nightly.
-                rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
-            }
+            // `-Z sanitizer=address` requires the nightly compiler; the host `mimi`
+            // may have been built with stable, so pin the spawned rustc to nightly.
+            configure_runtime_compiler_command(&mut rt_cmd, asan_enabled());
             let status = rt_cmd
                 .status()
                 .map_err(|e| format!("runtime compile (rustc): {e}"))?;
@@ -737,10 +734,8 @@ pub(crate) fn build(
         if shared {
             rt_cmd.arg("-C").arg("relocation-model=pic");
         }
-        if asan_enabled() {
-            // `-Z sanitizer=address` requires the nightly compiler.
-            rt_cmd.env("RUSTUP_TOOLCHAIN", "nightly");
-        }
+        // `-Z sanitizer=address` requires the nightly compiler.
+        configure_runtime_compiler_command(&mut rt_cmd, asan_enabled());
         rt_cmd.arg("-o").arg(&runtime_lib);
         rt_cmd.arg(&runtime_rs);
         let rt_status = rt_cmd

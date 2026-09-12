@@ -6,6 +6,16 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+/// Apply environment overrides that are part of the standalone `rustc`
+/// invocation contract.  Keep this shared by identity probes and archive
+/// compilation so the cache frame cannot drift from the command that builds
+/// the artifact.
+pub fn configure_rustc_command(command: &mut std::process::Command, asan: bool) {
+    if asan {
+        command.env("RUSTUP_TOOLCHAIN", "nightly");
+    }
+}
+
 pub fn included_sources(
     runtime_rs: &Path,
     known_sources: &[std::path::PathBuf],
@@ -241,12 +251,21 @@ const RUSTC_ENVIRONMENT_KEYS: &[&str] = &[
 /// explicitly empty one, and ASan mirrors the production command's explicit
 /// `RUSTUP_TOOLCHAIN=nightly` override.
 pub fn compiler_environment_frame(asan: bool) -> Vec<u8> {
+    compiler_environment_frame_from_lookup(asan, |key| {
+        std::env::var_os(key).map(|value| os_str_bytes(&value))
+    })
+}
+
+fn compiler_environment_frame_from_lookup<F>(asan: bool, mut lookup: F) -> Vec<u8>
+where
+    F: FnMut(&str) -> Option<Vec<u8>>,
+{
     let mut frame = b"rustc-env\0".to_vec();
     for key in RUSTC_ENVIRONMENT_KEYS {
         let value = if asan && *key == "RUSTUP_TOOLCHAIN" {
             Some(b"nightly".to_vec())
         } else {
-            std::env::var_os(key).map(|value| os_str_bytes(&value))
+            lookup(key)
         };
         append_len_framed(&mut frame, key.as_bytes());
         match value {
@@ -286,4 +305,119 @@ pub fn os_str_bytes(value: &OsStr) -> Vec<u8> {
 
 pub fn path_bytes(path: &Path) -> Vec<u8> {
     os_str_bytes(path.as_os_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        compiler_environment_frame, compiler_environment_frame_from_lookup,
+        configure_rustc_command, RUSTC_ENVIRONMENT_KEYS,
+    };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    #[cfg(unix)]
+    fn rustc_on_path() -> PathBuf {
+        let path = std::env::var_os("PATH").expect("PATH must be available for rustc probe");
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("rustc");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        panic!("rustc is not available on PATH");
+    }
+
+    #[cfg(unix)]
+    fn parse_environment(bytes: &[u8]) -> HashMap<String, Vec<u8>> {
+        bytes
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let separator = entry
+                    .iter()
+                    .position(|byte| *byte == b'=')
+                    .expect("env -0 entry must contain '='");
+                let key = String::from_utf8(entry[..separator].to_vec())
+                    .expect("environment key must be UTF-8");
+                (key, entry[separator + 1..].to_vec())
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn write_probe_script(path: &Path) {
+        std::fs::write(
+            path,
+            b"#!/bin/sh\nset -eu\n/usr/bin/env -0 > \"$MIMI_RUSTC_ENV_CAPTURE\"\nexec \"$MIMI_RUSTC_REAL\" \"$@\"\n",
+        )
+        .expect("write rustc environment probe");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)
+            .expect("stat rustc environment probe")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .expect("make rustc environment probe executable");
+    }
+
+    /// Check the frame against the environment captured immediately before a
+    /// real rustc process is exec'd.  This catches drift in presence handling,
+    /// non-UTF-8 values, and the ASan toolchain override without mutating the
+    /// test process environment.
+    #[cfg(unix)]
+    #[test]
+    fn compiler_environment_frame_matches_actual_rustc_subprocess() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-env-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create rustc environment probe directory");
+        let script = root.join("rustc-probe.sh");
+        let capture = root.join("environment.bin");
+        write_probe_script(&script);
+        let real_rustc = rustc_on_path();
+
+        for asan in [false, true] {
+            let mut command = Command::new(&script);
+            command
+                .env("MIMI_RUSTC_ENV_CAPTURE", &capture)
+                .env("MIMI_RUSTC_REAL", &real_rustc)
+                .args(["--version", "--verbose"]);
+            configure_rustc_command(&mut command, asan);
+            let output = command.output().expect("spawn rustc environment probe");
+            assert!(
+                output.status.success(),
+                "rustc environment probe failed for asan={asan}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let observed = parse_environment(
+                &std::fs::read(&capture).expect("read captured rustc environment"),
+            );
+            let observed_frame =
+                compiler_environment_frame_from_lookup(asan, |key| observed.get(key).cloned());
+            assert_eq!(
+                observed_frame,
+                compiler_environment_frame(asan),
+                "cache environment frame diverged from rustc child for asan={asan}; keys={RUSTC_ENVIRONMENT_KEYS:?}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn compiler_environment_frame_distinguishes_unset_and_empty_values() {
+        let unset = compiler_environment_frame_from_lookup(false, |_| None);
+        let empty =
+            compiler_environment_frame_from_lookup(false, |key| (key == "PATH").then(Vec::new));
+        assert_ne!(unset, empty);
+        assert!(empty.windows(b"PATH".len()).any(|window| window == b"PATH"));
+    }
 }
