@@ -63,6 +63,22 @@ const RESULT_RANGE_I64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_i64_overflow(x: i64) -> i64; }
 func main() -> i64 { mir_ffi_result_i64_overflow(7 as i64) }
 "#;
+const MULTI_CALL_REQUIRES_C_SOURCE: &str = r#"
+#include <stdint.h>
+static int64_t call_count;
+int64_t mir_ffi_requires_sequence(int64_t value) {
+    ++call_count;
+    return call_count * 100 + value;
+}
+"#;
+const MULTI_CALL_REQUIRES_SOURCE: &str = r#"
+extern "C" { func mir_ffi_requires_sequence(x: i64) -> i64 requires: x >= 0; }
+func main() -> i64 {
+    let first = mir_ffi_requires_sequence(7 as i64)
+    println(first)
+    mir_ffi_requires_sequence(-8 as i64)
+}
+"#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
@@ -915,6 +931,114 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
             && native
                 .stderr
                 .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+}
+
+#[test]
+fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MULTI_CALL_REQUIRES_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MULTI_CALL_REQUIRES_SOURCE)
+        .tokenize()
+        .expect("lex multi-call requires fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse multi-call requires fixture");
+    let checked = crate::core::check_program(&file).expect("check multi-call requires fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize multi-call requires MIR");
+    assert_eq!(
+        mir.ffi_calls().len(),
+        2,
+        "fixture must retain both call receipts"
+    );
+    let receipt_ids = mir.ffi_calls().keys().cloned().collect::<Vec<_>>();
+    assert_ne!(receipt_ids[0], receipt_ids[1]);
+
+    struct RequiresSequenceOracle(Cell<i64>);
+    impl MirReferenceFfiResolver for RequiresSequenceOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_requires_sequence" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("requires sequence arguments {arguments:?}"));
+            };
+            let count = self.0.get() + 1;
+            self.0.set(count);
+            Ok(MirRuntimeValue::Int(count * 100 + value))
+        }
+    }
+
+    let oracle = RequiresSequenceOracle(Cell::new(0));
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must stop at the disproven second requires");
+    assert!(
+        reference_error.to_string().contains("requires")
+            || reference_error.to_string().contains("precondition"),
+        "{reference_error}"
+    );
+    assert_eq!(
+        oracle.0.get(),
+        1,
+        "reference must invoke only the first call"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-prefix-failure".into())
+        .expect("verify multi-call requires MIR");
+    assert!(
+        verification
+            .iter()
+            .any(|result| result.status == crate::verifier::VerifStatus::Disproven),
+        "verifier must retain the disproven second requires: {verification:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free multi-call requires bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must stop before invoking the second call");
+    assert!(
+        bytecode_error.to_string().contains("requires")
+            || bytecode_error.to_string().contains("precondition"),
+        "{bytecode_error}"
+    );
+    assert_eq!(vm.stdout(), "107\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_prefix");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-call requires lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid multi-call requires LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MULTI_CALL_REQUIRES_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native multi-call requires execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "107\n");
+    assert!(
+        native.stderr.contains("E0808") && native.stderr.contains("FFI precondition failed"),
         "{}",
         native.stderr
     );
