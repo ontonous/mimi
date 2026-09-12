@@ -219,7 +219,11 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
     files.sort();
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mimi-native-runtime-v1\0");
+    // The key format is length-framed so path bytes and file contents cannot
+    // run together into an ambiguous digest.  Keep the version marker in the
+    // domain separator so existing v1 archives are naturally bypassed after
+    // this identity hardening.
+    hasher.update(b"mimi-native-runtime-v2\0");
     if asan {
         // Invalidate the cache for ASan builds so a non-ASan runtime is never
         // reused for an ASan-instrumented link.
@@ -229,12 +233,35 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
     hasher.update(runtime_compiler_identity(asan)?.as_bytes());
     hasher.update(b"\0");
     for path in files {
-        hasher.update(path.to_string_lossy().as_bytes());
+        let path_bytes = runtime_cache_path_bytes(&path);
+        hasher.update(&(path_bytes.len() as u64).to_le_bytes());
+        hasher.update(&path_bytes);
         let contents =
             std::fs::read(&path).map_err(|e| format!("read runtime file {path:?}: {e}"))?;
+        hasher.update(&(contents.len() as u64).to_le_bytes());
         hasher.update(&contents);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(unix)]
+fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn runtime_cache_path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
 }
 
 fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
@@ -913,6 +940,38 @@ mod tests {
             error.starts_with("runtime source entry is not a regular file:"),
             "{error}"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_key_distinguishes_non_utf8_source_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-non-utf8-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache non-UTF-8 source directory");
+        let runtime_rs = dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let first_name = std::ffi::OsString::from_vec(b"helper-\x80.rs".to_vec());
+        let first_path = dir.join(first_name);
+        fs::write(&first_path, b"fn helper() {}\n").expect("write first non-UTF-8 source");
+        let first = runtime_cache_key(&runtime_rs).expect("compute first non-UTF-8 cache key");
+
+        fs::remove_file(&first_path).expect("remove first non-UTF-8 source");
+        let second_name = std::ffi::OsString::from_vec(b"helper-\x81.rs".to_vec());
+        let second_path = dir.join(second_name);
+        fs::write(&second_path, b"fn helper() {}\n").expect("write second non-UTF-8 source");
+        let second = runtime_cache_key(&runtime_rs).expect("compute second non-UTF-8 cache key");
+
+        assert_ne!(first, second, "distinct raw source names must not collide");
         fs::remove_dir_all(&dir).ok();
     }
 
