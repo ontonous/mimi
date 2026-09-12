@@ -152,6 +152,10 @@ fn cleanup_runtime_cache_temps(cache_dir: &Path, key: &str) {
 }
 
 fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
+    runtime_cache_key_with_asan(runtime_rs, asan_enabled())
+}
+
+fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, String> {
     let runtime_dir = runtime_rs
         .parent()
         .ok_or_else(|| "runtime source has no parent directory".to_string())?;
@@ -166,7 +170,7 @@ fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"mimi-native-runtime-v1\0");
-    if asan_enabled() {
+    if asan {
         // Invalidate the cache for ASan builds so a non-ASan runtime is never
         // reused for an ASan-instrumented link.
         hasher.update(b"asan\0");
@@ -610,7 +614,10 @@ pub(crate) fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_key};
+    use super::{
+        cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_key,
+        runtime_cache_key_with_asan,
+    };
     use std::fs;
 
     #[test]
@@ -722,6 +729,39 @@ mod tests {
         let changed_file_set =
             runtime_cache_key(&runtime_rs).expect("compute changed-file-set runtime cache key");
         assert_ne!(changed_content, changed_file_set);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_separates_asan_and_normal_modes() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-asan-key-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache ASan key directory");
+        let runtime_rs = dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let normal = runtime_cache_key_with_asan(&runtime_rs, false)
+            .expect("compute normal runtime cache key");
+        let asan =
+            runtime_cache_key_with_asan(&runtime_rs, true).expect("compute ASan runtime cache key");
+        assert_ne!(normal, asan);
+        assert_eq!(
+            normal,
+            runtime_cache_key_with_asan(&runtime_rs, false)
+                .expect("recompute normal runtime cache key")
+        );
+        assert_eq!(
+            asan,
+            runtime_cache_key_with_asan(&runtime_rs, true)
+                .expect("recompute ASan runtime cache key")
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
