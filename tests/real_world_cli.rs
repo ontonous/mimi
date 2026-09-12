@@ -616,6 +616,24 @@ fn canonical_scalar_ffi_cli_multiple_contract_failures_precede_linker_diagnostic
         .expect("multi-contract receipt manifest"),
         checked_route_receipt(&source)
     );
+    let receipt_repeat = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn repeated multi-contract receipt inspection");
+    assert_eq!(receipt.stdout, receipt_repeat.stdout);
+    let receipt_reordered = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--receipt")
+        .arg("--all")
+        .output()
+        .expect("spawn reordered multi-contract receipt inspection");
+    assert_eq!(receipt.stdout, receipt_reordered.stdout);
     let mir_text = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("mir")
