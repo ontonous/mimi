@@ -3266,7 +3266,7 @@ fn scalar_ffi_imported_alias_negative_verifier_artifact_matches_route_receipt() 
     .expect("write imported alias negative proof main");
     fs::write(
         project.join("ffi_types.mimi"),
-        "pub type Scalar = f64\npub type Real = Scalar\nextern \"C\" { func mir_ffi_import_alias_negative(value: Real) -> i64 requires: value >= 0; }\npub func call_imported_alias(value: i64) -> i64 { mir_ffi_import_alias_negative(value) }\n",
+        "pub type Scalar = f64\npub type Real = Scalar\npub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" { func mir_ffi_import_alias_negative(value: Real) -> ResultId requires: value >= 0; }\npub func call_imported_alias(value: i64) -> ResultId { mir_ffi_import_alias_negative(value) }\n",
     )
     .expect("write imported alias negative proof module");
 
