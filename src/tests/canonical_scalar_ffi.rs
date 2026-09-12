@@ -2254,6 +2254,100 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_callsite_public_verifiers_preserve_order_and_receipt_digest() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_order_first(value: i64) -> i64 requires: value >= 0 ensures: true;
+    func mir_ffi_order_second(value: i64) -> i64 requires: value >= 0 ensures: result == value;
+}
+func main() -> i64 {
+    mir_ffi_order_first(7 as i64);
+    mir_ffi_order_second(-8 as i64);
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("check public multi-callsite FFI verifier fixture");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize public multi-callsite FFI verifier fixture");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.symbol, "mir_ffi_order_first");
+    assert_eq!(ordered[1].1.symbol, "mir_ffi_order_second");
+    assert!(ordered[0].1.span.start_line < ordered[1].1.span.start_line);
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize shared public verifier route");
+    let receipt = route.program.route_receipt("r6-457-public-verifiers");
+    assert_eq!(route.program.canonical_digest(), mir.canonical_digest());
+    assert_eq!(receipt.mir_digest, mir.canonical_digest());
+    assert_eq!(receipt.ffi_digest.len(), 64);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let api_results = [
+        crate::verifier::verify_checked(&checked, "r6-457-public-verifiers".into()),
+        crate::verifier::verify_checked_dual(&checked, "r6-457-public-verifiers".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ];
+    let mut projections = Vec::new();
+    for results in api_results {
+        let results = results.expect("public multi-callsite FFI verifier");
+        assert_eq!(results.len(), 2, "each receipt must produce one result");
+        assert_eq!(
+            results[0].status,
+            crate::verifier::VerifStatus::Proven,
+            "the first combined receipt must remain the first proven result"
+        );
+        assert_eq!(
+            results[1].status,
+            crate::verifier::VerifStatus::Disproven,
+            "the second requires failure must remain the second result"
+        );
+        assert!(results.iter().all(|result| {
+            result
+                .func_name
+                .strip_prefix("function:")
+                .unwrap_or(result.func_name.as_str())
+                == "main"
+                && result.artifact.as_ref().is_some_and(|artifact| {
+                    artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                        && artifact.mir_hash == receipt.mir_digest
+                })
+        }));
+        assert_eq!(
+            results[1]
+                .diagnostic
+                .as_ref()
+                .expect("second requires diagnostic")
+                .span,
+            ordered[1].1.span,
+            "the disproven result must retain the second receipt span"
+        );
+        projections.push(
+            results
+                .iter()
+                .map(|result| {
+                    (
+                        result.status.clone(),
+                        result.message.clone(),
+                        result.constraint_count,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(
+        projections.windows(2).all(|pair| pair[0] == pair[1]),
+        "public verifier APIs must expose one ordered semantic result projection"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_branch_merge_preserves_per_callsite_result_cardinality() {
     let source = r#"
 extern "C" { func mir_ffi_branch(value: i64) -> i64 requires: value >= 0; }

@@ -961,6 +961,108 @@ fn canonical_scalar_ffi_cli_combined_requires_ensures_runtime_verify_boundary() 
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_multi_callsite_mixed_verdict_matches_receipt_and_mir() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_multi_callsite_mixed_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-callsite mixed CLI fixture directory");
+    let source = dir.join("mixed.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    0\n}\n",
+    )
+    .expect("write multi-callsite mixed CLI source");
+
+    let checked = checked_route_receipt(&source);
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn multi-callsite mixed receipt inspection");
+    assert!(
+        inspect.status.success(),
+        "mixed receipt inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let manifest = parse_route_receipt_manifest(&inspect.stdout);
+    assert_eq!(
+        manifest.get("mir_digest"),
+        Some(&checked.mir_digest),
+        "CLI receipt MIR digest must match the checked route"
+    );
+    assert_eq!(
+        manifest.get("ffi_digest"),
+        Some(&checked.ffi_digest),
+        "CLI receipt FFI digest must match the checked route"
+    );
+    assert!(
+        !String::from_utf8_lossy(&inspect.stderr).contains("canonical route disposition: legacy")
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .expect("spawn multi-callsite mixed verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    let semantic_summary = |output: &std::process::Output| {
+        let mut lines = Vec::new();
+        for bytes in [&output.stdout, &output.stderr] {
+            lines.extend(String::from_utf8_lossy(bytes).lines().map(str::to_owned));
+        }
+        lines
+            .into_iter()
+            .filter(|line| line.contains("canonical MIR extern requires contract"))
+            .map(|line| line.split(" (").next().unwrap_or(&line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert!(
+            !output.status.success(),
+            "{label} mixed verifier must report the disproven second receipt"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("canonical MIR extern requires contract proven"),
+            "{label} lost the first proven receipt: {stdout}"
+        );
+        assert!(
+            stderr.contains("canonical MIR extern requires contract disproven"),
+            "{label} lost the second disproven receipt: {stderr}"
+        );
+        assert!(
+            stdout.contains("1/2 verified") || stderr.contains("1/2 verified"),
+            "{label} lost the two-receipt cardinality summary: stdout={stdout} stderr={stderr}"
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(
+        semantic_summary(&default_verify),
+        semantic_summary(&mir_verify),
+        "default and explicit MIR must expose the same mixed verdict order and summaries"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
