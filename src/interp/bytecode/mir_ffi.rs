@@ -1120,6 +1120,94 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_runtime_load_failure_does_not_poison_library_cache() {
+        let _guard = crate::tests::FfiEnvLock::lock();
+        let previous = std::env::var_os("MIMI_FFI_LIB");
+        let missing = std::env::temp_dir().join(format!(
+            "mimi-canonical-ffi-missing-{}-{}.so",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_nanos()
+        ));
+        std::env::set_var("MIMI_FFI_LIB", &missing);
+
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let error = runtime
+            .call(
+                &descriptor("labs", CanonicalFfiScalarType::I64),
+                &[Value::Int(-41)],
+            )
+            .expect_err("a missing dynamic library must fail before caching a handle");
+        assert!(error.to_string().contains("failed to load"), "{error}");
+        assert!(runtime.loaded_libs.is_empty());
+
+        let libc = default_libc_candidates()
+            .into_iter()
+            .find(|candidate| std::path::Path::new(candidate).exists())
+            .expect("a discoverable libc is required for the scalar FFI runtime test");
+        std::env::set_var("MIMI_FFI_LIB", libc);
+        assert_eq!(
+            runtime
+                .call(
+                    &descriptor("labs", CanonicalFfiScalarType::I64),
+                    &[Value::Int(-41)]
+                )
+                .expect("a later valid library must still load"),
+            Value::Int(41)
+        );
+        assert_eq!(runtime.loaded_libs.len(), 1);
+
+        match previous {
+            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
+            None => std::env::remove_var("MIMI_FFI_LIB"),
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_missing_symbol_preserves_cached_library_for_next_call() {
+        let _guard = crate::tests::FfiEnvLock::lock();
+        let previous = std::env::var_os("MIMI_FFI_LIB");
+        let libc = default_libc_candidates()
+            .into_iter()
+            .find(|candidate| std::path::Path::new(candidate).exists())
+            .expect("a discoverable libc is required for the scalar FFI runtime test");
+        std::env::set_var("MIMI_FFI_LIB", libc);
+
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let missing = runtime
+            .call(
+                &descriptor(
+                    "mimi_canonical_ffi_missing_symbol",
+                    CanonicalFfiScalarType::I64,
+                ),
+                &[Value::Int(1)],
+            )
+            .expect_err("an absent symbol must fail at symbol lookup");
+        assert!(missing
+            .to_string()
+            .contains("failed to find canonical MIR FFI symbol"));
+        assert_eq!(runtime.loaded_libs.len(), 1);
+
+        assert_eq!(
+            runtime
+                .call(
+                    &descriptor("labs", CanonicalFfiScalarType::I64),
+                    &[Value::Int(-41)]
+                )
+                .expect("a later symbol in the cached library must remain callable"),
+            Value::Int(41)
+        );
+        assert_eq!(runtime.loaded_libs.len(), 1);
+
+        match previous {
+            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
+            None => std::env::remove_var("MIMI_FFI_LIB"),
+        }
+    }
+
+    #[test]
     fn scalar_ffi_runtime_validates_argument_conversion_before_predicates() {
         let mut runtime = CanonicalMirFfiRuntime::new();
         let mut call = descriptor("abs", CanonicalFfiScalarType::I32);
