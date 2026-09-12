@@ -168,6 +168,16 @@ fn runtime_cache_key(runtime_rs: &Path) -> Result<String, String> {
     runtime_cache_key_with_asan(runtime_rs, asan_enabled())
 }
 
+fn ensure_runtime_cache_key_stable(runtime_rs: &Path, expected_key: &str) -> Result<(), String> {
+    let actual_key = runtime_cache_key(runtime_rs)?;
+    if actual_key == expected_key {
+        return Ok(());
+    }
+    Err(format!(
+        "runtime sources changed while compiling cached archive (expected key {expected_key}, found {actual_key}); retry"
+    ))
+}
+
 fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
     let mut command = std::process::Command::new("rustc");
     command.args(["--version", "--verbose"]);
@@ -518,30 +528,37 @@ fn acquire_runtime_cache_lock(cache_dir: &Path) -> Result<std::fs::File, String>
         .map_err(|e| format!("open runtime cache lock: {e}"))?;
     // SAFETY: lock_file is an open regular file and flock only changes its
     // advisory lock state; no Rust references cross the FFI boundary.
-    unsafe {
-        if libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) != 0 {
-            return Err(format!(
-                "lock runtime cache: {}",
-                std::io::Error::last_os_error()
-            ));
+    loop {
+        // SAFETY: lock_file is an open regular file and flock only changes its
+        // advisory lock state; no Rust references cross the FFI boundary.
+        let result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        if result == 0 {
+            break;
         }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(format!("lock runtime cache: {error}"));
     }
     Ok(lock_file)
 }
 
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
-    let key = runtime_cache_key(runtime_rs)?;
     let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
-    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
+    let key = runtime_cache_key(runtime_rs)?;
+    let cache_path = cache_dir.join(format!("libmimi_runtime_{key}.a"));
     cleanup_runtime_cache_temps(&cache_dir, &key)?;
     if let Some(cache_path) = runtime_cache_hit(&cache_path)? {
+        ensure_runtime_cache_key_stable(runtime_rs, &key)?;
         return Ok(cache_path);
     }
 
     let tmp_path = cache_dir.join(format!("libmimi_runtime_{key}.tmp-{}", std::process::id()));
+    let _tmp_guard = TempFileGuard::new(tmp_path.clone());
     let mut rt_cmd = std::process::Command::new("rustc");
     rt_cmd
         .args([
@@ -566,9 +583,9 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
         .status()
         .map_err(|e| format!("runtime compile (rustc): {e}"))?;
     if !status.success() {
-        let _ = std::fs::remove_file(&tmp_path);
         return Err("Rust runtime compilation failed".into());
     }
+    ensure_runtime_cache_key_stable(runtime_rs, &key)?;
     publish_runtime_cache(&tmp_path, &cache_path)
 }
 
@@ -944,8 +961,9 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_runtime_cache_temps, publish_runtime_cache, runtime_cache_hit, runtime_cache_key,
-        runtime_cache_key_with_asan, runtime_include_literals,
+        cleanup_runtime_cache_temps, ensure_runtime_cache_key_stable, publish_runtime_cache,
+        runtime_cache_hit, runtime_cache_key, runtime_cache_key_with_asan,
+        runtime_include_literals,
     };
     use std::fs;
 
@@ -1091,6 +1109,32 @@ mod tests {
         let changed_file_set =
             runtime_cache_key(&runtime_rs).expect("compute changed-file-set runtime cache key");
         assert_ne!(changed_content, changed_file_set);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_stability_rejects_changed_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-stability-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache key stability directory");
+        let runtime_rs = dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let expected = runtime_cache_key(&runtime_rs).expect("compute initial runtime cache key");
+        fs::write(&runtime_rs, b"fn runtime_changed() {}\n").expect("change runtime source");
+        let error = ensure_runtime_cache_key_stable(&runtime_rs, &expected)
+            .expect_err("changed runtime source must reject publication");
+        assert!(
+            error.starts_with("runtime sources changed while compiling cached archive"),
+            "{error}"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
