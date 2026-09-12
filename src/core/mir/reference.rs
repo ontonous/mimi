@@ -1443,6 +1443,31 @@ impl MirProgram {
     ) {
         self.ffi_calls = ffi_calls;
     }
+
+    /// Adjust one already-materialized call result for a backend conversion
+    /// fixture.  The production checker normally gives an extern call the
+    /// declaration result type directly, so a non-identity result conversion
+    /// is otherwise unreachable from surface syntax.  Tests use this narrow
+    /// helper to model a future caller-side ABI adaptation while preserving
+    /// the canonical value identity and function return shape.
+    #[cfg(test)]
+    pub(crate) fn replace_function_result_and_value_type_for_test_only(
+        &mut self,
+        owner: &NodeId,
+        value: &MirValueId,
+        ty: crate::core::ResolvedTypeId,
+    ) {
+        let function = self
+            .functions
+            .get_mut(owner)
+            .expect("MIR test function owner");
+        function.result = ty.clone();
+        function
+            .values
+            .get_mut(value)
+            .expect("MIR test result value")
+            .ty = ty;
+    }
 }
 
 /// Validate every `Convert` against the closed TypeDesc conversion contract

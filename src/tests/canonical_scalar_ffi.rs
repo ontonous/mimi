@@ -39,6 +39,14 @@ const MIXED_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_expect_f64(x: f64) -> i64; }
 func main() -> i64 { mir_ffi_expect_f64(7 as i32) }
 "#;
+const RESULT_CONVERSION_F64_C_SOURCE: &str = r#"
+#include <stdint.h>
+double mir_ffi_result_f64(int64_t x) { return x == 7 ? 42.75 : -1.0; }
+"#;
+const RESULT_CONVERSION_F64_SOURCE: &str = r#"
+extern "C" { func mir_ffi_result_f64(x: i64) -> f64; }
+func main() -> f64 { mir_ffi_result_f64(7 as i64) }
+"#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
@@ -410,6 +418,159 @@ fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
         .expect("native mixed-width FFI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n7\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_result_conversion_matches_three_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, RESULT_CONVERSION_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(RESULT_CONVERSION_F64_SOURCE)
+        .tokenize()
+        .expect("lex result conversion FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse result conversion FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check result conversion FFI fixture");
+    let mut mir =
+        MirProgram::from_checked_program(&checked).expect("materialize result conversion FFI MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt.result.clone().expect("result conversion value"),
+            )
+        })
+        .expect("result conversion receipt");
+    let i64_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i64 result TypeDesc");
+    // Surface calls currently inherit the declaration result type.  This
+    // canonical fixture models a caller-side i64 result slot so the existing
+    // checker-owned f64 -> i64 result conversion receipt is exercised by all
+    // consumers without reopening surface type inference.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type.clone());
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Float { bits: 64 },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("result conversion receipt")
+        .result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+    let receipt = mir
+        .ffi_calls()
+        .get(&instruction_id)
+        .expect("updated result conversion receipt");
+    assert_eq!(
+        receipt.result_type,
+        mir.type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.abi == MirAbiClass::Float { bits: 64 }).then(|| id.clone())
+            })
+            .expect("f64 declaration TypeDesc")
+    );
+    assert_eq!(receipt.result_conversion, Some(result_conversion));
+    assert_eq!(
+        mir.functions()[&owner].values[&result_id].ty,
+        i64_type,
+        "the result slot must be the conversion target"
+    );
+
+    struct ResultConversionOracle;
+    impl MirReferenceFfiResolver for ResultConversionOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_result_f64" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::Int(7)] {
+                return Err(format!(
+                    "unexpected result conversion arguments {arguments:?}"
+                ));
+            }
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Float { bits: 64 },
+                    to: MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("result conversion receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::FloatBits(42.75_f64.to_bits()))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&ResultConversionOracle)
+        .execute(&owner, &[])
+        .expect("reference result conversion FFI execution");
+    assert_eq!(reference, MirRuntimeValue::Int(42));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-conversion".into())
+        .expect("verify result conversion MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free result conversion bytecode");
+    assert!(bytecode.ast.is_none());
+    let bytecode_value = BytecodeVM::new(bytecode)
+        .run_value()
+        .expect("bytecode result conversion FFI execution");
+    assert_eq!(bytecode_value, Value::Int(42));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_result");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native result conversion FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid result conversion LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(RESULT_CONVERSION_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native result conversion FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
     assert_eq!(native.stderr, "");
 }
 
