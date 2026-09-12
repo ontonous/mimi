@@ -20,6 +20,9 @@ use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -128,6 +131,34 @@ fn temp_build_dir_from_linker_stderr(stderr: &[u8]) -> PathBuf {
         .find(|character| character == '/' || character == '\\')
         .expect("staging path must include an artifact separator");
     PathBuf::from(&token[..marker + separator])
+}
+
+#[cfg(unix)]
+fn native_runtime_cache_path() -> PathBuf {
+    let runtime_rs = project_root().join("src/runtime/standalone.rs");
+    let runtime_dir = runtime_rs.parent().expect("runtime source parent");
+    let mut files = fs::read_dir(runtime_dir)
+        .expect("read runtime source directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect::<Vec<_>>();
+    files.push(runtime_rs);
+    files.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mimi-native-runtime-v1\0");
+    if std::env::var_os("MIMI_ASAN").is_some() {
+        hasher.update(b"asan\0");
+    }
+    for path in files {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(&fs::read(path).expect("read runtime source"));
+    }
+    let key = hasher.finalize().to_hex();
+    std::env::temp_dir()
+        .join("mimi_runtime_build_cache")
+        .join(format!("libmimi_runtime_{key}.a"))
 }
 
 fn run_mimi_run_out(src: &Path) -> Result<String, String> {
@@ -674,6 +705,93 @@ fn canonical_scalar_ffi_cli_parallel_link_failures_keep_staging_isolated() {
         "parallel MIR build left an output binary"
     );
 
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_reuses_runtime_cache_identity_across_default_and_mir() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_runtime_cache_reuse_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI runtime cache reuse directory");
+    let source = dir.join("cache-reuse.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI runtime cache reuse source");
+    let default_binary = dir.join("default");
+    let mir_binary = dir.join("mir");
+    let build = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .unwrap_or_else(|error| panic!("runtime cache reuse build {explicit_mir}: {error}"))
+    };
+
+    let cache_path = native_runtime_cache_path();
+    let default_build = build(false, &default_binary);
+    assert!(
+        default_build.status.success(),
+        "default cache-seeding build failed: {}",
+        String::from_utf8_lossy(&default_build.stderr)
+    );
+    assert!(
+        cache_path.is_file(),
+        "default build did not publish runtime cache"
+    );
+    let first_bytes = fs::read(&cache_path).expect("read seeded runtime cache");
+    let first_metadata = fs::metadata(&cache_path).expect("stat seeded runtime cache");
+    let stale_temp = cache_path
+        .parent()
+        .expect("runtime cache parent")
+        .join(format!(
+            "{}.tmp-stale-{}",
+            cache_path
+                .file_stem()
+                .expect("runtime cache stem")
+                .to_string_lossy(),
+            std::process::id()
+        ));
+    fs::write(&stale_temp, b"stale runtime cache temporary")
+        .expect("write stale runtime cache temporary");
+
+    let mir_build = build(true, &mir_binary);
+    assert!(
+        mir_build.status.success(),
+        "MIR cache-reuse build failed: {}",
+        String::from_utf8_lossy(&mir_build.stderr)
+    );
+    assert!(
+        !stale_temp.exists(),
+        "cache hit did not prune stale temporary"
+    );
+    assert_eq!(
+        fs::read(&cache_path).expect("read reused runtime cache"),
+        first_bytes
+    );
+    let second_metadata = fs::metadata(&cache_path).expect("stat reused runtime cache");
+    assert_eq!(first_metadata.dev(), second_metadata.dev());
+    assert_eq!(first_metadata.ino(), second_metadata.ino());
+    assert!(default_binary.is_file());
+    assert!(mir_binary.is_file());
+
+    fs::remove_file(&default_binary).ok();
+    fs::remove_file(&mir_binary).ok();
     fs::remove_dir_all(&dir).ok();
 }
 
