@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -505,6 +508,77 @@ fn canonical_scalar_ffi_cli_multiple_linker_symbols_preserve_failure_order() {
     }
     assert!(!default_binary.exists());
     assert!(!mir_binary.exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_scalar_ffi_cli_runtime_failure_cleans_staging_directory() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_runtime_compile_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI runtime compile failure directory");
+    let source = dir.join("runtime-failure.mimi");
+    fs::write(&source, "func main() -> i64 { 0 }\n")
+        .expect("write scalar FFI runtime compile failure source");
+
+    let fake_bin = dir.join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake rustc directory");
+    let args_capture = dir.join("rustc-args.txt");
+    let fake_rustc = fake_bin.join("rustc");
+    fs::write(
+        &fake_rustc,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MIMI_FAKE_RUSTC_ARGS\"\nexit 23\n",
+    )
+    .expect("write failing rustc shim");
+    let mut permissions = fs::metadata(&fake_rustc)
+        .expect("stat failing rustc shim")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_rustc, permissions).expect("make failing rustc shim executable");
+
+    let binary = dir.join("runtime-failure.so");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg("--shared")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .env("PATH", &fake_bin)
+        .env("MIMI_FAKE_RUSTC_ARGS", &args_capture)
+        .output()
+        .expect("spawn scalar FFI runtime compile failure build");
+    assert!(!build.status.success());
+    assert!(build.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("Rust runtime compilation failed"),
+        "runtime failure lost its stable diagnostic: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(!binary.exists(), "runtime failure left an output binary");
+
+    let rustc_args = fs::read_to_string(&args_capture).expect("failing rustc shim captured args");
+    let runtime_output = rustc_args
+        .lines()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| (pair[0] == "-o").then_some(pair[1]))
+        .expect("runtime rustc invocation must include an output path");
+    let staging_dir = Path::new(runtime_output)
+        .parent()
+        .expect("runtime output path must have a staging parent");
+    assert!(
+        !staging_dir.exists(),
+        "runtime compiler failure left staging directory {staging_dir:?}"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
