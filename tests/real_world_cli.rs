@@ -1140,6 +1140,96 @@ fn canonical_scalar_ffi_cli_build_verify_reports_only_failed_receipt() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_build_verify_counts_all_failed_receipts() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_build_verify_receipt_count_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create receipt-count CLI fixture directory");
+    let source = dir.join("receipt-count.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0 ensures: true;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n    func third(value: i64) -> i64 requires: value >= 0 ensures: true;\n}\nfunc main() -> i64 {\n    first(7 as i64);\n    second(-8 as i64);\n    third(-9 as i64);\n    0\n}\n",
+    )
+    .expect("write receipt-count CLI source");
+
+    let checked = checked_route_receipt(&source);
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn receipt-count route inspection");
+    assert!(inspect.status.success());
+    let manifest = parse_route_receipt_manifest(&inspect.stdout);
+    assert_eq!(manifest.get("mir_digest"), Some(&checked.mir_digest));
+    assert_eq!(manifest.get("ffi_digest"), Some(&checked.ffi_digest));
+    assert!(
+        !String::from_utf8_lossy(&inspect.stderr).contains("canonical route disposition: legacy")
+    );
+
+    let mut outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "receipt-count-mir-output"
+        } else {
+            "receipt-count-default-output"
+        });
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg("--verify-ffi")
+            .arg("--emit-ir")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("spawn receipt-count build verifier");
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "build --verify-ffi {:?} must use one failure exit code",
+            explicit_mir
+        );
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches("FFI violation").count(),
+            2,
+            "build --verify-ffi {:?} must report both failed receipts: {stderr}",
+            explicit_mir
+        );
+        assert_eq!(
+            stderr.matches("FFI contract verification failed").count(),
+            1,
+            "build --verify-ffi {:?} must emit one terminal failure: {stderr}",
+            explicit_mir
+        );
+        assert_eq!(stderr.matches("second(-8 as i64)").count(), 1);
+        assert_eq!(stderr.matches("third(-9 as i64)").count(), 1);
+        assert!(!stderr.contains("first(7 as i64)"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!binary.exists());
+        outputs.push(output);
+    }
+    assert_eq!(
+        outputs[0].stderr, outputs[1].stderr,
+        "default and explicit MIR must report the same receipt-count diagnostics"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
