@@ -1684,6 +1684,105 @@ fn canonical_scalar_ffi_cli_import_graph_failure_is_atomic_across_source_and_all
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_verify_counts_all_failed_receipts_and_preserves_order() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-ffi-verify-all-failed-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create all-failed verifier directory");
+    let source = dir.join("all-failed.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" {\n    func first(value: i64) -> i64 requires: value >= 0;\n    func second(value: i64) -> i64 requires: value >= 0 ensures: result == value;\n    func third(value: i64) -> i64 requires: value >= 0;\n}\nfunc main() -> i64 {\n    first(-1 as i64);\n    second(-2 as i64);\n    third(-3 as i64);\n    0\n}\n",
+    )
+    .expect("write all-failed verifier source");
+
+    let checked = checked_route_receipt(&source);
+    let inspect = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&source)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn all-failed verifier receipt inspection");
+    assert!(inspect.status.success());
+    let manifest = String::from_utf8_lossy(&inspect.stdout);
+    assert_eq!(
+        mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest),
+        Ok(checked)
+    );
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .expect("spawn all-failed verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert_eq!(output.status.code(), Some(1), "{label} verifier exit code");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("0/3 verified"));
+        assert!(stdout.contains("12 total constraints"));
+        assert!(!stdout.contains("canonical MIR extern requires contract proven"));
+        assert_eq!(
+            stderr
+                .matches("canonical MIR extern requires contract disproven")
+                .count(),
+            3,
+            "{label} verifier must report every failed receipt"
+        );
+        let first = stderr
+            .find("first(-1 as i64)")
+            .expect("first failure source");
+        let second = stderr
+            .find("second(-2 as i64)")
+            .expect("second failure source");
+        let third = stderr
+            .find("third(-3 as i64)")
+            .expect("third failure source");
+        assert!(
+            first < second && second < third,
+            "{label} receipt order changed"
+        );
+        assert_eq!(stderr.matches("first(-1 as i64)").count(), 1);
+        assert_eq!(stderr.matches("second(-2 as i64)").count(), 1);
+        assert_eq!(stderr.matches("third(-3 as i64)").count(), 1);
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(
+        default_verify.stderr, mir_verify.stderr,
+        "default and explicit MIR all-failed diagnostics must match"
+    );
+    let stable_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains("verified in"))
+            .map(|line| line.split(" in ").next().unwrap_or(line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        stable_summary(&default_verify),
+        stable_summary(&mir_verify),
+        "default and explicit MIR all-failed summaries must match"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
