@@ -6493,6 +6493,125 @@ fn scalar_ffi_duplicate_imported_declaration_keeps_checker_span_provenance() {
 }
 
 #[test]
+fn scalar_ffi_multiple_duplicate_imports_have_deterministic_diagnostic_order() {
+    use std::fs;
+
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-duplicate-order-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create duplicate order project");
+    let main_path = project.join("main.mimi");
+    let left_path = project.join("left.mimi");
+    let right_path = project.join("right.mimi");
+    fs::write(
+        &main_path,
+        "use left;\nuse right;\nfunc main() -> i64 { 0 }\n",
+    )
+    .expect("write duplicate order main");
+    let left_source = "extern \"C\" {\n    func zeta(value: i64) -> i64;\n    func alpha(value: i64) -> i64;\n}\npub func call_left(value: i64) -> i64 { zeta(value) + alpha(value) }\n";
+    let right_source = "extern \"C\" {\n    func zeta(value: i64) -> i64;\n    func alpha(value: i64) -> i64;\n}\npub func call_right(value: i64) -> i64 { zeta(value) + alpha(value) }\n";
+    fs::write(&left_path, left_source).expect("write left duplicate order declarations");
+    fs::write(&right_path, right_source).expect("write right duplicate order declarations");
+
+    let load = || {
+        let source = fs::read_to_string(&main_path).expect("read duplicate order main");
+        let tokens = crate::lexer::Lexer::new(&source)
+            .tokenize()
+            .expect("lex duplicate order main");
+        let file = crate::loader::parser_for_path(tokens, &main_path)
+            .expect("select duplicate order parser")
+            .parse_file()
+            .expect("parse duplicate order main");
+        let mut loader = crate::loader::ModuleLoader::new(project.clone());
+        loader
+            .load_main_with_file(&main_path, file)
+            .expect("load duplicate order graph");
+        let mut merged = loader.merge_all().expect("merge duplicate order graph");
+        crate::loader::merge_prelude_into(&mut merged);
+        merged
+    };
+
+    let first = load();
+    let second = load();
+    let first_errors = crate::core::check_program(&first)
+        .expect_err("multiple imported duplicate externs must fail checker");
+    let second_errors = crate::core::check_program(&second)
+        .expect_err("repeated duplicate order graph must fail checker");
+    let duplicate_summary =
+        |file: &crate::ast::File, diagnostics: &[crate::diagnostic::Diagnostic]| {
+            diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0402)
+                })
+                .map(|diagnostic| {
+                    let primary = file
+                        .sources
+                        .record(diagnostic.span.source_id)
+                        .expect("duplicate primary source record")
+                        .disk_path
+                        .clone();
+                    let note = diagnostic
+                        .notes
+                        .first()
+                        .expect("duplicate declaration prior note");
+                    let previous = file
+                        .sources
+                        .record(note.span.source_id)
+                        .expect("duplicate prior source record")
+                        .disk_path
+                        .clone();
+                    (
+                        diagnostic.message.clone(),
+                        primary,
+                        note.message.clone(),
+                        previous,
+                        diagnostic.span.start_line,
+                        diagnostic.span.start_col,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    let first_summary = duplicate_summary(&first, &first_errors);
+    let second_summary = duplicate_summary(&second, &second_errors);
+    assert_eq!(first_summary, second_summary);
+    assert_eq!(
+        first_summary.len(),
+        2,
+        "both duplicate symbols must be reported"
+    );
+    assert_eq!(
+        first_summary
+            .iter()
+            .map(|(message, _, _, _, _, _)| message.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "duplicate extern function 'zeta' (conflicting declarations across extern blocks)"
+                .to_string(),
+            "duplicate extern function 'alpha' (conflicting declarations across extern blocks)"
+                .to_string(),
+        ]
+    );
+    for (_, primary, note, previous, _, _) in &first_summary {
+        assert_eq!(
+            primary.as_deref(),
+            right_path.canonicalize().ok().as_deref()
+        );
+        assert_eq!(note, "previous extern declaration is here");
+        assert_eq!(
+            previous.as_deref(),
+            left_path.canonicalize().ok().as_deref()
+        );
+    }
+    assert!(first_errors
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0402))
+        .all(|diagnostic| diagnostic.notes.len() == 1));
+    fs::remove_dir_all(project).expect("remove duplicate order project");
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
