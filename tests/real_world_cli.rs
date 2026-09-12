@@ -173,7 +173,7 @@ fn native_runtime_cache_path() -> PathBuf {
     files.sort();
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mimi-native-runtime-v2\0");
+    hasher.update(b"mimi-native-runtime-v3\0");
     if std::env::var_os("MIMI_ASAN").is_some() {
         hasher.update(b"asan\0");
     }
@@ -194,6 +194,27 @@ fn native_runtime_cache_path() -> PathBuf {
             .as_bytes(),
     );
     hasher.update(b"\0");
+    let mut compiler_args = vec![
+        "--edition",
+        "2021",
+        "--crate-type",
+        "staticlib",
+        "--cfg",
+        "standalone",
+        "--crate-name",
+        "mimi_runtime",
+        "-A",
+        "dead_code",
+    ];
+    if std::env::var_os("MIMI_ASAN").is_some() {
+        compiler_args.extend(["-Z", "sanitizer=address"]);
+    }
+    hasher.update(b"rustc-args\0");
+    for arg in compiler_args {
+        let bytes = arg.as_bytes();
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
     for path in files {
         let path_bytes = path.as_os_str().as_bytes();
         hasher.update(&(path_bytes.len() as u64).to_le_bytes());

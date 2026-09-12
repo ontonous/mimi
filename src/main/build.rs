@@ -85,6 +85,25 @@ fn asan_rustc_flags() -> Vec<&'static str> {
     }
 }
 
+fn runtime_compiler_args(asan: bool) -> Vec<&'static str> {
+    let mut args = vec![
+        "--edition",
+        "2021",
+        "--crate-type",
+        "staticlib",
+        "--cfg",
+        "standalone",
+        "--crate-name",
+        "mimi_runtime",
+        "-A",
+        "dead_code",
+    ];
+    if asan {
+        args.extend(["-Z", "sanitizer=address"]);
+    }
+    args
+}
+
 fn asan_link_flags() -> Vec<&'static str> {
     if asan_enabled() {
         vec!["-fsanitize=address"]
@@ -245,6 +264,14 @@ fn runtime_compiler_identity(asan: bool) -> Result<String, String> {
 }
 
 fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, String> {
+    runtime_cache_key_with_asan_and_args(runtime_rs, asan, &runtime_compiler_args(asan))
+}
+
+fn runtime_cache_key_with_asan_and_args(
+    runtime_rs: &Path,
+    asan: bool,
+    compiler_args: &[&str],
+) -> Result<String, String> {
     let runtime_dir = runtime_rs
         .parent()
         .ok_or_else(|| "runtime source has no parent directory".to_string())?;
@@ -276,9 +303,11 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
     let mut hasher = blake3::Hasher::new();
     // The key format is length-framed so path bytes and file contents cannot
     // run together into an ambiguous digest.  Keep the version marker in the
-    // domain separator so existing v1 archives are naturally bypassed after
-    // this identity hardening.
-    hasher.update(b"mimi-native-runtime-v2\0");
+    // domain separator so existing v1/v2 archives are naturally bypassed after
+    // this identity hardening.  The compiler argument frame is part of the
+    // domain so changing the standalone runtime invocation cannot reuse an
+    // archive built with a different ABI or cfg set.
+    hasher.update(b"mimi-native-runtime-v3\0");
     if asan {
         // Invalidate the cache for ASan builds so a non-ASan runtime is never
         // reused for an ASan-instrumented link.
@@ -287,6 +316,12 @@ fn runtime_cache_key_with_asan(runtime_rs: &Path, asan: bool) -> Result<String, 
     hasher.update(b"rustc\0");
     hasher.update(runtime_compiler_identity(asan)?.as_bytes());
     hasher.update(b"\0");
+    hasher.update(b"rustc-args\0");
+    for arg in compiler_args {
+        let bytes = arg.as_bytes();
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
     for path in files {
         let path_bytes = runtime_cache_path_bytes(&path);
         hasher.update(&(path_bytes.len() as u64).to_le_bytes());
@@ -605,16 +640,7 @@ fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String
     let _tmp_guard = TempFileGuard::new(tmp_path.clone());
     let mut rt_cmd = std::process::Command::new("rustc");
     rt_cmd
-        .args([
-            "--edition",
-            "2021",
-            "--crate-type",
-            "staticlib",
-            "--cfg",
-            "standalone",
-        ])
-        .args(["--crate-name", "mimi_runtime", "-A", "dead_code"])
-        .args(asan_rustc_flags())
+        .args(runtime_compiler_args(asan_enabled()))
         .arg("-o")
         .arg(&tmp_path)
         .arg(runtime_rs);
@@ -1007,8 +1033,8 @@ mod tests {
     use super::{
         cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
         ensure_runtime_cache_key_stable, publish_runtime_cache, runtime_cache_hit,
-        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_temp_path,
-        runtime_include_literals,
+        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args,
+        runtime_cache_temp_path, runtime_compiler_args, runtime_include_literals,
     };
     use std::fs;
 
@@ -1516,6 +1542,32 @@ mod tests {
             runtime_cache_key_with_asan(&runtime_rs, true)
                 .expect("recompute ASan runtime cache key")
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_key_includes_compiler_argument_frame() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-key-args-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache key args directory");
+        let runtime_rs = dir.join("standalone.rs");
+        fs::write(&runtime_rs, b"fn runtime() {}\n").expect("write runtime source");
+
+        let baseline_args = runtime_compiler_args(false);
+        let baseline = runtime_cache_key_with_asan_and_args(&runtime_rs, false, &baseline_args)
+            .expect("compute baseline runtime cache key");
+        let mut changed_args = baseline_args;
+        changed_args.extend(["--cfg", "changed_invocation"]);
+        let changed = runtime_cache_key_with_asan_and_args(&runtime_rs, false, &changed_args)
+            .expect("compute changed-argument runtime cache key");
+        assert_ne!(baseline, changed);
 
         fs::remove_dir_all(&dir).ok();
     }
