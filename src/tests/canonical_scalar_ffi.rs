@@ -47,6 +47,14 @@ const RESULT_CONVERSION_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_f64(x: i64) -> f64; }
 func main() -> f64 { mir_ffi_result_f64(7 as i64) }
 "#;
+const RESULT_CONVERSION_I64_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_result_i64(int64_t x) { return x == 7 ? 42 : -1; }
+"#;
+const RESULT_CONVERSION_I64_SOURCE: &str = r#"
+extern "C" { func mir_ffi_result_i64(x: i64) -> i64; }
+func main() -> i64 { mir_ffi_result_i64(7 as i64) }
+"#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
@@ -569,6 +577,181 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
     };
     let native = super::link_and_observe_module(&generator, &config, counter)
         .expect("native result conversion FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, RESULT_CONVERSION_I64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(RESULT_CONVERSION_I64_SOURCE)
+        .tokenize()
+        .expect("lex integer narrow result conversion FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse integer narrow result conversion FFI fixture");
+    let checked = crate::core::check_program(&file)
+        .expect("check integer narrow result conversion FFI fixture");
+    let mut mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize integer narrow result conversion FFI MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt.result.clone().expect("integer narrow result value"),
+            )
+        })
+        .expect("integer narrow result receipt");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i32 result TypeDesc");
+    // As in the floating-point result fixture, the surface declaration owns
+    // the call result today.  This test-only adjustment models a caller-side
+    // narrow ABI slot so the integer result conversion is executed physically
+    // by every canonical consumer.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type.clone());
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("integer narrow result receipt")
+        .result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+    let receipt = mir
+        .ffi_calls()
+        .get(&instruction_id)
+        .expect("updated integer narrow result receipt");
+    assert_eq!(
+        receipt.result_type,
+        mir.type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.abi
+                    == MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    })
+                .then(|| id.clone())
+            })
+            .expect("i64 declaration TypeDesc")
+    );
+    assert_eq!(receipt.result_conversion, Some(result_conversion));
+    assert_eq!(
+        mir.functions()[&owner].values[&result_id].ty,
+        receipt
+            .result_conversion
+            .as_ref()
+            .and_then(|conversion| {
+                (conversion.to
+                    == MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    })
+                .then(|| i32_type.clone())
+            })
+            .expect("i32 conversion target")
+    );
+
+    struct IntegerNarrowResultOracle;
+    impl MirReferenceFfiResolver for IntegerNarrowResultOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_result_i64" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::Int(7)] {
+                return Err(format!(
+                    "unexpected integer narrow result arguments {arguments:?}"
+                ));
+            }
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    to: MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("integer narrow result conversion receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::Int(42))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&IntegerNarrowResultOracle)
+        .execute(&owner, &[])
+        .expect("reference integer narrow result conversion FFI execution");
+    assert_eq!(reference, MirRuntimeValue::Int(42));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-narrow".into())
+        .expect("verify integer narrow result conversion MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free integer narrow result bytecode");
+    assert!(bytecode.ast.is_none());
+    let bytecode_value = BytecodeVM::new(bytecode)
+        .run_value()
+        .expect("bytecode integer narrow result conversion FFI execution");
+    assert_eq!(bytecode_value, Value::Int(42));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_narrow");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native integer narrow result conversion FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid integer narrow result conversion LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(RESULT_CONVERSION_I64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native integer narrow result conversion FFI execution");
     assert_eq!(native.exit_code, Some(42));
     assert_eq!(native.stdout, "");
     assert_eq!(native.stderr, "");
