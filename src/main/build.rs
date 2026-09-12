@@ -2,6 +2,8 @@ use std::path::Path;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::resolve_path;
 use mimi::ast::Item;
@@ -389,8 +391,29 @@ fn acquire_runtime_cache_lock(cache_dir: &Path) -> Result<std::fs::File, String>
         .create(true)
         .truncate(false)
         .write(true)
+        // Never follow a user- or another-process-supplied lock symlink.
+        // The cache directory is shared through the system temp root, so the
+        // final path component must be pinned to this cache instance.
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
         .open(&lock_path)
         .map_err(|e| format!("open runtime cache lock: {e}"))?;
+    let metadata = lock_file
+        .metadata()
+        .map_err(|e| format!("inspect runtime cache lock: {e}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "runtime cache lock path is not a regular file: {lock_path:?}"
+        ));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        lock_file
+            .set_permissions(permissions)
+            .map_err(|e| format!("set runtime cache lock permissions: {e}"))?;
+    }
     // SAFETY: lock_file is an open regular file and flock only changes its
     // advisory lock state; no Rust references cross the FFI boundary.
     loop {
@@ -1500,6 +1523,75 @@ mod tests {
             .expect_err("directory lock path must fail to open as a file");
         assert!(error.starts_with("open runtime cache lock:"), "{error}");
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_rejects_symlink_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-lock-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache lock symlink directory");
+        let target = dir.join("target.lock");
+        let lock_path = dir.join("build.lock");
+        fs::write(&target, b"unrelated lock target").expect("write lock symlink target");
+        std::os::unix::fs::symlink(&target, &lock_path).expect("create runtime cache lock symlink");
+
+        let error = acquire_runtime_cache_lock(&dir)
+            .expect_err("runtime cache lock must not follow a symlink");
+        assert!(error.starts_with("open runtime cache lock:"), "{error}");
+        assert!(lock_path.is_symlink());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_is_owner_only_and_repairs_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-lock-permissions-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache lock permissions directory");
+        let lock_path = dir.join("build.lock");
+        let lock = acquire_runtime_cache_lock(&dir).expect("create private runtime cache lock");
+        assert_eq!(
+            lock.metadata()
+                .expect("stat new cache lock")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(lock);
+
+        let mut broad = fs::metadata(&lock_path)
+            .expect("stat existing cache lock")
+            .permissions();
+        broad.set_mode(0o644);
+        fs::set_permissions(&lock_path, broad).expect("broaden cache lock permissions");
+        let repaired = acquire_runtime_cache_lock(&dir).expect("reopen cache lock");
+        assert_eq!(
+            repaired
+                .metadata()
+                .expect("stat repaired cache lock")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(repaired);
         fs::remove_dir_all(&dir).ok();
     }
 
