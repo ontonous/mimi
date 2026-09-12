@@ -349,6 +349,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             (
                 Vec<crate::core::ResolvedTypeId>,
                 crate::core::ResolvedTypeId,
+                crate::span::Span,
             ),
         > = BTreeMap::new();
         for function in self.program.functions().values() {
@@ -379,13 +380,17 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     declarations
                         .entry(receipt.symbol.clone())
                         .or_insert_with(|| {
-                            (receipt.parameter_types.clone(), receipt.result_type.clone())
+                            (
+                                receipt.parameter_types.clone(),
+                                receipt.result_type.clone(),
+                                receipt.span,
+                            )
                         });
                 }
             }
         }
 
-        for (symbol, (parameter_type_ids, result_type)) in declarations {
+        for (symbol, (parameter_type_ids, result_type, symbol_span)) in declarations {
             let parameter_types = parameter_type_ids
                 .iter()
                 .map(|ty| {
@@ -396,6 +401,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                         &symbol,
                     )
                     .map(BasicMetadataTypeEnum::from)
+                    .map_err(|error| error.with_span(symbol_span))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let function_type = if self
@@ -414,14 +420,16 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     self.program.type_catalog(),
                     &result_type,
                     &symbol,
-                )?
+                )
+                .map_err(|error| error.with_span(symbol_span))?
                 .fn_type(&parameter_types, false)
             };
             if self.generator.module.get_function(&symbol).is_some() {
                 return Err(NativeMirError::new(
                     symbol.clone(),
                     "FFI symbol collides with an already-declared native MIR function",
-                ));
+                )
+                .with_span(symbol_span));
             }
             let function =
                 self.generator
@@ -568,7 +576,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .ok_or_else(|| NativeMirError::new(block.id.to_string(), "LLVM block is absent"))?;
             self.generator.builder.position_at_end(llvm_block);
             for instruction in &block.instructions {
-                self.emit_instruction(&instruction.kind, instruction.id.as_str())?;
+                if let Err(error) =
+                    self.emit_instruction(&instruction.kind, instruction.id.as_str())
+                {
+                    let error_span = self
+                        .program
+                        .ffi_calls()
+                        .get(&instruction.id)
+                        .map(|receipt| receipt.span)
+                        .unwrap_or(crate::span::Span::UNKNOWN);
+                    return Err(error.with_span(error_span));
+                }
             }
             self.emit_terminator(&block.terminator, &block.id)?;
         }

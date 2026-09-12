@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct NativeMirError {
     pub(super) subject: String,
     pub(super) message: String,
+    pub(super) span: Span,
 }
 
 impl NativeMirError {
@@ -15,7 +16,13 @@ impl NativeMirError {
         Self {
             subject: subject.into(),
             message: message.into(),
+            span: Span::UNKNOWN,
         }
+    }
+
+    pub(super) fn with_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
     }
 
     pub(super) fn diagnostic(self) -> Diagnostic {
@@ -24,7 +31,7 @@ impl NativeMirError {
                 "canonical MIR native backend rejected {}: {}",
                 self.subject, self.message
             ),
-            Span::UNKNOWN,
+            self.span,
         )
     }
 }

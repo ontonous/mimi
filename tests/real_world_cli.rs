@@ -1773,6 +1773,58 @@ fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() 
 }
 
 #[test]
+fn canonical_scalar_ffi_native_declaration_error_keeps_call_span() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-native-ffi-diagnostic-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create native FFI diagnostic directory");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func mimi_session_pair(value: i64) -> i64; }\nfunc main() -> i64 { mimi_session_pair(1 as i64) }\n",
+    )
+    .expect("write native FFI diagnostic source");
+    let binary = dir.join("out");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn native FFI diagnostic build");
+
+    assert!(
+        !build.status.success(),
+        "reserved FFI symbol unexpectedly built"
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("main.mimi")
+            && stderr.contains("main.mimi:2:")
+            && stderr.contains("src: func main() -> i64 { mimi_session_pair")
+            && stderr.contains("FFI symbol collides with an already-declared native MIR function"),
+        "native FFI diagnostic lost receipt source span: {stderr}"
+    );
+    assert!(
+        stderr.contains("canonical MIR native backend capability check failed"),
+        "native FFI diagnostic lost canonical failure stage: {stderr}"
+    );
+    assert!(
+        !binary.exists(),
+        "failed native FFI build left an output binary"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-receipt-multi-failure-{}-{}",
