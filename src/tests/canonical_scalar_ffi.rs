@@ -1446,6 +1446,192 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
 }
 
 #[test]
+fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MIXED_F64_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MIXED_F64_SOURCE)
+        .tokenize()
+        .expect("lex mixed argument/result conversion FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse mixed argument/result conversion FFI fixture");
+    let checked = crate::core::check_program(&file)
+        .expect("check mixed argument/result conversion FFI fixture");
+    let mut mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize mixed argument/result conversion FFI MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, argument_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt
+                    .arguments
+                    .first()
+                    .cloned()
+                    .expect("mixed conversion argument value"),
+                receipt
+                    .result
+                    .clone()
+                    .expect("mixed conversion result value"),
+            )
+        })
+        .expect("mixed argument/result conversion receipt");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i32 mixed conversion result target TypeDesc");
+    // The argument conversion is checker-generated from the surface call
+    // (`i32` actual to `f64` declaration).  Rebind only the result slot to
+    // exercise that production argument receipt together with i64 -> i32
+    // result narrowing in one canonical call boundary.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    let receipt = receipts
+        .get_mut(&instruction_id)
+        .expect("mixed conversion receipt");
+    assert_eq!(receipt.parameter_conversions.len(), 1);
+    assert_eq!(
+        receipt.parameter_conversions[0],
+        crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        }
+    );
+    receipt.result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct MixedConversionOracle;
+    impl MirReferenceFfiResolver for MixedConversionOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_expect_f64" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::FloatBits(7.0_f64.to_bits())] {
+                return Err(format!(
+                    "unexpected mixed conversion arguments {arguments:?}"
+                ));
+            }
+            if receipt.parameter_conversions
+                != vec![crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    to: MirAbiClass::Float { bits: 64 },
+                }]
+            {
+                return Err("mixed conversion parameter receipt mismatch".into());
+            }
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    to: MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("mixed conversion result receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::Int(42))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&MixedConversionOracle)
+        .execute(&owner, &[])
+        .expect("reference mixed argument/result conversion FFI execution");
+    assert_eq!(reference, MirRuntimeValue::Int(42));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-conversion".into())
+        .expect("verify mixed argument/result conversion MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed conversion bytecode");
+    assert!(bytecode.ast.is_none());
+    let bytecode_value = BytecodeVM::new(bytecode)
+        .run_value()
+        .expect("bytecode mixed argument/result conversion FFI execution");
+    assert_eq!(bytecode_value, Value::Int(42));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_conversion");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed argument/result conversion FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid mixed argument/result conversion LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MIXED_F64_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native mixed argument/result conversion FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+    assert_eq!(
+        mir.functions()[&owner].values[&argument_id].ty,
+        mir.type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.abi
+                    == MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    })
+                .then(|| id.clone())
+            })
+            .expect("mixed conversion argument TypeDesc")
+    );
+}
+
+#[test]
 fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
     let _guard = super::FfiEnvLock::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
