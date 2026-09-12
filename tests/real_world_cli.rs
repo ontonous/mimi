@@ -1587,6 +1587,103 @@ fn canonical_scalar_ffi_cli_import_graph_mixed_verdict_preserves_manifest_and_so
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_import_graph_failure_is_atomic_across_source_and_all() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-ffi-import-failure-atomic-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported FFI failure directory");
+    fs::write(
+        dir.join("left.mimi"),
+        "pub type LeftArg = i64\npub type LeftResult = i64\nextern \"C\" {\n    func clash(value: LeftArg) -> LeftResult;\n}\npub func call_left(value: i64) -> LeftResult { clash(value) }\n",
+    )
+    .expect("write left imported FFI declaration");
+    fs::write(
+        dir.join("right.mimi"),
+        "pub type RightArg = i64\npub type RightResult = i64\nextern \"C\" {\n    func clash(value: RightArg) -> RightResult;\n}\npub func call_right(value: i64) -> RightResult { clash(value) }\n",
+    )
+    .expect("write right imported FFI declaration");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use left;\nuse right;\nfunc main() -> i32 { println(call_left(1)); println(call_right(2)); 0 }\n",
+    )
+    .expect("write imported FFI failure entry");
+
+    let inspect = |flags: &[&str]| {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .args(flags)
+            .output()
+            .expect("spawn imported FFI failure inspection")
+    };
+    let source_scope = inspect(&["--receipt"]);
+    let all_scope = inspect(&["--receipt", "--all"]);
+    let all_reordered = inspect(&["--all", "--receipt"]);
+    for (label, output) in [
+        ("source", &source_scope),
+        ("all", &all_scope),
+        ("all-reordered", &all_reordered),
+    ] {
+        assert_eq!(output.status.code(), Some(1), "{label} failure exit code");
+        assert!(
+            output.stdout.is_empty(),
+            "{label} failure emitted a partial receipt manifest"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0402"));
+        assert!(stderr.contains("duplicate extern function 'clash'"));
+        assert!(stderr.contains("left.mimi") && stderr.contains("right.mimi"));
+        assert!(stderr.contains("previous extern declaration is here"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER));
+    }
+    assert_eq!(source_scope.status.code(), all_scope.status.code());
+    assert_eq!(source_scope.stdout, all_scope.stdout);
+    assert_eq!(source_scope.stderr, all_scope.stderr);
+    assert_eq!(source_scope.stdout, all_reordered.stdout);
+    assert_eq!(source_scope.stderr, all_reordered.stderr);
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn imported FFI failure verifier")
+    };
+    let verify_default = verify(false);
+    let verify_mir = verify(true);
+    for (label, output) in [("default", &verify_default), ("mir", &verify_mir)] {
+        assert_eq!(output.status.code(), Some(1), "{label} verifier exit code");
+        assert!(
+            output.stdout.is_empty(),
+            "{label} verifier emitted a result"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0402"));
+        assert!(stderr.contains("duplicate extern function 'clash'"));
+        assert!(stderr.contains("left.mimi") && stderr.contains("right.mimi"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER));
+    }
+    assert_eq!(verify_default.status.code(), verify_mir.status.code());
+    assert_eq!(verify_default.stdout, verify_mir.stdout);
+    assert_eq!(verify_default.stderr, verify_mir.stderr);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
     if !can_link() {
         return;
