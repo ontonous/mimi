@@ -299,6 +299,92 @@ fn canonical_scalar_ffi_cli_generic_runtime_failures_match_default_and_mir() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_verify_is_checker_only_before_native_link_failure() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_link_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI link failure directory");
+    let source = dir.join("unlinked.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func mir_ffi_unlinked_symbol(value: i64) -> i64; }\nfunc main() -> i64 { mir_ffi_unlinked_symbol(7 as i64) }\n",
+    )
+    .expect("write scalar FFI link failure source");
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("unlinked verify {explicit_mir}: {error}"))
+    };
+    let verifies = [verify(false), verify(true)];
+    for output in &verifies {
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("No contracts to verify"), "{stdout}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(verifies[0].stdout, verifies[1].stdout);
+    assert_eq!(verifies[0].stderr, verifies[1].stderr);
+
+    let build = |explicit_mir: bool, binary: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .output()
+            .unwrap_or_else(|error| panic!("unlinked build {explicit_mir}: {error}"))
+    };
+    let default_binary = dir.join("unlinked-default");
+    let mir_binary = dir.join("unlinked-mir");
+    let builds = [build(false, &default_binary), build(true, &mir_binary)];
+    let normalize_linker_stderr = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter(|line| !line.contains("mimi-build-"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        normalize_linker_stderr(&builds[0].stderr),
+        normalize_linker_stderr(&builds[1].stderr),
+        "default and --mir linker diagnostics must match after temporary path normalization"
+    );
+    for output in &builds {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("undefined symbol: mir_ffi_unlinked_symbol"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("FFI contract verification failed"));
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert!(!default_binary.exists());
+    assert!(!mir_binary.exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
     if !can_link() {
         return;
