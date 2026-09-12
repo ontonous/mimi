@@ -79,6 +79,14 @@ func main() -> i64 {
     mir_ffi_requires_sequence(-8 as i64)
 }
 "#;
+const MISSING_SYMBOL_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_present_only(int64_t value) { return value + 1; }
+"#;
+const MISSING_SYMBOL_SOURCE: &str = r#"
+extern "C" { func mir_ffi_absent_symbol(value: i64) -> i64; }
+func main() -> i64 { mir_ffi_absent_symbol(7 as i64) }
+"#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
@@ -1042,6 +1050,74 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
         "{}",
         native.stderr
     );
+}
+
+#[test]
+fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+
+    let tokens = crate::lexer::Lexer::new(MISSING_SYMBOL_SOURCE)
+        .tokenize()
+        .expect("lex missing-symbol FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse missing-symbol FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check missing-symbol FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize missing-symbol FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    assert!(mir
+        .ffi_calls()
+        .values()
+        .any(|receipt| receipt.symbol == "mir_ffi_absent_symbol"));
+
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference execution must require an explicit host binding");
+    assert!(reference_error
+        .to_string()
+        .contains("no reference FFI host binding"));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-missing-symbol".into())
+        .expect("verify missing-symbol FFI MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free missing-symbol FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject an absent symbol after loading the fixture library");
+    assert!(bytecode_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_missing");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native missing-symbol FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid missing-symbol LLVM module before host link");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_error = super::link_and_observe_module(&generator, &config, counter)
+        .expect_err("native link must reject the absent C symbol");
+    assert!(native_error.contains("linker failed"), "{native_error}");
 }
 
 #[test]
