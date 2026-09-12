@@ -207,6 +207,98 @@ fn canonical_native_scalar_ffi_executes_checker_owned_symbol() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_generic_runtime_failures_match_default_and_mir() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_runtime_failure_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI runtime failure directory");
+    let c_path = dir.join("present.c");
+    let library = dir.join("present.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nint64_t mir_ffi_present_only(int64_t value) { return value + 1; }\n",
+    )
+    .expect("write scalar FFI runtime failure C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile scalar FFI runtime failure C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+
+    let source = dir.join("missing.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func mir_ffi_absent_symbol(value: i64) -> i64; }\nfunc main() -> i64 { mir_ffi_absent_symbol(7 as i64) }\n",
+    )
+    .expect("write scalar FFI runtime failure source");
+
+    let run = |explicit_mir: bool, library_path: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .env("MIMI_FFI_LIB", library_path)
+            .output()
+            .unwrap_or_else(|error| panic!("runtime failure run {explicit_mir}: {error}"))
+    };
+
+    let missing_library = dir.join("missing.so");
+    let missing_library_runs = [run(false, &missing_library), run(true, &missing_library)];
+    assert_eq!(
+        missing_library_runs[0].stderr, missing_library_runs[1].stderr,
+        "default and --mir missing-library diagnostics must match"
+    );
+    for output in &missing_library_runs {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(stderr.contains("failed to load"), "{stderr}");
+        assert!(!stderr.contains("E0802"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
+    let missing_symbol_runs = [run(false, &library), run(true, &library)];
+    assert_eq!(
+        missing_symbol_runs[0].stderr, missing_symbol_runs[1].stderr,
+        "default and --mir missing-symbol diagnostics must match"
+    );
+    for output in &missing_symbol_runs {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(
+            stderr.contains("failed to find canonical MIR FFI symbol"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("E0802"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
     if !can_link() {
         return;
