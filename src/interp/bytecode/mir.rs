@@ -405,7 +405,7 @@ fn materialize_canonical_ffi(
             message,
         });
     }
-    for (instruction, receipt) in program.ffi_calls() {
+    for (instruction, receipt) in program.ffi_call_entries_in_source_order() {
         let Some(function) = program.functions().get(&receipt.caller) else {
             errors.push(MirBytecodeError {
                 function: receipt.caller.clone(),

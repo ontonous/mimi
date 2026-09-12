@@ -1436,6 +1436,33 @@ impl MirProgram {
         &self.ffi_calls
     }
 
+    /// Return checker-owned FFI receipts in canonical source order.
+    ///
+    /// The receipt table remains keyed by instruction identity for O(1)
+    /// consumer lookup and tamper validation, so its `BTreeMap` iteration
+    /// order is identity order rather than execution order.  Any consumer
+    /// that emits an ordered descriptor table or canonical receipt text must
+    /// use this view: source position is the stable ordering fact that keeps
+    /// side-effecting foreign calls aligned with their MIR instruction
+    /// sequence while remaining invariant to map insertion order.
+    pub(crate) fn ffi_call_entries_in_source_order(
+        &self,
+    ) -> Vec<(&MirInstructionId, &super::MirFfiCallContract)> {
+        let mut entries = self.ffi_calls.iter().collect::<Vec<_>>();
+        entries.sort_by(|(left_key, left), (right_key, right)| {
+            left.caller
+                .cmp(&right.caller)
+                .then_with(|| left.span.source_id.raw().cmp(&right.span.source_id.raw()))
+                .then_with(|| left.span.start_line.cmp(&right.span.start_line))
+                .then_with(|| left.span.start_col.cmp(&right.span.start_col))
+                .then_with(|| left.span.end_line.cmp(&right.span.end_line))
+                .then_with(|| left.span.end_col.cmp(&right.span.end_col))
+                .then_with(|| left.instruction.cmp(&right.instruction))
+                .then_with(|| left_key.cmp(right_key))
+        });
+        entries
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_ffi_calls_for_test_only(
         &mut self,

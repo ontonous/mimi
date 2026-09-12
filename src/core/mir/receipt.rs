@@ -420,7 +420,7 @@ fn canonical_mir_text(program: &MirProgram) -> String {
 
 fn canonical_ffi_text(program: &MirProgram) -> String {
     let mut text = String::new();
-    for (instruction, contract) in program.ffi_calls() {
+    for (instruction, contract) in program.ffi_call_entries_in_source_order() {
         text.push_str("mir.ffi ");
         // Valid canonical programs keep the table key and checker-owned
         // receipt identity equal, so this marker is absent and preserves the

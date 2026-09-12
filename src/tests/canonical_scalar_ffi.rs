@@ -2336,7 +2336,11 @@ fn scalar_ffi_transparent_aliases_cover_every_scalar_endpoint_across_consumers()
     );
     let mir = MirProgram::from_checked_program(&checked).expect("materialize scalar alias matrix");
     assert_eq!(mir.ffi_calls().len(), 5);
-    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    let receipts = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
     assert!(receipts.iter().all(|receipt| receipt.abi == "C"));
     let i32_receipt = receipts
         .iter()
@@ -2711,8 +2715,10 @@ func main() -> i64 {
         r#"
 pub type Scalar = f64
 pub type Real = Scalar
-extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> i64 requires: value >= 0; }
-pub func call_imported_alias(first: i64, second: i64) -> i64 {
+pub type ScalarInt = i64
+pub type ResultId = ScalarInt
+extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> ResultId requires: value >= 0; }
+pub func call_imported_alias(first: i64, second: i64) -> ResultId {
     requires: first >= 0 and second >= 0
     let first_result = mir_ffi_import_alias_sequence(first)
     let second_result = mir_ffi_import_alias_sequence(second)
@@ -2763,7 +2769,11 @@ pub func call_imported_alias(first: i64, second: i64) -> i64 {
     assert_eq!(receipt.ffi_digest, repeated_receipt.ffi_digest);
     assert_eq!(receipt.mir_digest, repeated_receipt.mir_digest);
     assert_eq!(mir.ffi_calls().len(), 2, "two calls must keep two receipts");
-    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    let receipts = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
     assert!(receipts
         .iter()
         .all(|call| call.symbol == "mir_ffi_import_alias_sequence"));
@@ -2793,12 +2803,12 @@ pub func call_imported_alias(first: i64, second: i64) -> i64 {
         .collect::<Vec<_>>();
     assert_eq!(
         call_instruction_ids, receipt_instruction_ids,
-        "receipt map order must follow the wrapper's source call order"
+        "source-ordered receipt view must follow the wrapper's source call order"
     );
     let repeated_instruction_ids = repeated_mir
-        .ffi_calls()
-        .values()
-        .map(|call| call.instruction.clone())
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, call)| call.instruction.clone())
         .collect::<Vec<_>>();
     assert_eq!(receipt_instruction_ids, repeated_instruction_ids);
 
@@ -2806,10 +2816,9 @@ pub func call_imported_alias(first: i64, second: i64) -> i64 {
     // moving a receipt under a forged key is rejected by every direct consumer.
     let baseline_route = mir.route_receipt("scalar-ffi-sequence-v1");
     let first_id = mir
-        .ffi_calls()
-        .keys()
-        .next()
-        .cloned()
+        .ffi_call_entries_in_source_order()
+        .first()
+        .map(|(instruction, _)| (*instruction).clone())
         .expect("first imported alias receipt key");
     let forged_map_key =
         crate::core::mir::MirInstructionId::new("inst:call:forged-imported-alias-map-key")
