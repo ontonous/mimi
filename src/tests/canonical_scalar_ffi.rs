@@ -10,7 +10,9 @@ use crate::core::mir::reference::{
     MirProgram, MirReferenceFfiResolver, MirReferenceInterpreter, MirRuntimeValue,
 };
 use crate::core::mir::MirFfiCallContract;
-use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
+use crate::interp::bytecode::{
+    compile_mir_program, BytecodeVM, CanonicalFfiDescriptor, CanonicalFfiScalarType,
+};
 use crate::interp::Value;
 
 const C_SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.c");
@@ -86,6 +88,14 @@ int64_t mir_ffi_present_only(int64_t value) { return value + 1; }
 const MISSING_SYMBOL_SOURCE: &str = r#"
 extern "C" { func mir_ffi_absent_symbol(value: i64) -> i64; }
 func main() -> i64 { mir_ffi_absent_symbol(7 as i64) }
+"#;
+const REBINDABLE_SYMBOL_A_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_rebindable(int64_t value) { return value + 11; }
+"#;
+const REBINDABLE_SYMBOL_B_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_rebindable(int64_t value) { return value + 22; }
 "#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
@@ -1118,6 +1128,75 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     let native_error = super::link_and_observe_module(&generator, &config, counter)
         .expect_err("native link must reject the absent C symbol");
     assert!(native_error.contains("linker failed"), "{native_error}");
+}
+
+#[test]
+fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_library = first.dir.join("ffi.so");
+    let second_library = second.dir.join("ffi.so");
+    let previous = std::env::var_os("MIMI_FFI_LIB");
+    let i64_abi = crate::core::mir::types::MirAbiClass::Integer {
+        bits: 64,
+        signed: true,
+    };
+    let descriptor = CanonicalFfiDescriptor {
+        caller: "function:main".into(),
+        instruction: "ffi-test-call".into(),
+        callee: "extern:C:test/function:mir_ffi_rebindable:0000000000000000".into(),
+        symbol: "mir_ffi_rebindable".into(),
+        abi: "C".into(),
+        arguments: vec![CanonicalFfiScalarType::I64],
+        parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
+            from: i64_abi,
+            to: i64_abi,
+        }],
+        result: CanonicalFfiScalarType::I64,
+        result_conversion: Some(crate::core::mir::MirFfiAbiConversion {
+            from: i64_abi,
+            to: i64_abi,
+        }),
+        argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
+        requires: None,
+        result_id: Some(crate::core::mir::MirValueId::new("ffi-test-result").unwrap()),
+        ensures: None,
+    };
+
+    std::env::set_var("MIMI_FFI_LIB", &first_library);
+    let mut runtime = crate::interp::bytecode::mir_ffi::CanonicalMirFfiRuntime::new();
+    assert_eq!(
+        runtime
+            .call(&descriptor, &[Value::Int(1)])
+            .expect("first library binding"),
+        Value::Int(12)
+    );
+    assert_eq!(runtime.loaded_library_count_for_test(), 1);
+
+    std::env::set_var("MIMI_FFI_LIB", &second_library);
+    assert_eq!(
+        runtime
+            .call(&descriptor, &[Value::Int(1)])
+            .expect("second library binding"),
+        Value::Int(23)
+    );
+    assert_eq!(runtime.loaded_library_count_for_test(), 2);
+
+    std::env::set_var("MIMI_FFI_LIB", &first_library);
+    assert_eq!(
+        runtime
+            .call(&descriptor, &[Value::Int(1)])
+            .expect("cached first library binding"),
+        Value::Int(12)
+    );
+    assert_eq!(runtime.loaded_library_count_for_test(), 2);
+
+    match previous {
+        Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
+        None => std::env::remove_var("MIMI_FFI_LIB"),
+    }
 }
 
 #[test]

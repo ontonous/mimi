@@ -62,6 +62,11 @@ impl CanonicalMirFfiRuntime {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn loaded_library_count_for_test(&self) -> usize {
+        self.loaded_libs.len()
+    }
+
     /// Execute one checker-owned scalar descriptor.
     ///
     /// The descriptor has already passed the MIR adapter's TypeDesc/layout
