@@ -831,13 +831,14 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
+        acquire_runtime_cache_lock, cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
         ensure_runtime_cache_key_stable, native_runtime_cache_eligible, publish_runtime_cache,
         runtime_cache_attempt_should_retry, runtime_cache_hit, runtime_cache_key,
         runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args, runtime_cache_temp_path,
         runtime_compiler_args, runtime_compiler_environment_frame, runtime_include_literals,
     };
     use std::fs;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn runtime_cache_publish_failure_removes_temporary_archive() {
@@ -1546,5 +1547,163 @@ mod tests {
         assert!(acquired.load(Ordering::Acquire));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_cross_process_probe() {
+        let Ok(mode) = std::env::var("MIMI_RUNTIME_CACHE_PROBE_MODE") else {
+            return;
+        };
+        match mode.as_str() {
+            "key" => {
+                let source = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_SOURCE")
+                    .expect("runtime cache key probe source");
+                let marker = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_MARKER")
+                    .expect("runtime cache key probe marker");
+                let key = runtime_cache_key(std::path::Path::new(&source))
+                    .expect("compute child runtime cache key");
+                fs::write(marker, key).expect("write child runtime cache key");
+            }
+            "lock" => {
+                let directory = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_DIR")
+                    .expect("runtime cache lock probe directory");
+                let marker = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_MARKER")
+                    .expect("runtime cache lock probe marker");
+                let lock = acquire_runtime_cache_lock(std::path::Path::new(&directory))
+                    .expect("acquire child runtime cache lock");
+                fs::write(marker, b"acquired").expect("write child lock marker");
+                drop(lock);
+            }
+            "stale" => {
+                let temporary = std::env::var_os("MIMI_RUNTIME_CACHE_PROBE_TEMP")
+                    .expect("runtime cache stale probe temporary");
+                fs::write(temporary, b"child-abrupt-exit")
+                    .expect("write child runtime cache temporary");
+                std::process::exit(17);
+            }
+            other => panic!("unknown runtime cache probe mode: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_key_is_stable_across_processes() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-cross-process-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create cross-process key directory");
+        let source = root.join("standalone.rs");
+        let marker = root.join("child-key");
+        fs::write(&source, b"fn runtime() {}\n").expect("write cross-process runtime source");
+        let expected = runtime_cache_key(&source).expect("compute parent runtime cache key");
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "build::tests::runtime_cache_cross_process_probe",
+                "--nocapture",
+            ])
+            .env("MIMI_RUNTIME_CACHE_PROBE_MODE", "key")
+            .env("MIMI_RUNTIME_CACHE_PROBE_SOURCE", &source)
+            .env("MIMI_RUNTIME_CACHE_PROBE_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn cross-process key probe");
+        assert!(status.success(), "child key probe failed: {status}");
+        let actual = fs::read_to_string(&marker).expect("read child runtime cache key");
+        assert_eq!(expected, actual);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_is_mutually_exclusive_across_processes() {
+        use std::thread;
+        use std::time::Duration;
+
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-cross-process-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create cross-process lock directory");
+        let marker = root.join("child-acquired");
+        let first_lock = acquire_runtime_cache_lock(&root).expect("acquire parent cache lock");
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "build::tests::runtime_cache_cross_process_probe",
+                "--nocapture",
+            ])
+            .env("MIMI_RUNTIME_CACHE_PROBE_MODE", "lock")
+            .env("MIMI_RUNTIME_CACHE_PROBE_DIR", &root)
+            .env("MIMI_RUNTIME_CACHE_PROBE_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cross-process lock probe");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            child
+                .try_wait()
+                .expect("poll cross-process lock probe")
+                .is_none(),
+            "child acquired cache lock before parent released it"
+        );
+        assert!(!marker.exists(), "child lock marker appeared too early");
+        drop(first_lock);
+        let status = child.wait().expect("wait for cross-process lock probe");
+        assert!(status.success(), "child lock probe failed: {status}");
+        assert_eq!(
+            fs::read(&marker).expect("read child lock marker"),
+            b"acquired"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_stale_cleanup_recovers_after_abrupt_child_exit() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-abrupt-exit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create abrupt-exit cache directory");
+        let key = "e".repeat(64);
+        let temporary = runtime_cache_temp_path(&root, &key);
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "build::tests::runtime_cache_cross_process_probe",
+                "--nocapture",
+            ])
+            .env("MIMI_RUNTIME_CACHE_PROBE_MODE", "stale")
+            .env("MIMI_RUNTIME_CACHE_PROBE_TEMP", &temporary)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn abrupt-exit runtime cache probe");
+        assert_eq!(status.code(), Some(17));
+        assert!(
+            temporary.is_file(),
+            "abrupt child should leave stale temporary"
+        );
+        cleanup_runtime_cache_stale_temps(&root)
+            .expect("stale cleanup should recover abrupt child temporary");
+        assert!(!temporary.exists());
+        fs::remove_dir_all(&root).ok();
     }
 }
