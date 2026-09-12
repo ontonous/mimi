@@ -791,4 +791,50 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_lock_releases_after_guard_drop() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Barrier,
+        };
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-lock-release-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache lock release directory");
+        let first_lock =
+            super::acquire_runtime_cache_lock(&dir).expect("first runtime cache lock acquisition");
+        let ready = Arc::new(Barrier::new(2));
+        let acquired = Arc::new(AtomicBool::new(false));
+        let thread_ready = Arc::clone(&ready);
+        let thread_acquired = Arc::clone(&acquired);
+        let thread_dir = dir.clone();
+        let waiter = thread::spawn(move || {
+            thread_ready.wait();
+            let second_lock = super::acquire_runtime_cache_lock(&thread_dir)
+                .expect("second runtime cache lock acquisition");
+            thread_acquired.store(true, Ordering::Release);
+            drop(second_lock);
+        });
+        ready.wait();
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !acquired.load(Ordering::Acquire),
+            "second cache lock acquired while first guard was still held"
+        );
+        drop(first_lock);
+        waiter.join().expect("cache lock waiter must finish");
+        assert!(acquired.load(Ordering::Acquire));
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
