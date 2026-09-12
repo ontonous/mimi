@@ -158,6 +158,8 @@ fn staging_dirs_for_output_stem(stem: &str) -> Vec<PathBuf> {
 
 #[cfg(unix)]
 fn native_runtime_cache_path() -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+
     let runtime_rs = project_root().join("src/runtime/standalone.rs");
     let runtime_dir = runtime_rs.parent().expect("runtime source parent");
     let mut files = fs::read_dir(runtime_dir)
@@ -170,7 +172,7 @@ fn native_runtime_cache_path() -> PathBuf {
     files.sort();
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mimi-native-runtime-v1\0");
+    hasher.update(b"mimi-native-runtime-v2\0");
     if std::env::var_os("MIMI_ASAN").is_some() {
         hasher.update(b"asan\0");
     }
@@ -192,8 +194,12 @@ fn native_runtime_cache_path() -> PathBuf {
     );
     hasher.update(b"\0");
     for path in files {
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update(&fs::read(path).expect("read runtime source"));
+        let path_bytes = path.as_os_str().as_bytes();
+        hasher.update(&(path_bytes.len() as u64).to_le_bytes());
+        hasher.update(path_bytes);
+        let contents = fs::read(path).expect("read runtime source");
+        hasher.update(&(contents.len() as u64).to_le_bytes());
+        hasher.update(&contents);
     }
     let key = hasher.finalize().to_hex();
     std::env::temp_dir()
