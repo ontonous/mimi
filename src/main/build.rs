@@ -93,6 +93,28 @@ fn asan_link_flags() -> Vec<&'static str> {
     }
 }
 
+/// Owns the per-build staging directory for the whole native build attempt.
+///
+/// The linker and runtime compiler can fail after the directory has been
+/// created, so cleanup must happen on every return path rather than only
+/// after a successful link.  The directory name is process-scoped and holds
+/// only transient object/runtime artifacts.
+struct TempBuildDirGuard {
+    path: std::path::PathBuf,
+}
+
+impl TempBuildDirGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempBuildDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
     let runtime_dir = runtime_rs
@@ -397,6 +419,7 @@ pub(crate) fn build(
             .and_then(|s| s.to_str())
             .unwrap_or("out")
     ));
+    let _tmp_dir_guard = TempBuildDirGuard::new(tmp_dir.clone());
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("failed to create temp build dir: {}", e))?;
     let obj_path = tmp_dir.join(
@@ -542,6 +565,5 @@ pub(crate) fn build(
     } else {
         return Err(format!("linker failed with exit code {:?}", status.code()));
     }
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(())
 }

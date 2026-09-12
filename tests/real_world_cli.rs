@@ -112,6 +112,21 @@ fn checked_route_receipt(path: &Path) -> mimi::core::mir::CanonicalMirRouteRecei
     route.program.route_receipt("cli-mir-v1")
 }
 
+fn temp_build_dir_from_linker_stderr(stderr: &[u8]) -> PathBuf {
+    let text = String::from_utf8_lossy(stderr);
+    let token = text
+        .split_whitespace()
+        .find(|token| token.contains("mimi-build-"))
+        .unwrap_or_else(|| panic!("linker stderr omitted staging path:\n{text}"));
+    let marker = token
+        .find("mimi-build-")
+        .expect("staging path marker must be present");
+    let separator = token[marker..]
+        .find(|character| character == '/' || character == '\\')
+        .expect("staging path must include an artifact separator");
+    PathBuf::from(&token[..marker + separator])
+}
+
 fn run_mimi_run_out(src: &Path) -> Result<String, String> {
     let output = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -415,6 +430,13 @@ fn canonical_scalar_ffi_cli_verify_is_checker_only_before_native_link_failure() 
     }
     assert!(!default_binary.exists());
     assert!(!mir_binary.exists());
+    for output in &builds {
+        let staging_dir = temp_build_dir_from_linker_stderr(&output.stderr);
+        assert!(
+            !staging_dir.exists(),
+            "failed linker build left staging directory {staging_dir:?}"
+        );
+    }
 
     fs::remove_dir_all(&dir).ok();
 }
