@@ -762,6 +762,7 @@ mod test_runtime_cache_regressions {
             "MIMI_FFI_LOCK_PROBE",
             "MIMI_FFI_LOCK_EOF_PROBE",
             "MIMI_STDLIB_LOCK_PROBE",
+            "MIMI_STDLIB_LOCK_EOF_PROBE",
             "MIMI_STDLIB_READER_PROBE",
         ] {
             command.env_remove(variable);
@@ -1164,6 +1165,77 @@ mod test_runtime_cache_regressions {
         );
 
         let _guard = StdlibEnvGuard::read();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_stdlib_lock_readiness_eof_releases_and_preserves_environment() {
+        use std::process::Stdio;
+
+        if std::env::var_os("MIMI_STDLIB_LOCK_EOF_PROBE").is_some() {
+            // Deliberately return without emitting the readiness marker. The
+            // parent must treat EOF as a failed handshake, then prove that the
+            // stdlib lock is released even though this child exits normally.
+            let _guard = StdlibEnvGuard::set(std::path::Path::new("/tmp/mimi_stdlib_eof_probe"));
+            return;
+        }
+
+        let original_stdlib = std::env::var_os("MIMI_STDLIB");
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = ProbeChildGuard::new(
+            probe_command(executable)
+                .arg("--exact")
+                .arg(
+                    "tests::test_runtime_cache_regressions::process_global_stdlib_lock_readiness_eof_releases_and_preserves_environment",
+                )
+                .arg("--nocapture")
+                .env("MIMI_STDLIB_LOCK_EOF_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "stdlib EOF",
+        )
+        .expect("spawn stdlib EOF probe child");
+        let error = child
+            .wait_ready("stdlib-lock-ready", "stdlib EOF")
+            .expect_err("EOF before stdlib readiness must fail closed");
+        assert_eq!(error, "read stdlib EOF probe readiness: EOF");
+        let status = child
+            .wait("stdlib EOF")
+            .expect("wait for stdlib EOF probe child");
+        assert_eq!(status.code(), Some(0), "stdlib EOF probe status: {status}");
+
+        let lock_path = std::env::temp_dir()
+            .join("mimi_test_locks")
+            .join("stdlib.lock");
+        assert!(
+            lock_path.is_file(),
+            "stdlib lock file disappeared after EOF"
+        );
+        assert_eq!(
+            std::env::var_os("MIMI_STDLIB"),
+            original_stdlib,
+            "child stdlib override leaked into parent environment"
+        );
+
+        // Reacquiring the shared lock proves that the child guard released its
+        // process-wide lock on the normal EOF path. The explicit set/drop pair
+        // also keeps the parent environment restoration contract observable.
+        let reader = StdlibEnvGuard::read();
+        drop(reader);
+        let sentinel = std::env::temp_dir().join("mimi_stdlib_parent_probe");
+        {
+            let _writer = StdlibEnvGuard::set(&sentinel);
+            assert_eq!(
+                std::env::var_os("MIMI_STDLIB"),
+                Some(sentinel.into_os_string())
+            );
+        }
+        assert_eq!(
+            std::env::var_os("MIMI_STDLIB"),
+            original_stdlib,
+            "stdlib writer guard failed to restore parent environment"
+        );
     }
 
     #[cfg(unix)]
