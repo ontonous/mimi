@@ -5987,6 +5987,52 @@ func main() -> i64 { println(mir_ffi_rebindable(1 as i64)); 0 }
     assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_cached_binding_survives_same_path_replacement() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let replacement = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_path = first.dir.join("ffi.so");
+    let replacement_path = replacement.dir.join("ffi.so");
+    guard.set_path(&first_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("same-path replacement fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize same-path replacement MIR");
+    let bytecode = compile_mir_program(&mir).expect("same-path replacement bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut cached_vm = BytecodeVM::new(bytecode.clone());
+
+    assert_eq!(
+        cached_vm
+            .run_value()
+            .expect("initial VM must load library A"),
+        Value::Int(0)
+    );
+    assert_eq!(cached_vm.stdout(), "12\n");
+    assert_eq!(cached_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&replacement_path, &first_path)
+        .expect("replacement library must atomically take over the binding path");
+    assert_eq!(
+        cached_vm
+            .run_value()
+            .expect("cached VM must keep the original loaded handle"),
+        Value::Int(0)
+    );
+    assert_eq!(cached_vm.stdout(), "12\n");
+    assert_eq!(cached_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(cached_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
