@@ -13111,4 +13111,52 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
             .expect_err("the i64 reference slot must respect the i32 FFI ABI");
         assert!(error.to_string().contains("FFI result does not match"));
     }
+
+    #[test]
+    fn scalar_ffi_reference_repeated_malformed_receipt_clears_output_and_stabilizes_error() {
+        let source = r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { println(foreign(1 as i64)); 0 }
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let canonical = MirProgram::from_checked_program(&checked).unwrap();
+        let mut receipts = canonical.ffi_calls().clone();
+        receipts.values_mut().next().unwrap().symbol = "forged_repeated_symbol".into();
+        let mut forged = canonical;
+        forged.replace_ffi_calls_for_test_only(receipts);
+
+        let interpreter = MirReferenceInterpreter::new(&forged);
+        interpreter
+            .output
+            .borrow_mut()
+            .push_str("stale-before-first\n");
+        let first = interpreter
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("malformed receipt must fail before execution");
+        assert!(first
+            .to_string()
+            .contains("symbol disagrees with canonical extern callee"));
+        assert_eq!(
+            interpreter.captured_output(),
+            "",
+            "receipt preflight must clear a stale reference stdout snapshot"
+        );
+
+        interpreter
+            .output
+            .borrow_mut()
+            .push_str("stale-before-second\n");
+        let second = interpreter
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("repeated malformed receipt must fail before execution");
+        assert_eq!(second.to_string(), first.to_string());
+        assert_eq!(
+            interpreter.captured_output(),
+            "",
+            "repeated receipt preflight must leave a clean stdout snapshot"
+        );
+    }
 }

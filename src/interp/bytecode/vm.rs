@@ -210,6 +210,20 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_descriptor_for_test_only(
+        &mut self,
+        index: usize,
+        descriptor: crate::interp::bytecode::CanonicalFfiDescriptor,
+    ) {
+        let program = std::sync::Arc::get_mut(&mut self.program)
+            .expect("test VM must uniquely own its bytecode program");
+        *program
+            .canonical_ffi
+            .get_mut(index)
+            .expect("canonical FFI descriptor index") = descriptor;
+    }
+
+    #[cfg(test)]
     pub(crate) fn debug_stack_state(&self) -> (usize, usize) {
         (self.stack.len(), self.depth)
     }
@@ -590,6 +604,10 @@ impl BytecodeVM {
 
     /// Run the program from the entry point. Returns the exit code.
     pub fn run(&mut self) -> Result<i64, InterpError> {
+        // Each public entry owns a fresh stdout snapshot.  Clear it before
+        // canonical FFI preflight so a malformed descriptor cannot inherit
+        // output from a previous successful invocation.
+        self.stdout.clear();
         self.validate_canonical_ffi_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
@@ -629,6 +647,10 @@ impl BytecodeVM {
     /// Run the program and return the full Value (not just exit code).
     /// Used by test infrastructure that needs the actual return value.
     pub fn run_value(&mut self) -> Result<Value, InterpError> {
+        // Keep the full-value entry point aligned with `run`: validation
+        // failures must observe only this attempt's output, never a stale
+        // snapshot left by an earlier invocation on the same VM.
+        self.stdout.clear();
         self.validate_canonical_ffi_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();

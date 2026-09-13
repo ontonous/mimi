@@ -7411,6 +7411,61 @@ func main() -> i64 { println(17); preflight_guard(1 as i64); 0 }
 }
 
 #[test]
+fn scalar_ffi_repeated_forged_descriptor_clears_vm_state_and_stabilizes_error() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(MISSING_LIBRARY_SOURCE)
+            .tokenize()
+            .expect("lex repeated descriptor fixture"),
+    )
+    .parse_file()
+    .expect("parse repeated descriptor fixture");
+    let checked = crate::core::check_program(&file).expect("check repeated descriptor fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("canonical repeated descriptor MIR");
+    let bytecode = compile_mir_program(&mir).expect("AST-free repeated descriptor bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("initial valid FFI run"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "13\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut forged = vm.program().canonical_ffi[0].clone();
+    forged.symbol = "forged_repeated_symbol".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);
+
+    let first = vm
+        .run_value()
+        .expect_err("forged descriptor must fail on the next VM entry");
+    assert!(first
+        .to_string()
+        .contains("differs from its compiler binding"));
+    assert_eq!(
+        vm.stdout(),
+        "",
+        "preflight failure must clear stdout from the previous invocation"
+    );
+    assert_eq!(
+        vm.debug_stack_state(),
+        (0, 0),
+        "preflight failure must not leave a frame or depth residue"
+    );
+
+    let second = vm
+        .run()
+        .expect_err("repeated forged descriptor must fail deterministically");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
