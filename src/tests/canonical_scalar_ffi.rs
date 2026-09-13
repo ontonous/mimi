@@ -3960,6 +3960,101 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_reused_descriptor_after_op_and_binding_forgery() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cached reused-descriptor FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize cached reused-descriptor MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached reused-descriptor bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial cached two-site run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_binding = vm.program().canonical_ffi_bindings[1].clone();
+    let first_binding = vm.program().canonical_ffi_bindings[0].clone();
+    let first_descriptor = vm.program().canonical_ffi[0].clone();
+    let mut forged_binding = original_binding.clone();
+    forged_binding.extern_idx = 0;
+    forged_binding.instruction = first_binding.instruction;
+    forged_binding.instruction_text = first_binding.instruction_text.clone();
+    forged_binding.descriptor = first_descriptor;
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        0,
+    );
+    vm.replace_canonical_ffi_call_instruction_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        first_binding.instruction,
+    );
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject a reused descriptor after coordinated forgery");
+    assert!(
+        first
+            .to_string()
+            .contains("descriptor index 0 is referenced by multiple bytecode call sites"),
+        "{first}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject the same reused descriptor forgery");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        original_binding.extern_idx,
+    );
+    vm.replace_canonical_ffi_call_instruction_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        original_binding.instruction,
+    );
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_binding);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("canonical VM must recover after coordinated forgery restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 

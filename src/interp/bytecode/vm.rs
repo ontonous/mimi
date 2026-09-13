@@ -238,6 +238,54 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_call_extern_index_for_test_only(
+        &mut self,
+        function: FuncIdx,
+        pc: u32,
+        extern_idx: u16,
+    ) {
+        let program = std::sync::Arc::get_mut(&mut self.program)
+            .expect("test VM must uniquely own its bytecode program");
+        let op = program
+            .functions
+            .get_mut(function as usize)
+            .and_then(|proto| proto.code.get_mut(pc as usize))
+            .expect("canonical FFI call instruction");
+        let Op::CallCanonicalExtern {
+            extern_idx: current,
+            ..
+        } = op
+        else {
+            panic!("canonical FFI binding must point at CallCanonicalExtern");
+        };
+        *current = extern_idx;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_call_instruction_for_test_only(
+        &mut self,
+        function: FuncIdx,
+        pc: u32,
+        instruction: ConstIdx,
+    ) {
+        let program = std::sync::Arc::get_mut(&mut self.program)
+            .expect("test VM must uniquely own its bytecode program");
+        let op = program
+            .functions
+            .get_mut(function as usize)
+            .and_then(|proto| proto.code.get_mut(pc as usize))
+            .expect("canonical FFI call instruction");
+        let Op::CallCanonicalExtern {
+            instruction: current,
+            ..
+        } = op
+        else {
+            panic!("canonical FFI binding must point at CallCanonicalExtern");
+        };
+        *current = instruction;
+    }
+
+    #[cfg(test)]
     pub(crate) fn debug_stack_state(&self) -> (usize, usize) {
         (self.stack.len(), self.depth)
     }
