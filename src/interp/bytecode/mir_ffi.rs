@@ -388,6 +388,12 @@ impl CanonicalMirFfiRuntime {
                     })?,
             },
         };
+        if lib_path.trim().is_empty() {
+            return Err(format!(
+                "failed to load '{}': canonical MIR FFI library path is empty",
+                lib_path
+            ));
+        }
         let lib_idx = if let Some(index) = self
             .loaded_libs
             .iter()
