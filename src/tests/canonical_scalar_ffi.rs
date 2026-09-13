@@ -3588,6 +3588,78 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_forged_descriptor_before_wrapped_reuse() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cached forged-descriptor FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize cached forged-descriptor MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached forged-descriptor bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("initial cached canonical FFI call"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original = vm.program().canonical_ffi[1].clone();
+    let mut forged = original.clone();
+    forged.symbol = "forged_after_cache_symbol".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, forged);
+
+    let first = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject a forged cached descriptor before reuse");
+    assert!(first
+        .to_string()
+        .contains("differs from its compiler binding"));
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "descriptor preflight must run before reusing the cached library"
+    );
+
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("repeated wrapped cached-descriptor rejection must be stable");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, original);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("direct entry must recover after cached descriptor restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
