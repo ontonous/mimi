@@ -235,11 +235,11 @@ impl Drop for TestRuntimeTempGuard {
     }
 }
 
-struct TestRuntimeCacheLockGuard {
+struct TestFileLockGuard {
     file: std::fs::File,
 }
 
-impl Drop for TestRuntimeCacheLockGuard {
+impl Drop for TestFileLockGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
@@ -256,30 +256,44 @@ impl Drop for TestRuntimeCacheLockGuard {
 }
 
 #[cfg(unix)]
-fn acquire_test_runtime_cache_lock(
+fn acquire_test_file_lock(
     file: std::fs::File,
-) -> Result<TestRuntimeCacheLockGuard, String> {
+    operation: libc::c_int,
+    label: &str,
+) -> Result<TestFileLockGuard, String> {
     loop {
         // SAFETY: file is an open regular lock file and flock only changes its
         // advisory lock state; no Rust references cross the FFI boundary.
         let result =
-            unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+            unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), operation) };
         if result == 0 {
-            return Ok(TestRuntimeCacheLockGuard { file });
+            return Ok(TestFileLockGuard { file });
         }
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::Interrupted {
             continue;
         }
-        return Err(format!("lock test runtime cache: {error}"));
+        return Err(format!("lock {label}: {error}"));
     }
 }
 
 #[cfg(not(unix))]
-fn acquire_test_runtime_cache_lock(
+fn acquire_test_file_lock(
     file: std::fs::File,
-) -> Result<TestRuntimeCacheLockGuard, String> {
-    Ok(TestRuntimeCacheLockGuard { file })
+    _operation: i32,
+    _label: &str,
+) -> Result<TestFileLockGuard, String> {
+    Ok(TestFileLockGuard { file })
+}
+
+#[cfg(unix)]
+fn acquire_test_runtime_cache_lock(file: std::fs::File) -> Result<TestFileLockGuard, String> {
+    acquire_test_file_lock(file, libc::LOCK_EX, "test runtime cache")
+}
+
+#[cfg(not(unix))]
+fn acquire_test_runtime_cache_lock(file: std::fs::File) -> Result<TestFileLockGuard, String> {
+    acquire_test_file_lock(file, 0, "test runtime cache")
 }
 
 fn is_test_runtime_cache_temp_name(name: &std::ffi::OsStr) -> bool {
@@ -561,7 +575,7 @@ mod test_runtime_cache_regressions {
     use super::{
         acquire_test_runtime_cache_lock, cleanup_test_runtime_cache_stale_archives,
         cleanup_test_runtime_cache_stale_temps, is_test_runtime_cache_archive_name,
-        is_test_runtime_cache_temp_name, test_runtime_cache_temp_path,
+        is_test_runtime_cache_temp_name, test_runtime_cache_temp_path, FfiEnvLock, StdlibEnvGuard,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -679,39 +693,60 @@ mod test_runtime_cache_regressions {
             "libmimi_runtime_gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.a"
         )));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_test_locks_use_private_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ffi_guard = FfiEnvLock::lock();
+        let lock_dir = std::env::temp_dir().join("mimi_test_locks");
+        let ffi_mode = fs::symlink_metadata(lock_dir.join("ffi.lock"))
+            .expect("inspect FFI test lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(ffi_mode, 0o600);
+        drop(ffi_guard);
+
+        let stdlib_guard = StdlibEnvGuard::read();
+        let stdlib_mode = fs::symlink_metadata(lock_dir.join("stdlib.lock"))
+            .expect("inspect stdlib test lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(stdlib_mode, 0o600);
+        drop(stdlib_guard);
+    }
 }
 
 /// File-based lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
 /// variable. This works across multiple test binaries running in parallel.
 pub(crate) struct FfiEnvLock {
-    _file: std::fs::File,
+    _guard: TestFileLockGuard,
 }
 
 impl FfiEnvLock {
     pub fn lock() -> Self {
-        let lock_path = std::env::temp_dir().join("mimi_ffi_test.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
+        let lock_dir = std::env::temp_dir().join("mimi_test_locks");
+        crate::runtime_cache::prepare_private_cache_directory(&lock_dir, "FFI test lock")
+            .expect("failed to prepare FFI test lock directory");
+        let lock_path = lock_dir.join("ffi.lock");
+        let file = crate::runtime_cache::open_private_cache_lock(&lock_path, "FFI test lock")
             .expect("failed to create FFI test lock file");
-
-        // Use file locking to ensure exclusive access
-        #[cfg(unix)]
-        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            libc::flock(file.as_raw_fd(), libc::LOCK_EX);
+        let guard = {
+            #[cfg(unix)]
+            {
+                acquire_test_file_lock(file, libc::LOCK_EX, "FFI test lock")
+            }
+            #[cfg(not(unix))]
+            {
+                acquire_test_file_lock(file, 0, "FFI test lock")
+            }
         }
+        .expect("failed to acquire FFI test lock");
 
-        Self { _file: file }
-    }
-}
-
-impl Drop for FfiEnvLock {
-    fn drop(&mut self) {
-        // Lock is automatically released when file is closed
+        Self { _guard: guard }
     }
 }
 
@@ -721,7 +756,7 @@ impl Drop for FfiEnvLock {
 /// a dedicated flock file and RESTORES the previous value on drop — including
 /// during unwinding, so a failing assertion can no longer leak the override.
 pub(crate) struct StdlibEnvGuard {
-    _lock_file: std::fs::File,
+    _lock_guard: TestFileLockGuard,
     prev: Option<std::ffi::OsString>,
     restore: bool,
 }
@@ -730,21 +765,25 @@ impl StdlibEnvGuard {
     /// Reader side: hold a SHARED flock while the test runs, so a concurrent
     /// `set` (LOCK_EX) cannot flip MIMI_STDLIB underneath stdlib resolution.
     pub fn read() -> Self {
-        let lock_path = std::env::temp_dir().join("mimi_stdlib_test.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
+        let lock_dir = std::env::temp_dir().join("mimi_test_locks");
+        crate::runtime_cache::prepare_private_cache_directory(&lock_dir, "stdlib test lock")
+            .expect("failed to prepare stdlib test lock directory");
+        let lock_path = lock_dir.join("stdlib.lock");
+        let file = crate::runtime_cache::open_private_cache_lock(&lock_path, "stdlib test lock")
             .expect("failed to create stdlib test lock file");
-        #[cfg(unix)]
-        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            libc::flock(file.as_raw_fd(), libc::LOCK_SH);
+        let lock_guard = {
+            #[cfg(unix)]
+            {
+                acquire_test_file_lock(file, libc::LOCK_SH, "stdlib test lock")
+            }
+            #[cfg(not(unix))]
+            {
+                acquire_test_file_lock(file, 0, "stdlib test lock")
+            }
         }
+        .expect("failed to acquire stdlib test lock");
         Self {
-            _lock_file: file,
+            _lock_guard: lock_guard,
             prev: None,
             restore: false,
         }
@@ -752,23 +791,27 @@ impl StdlibEnvGuard {
 
     /// Writer side: exclusive flock + set + restore-on-drop.
     pub fn set(value: &std::path::Path) -> Self {
-        let lock_path = std::env::temp_dir().join("mimi_stdlib_test.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
+        let lock_dir = std::env::temp_dir().join("mimi_test_locks");
+        crate::runtime_cache::prepare_private_cache_directory(&lock_dir, "stdlib test lock")
+            .expect("failed to prepare stdlib test lock directory");
+        let lock_path = lock_dir.join("stdlib.lock");
+        let file = crate::runtime_cache::open_private_cache_lock(&lock_path, "stdlib test lock")
             .expect("failed to create stdlib test lock file");
-        #[cfg(unix)]
-        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            libc::flock(file.as_raw_fd(), libc::LOCK_EX);
+        let lock_guard = {
+            #[cfg(unix)]
+            {
+                acquire_test_file_lock(file, libc::LOCK_EX, "stdlib test lock")
+            }
+            #[cfg(not(unix))]
+            {
+                acquire_test_file_lock(file, 0, "stdlib test lock")
+            }
         }
+        .expect("failed to acquire stdlib test lock");
         let prev = std::env::var_os("MIMI_STDLIB");
         std::env::set_var("MIMI_STDLIB", value);
         Self {
-            _lock_file: file,
+            _lock_guard: lock_guard,
             prev,
             restore: true,
         }
