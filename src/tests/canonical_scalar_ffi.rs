@@ -3660,6 +3660,164 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_forged_result_conversion_before_reuse() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+    let forged_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cached forged-result-conversion FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize cached forged-result-conversion MIR");
+    let instruction_id = mir
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("cached forged-result-conversion call-site");
+
+    let mut forged_receipts = mir.ffi_calls().clone();
+    forged_receipts
+        .get_mut(&instruction_id)
+        .expect("cached forged-result-conversion receipt")
+        .result_conversion = Some(forged_conversion);
+    let mut forged_mir = mir.clone();
+    forged_mir.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let reference = MirReferenceInterpreter::new(&forged_mir);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged result conversion receipt");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("result ABI conversion receipt disagrees"),
+        "{reference_error}"
+    );
+    assert_eq!(
+        reference.captured_output(),
+        "",
+        "receipt rejection must happen before the leading println"
+    );
+
+    let bytecode_error = compile_mir_program(&forged_mir)
+        .expect_err("bytecode adapter must reject a forged result conversion receipt");
+    assert!(bytecode_error.iter().any(|error| {
+        error
+            .message
+            .contains("result ABI conversion receipt disagrees")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let native_error = crate::codegen::mir::validate_mir_native(&forged_mir)
+        .expect_err("native admission must reject a forged result conversion receipt");
+    assert!(native_error.iter().any(|error| {
+        error
+            .message
+            .contains("result ABI conversion receipt disagrees")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged_mir)
+        .expect_err("capability gate must reject a forged result conversion receipt");
+    assert!(capability_error.iter().any(|error| {
+        error.contains("result ABI conversion receipt disagrees")
+            || error.contains("conversion receipt")
+    }));
+
+    let verifier_error =
+        crate::verifier::verify_mir(&forged_mir, "forged-result-conversion".into())
+            .expect_err("verifier must reject a forged result conversion receipt");
+    assert!(
+        verifier_error.contains("result ABI conversion receipt disagrees")
+            || verifier_error.contains("conversion receipt"),
+        "{verifier_error}"
+    );
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let bytecode = compile_mir_program(&mir).expect("canonical result-conversion bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial canonical FFI run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original = vm.program().canonical_ffi[0].clone();
+    let mut forged_descriptor = original.clone();
+    forged_descriptor.result_conversion = Some(forged_conversion);
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, forged_descriptor);
+    let descriptor_error = vm
+        .run_value()
+        .expect_err("cached VM must reject a forged result conversion before reuse");
+    assert!(
+        descriptor_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{descriptor_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "descriptor preflight must run before reusing the cached library"
+    );
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, original);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("canonical VM must recover after descriptor restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_result_forge");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native result-conversion lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native result-conversion module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(REBINDABLE_SYMBOL_A_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native result-conversion execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "12\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
