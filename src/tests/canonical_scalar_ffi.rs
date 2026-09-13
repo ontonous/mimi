@@ -4149,6 +4149,81 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_canonical_vm_caches_are_isolated_across_shared_programs() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_library = first.dir.join("ffi.so");
+    let second_library = second.dir.join("ffi.so");
+    guard.set_path(&first_library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("shared-program VM cache isolation fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize shared-program VM cache isolation MIR");
+    let bytecode = compile_mir_program(&mir).expect("shared-program VM cache isolation bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut first_vm = BytecodeVM::new(bytecode.clone());
+    let mut second_vm = BytecodeVM::new(bytecode);
+
+    assert_eq!(
+        first_vm.run_value().expect("first VM library-A run"),
+        Value::Int(0)
+    );
+    assert_eq!(first_vm.stdout(), "12\n");
+    assert_eq!(first_vm.debug_stack_state(), (0, 0));
+    assert_eq!(first_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&second_library);
+    assert_eq!(
+        second_vm.run_value().expect("second VM library-B run"),
+        Value::Int(0)
+    );
+    assert_eq!(second_vm.stdout(), "23\n");
+    assert_eq!(second_vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        second_vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "a second VM must not inherit the first VM's loaded-library cache"
+    );
+    assert_eq!(first_vm.stdout(), "12\n");
+    assert_eq!(first_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    assert_eq!(
+        first_vm.run_value().expect("first VM library-B rebinding"),
+        Value::Int(0)
+    );
+    assert_eq!(first_vm.stdout(), "23\n");
+    assert_eq!(first_vm.debug_stack_state(), (0, 0));
+    assert_eq!(first_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&first_library);
+    assert_eq!(
+        second_vm
+            .run_value()
+            .expect("second VM library-A rebinding"),
+        Value::Int(0)
+    );
+    assert_eq!(second_vm.stdout(), "12\n");
+    assert_eq!(second_vm.debug_stack_state(), (0, 0));
+    assert_eq!(second_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(first_vm.stdout(), "23\n");
+    assert_eq!(first_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(first_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(second_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
