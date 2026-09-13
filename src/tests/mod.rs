@@ -576,7 +576,7 @@ mod test_runtime_cache_regressions {
         acquire_test_file_lock, acquire_test_runtime_cache_lock,
         cleanup_test_runtime_cache_stale_archives, cleanup_test_runtime_cache_stale_temps,
         is_test_runtime_cache_archive_name, is_test_runtime_cache_temp_name,
-        test_runtime_cache_temp_path, FfiEnvLock, StdlibEnvGuard,
+        test_runtime_cache_temp_path, FfiEnvGuard, FfiEnvLock, StdlibEnvGuard,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -1086,10 +1086,11 @@ mod test_runtime_cache_regressions {
         use std::process::Stdio;
 
         if std::env::var_os("MIMI_FFI_LOCK_EOF_PROBE").is_some() {
-            let _guard = FfiEnvLock::lock();
+            let _guard = FfiEnvGuard::set(std::path::Path::new("/tmp/mimi_ffi_eof_probe"));
             return;
         }
 
+        let original_ffi_lib = std::env::var_os("MIMI_FFI_LIB");
         let executable = std::env::current_exe().expect("locate test executable");
         let mut child = ProbeChildGuard::new(
             probe_command(executable)
@@ -1109,6 +1110,28 @@ mod test_runtime_cache_regressions {
         assert_eq!(error, "read FFI EOF probe readiness: EOF");
         let status = child.wait("FFI EOF").expect("wait for FFI EOF probe child");
         assert_eq!(status.code(), Some(0), "FFI EOF probe status: {status}");
+
+        let lock = FfiEnvLock::lock();
+        drop(lock);
+        assert_eq!(
+            std::env::var_os("MIMI_FFI_LIB"),
+            original_ffi_lib,
+            "child FFI library override leaked into parent environment"
+        );
+
+        let sentinel = std::env::temp_dir().join("mimi_ffi_parent_probe.so");
+        {
+            let _guard = FfiEnvGuard::set(&sentinel);
+            assert_eq!(
+                std::env::var_os("MIMI_FFI_LIB"),
+                Some(sentinel.clone().into_os_string())
+            );
+        }
+        assert_eq!(
+            std::env::var_os("MIMI_FFI_LIB"),
+            original_ffi_lib,
+            "FFI environment guard failed to restore parent environment"
+        );
 
         let _guard = FfiEnvLock::lock();
     }
@@ -1335,6 +1358,37 @@ impl FfiEnvLock {
         .expect("failed to acquire FFI test lock");
 
         Self { _guard: guard }
+    }
+}
+
+/// Exclusive FFI test environment override with restoration on every exit.
+///
+/// `MIMI_FFI_LIB` is process-global, so the file lock and the environment
+/// mutation must share one scope. Keeping the lock as a field also means the
+/// previous value is restored while no other test can observe the transition.
+pub(crate) struct FfiEnvGuard {
+    _lock_guard: FfiEnvLock,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl FfiEnvGuard {
+    pub fn set(value: &std::path::Path) -> Self {
+        let lock_guard = FfiEnvLock::lock();
+        let prev = std::env::var_os("MIMI_FFI_LIB");
+        std::env::set_var("MIMI_FFI_LIB", value);
+        Self {
+            _lock_guard: lock_guard,
+            prev,
+        }
+    }
+}
+
+impl Drop for FfiEnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
+            None => std::env::remove_var("MIMI_FFI_LIB"),
+        }
     }
 }
 
