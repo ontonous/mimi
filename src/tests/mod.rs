@@ -758,41 +758,193 @@ mod test_runtime_cache_regressions {
     #[cfg(unix)]
     struct ProbeChildGuard {
         child: std::process::Child,
+        reaped: bool,
     }
 
     #[cfg(unix)]
     impl ProbeChildGuard {
-        fn take_stdout(&mut self) -> std::process::ChildStdout {
-            self.child.stdout.take().expect("capture lock probe output")
+        fn new(result: std::io::Result<std::process::Child>, label: &str) -> Result<Self, String> {
+            result
+                .map(|child| Self {
+                    child,
+                    reaped: false,
+                })
+                .map_err(|error| format!("spawn {label} probe child: {error}"))
         }
 
-        fn kill(&mut self) {
-            self.child.kill().expect("terminate lock probe child");
+        fn wait_ready(&mut self, marker: &str, label: &str) -> Result<(), String> {
+            use std::io::{BufRead, BufReader};
+
+            let stdout = self
+                .child
+                .stdout
+                .take()
+                .ok_or_else(|| format!("capture {label} probe output: stdout unavailable"))?;
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next() {
+                    Some(Ok(line)) if line == marker => return Ok(()),
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => {
+                        return Err(format!("decode {label} probe readiness: {error}"));
+                    }
+                    None => return Err(format!("read {label} probe readiness: EOF")),
+                }
+            }
         }
 
-        fn wait(&mut self) -> std::process::ExitStatus {
-            self.child.wait().expect("wait for lock probe child")
+        fn kill(&mut self, label: &str) -> Result<(), String> {
+            if self.reaped {
+                return Err(format!(
+                    "terminate {label} probe child: child already reaped"
+                ));
+            }
+            self.child
+                .kill()
+                .map_err(|error| format!("terminate {label} probe child: {error}"))
+        }
+
+        fn wait(&mut self, label: &str) -> Result<std::process::ExitStatus, String> {
+            if self.reaped {
+                return Err(format!(
+                    "wait for {label} probe child: child already reaped"
+                ));
+            }
+            let status = self
+                .child
+                .wait()
+                .map_err(|error| format!("wait for {label} probe child: {error}"))?;
+            self.reaped = true;
+            Ok(status)
         }
     }
 
     #[cfg(unix)]
     impl Drop for ProbeChildGuard {
         fn drop(&mut self) {
+            if self.reaped {
+                return;
+            }
             let running = match self.child.try_wait() {
-                Ok(Some(_)) => false,
+                Ok(Some(_)) => {
+                    self.reaped = true;
+                    false
+                }
                 Ok(None) | Err(_) => true,
             };
             if running {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
+                self.reaped = true;
             }
         }
     }
 
     #[cfg(unix)]
     #[test]
+    fn lock_probe_startup_failure_has_structured_diagnostic() {
+        use std::process::Command;
+
+        let result = ProbeChildGuard::new(
+            Command::new("/definitely/missing/mimi-lock-probe").spawn(),
+            "startup",
+        );
+        let error = match result {
+            Ok(_) => panic!("missing lock probe executable must fail to spawn"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("spawn startup probe child: "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe_readiness_eof_has_structured_diagnostic() {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = ProbeChildGuard::new(command.spawn(), "readiness")
+            .expect("spawn readiness EOF probe child");
+        let error = child
+            .wait_ready("ready", "readiness")
+            .expect_err("EOF before readiness must fail closed");
+        assert_eq!(error, "read readiness probe readiness: EOF");
+        assert!(child
+            .wait("readiness")
+            .expect("reap readiness EOF probe child")
+            .success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe_readiness_skips_noise_before_marker() {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf 'noise\\nready\\n'"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = ProbeChildGuard::new(command.spawn(), "framing")
+            .expect("spawn readiness framing probe child");
+        child
+            .wait_ready("ready", "framing")
+            .expect("readiness marker must be framed after noise");
+        assert!(child
+            .wait("framing")
+            .expect("reap readiness framing probe child")
+            .success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe_kill_failure_has_structured_diagnostic() {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child =
+            ProbeChildGuard::new(command.spawn(), "kill").expect("spawn kill failure probe child");
+        child
+            .wait("kill pre-reap")
+            .expect("reap kill failure probe child");
+        let error = child
+            .kill("kill-after-wait")
+            .expect_err("kill after wait must report a structured error");
+        assert!(error.starts_with("terminate kill-after-wait probe child: "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe_wait_failure_has_structured_diagnostic() {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child =
+            ProbeChildGuard::new(command.spawn(), "wait").expect("spawn wait failure probe child");
+        child
+            .wait("wait first")
+            .expect("reap wait failure probe child");
+        let error = child
+            .wait("wait-after-reap")
+            .expect_err("waiting after reap must report a structured error");
+        assert!(error.starts_with("wait for wait-after-reap probe child: "));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn process_global_ffi_lock_recovers_after_child_exit() {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
 
         if std::env::var_os("MIMI_FFI_LOCK_PROBE").is_some() {
@@ -804,28 +956,21 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = ProbeChildGuard {
-            child: Command::new(executable)
-            .arg("--exact")
-            .arg("tests::test_runtime_cache_regressions::process_global_ffi_lock_recovers_after_child_exit")
-            .arg("--nocapture")
-            .env("MIMI_FFI_LOCK_PROBE", "hold")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn FFI lock probe child"),
-        };
-        let stdout = child.take_stdout();
-        let mut lines = BufReader::new(stdout).lines();
-        let ready = loop {
-            match lines.next() {
-                Some(Ok(line)) if line == "ffi-lock-ready" => break line,
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => panic!("decode FFI lock probe readiness: {error}"),
-                None => panic!("read FFI lock probe readiness"),
-            }
-        };
-        assert_eq!(ready, "ffi-lock-ready");
+        let mut child = ProbeChildGuard::new(
+            Command::new(executable)
+                .arg("--exact")
+                .arg("tests::test_runtime_cache_regressions::process_global_ffi_lock_recovers_after_child_exit")
+                .arg("--nocapture")
+                .env("MIMI_FFI_LOCK_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "FFI lock",
+        )
+        .expect("spawn FFI lock probe child");
+        child
+            .wait_ready("ffi-lock-ready", "FFI lock")
+            .expect("read FFI lock probe readiness");
 
         let runtime_cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
         crate::runtime_cache::prepare_private_cache_directory(
@@ -846,8 +991,12 @@ mod test_runtime_cache_regressions {
         let lock_path = lock_dir.join("ffi.lock");
         assert_test_lock_busy(&lock_path, libc::LOCK_EX, "FFI lock recovery probe");
 
-        child.kill();
-        let status = child.wait();
+        child
+            .kill("FFI lock")
+            .expect("terminate FFI lock probe child");
+        let status = child
+            .wait("FFI lock")
+            .expect("wait for FFI lock probe child");
         assert!(
             !status.success(),
             "terminated lock probe must not report success"
@@ -859,7 +1008,7 @@ mod test_runtime_cache_regressions {
     #[cfg(unix)]
     #[test]
     fn process_global_stdlib_lock_recovers_after_child_exit() {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
 
         if std::env::var_os("MIMI_STDLIB_LOCK_PROBE").is_some() {
@@ -871,36 +1020,33 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = ProbeChildGuard {
-            child: Command::new(executable)
-            .arg("--exact")
-            .arg("tests::test_runtime_cache_regressions::process_global_stdlib_lock_recovers_after_child_exit")
-            .arg("--nocapture")
-            .env("MIMI_STDLIB_LOCK_PROBE", "hold")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn stdlib lock probe child"),
-        };
-        let stdout = child.take_stdout();
-        let mut lines = BufReader::new(stdout).lines();
-        let ready = loop {
-            match lines.next() {
-                Some(Ok(line)) if line == "stdlib-lock-ready" => break line,
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => panic!("decode stdlib lock probe readiness: {error}"),
-                None => panic!("read stdlib lock probe readiness"),
-            }
-        };
-        assert_eq!(ready, "stdlib-lock-ready");
+        let mut child = ProbeChildGuard::new(
+            Command::new(executable)
+                .arg("--exact")
+                .arg("tests::test_runtime_cache_regressions::process_global_stdlib_lock_recovers_after_child_exit")
+                .arg("--nocapture")
+                .env("MIMI_STDLIB_LOCK_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "stdlib lock",
+        )
+        .expect("spawn stdlib lock probe child");
+        child
+            .wait_ready("stdlib-lock-ready", "stdlib lock")
+            .expect("read stdlib lock probe readiness");
 
         let lock_path = std::env::temp_dir()
             .join("mimi_test_locks")
             .join("stdlib.lock");
         assert_test_lock_busy(&lock_path, libc::LOCK_SH, "stdlib lock recovery probe");
 
-        child.kill();
-        let status = child.wait();
+        child
+            .kill("stdlib lock")
+            .expect("terminate stdlib lock probe child");
+        let status = child
+            .wait("stdlib lock")
+            .expect("wait for stdlib lock probe child");
         assert!(
             !status.success(),
             "terminated stdlib lock probe must not report success"
@@ -916,7 +1062,7 @@ mod test_runtime_cache_regressions {
     #[cfg(unix)]
     #[test]
     fn process_global_stdlib_readers_share_and_writer_waits() {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
 
         if std::env::var_os("MIMI_STDLIB_READER_PROBE").is_some() {
@@ -930,30 +1076,23 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = ProbeChildGuard {
-            child: Command::new(executable)
-            .arg("--exact")
-            .arg(
-                "tests::test_runtime_cache_regressions::process_global_stdlib_readers_share_and_writer_waits",
-            )
-            .arg("--nocapture")
-            .env("MIMI_STDLIB_READER_PROBE", "hold")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn stdlib reader probe child"),
-        };
-        let stdout = child.take_stdout();
-        let mut lines = BufReader::new(stdout).lines();
-        let ready = loop {
-            match lines.next() {
-                Some(Ok(line)) if line == "stdlib-reader-ready" => break line,
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => panic!("decode stdlib reader probe readiness: {error}"),
-                None => panic!("read stdlib reader probe readiness"),
-            }
-        };
-        assert_eq!(ready, "stdlib-reader-ready");
+        let mut child = ProbeChildGuard::new(
+            Command::new(executable)
+                .arg("--exact")
+                .arg(
+                    "tests::test_runtime_cache_regressions::process_global_stdlib_readers_share_and_writer_waits",
+                )
+                .arg("--nocapture")
+                .env("MIMI_STDLIB_READER_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "stdlib reader",
+        )
+        .expect("spawn stdlib reader probe child");
+        child
+            .wait_ready("stdlib-reader-ready", "stdlib reader")
+            .expect("read stdlib reader probe readiness");
 
         let lock_path = std::env::temp_dir()
             .join("mimi_test_locks")
@@ -967,8 +1106,12 @@ mod test_runtime_cache_regressions {
             "stdlib writer while child reader holds",
         );
 
-        child.kill();
-        let status = child.wait();
+        child
+            .kill("stdlib reader")
+            .expect("terminate stdlib reader probe child");
+        let status = child
+            .wait("stdlib reader")
+            .expect("wait for stdlib reader probe child");
         assert!(
             !status.success(),
             "terminated stdlib reader probe must not report success"
