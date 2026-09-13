@@ -583,6 +583,35 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bytecode_wrapped_entry_snapshot_reset_does_not_require_canonical_manifest() {
+        let tokens = crate::lexer::Lexer::new("func main() -> i32 { println(2); 0 }")
+            .tokenize()
+            .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let program = compiler.compile_file(&file).unwrap();
+        assert!(
+            program.canonical_ffi.is_empty(),
+            "compatibility bytecode must not acquire a canonical FFI manifest"
+        );
+        let mut vm = BytecodeVM::new(program);
+
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .unwrap();
+        assert_eq!(vm.stdout(), "2\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .unwrap();
+        assert_eq!(
+            vm.stdout(),
+            "2\n",
+            "wrapped compatibility entry must start a fresh stdout snapshot"
+        );
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+    }
+
+    #[test]
     fn e2e_fib_with_print() {
         let tokens = crate::lexer::Lexer::new(
             "func fib(n: i32) -> i32 {
