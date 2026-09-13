@@ -34,6 +34,7 @@ pub use vm::BytecodeVM;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interp::Value;
 
     /// Helper: compile a simple program and run it.
     fn run_program(prog: std::sync::Arc<BytecodeProgram>) -> Result<i64, String> {
@@ -546,6 +547,39 @@ mod tests {
         let code = vm.run().unwrap();
         assert_eq!(code, 0);
         assert_eq!(vm.stdout().trim(), "42");
+    }
+
+    #[test]
+    fn legacy_bytecode_entry_snapshot_reset_does_not_require_canonical_manifest() {
+        let tokens = crate::lexer::Lexer::new("func main() -> i32 { println(1); 0 }")
+            .tokenize()
+            .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let program = compiler.compile_file(&file).unwrap();
+        assert!(
+            program.canonical_ffi.is_empty(),
+            "compatibility bytecode must not acquire a canonical FFI manifest"
+        );
+        let mut vm = BytecodeVM::new(program);
+
+        assert!(matches!(vm.run_value().unwrap(), Value::Int(0)));
+        assert_eq!(vm.stdout(), "1\n");
+        assert!(matches!(
+            vm.call_named("main", Vec::new()).unwrap(),
+            Value::Int(0)
+        ));
+        assert_eq!(
+            vm.stdout(),
+            "1\n",
+            "direct compatibility entry must start a fresh stdout snapshot"
+        );
+        assert!(matches!(
+            vm.call_function(vm.program().entry, &[]).unwrap(),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.stdout(), "1\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
     }
 
     #[test]
