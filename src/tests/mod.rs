@@ -573,9 +573,10 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
 #[cfg(test)]
 mod test_runtime_cache_regressions {
     use super::{
-        acquire_test_runtime_cache_lock, cleanup_test_runtime_cache_stale_archives,
-        cleanup_test_runtime_cache_stale_temps, is_test_runtime_cache_archive_name,
-        is_test_runtime_cache_temp_name, test_runtime_cache_temp_path, FfiEnvLock, StdlibEnvGuard,
+        acquire_test_file_lock, acquire_test_runtime_cache_lock,
+        cleanup_test_runtime_cache_stale_archives, cleanup_test_runtime_cache_stale_temps,
+        is_test_runtime_cache_archive_name, is_test_runtime_cache_temp_name,
+        test_runtime_cache_temp_path, FfiEnvLock, StdlibEnvGuard,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -738,6 +739,23 @@ mod test_runtime_cache_regressions {
     }
 
     #[cfg(unix)]
+    fn acquire_test_lock_nonblocking(
+        lock_path: &std::path::Path,
+        operation: libc::c_int,
+        label: &str,
+    ) -> std::fs::File {
+        use std::os::unix::io::AsRawFd;
+
+        let file = crate::runtime_cache::open_private_cache_lock(lock_path, label)
+            .expect("open nonblocking shared lock probe");
+        // SAFETY: file is an open regular lock file; LOCK_NB only asks
+        // the kernel for the requested advisory lock without waiting.
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
+        assert_eq!(result, 0, "{label} must be available without waiting");
+        file
+    }
+
+    #[cfg(unix)]
     #[test]
     fn process_global_ffi_lock_recovers_after_child_exit() {
         use std::io::{BufRead, BufReader, Write};
@@ -858,6 +876,79 @@ mod test_runtime_cache_regressions {
         );
 
         let _guard = StdlibEnvGuard::read();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_stdlib_readers_share_and_writer_waits() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        if std::env::var_os("MIMI_STDLIB_READER_PROBE").is_some() {
+            let _guard = StdlibEnvGuard::read();
+            println!("stdlib-reader-ready");
+            std::io::stdout()
+                .flush()
+                .expect("flush stdlib reader probe");
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = Command::new(executable)
+            .arg("--exact")
+            .arg(
+                "tests::test_runtime_cache_regressions::process_global_stdlib_readers_share_and_writer_waits",
+            )
+            .arg("--nocapture")
+            .env("MIMI_STDLIB_READER_PROBE", "hold")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn stdlib reader probe child");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("capture stdlib reader probe output");
+        let mut lines = BufReader::new(stdout).lines();
+        let ready = loop {
+            match lines.next() {
+                Some(Ok(line)) if line == "stdlib-reader-ready" => break line,
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => panic!("decode stdlib reader probe readiness: {error}"),
+                None => panic!("read stdlib reader probe readiness"),
+            }
+        };
+        assert_eq!(ready, "stdlib-reader-ready");
+
+        let lock_path = std::env::temp_dir()
+            .join("mimi_test_locks")
+            .join("stdlib.lock");
+        let parent_reader =
+            acquire_test_lock_nonblocking(&lock_path, libc::LOCK_SH, "stdlib shared reader probe");
+        drop(parent_reader);
+        assert_test_lock_busy(
+            &lock_path,
+            libc::LOCK_EX,
+            "stdlib writer while child reader holds",
+        );
+
+        child.kill().expect("terminate stdlib reader probe child");
+        let status = child.wait().expect("wait for stdlib reader probe child");
+        assert!(
+            !status.success(),
+            "terminated stdlib reader probe must not report success"
+        );
+
+        let exclusive = crate::runtime_cache::open_private_cache_lock(
+            &lock_path,
+            "stdlib writer recovery probe",
+        )
+        .expect("open stdlib writer recovery probe");
+        let guard =
+            acquire_test_file_lock(exclusive, libc::LOCK_EX, "stdlib writer recovery probe")
+                .expect("stdlib writer must acquire after reader exit");
+        drop(guard);
     }
 }
 
