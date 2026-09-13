@@ -2871,6 +2871,47 @@ fn scalar_ffi_missing_library_preserves_prefix_and_recovers() {
 }
 
 #[test]
+fn scalar_ffi_failed_vm_run_is_reusable_after_stdout_snapshot() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let missing = fixture.dir.join("missing.so");
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(MISSING_LIBRARY_SOURCE)
+            .tokenize()
+            .expect("lex reusable-VM FFI fixture"),
+    )
+    .parse_file()
+    .expect("parse reusable-VM FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check reusable-VM FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize reusable-VM FFI fixture MIR");
+    let bytecode = compile_mir_program(&mir).expect("reusable-VM AST-free bytecode");
+
+    guard.set_path(&missing);
+    let mut vm = BytecodeVM::new(bytecode);
+    let error = vm
+        .run_value()
+        .expect_err("the first run must fail while loading the absent library");
+    assert_eq!(error.code(), "E0800");
+    assert_eq!(vm.stdout(), "13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.take_stdout(), "13\n");
+    assert_eq!(vm.stdout(), "");
+
+    guard.set_path(&library);
+    assert_eq!(
+        vm.run_value()
+            .expect("the same VM must recover after the caller consumes its failure output"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.stdout(), "13\n8\n");
+}
+
+#[test]
 fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
