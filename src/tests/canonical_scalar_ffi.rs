@@ -5577,6 +5577,79 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_ignores_environment_changes_until_cleared() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_path = first.dir.join("ffi.so");
+    let second_path = second.dir.join("ffi.so");
+    guard.set_path(&second_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("environment-change isolation fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize environment-change isolation MIR");
+    let bytecode = compile_mir_program(&mir).expect("environment-change isolation bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut explicit_vm = BytecodeVM::new(bytecode.clone());
+    let mut environment_vm = BytecodeVM::new(bytecode);
+
+    explicit_vm.set_canonical_ffi_library_path(first_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm.run_value().expect("explicit A run"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "12\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&second_path);
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("explicit A must ignore a changed environment path"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "12\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        environment_vm
+            .run_value()
+            .expect("unbound VM must observe environment B"),
+        Value::Int(0)
+    );
+    assert_eq!(environment_vm.stdout(), "23\n");
+    assert_eq!(environment_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("cleared explicit binding must observe environment B"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "23\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&first_path);
+    assert_eq!(
+        environment_vm
+            .call_named("function:main", Vec::new())
+            .expect("unbound VM must observe environment A after the next change"),
+        Value::Int(0)
+    );
+    assert_eq!(environment_vm.stdout(), "12\n");
+    assert_eq!(environment_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(environment_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
