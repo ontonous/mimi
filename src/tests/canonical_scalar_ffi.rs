@@ -3294,6 +3294,116 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_vm_multi_call_site_failure_rebinds_without_partial_output() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(0)
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+    struct RebindOracle;
+    impl MirReferenceFfiResolver for RebindOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_rebindable" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 11))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let valid_a = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let valid_b = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let missing = library_fixture(counter + 2, MISSING_SYMBOL_C_SOURCE);
+    let valid_a_library = valid_a.dir.join("ffi.so");
+    let valid_b_library = valid_b.dir.join("ffi.so");
+    let missing_library = missing.dir.join("ffi.so");
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-call-site failure/rebind FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize multi-call-site failure/rebind MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&RebindOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("multi-call-site reference execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "0\n12\n13\n");
+
+    let bytecode = compile_mir_program(&mir).expect("multi-call-site failure/rebind bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    guard.set_path(&missing_library);
+    let missing_error = vm
+        .run_value()
+        .expect_err("first missing-symbol call must fail before the second call site");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&valid_b_library);
+    assert_eq!(
+        vm.run_value()
+            .expect("same VM must recover both call sites against library B"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n24\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&valid_a_library);
+    assert_eq!(
+        vm.run_value()
+            .expect("same VM must rebind both call sites back to library A"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    guard.set_path(&valid_a_library);
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_multi_rebind");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-call-site failure/rebind lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native multi-call-site failure/rebind module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(REBINDABLE_SYMBOL_A_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native multi-call-site failure/rebind execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "0\n12\n13\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
