@@ -224,6 +224,20 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_binding_for_test_only(
+        &mut self,
+        index: usize,
+        binding: CanonicalFfiBinding,
+    ) {
+        let program = std::sync::Arc::get_mut(&mut self.program)
+            .expect("test VM must uniquely own its bytecode program");
+        *program
+            .canonical_ffi_bindings
+            .get_mut(index)
+            .expect("canonical FFI binding index") = binding;
+    }
+
+    #[cfg(test)]
     pub(crate) fn debug_stack_state(&self) -> (usize, usize) {
         (self.stack.len(), self.depth)
     }

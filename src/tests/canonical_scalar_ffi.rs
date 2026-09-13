@@ -3818,6 +3818,77 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_forged_binding_snapshot_before_reuse() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cached forged-binding FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize cached forged-binding MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached forged-binding bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial cached canonical FFI run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original = vm.program().canonical_ffi_bindings[0].clone();
+    let mut forged = original.clone();
+    forged.descriptor.symbol = "forged_binding_snapshot_symbol".into();
+    vm.replace_canonical_ffi_binding_for_test_only(0, forged);
+
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject a forged binding snapshot before reuse");
+    assert!(
+        first
+            .to_string()
+            .contains("canonical FFI descriptor index 0")
+            && first
+                .to_string()
+                .contains("differs from its compiler binding"),
+        "{first}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must share forged binding rejection");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.replace_canonical_ffi_binding_for_test_only(0, original);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("canonical VM must recover after binding restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
