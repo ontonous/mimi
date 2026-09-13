@@ -6836,6 +6836,174 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(fallback_descriptor_snapshot, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_repeated_failed_generations_preserve_cache_and_recover_after_vm_rebuild() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1_000_000_000);
+    let explicit = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let environment = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let missing = library_fixture(counter + 2, MISSING_SYMBOL_C_SOURCE);
+    let repair = library_fixture(counter + 3, REBINDABLE_SYMBOL_C_C_SOURCE);
+    let explicit_path = explicit.dir.join("ffi.so");
+    let environment_path = environment.dir.join("ffi.so");
+    let missing_path = missing.dir.join("ffi.so");
+    let repair_path = repair.dir.join("ffi.so");
+    let malformed_pending = environment.dir.join("environment-failed-one.pending.so");
+    let missing_pending = environment.dir.join("environment-failed-two.pending.so");
+    let repair_pending = environment.dir.join("environment-failed-three.pending.so");
+    guard.set_path(&environment_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("repeated failed-generation fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize repeated failed-generation MIR");
+    let bytecode = compile_mir_program(&mir).expect("repeated failed-generation bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut cached_vm = BytecodeVM::new(bytecode.clone());
+
+    assert_eq!(
+        cached_vm
+            .run_value()
+            .expect("fallback VM must initially cache library B"),
+        Value::Int(0)
+    );
+    assert_eq!(cached_vm.stdout(), "0\n23\n");
+    assert_eq!(cached_vm.debug_stack_state(), (0, 0));
+    assert_eq!(cached_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&environment_path, &malformed_pending)
+        .expect("library B must move before malformed generation");
+    std::fs::write(&environment_path, b"this is not a shared library")
+        .expect("malformed generation payload must be written");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        cached_vm
+            .call_function_wrap_ok(cached_vm.program().entry, &[], Value::Unit)
+            .expect("cached fallback must survive the malformed generation"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(cached_vm.stdout(), "0\n23\n");
+    assert_eq!(cached_vm.debug_stack_state(), (0, 0));
+    assert_eq!(cached_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let cached_descriptor_snapshot = cached_vm.program().canonical_ffi.clone();
+    drop(cached_vm);
+
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value()
+            .expect("explicit VM must initially cache library A"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.clear_canonical_ffi_library_path();
+    let malformed_error = vm
+        .call_named("function:main", Vec::new())
+        .expect_err("malformed generation must fail through the named entry");
+    assert_eq!(malformed_error.code(), "E0800");
+    assert!(malformed_error.to_string().contains("failed to load"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::remove_file(&environment_path).expect("malformed generation must be removed");
+    std::fs::rename(&missing_path, &environment_path)
+        .expect("missing-symbol generation must occupy the same path");
+    guard.set_path(&environment_path);
+    let missing_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("missing-symbol generation must fail through the wrapped entry");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    std::fs::rename(&environment_path, &missing_pending)
+        .expect("missing-symbol generation must move before repair");
+    std::fs::rename(&repair_path, &environment_path)
+        .expect("repair generation must occupy the same path");
+    guard.set_path(&environment_path);
+    let cached_missing_error = vm
+        .run_value()
+        .expect_err("same VM must retain the cached missing-symbol generation");
+    assert_eq!(cached_missing_error.code(), "E0800");
+    assert!(cached_missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    drop(vm);
+    let mut recovered_vm = BytecodeVM::new(
+        crate::interp::bytecode::compile_mir_program(&mir)
+            .expect("rebuild AST-free bytecode after cached missing-symbol generation"),
+    );
+    assert_eq!(
+        recovered_vm
+            .call_named("function:main", Vec::new())
+            .expect("rebuilt VM must load the repaired library C"),
+        Value::Int(0)
+    );
+    assert_eq!(recovered_vm.stdout(), "0\n34\n");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    recovered_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        recovered_vm
+            .call_function_wrap_ok(recovered_vm.program().entry, &[], Value::Unit)
+            .expect("rebuilt VM must rebind explicit library A"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(recovered_vm.stdout(), "0\n12\n");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    recovered_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        recovered_vm
+            .run_value()
+            .expect("cleared binding must reuse repaired library C"),
+        Value::Int(0)
+    );
+    assert_eq!(recovered_vm.stdout(), "0\n34\n");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(recovered_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(cached_descriptor_snapshot, descriptor_snapshot);
+
+    std::fs::rename(&environment_path, &repair_pending)
+        .expect("repaired generation must move during final cache check");
+    std::fs::rename(&missing_pending, &environment_path)
+        .expect("missing-symbol generation must be restored for final cache check");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        recovered_vm
+            .call_named("function:main", Vec::new())
+            .expect("cached repaired handle must survive later failed-generation replacement"),
+        Value::Int(0)
+    );
+    assert_eq!(recovered_vm.stdout(), "0\n34\n");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(recovered_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
