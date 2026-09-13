@@ -4285,6 +4285,159 @@ fn canonical_scalar_ffi_imported_default_libc_contract_matches_cli_consumers() {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_default_libc_negative_contract_fails_before_link() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-default-libc-negative-contract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported default-libc negative fixture directory");
+    fs::write(
+        dir.join("libc_guarded.mimi"),
+        "extern \"C\" { func labs(value: i64) -> i64 requires: value <= 0; }\npub func call_labs(value: i64) -> i64 { labs(value) }\n",
+    )
+    .expect("write imported default-libc negative helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use libc_guarded\nfunc main() -> i64 { println(7); println(call_labs(41 as i64)); 0 }\n",
+    )
+    .expect("write imported default-libc negative entry");
+
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc negative verification");
+        assert!(
+            !verify.status.success(),
+            "invalid imported default-libc contract unexpectedly verified (explicit_mir={explicit_mir})"
+        );
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            verify_text.contains("canonical MIR extern requires contract disproven"),
+            "negative imported default-libc proof lost canonical diagnostic: {verify_text}"
+        );
+        assert!(
+            verify_text.contains("libc_guarded.mimi"),
+            "negative imported default-libc proof lost module provenance: {verify_text}"
+        );
+        assert!(
+            !verify_text.contains("canonical route disposition: legacy"),
+            "negative imported default-libc verification fell back to legacy: {verify_text}"
+        );
+
+        let binary = dir.join(if explicit_mir {
+            "negative-contract-mir"
+        } else {
+            "negative-contract-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc negative build");
+        assert!(
+            !build.status.success(),
+            "invalid imported default-libc contract unexpectedly built (explicit_mir={explicit_mir})"
+        );
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build_stderr.contains("FFI contract verification failed"),
+            "negative imported default-libc build lost verification stage: {build_stderr}"
+        );
+        assert!(
+            build_stderr.contains("canonical MIR extern requires contract disproven"),
+            "negative imported default-libc build lost canonical diagnostic: {build_stderr}"
+        );
+        assert!(
+            !build_stderr.contains("undefined symbol: labs"),
+            "negative imported default-libc build attempted an unresolved link: {build_stderr}"
+        );
+        assert!(
+            !build_stderr.contains("canonical route disposition: legacy"),
+            "negative imported default-libc build fell back to legacy: {build_stderr}"
+        );
+        assert!(
+            !binary.exists(),
+            "failed imported default-libc build left an artifact"
+        );
+
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc negative run");
+        assert!(
+            !run.status.success(),
+            "invalid imported default-libc contract unexpectedly ran (explicit_mir={explicit_mir})"
+        );
+        assert_eq!(run.stdout, b"7\n", "explicit_mir={explicit_mir}");
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            run_stderr.contains("[E0808]"),
+            "negative imported default-libc run lost E0808: {run_stderr}"
+        );
+        assert!(
+            !run_stderr.contains("canonical route disposition: legacy"),
+            "negative imported default-libc run fell back to legacy: {run_stderr}"
+        );
+
+        let mut skipped = Command::new(mimi_bin());
+        skipped.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            skipped.arg("--mir");
+        }
+        let skipped = skipped
+            .arg("--skip-verify-ffi")
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc skipped-contract run");
+        assert!(
+            skipped.status.success(),
+            "skipped imported default-libc contract unexpectedly failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&skipped.stderr)
+        );
+        assert_eq!(skipped.stdout, b"7\n41\n", "explicit_mir={explicit_mir}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-imported-alias-negative-{}-{}",
