@@ -235,6 +235,52 @@ impl Drop for TestRuntimeTempGuard {
     }
 }
 
+fn test_runtime_cache_hit(path: &std::path::Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let mut file =
+                crate::runtime_cache::open_private_cache_file(path, "test runtime cache archive")?;
+            let mut magic = [0_u8; 8];
+            std::io::Read::read_exact(&mut file, &mut magic)
+                .map_err(|error| format!("read test runtime cache archive header: {error}"))?;
+            if &magic != b"!<arch>\n" {
+                return Err(format!(
+                    "test runtime cache archive header is invalid: {path:?}"
+                ));
+            }
+            Ok(true)
+        }
+        Ok(_) => Err(format!(
+            "test runtime cache path is not a regular file: {path:?}"
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("inspect test runtime cache: {error}")),
+    }
+}
+
+fn publish_test_runtime_cache(
+    tmp_path: &std::path::Path,
+    cache_path: &std::path::Path,
+) -> Result<(), String> {
+    let _tmp_file =
+        crate::runtime_cache::open_private_cache_file(tmp_path, "test runtime cache temporary")?;
+    match std::fs::symlink_metadata(cache_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "test runtime cache publish path is not a regular file: {cache_path:?}"
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("inspect test runtime cache publish path: {error}"));
+        }
+    }
+    std::fs::rename(tmp_path, cache_path)
+        .map_err(|error| format!("publish test runtime cache: {error}"))?;
+    Ok(())
+}
+
 pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
@@ -317,17 +363,13 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     let hash = hasher.finalize().to_hex().to_string();
 
     let cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
-    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("mkdir cache: {}", e))?;
+    crate::runtime_cache::prepare_private_cache_directory(&cache_dir, "test runtime cache")?;
     let lib_path = cache_dir.join(format!("libmimi_runtime_{hash}.a"));
     let lock_path = cache_dir.join("_build.lock");
 
     // File lock to serialize runtime compilation across parallel tests
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| format!("create lock: {}", e))?;
+    let lock_file =
+        crate::runtime_cache::open_private_cache_lock(&lock_path, "test runtime cache lock")?;
     #[cfg(unix)]
     // SAFETY: fd 是上方 OpenOptions 真实打开的锁文件，flock 参数满足 libc 前置条件。
     unsafe {
@@ -335,7 +377,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     }
 
     // Check again after acquiring lock (another thread may have compiled it)
-    if lib_path.exists() {
+    if test_runtime_cache_hit(&lib_path)? {
         #[cfg(unix)]
         // SAFETY: 同上——已持有锁的同一 fd 释放，无别名；参数有效。
         unsafe {
@@ -369,7 +411,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
             stderr
         ));
     }
-    std::fs::rename(&tmp_path, &lib_path).map_err(|e| format!("rename: {}", e))?;
+    publish_test_runtime_cache(&tmp_path, &lib_path)?;
 
     // Strip debug info from the cached archive (28 MB → ~15 MB).
     // This reduces linker symbol-scan time by ~15 %.
@@ -377,6 +419,7 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .arg("--strip-debug")
         .arg(&lib_path)
         .status();
+    test_runtime_cache_hit(&lib_path)?;
 
     // Remove stale runtime archives from previous builds (different source hash).
     let current_name = lib_path
@@ -388,7 +431,16 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("libmimi_runtime_") && name.ends_with(".a") && name != current_name
             {
-                let _ = std::fs::remove_file(entry.path());
+                let path = entry.path();
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|error| format!("inspect stale test runtime cache: {error}"))?;
+                if !metadata.file_type().is_file() {
+                    return Err(format!(
+                        "stale test runtime cache path is not a regular file: {path:?}"
+                    ));
+                }
+                std::fs::remove_file(path)
+                    .map_err(|error| format!("remove stale test runtime cache: {error}"))?;
             }
         }
     }

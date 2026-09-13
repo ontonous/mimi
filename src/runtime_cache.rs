@@ -307,6 +307,118 @@ pub fn path_bytes(path: &Path) -> Vec<u8> {
     os_str_bytes(path.as_os_str())
 }
 
+/// Create a cache directory without accepting a symlink at the final path
+/// component, then repair it to owner-only access on Unix.
+pub fn prepare_private_cache_directory(cache_dir: &Path, label: &str) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| format!("create {label}: {error}"))?;
+    let metadata = std::fs::symlink_metadata(cache_dir)
+        .map_err(|error| format!("inspect {label} directory: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!("{label} path is not a directory: {cache_dir:?}"));
+    }
+    #[cfg(unix)]
+    if {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777 != 0o700
+    } {
+        let mut permissions = metadata.permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o700);
+        }
+        std::fs::set_permissions(cache_dir, permissions)
+            .map_err(|error| format!("set {label} directory permissions: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Open a cache lock without following its final path component and enforce
+/// owner-only permissions on both newly-created and existing lock files.
+pub fn open_private_cache_lock(lock_path: &Path, label: &str) -> Result<std::fs::File, String> {
+    let file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .mode(0o600)
+                .open(lock_path)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(lock_path)
+        }
+    }
+    .map_err(|error| format!("open {label}: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect {label}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{label} path is not a regular file: {lock_path:?}"));
+    }
+    #[cfg(unix)]
+    if {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777 != 0o600
+    } {
+        let mut permissions = metadata.permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        file.set_permissions(permissions)
+            .map_err(|error| format!("set {label} permissions: {error}"))?;
+    }
+    Ok(file)
+}
+
+/// Open a cache archive or staging file without following its final path
+/// component, require a regular-file descriptor, and enforce owner-only mode.
+pub fn open_private_cache_file(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    let file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::File::open(path)
+        }
+    }
+    .map_err(|error| format!("open {label}: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect {label}: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("{label} path is not a regular file: {path:?}"));
+    }
+    #[cfg(unix)]
+    if {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777 != 0o600
+    } {
+        let mut permissions = metadata.permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        file.set_permissions(permissions)
+            .map_err(|error| format!("set {label} permissions: {error}"))?;
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

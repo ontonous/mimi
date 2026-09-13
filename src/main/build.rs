@@ -2,8 +2,6 @@ use std::path::Path;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::resolve_path;
 use mimi::ast::Item;
@@ -16,7 +14,11 @@ use mimi::runtime_cache::include_literals as runtime_include_literals;
 use mimi::runtime_cache::{
     compiler_environment_frame as runtime_compiler_environment_frame,
     configure_rustc_command as configure_runtime_compiler_command,
-    included_sources as runtime_cache_included_sources, path_bytes as runtime_cache_path_bytes,
+    included_sources as runtime_cache_included_sources,
+    open_private_cache_file as runtime_open_private_cache_file,
+    open_private_cache_lock as runtime_open_private_cache_lock,
+    path_bytes as runtime_cache_path_bytes,
+    prepare_private_cache_directory as runtime_prepare_private_cache_directory,
 };
 use mimi::{lexer, loader, verifier};
 
@@ -163,20 +165,7 @@ impl Drop for TempFileGuard {
 
 fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path::PathBuf, String> {
     let _tmp_guard = TempFileGuard::new(tmp_path.to_path_buf());
-    let tmp_metadata = std::fs::symlink_metadata(tmp_path)
-        .map_err(|error| format!("inspect runtime cache temporary: {error}"))?;
-    if !tmp_metadata.file_type().is_file() {
-        return Err(format!(
-            "runtime cache temporary path is not a regular file: {tmp_path:?}"
-        ));
-    }
-    #[cfg(unix)]
-    {
-        let mut permissions = tmp_metadata.permissions();
-        permissions.set_mode(0o600);
-        std::fs::set_permissions(tmp_path, permissions)
-            .map_err(|error| format!("set runtime cache archive permissions: {error}"))?;
-    }
+    let _tmp_file = runtime_open_private_cache_file(tmp_path, "runtime cache temporary")?;
     match std::fs::symlink_metadata(cache_path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
@@ -391,21 +380,6 @@ fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, St
     match std::fs::symlink_metadata(cache_path) {
         Ok(metadata) if metadata.file_type().is_file() => {
             let mut file = open_runtime_cache_archive(cache_path)?;
-            let handle_metadata = file
-                .metadata()
-                .map_err(|error| format!("inspect runtime cache archive handle: {error}"))?;
-            if !handle_metadata.file_type().is_file() {
-                return Err(format!(
-                    "runtime cache archive handle is not a regular file: {cache_path:?}"
-                ));
-            }
-            #[cfg(unix)]
-            if handle_metadata.permissions().mode() & 0o777 != 0o600 {
-                let mut permissions = handle_metadata.permissions();
-                permissions.set_mode(0o600);
-                file.set_permissions(permissions)
-                    .map_err(|error| format!("set runtime cache archive permissions: {error}"))?;
-            }
             let mut magic = [0_u8; 8];
             std::io::Read::read_exact(&mut file, &mut magic)
                 .map_err(|error| format!("read runtime cache archive header: {error}"))?;
@@ -425,72 +399,17 @@ fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, St
 }
 
 fn open_runtime_cache_archive(cache_path: &Path) -> Result<std::fs::File, String> {
-    let file = {
-        #[cfg(unix)]
-        {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(cache_path)
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::File::open(cache_path)
-        }
-    }
-    .map_err(|error| format!("open runtime cache archive: {error}"))?;
-    Ok(file)
+    runtime_open_private_cache_file(cache_path, "runtime cache archive")
 }
 
 fn prepare_runtime_cache_dir(cache_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(cache_dir).map_err(|error| format!("create runtime cache: {error}"))?;
-    let metadata = std::fs::symlink_metadata(cache_dir)
-        .map_err(|error| format!("inspect runtime cache directory: {error}"))?;
-    if !metadata.file_type().is_dir() {
-        return Err(format!(
-            "runtime cache path is not a directory: {cache_dir:?}"
-        ));
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o777 != 0o700 {
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(cache_dir, permissions)
-            .map_err(|error| format!("set runtime cache directory permissions: {error}"))?;
-    }
-    Ok(())
+    runtime_prepare_private_cache_directory(cache_dir, "runtime cache")
 }
 
 #[cfg(unix)]
 fn acquire_runtime_cache_lock(cache_dir: &Path) -> Result<std::fs::File, String> {
     let lock_path = cache_dir.join("build.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        // Never follow a user- or another-process-supplied lock symlink.
-        // The cache directory is shared through the system temp root, so the
-        // final path component must be pinned to this cache instance.
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(0o600)
-        .open(&lock_path)
-        .map_err(|e| format!("open runtime cache lock: {e}"))?;
-    let metadata = lock_file
-        .metadata()
-        .map_err(|e| format!("inspect runtime cache lock: {e}"))?;
-    if !metadata.file_type().is_file() {
-        return Err(format!(
-            "runtime cache lock path is not a regular file: {lock_path:?}"
-        ));
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600);
-        lock_file
-            .set_permissions(permissions)
-            .map_err(|e| format!("set runtime cache lock permissions: {e}"))?;
-    }
+    let lock_file = runtime_open_private_cache_lock(&lock_path, "runtime cache lock")?;
     // SAFETY: lock_file is an open regular file and flock only changes its
     // advisory lock state; no Rust references cross the FFI boundary.
     loop {
