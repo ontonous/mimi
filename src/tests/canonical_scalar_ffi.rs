@@ -4837,6 +4837,93 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_contract_failures_preserve_cross_entry_snapshots() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64 ensures: result == value; }
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_path = first.dir.join("ffi.so").to_string_lossy().into_owned();
+    let second_path = second.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&first.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("explicit-binding contract fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize explicit-binding contract MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit-binding contract bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(first_path.clone());
+    let first_error = vm
+        .run_value()
+        .expect_err("checked explicit library A must reject its violating result");
+    assert_eq!(first_error.code(), "E0808");
+    assert!(first_error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.set_canonical_ffi_library_path(second_path.clone());
+    let second_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped explicit library B must share the contract failure boundary");
+    assert_eq!(second_error.code(), "E0808");
+    assert!(second_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        2,
+        "switching to B must load it before the host-result contract failure"
+    );
+
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("unchecked direct entry must recover on explicit B"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_verify_ffi(true);
+    vm.set_canonical_ffi_library_path(first_path);
+    let third_error = vm
+        .run_value()
+        .expect_err("re-enabled checks must reject after rebinding back to A");
+    assert_eq!(third_error.code(), "E0808");
+    assert!(third_error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("unchecked wrapped entry must recover on explicit A"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
