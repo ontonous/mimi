@@ -2913,12 +2913,13 @@ fn scalar_ffi_failed_vm_run_is_reusable_after_stdout_snapshot() {
 
 #[test]
 fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
-    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
     let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
     let first_library = first.dir.join("ffi.so");
     let second_library = second.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&first_library);
     let i64_abi = crate::core::mir::types::MirAbiClass::Integer {
         bits: 64,
         signed: true,
@@ -4586,6 +4587,106 @@ func main() -> i64 {
     assert_eq!(second.1, 1);
     assert_eq!(first.2, descriptor_snapshot);
     assert_eq!(second.2, descriptor_snapshot);
+}
+
+#[test]
+fn scalar_ffi_explicit_vm_library_bindings_are_thread_local() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_library = first.dir.join("ffi.so");
+    let second_library = second.dir.join("ffi.so");
+    guard.set_path(&first_library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("explicit VM library binding fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize explicit VM library binding MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit VM library binding bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let first_program = bytecode.clone();
+    let second_program = bytecode.clone();
+    let fallback_program = bytecode;
+    let first_path = first_library.to_string_lossy().into_owned();
+    let second_path = second_library.to_string_lossy().into_owned();
+    let second_path_for_fallback = second_path.clone();
+
+    let first = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(first_program);
+        vm.set_canonical_ffi_library_path(first_path);
+        let value = vm.run_value();
+        (
+            value,
+            vm.stdout().to_owned(),
+            vm.debug_stack_state(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+    let second = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(second_program);
+        vm.set_canonical_ffi_library_path(second_path);
+        let value = vm.call_named("function:main", Vec::new());
+        (
+            value,
+            vm.stdout().to_owned(),
+            vm.debug_stack_state(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+
+    let first = first
+        .join()
+        .expect("first explicit-binding VM thread must join");
+    let second = second
+        .join()
+        .expect("second explicit-binding VM thread must join");
+    assert_eq!(first.0.expect("first explicit-binding run"), Value::Int(0));
+    assert_eq!(
+        second.0.expect("second explicit-binding call"),
+        Value::Int(0)
+    );
+    assert_eq!(first.1, "12\n");
+    assert_eq!(second.1, "23\n");
+    assert_eq!(first.2, (0, 0));
+    assert_eq!(second.2, (0, 0));
+    assert_eq!(first.3, 1);
+    assert_eq!(second.3, 1);
+    assert_eq!(first.4, descriptor_snapshot);
+    assert_eq!(second.4, descriptor_snapshot);
+
+    let mut fallback_vm = BytecodeVM::new(fallback_program);
+    fallback_vm.set_canonical_ffi_library_path(second_path_for_fallback);
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("explicit binding must select library B after threaded calls"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "23\n");
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    fallback_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("clearing explicit binding must restore environment lookup"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "12\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
 #[test]

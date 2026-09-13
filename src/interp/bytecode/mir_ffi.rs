@@ -69,6 +69,12 @@ fn default_libc_candidates() -> [&'static str; 5] {
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
     loaded_libs: Vec<(String, Library)>,
+    /// Optional VM-local host binding. When absent, the compatibility
+    /// environment contract (`MIMI_FFI_LIB` or discoverable libc) remains the
+    /// default. Keeping this override on the runtime instance lets embedders
+    /// run multiple VMs against different libraries without racing a
+    /// process-global environment variable.
+    library_path: Option<String>,
     pub(crate) verify_requires: bool,
 }
 
@@ -76,8 +82,17 @@ impl CanonicalMirFfiRuntime {
     pub(crate) fn new() -> Self {
         Self {
             loaded_libs: Vec::new(),
+            library_path: None,
             verify_requires: true,
         }
+    }
+
+    pub(crate) fn set_library_path(&mut self, path: impl Into<String>) {
+        self.library_path = Some(path.into());
+    }
+
+    pub(crate) fn clear_library_path(&mut self) {
+        self.library_path = None;
     }
 
     #[cfg(test)]
@@ -359,15 +374,19 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         converted_args: &[Value],
     ) -> Result<Value, String> {
-        let lib_path = match std::env::var("MIMI_FFI_LIB") {
-            Ok(path) => path,
-            Err(_) => default_libc_candidates()
-                .into_iter()
-                .find(|candidate| std::path::Path::new(candidate).exists())
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc".to_owned()
-                })?,
+        let lib_path = match self.library_path.clone() {
+            Some(path) => path,
+            None => match std::env::var("MIMI_FFI_LIB") {
+                Ok(path) => path,
+                Err(_) => default_libc_candidates()
+                    .into_iter()
+                    .find(|candidate| std::path::Path::new(candidate).exists())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc"
+                            .to_owned()
+                    })?,
+            },
         };
         let lib_idx = if let Some(index) = self
             .loaded_libs

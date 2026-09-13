@@ -361,6 +361,21 @@ impl BytecodeVM {
         self.canonical_ffi_runtime.verify_requires = verify;
     }
 
+    /// Bind Canonical MIR scalar FFI for this VM to one explicit dynamic
+    /// library path. The binding is VM-local, so separate VMs can safely use
+    /// different libraries even when they share one `BytecodeProgram` or run
+    /// on different threads. VMs without this override retain the
+    /// `MIMI_FFI_LIB`/discoverable-libc fallback.
+    pub fn set_canonical_ffi_library_path(&mut self, path: impl Into<String>) {
+        self.canonical_ffi_runtime.set_library_path(path);
+    }
+
+    /// Remove the VM-local Canonical FFI library binding and return to the
+    /// process environment/system-libc lookup contract.
+    pub fn clear_canonical_ffi_library_path(&mut self) {
+        self.canonical_ffi_runtime.clear_library_path();
+    }
+
     /// Validate the checker-owned provenance graph before executing any
     /// bytecode. Canonical FFI descriptors are materialized one-per-MIR
     /// call-site, and the compiler records an internal binding snapshot for
