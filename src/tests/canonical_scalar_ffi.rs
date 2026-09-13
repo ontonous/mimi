@@ -7343,6 +7343,74 @@ func main() -> i64 { receipt_guard(1 as i64) }
 }
 
 #[test]
+fn scalar_ffi_forged_descriptor_fails_before_stdout_in_all_consumers() {
+    const SOURCE: &str = r#"
+extern "C" { func preflight_guard(value: i64) -> i64; }
+func main() -> i64 { println(17); preflight_guard(1 as i64); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("descriptor-preflight FFI fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("descriptor-preflight FFI fixture materialization");
+
+    let mut forged_receipts = canonical.ffi_calls().clone();
+    forged_receipts
+        .values_mut()
+        .next()
+        .expect("descriptor-preflight call-site receipt")
+        .symbol = "forged_preflight_symbol".into();
+    let mut forged_mir = canonical.clone();
+    forged_mir.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let reference_interpreter = MirReferenceInterpreter::new(&forged_mir);
+    let reference_error = reference_interpreter
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged descriptor before execution");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("symbol disagrees with canonical extern callee"),
+        "{reference_error}"
+    );
+    assert_eq!(
+        reference_interpreter.captured_output(),
+        "",
+        "reference preflight failure must not execute the leading println"
+    );
+
+    let bytecode = compile_mir_program(&canonical).expect("descriptor-preflight bytecode");
+    let mut forged_bytecode = (*bytecode).clone();
+    forged_bytecode.canonical_ffi[0].symbol = "forged_preflight_symbol".into();
+    let mut vm = BytecodeVM::new(std::sync::Arc::new(forged_bytecode));
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject a forged descriptor before execution");
+    assert!(
+        bytecode_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{bytecode_error}"
+    );
+    assert_eq!(
+        vm.stdout(),
+        "",
+        "bytecode preflight failure must not execute the leading println"
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let native_errors = crate::codegen::mir::validate_mir_native(&forged_mir)
+        .expect_err("native must reject a forged descriptor before LLVM emission");
+    assert!(
+        native_errors.iter().any(|error| {
+            error
+                .message
+                .contains("symbol disagrees with canonical extern callee")
+        }),
+        "{native_errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
