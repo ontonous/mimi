@@ -5906,6 +5906,87 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_non_utf8_environment_does_not_cross_vm_explicit_binding() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_path = first.dir.join("ffi.so");
+    let second_path = second.dir.join("ffi.so");
+    guard.set_path(&first_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("cross-VM non-UTF-8 environment fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize cross-VM non-UTF-8 environment MIR");
+    let bytecode = compile_mir_program(&mir).expect("cross-VM non-UTF-8 environment bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut explicit_vm = BytecodeVM::new(bytecode.clone());
+    let mut fallback_vm = BytecodeVM::new(bytecode);
+
+    explicit_vm.set_canonical_ffi_library_path(first_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must load library A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "12\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::env::set_var(
+        "MIMI_FFI_LIB",
+        OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xfe, b'.', b's', b'o']),
+    );
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("explicit VM must ignore malformed global environment"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "12\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let fallback_error = fallback_vm
+        .run_value()
+        .expect_err("unbound VM must reject malformed environment bytes");
+    assert_eq!(fallback_error.code(), "E0800");
+    assert!(fallback_error.to_string().contains("not valid UTF-8"));
+    assert_eq!(fallback_vm.stdout(), "");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    guard.set_path(&second_path);
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("restored environment B must load for the unbound VM"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "23\n");
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must remain bound to A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "12\n");
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
