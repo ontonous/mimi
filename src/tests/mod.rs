@@ -1216,7 +1216,16 @@ mod test_runtime_cache_regressions {
             return;
         }
 
-        let original_ffi_lib = std::env::var_os("MIMI_FFI_LIB");
+        // Snapshot the process-wide value while holding the same lock used by
+        // every writer.  Capturing it without the lock races with a sibling
+        // test that may be between `set_path` and guard restoration, which can
+        // make the later restoration check compare against a transient value.
+        let original_ffi_lib = {
+            let lock = FfiEnvLock::lock();
+            let value = std::env::var_os("MIMI_FFI_LIB");
+            drop(lock);
+            value
+        };
         let executable = std::env::current_exe().expect("locate test executable");
         let mut child = ProbeChildGuard::new(
             probe_command(executable)
