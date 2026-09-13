@@ -6219,6 +6219,57 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_environment_failed_path_reopens_after_new_inode_repair() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let anchor = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let repair = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let target = anchor.dir.join("environment-late.so");
+    let repair_path = repair.dir.join("ffi.so");
+    guard.set_path(&target);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("environment new-inode repair fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize environment new-inode repair MIR");
+    let bytecode = compile_mir_program(&mir).expect("environment new-inode repair bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    let first_error = vm
+        .run_value()
+        .expect_err("an absent environment path must fail before caching");
+    assert_eq!(first_error.code(), "E0800");
+    assert!(
+        first_error.to_string().contains("failed to load"),
+        "{first_error}"
+    );
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert!(!target.exists());
+
+    std::fs::rename(&repair_path, &target)
+        .expect("repair library must appear at the failed environment path");
+    guard.set_path(&target);
+    assert_eq!(
+        vm.run_value()
+            .expect("environment fallback must load the repaired new inode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
