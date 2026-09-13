@@ -6342,6 +6342,125 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_cached_environment_binding_stays_vm_local_across_clear_rebind() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1_000_000_000);
+    let explicit = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let environment = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let explicit_path = explicit.dir.join("ffi.so");
+    let environment_path = environment.dir.join("ffi.so");
+    let pending_path = environment.dir.join("environment-cached.pending.so");
+    guard.set_path(&environment_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("cached environment clear/rebind fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize cached environment clear/rebind MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached environment clear/rebind bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut explicit_vm = BytecodeVM::new(bytecode.clone());
+    let mut fallback_vm = BytecodeVM::new(bytecode);
+
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must initially load library A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("fallback VM must cache environment library B"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&environment_path, &pending_path)
+        .expect("cached environment library must be temporarily hidden");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        fallback_vm
+            .call_function_wrap_ok(fallback_vm.program().entry, &[], Value::Unit)
+            .expect("fallback VM must retain its cached B handle after removal"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let fallback_descriptor_snapshot = fallback_vm.program().canonical_ffi.clone();
+
+    // Release the fallback VM's host handle before probing the explicit VM.
+    // Linux may let a second dlopen("path") resurrect an already loaded
+    // object even after the directory entry is renamed away; dropping the
+    // first VM keeps this assertion about Mimi's VM-local cache rather than
+    // the platform loader's process-wide handle table.
+    drop(fallback_vm);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    let clear_error = explicit_vm
+        .run_value()
+        .expect_err("cleared explicit VM must not borrow fallback VM's cached handle");
+    assert_eq!(clear_error.code(), "E0800");
+    assert!(
+        clear_error.to_string().contains("failed to load"),
+        "{clear_error}"
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    explicit_vm.set_canonical_ffi_library_path(environment_path.to_string_lossy().into_owned());
+    let rebind_error = explicit_vm
+        .call_named("function:main", Vec::new())
+        .expect_err("explicit rebind must still fail while its path is absent");
+    assert_eq!(rebind_error.code(), "E0800");
+    assert_eq!(rebind_error.to_string(), clear_error.to_string());
+    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&pending_path, &environment_path)
+        .expect("environment library must be restored for explicit rebind");
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must load B after the repaired rebind path appears"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n23\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        explicit_vm
+            .call_function_wrap_ok(explicit_vm.program().entry, &[], Value::Unit)
+            .expect("cleared binding must reuse its own cached environment handle"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n23\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(fallback_descriptor_snapshot, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
