@@ -756,6 +756,21 @@ mod test_runtime_cache_regressions {
         };
         assert_eq!(ready, "ffi-lock-ready");
 
+        let runtime_cache_dir = std::env::temp_dir().join("mimi_runtime_cache");
+        crate::runtime_cache::prepare_private_cache_directory(
+            &runtime_cache_dir,
+            "runtime cache identity probe",
+        )
+        .expect("prepare runtime cache identity probe directory");
+        let runtime_lock_path = runtime_cache_dir.join("_build.lock");
+        let runtime_lock = crate::runtime_cache::open_private_cache_lock(
+            &runtime_lock_path,
+            "runtime cache identity probe",
+        )
+        .expect("open runtime cache identity probe lock");
+        let _runtime_guard = acquire_test_runtime_cache_lock(runtime_lock)
+            .expect("FFI and runtime cache locks must not alias");
+
         let lock_dir = std::env::temp_dir().join("mimi_test_locks");
         let lock_path = lock_dir.join("ffi.lock");
         let probe_file =
