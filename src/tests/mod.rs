@@ -805,10 +805,7 @@ mod test_runtime_cache_regressions {
         let ffi_lock = FfiEnvLock::lock();
         let stdlib_lock = StdlibEnvGuard::read();
         assert_eq!(std::env::var_os("MIMI_FFI_LIB"), previous_ffi);
-        assert_eq!(
-            std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
-            previous_trace
-        );
+        assert_eq!(std::env::var_os("MIMI_CANONICAL_FFI_TRACE"), previous_trace);
         assert_eq!(std::env::var_os("MIMI_STDLIB"), previous_stdlib);
         drop(stdlib_lock);
         drop(ffi_lock);
@@ -836,10 +833,8 @@ mod test_runtime_cache_regressions {
 
         // A writer can acquire the same lock after both reader exits. This
         // proves Drop released the flock on ordinary return and unwinding.
-        let sentinel = std::env::temp_dir().join(format!(
-            "mimi-stdlib-reader-release-{}",
-            std::process::id()
-        ));
+        let sentinel =
+            std::env::temp_dir().join(format!("mimi-stdlib-reader-release-{}", std::process::id()));
         let writer = StdlibEnvGuard::set(&sentinel);
         assert_eq!(
             std::env::var_os("MIMI_STDLIB"),
@@ -894,6 +889,7 @@ mod test_runtime_cache_regressions {
             "MIMI_STDLIB_LOCK_EOF_PROBE",
             "MIMI_STDLIB_READER_PROBE",
             "MIMI_STDLIB_READER_EXIT_PROBE",
+            "MIMI_PROBE_STREAM_CLOSE",
         ] {
             command.env_remove(variable);
         }
@@ -1380,6 +1376,52 @@ mod test_runtime_cache_regressions {
         )
         .expect("writer must acquire after normal reader exit");
         drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_probe_streams_close_without_diagnostic_loss() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        if std::env::var_os("MIMI_PROBE_STREAM_CLOSE").is_some() {
+            println!("probe-stream-ready");
+            std::io::stdout()
+                .flush()
+                .expect("flush stream close probe readiness");
+            eprintln!("probe-stream-stderr");
+            // Exit immediately after both streams have emitted their probe
+            // diagnostics. This keeps libtest from writing to the closed
+            // readiness pipe and masking the child's terminal status.
+            std::process::exit(0);
+        }
+
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = ProbeChildGuard::new(
+            probe_command(executable)
+                .arg("--exact")
+                .arg(
+                    "tests::test_runtime_cache_regressions::process_global_probe_streams_close_without_diagnostic_loss",
+                )
+                .arg("--nocapture")
+                .env("MIMI_PROBE_STREAM_CLOSE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn(),
+            "probe stream close",
+        )
+        .expect("spawn probe stream close child");
+        child
+            .wait_ready("probe-stream-ready", "probe stream close")
+            .expect("read probe stream close readiness");
+        let status = child
+            .wait("probe stream close")
+            .expect("wait for probe stream close child");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "probe stream close status: {status}"
+        );
     }
 
     #[cfg(unix)]
