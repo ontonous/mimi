@@ -4924,6 +4924,104 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_contract_failure_clear_binding_falls_back_without_cache_duplication() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64 ensures: result == value; }
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let second_path = second.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&first.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("clear-binding contract fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize clear-binding contract MIR");
+    let bytecode = compile_mir_program(&mir).expect("clear-binding contract bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(second_path.clone());
+    let explicit_error = vm
+        .run_value()
+        .expect_err("checked explicit B must reject its violating result");
+    assert_eq!(explicit_error.code(), "E0808");
+    assert!(explicit_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.clear_canonical_ffi_library_path();
+    let fallback_error = vm
+        .call_named("function:main", Vec::new())
+        .expect_err("cleared binding must fail against violating environment A");
+    assert_eq!(fallback_error.code(), "E0808");
+    assert_eq!(fallback_error.to_string(), explicit_error.to_string());
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        2,
+        "clearing after explicit B failure must load environment A exactly once"
+    );
+
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("unchecked wrapped entry must recover through environment A"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(second_path);
+    assert_eq!(
+        vm.run_value()
+            .expect("unchecked run must recover after explicit B rebinding"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_verify_ffi(true);
+    let rebound_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("re-enabled wrapped entry must reject explicit B again");
+    assert_eq!(rebound_error.code(), "E0808");
+    assert!(rebound_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.clear_canonical_ffi_library_path();
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("cleared binding must reuse environment A after explicit B failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
