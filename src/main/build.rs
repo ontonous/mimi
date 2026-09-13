@@ -170,6 +170,13 @@ fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path
             "runtime cache temporary path is not a regular file: {tmp_path:?}"
         ));
     }
+    #[cfg(unix)]
+    {
+        let mut permissions = tmp_metadata.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(tmp_path, permissions)
+            .map_err(|error| format!("set runtime cache archive permissions: {error}"))?;
+    }
     match std::fs::symlink_metadata(cache_path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
@@ -392,6 +399,13 @@ fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, St
                     "runtime cache archive handle is not a regular file: {cache_path:?}"
                 ));
             }
+            #[cfg(unix)]
+            if handle_metadata.permissions().mode() & 0o777 != 0o600 {
+                let mut permissions = handle_metadata.permissions();
+                permissions.set_mode(0o600);
+                file.set_permissions(permissions)
+                    .map_err(|error| format!("set runtime cache archive permissions: {error}"))?;
+            }
             let mut magic = [0_u8; 8];
             std::io::Read::read_exact(&mut file, &mut magic)
                 .map_err(|error| format!("read runtime cache archive header: {error}"))?;
@@ -426,6 +440,25 @@ fn open_runtime_cache_archive(cache_path: &Path) -> Result<std::fs::File, String
     }
     .map_err(|error| format!("open runtime cache archive: {error}"))?;
     Ok(file)
+}
+
+fn prepare_runtime_cache_dir(cache_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| format!("create runtime cache: {error}"))?;
+    let metadata = std::fs::symlink_metadata(cache_dir)
+        .map_err(|error| format!("inspect runtime cache directory: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "runtime cache path is not a directory: {cache_dir:?}"
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(cache_dir, permissions)
+            .map_err(|error| format!("set runtime cache directory permissions: {error}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -479,7 +512,7 @@ fn acquire_runtime_cache_lock(cache_dir: &Path) -> Result<std::fs::File, String>
 #[cfg(unix)]
 fn cached_native_runtime(runtime_rs: &Path) -> Result<std::path::PathBuf, String> {
     let cache_dir = std::env::temp_dir().join("mimi_runtime_build_cache");
-    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("create runtime cache: {e}"))?;
+    prepare_runtime_cache_dir(&cache_dir)?;
     let _lock_file = acquire_runtime_cache_lock(&cache_dir)?;
     let mut attempt = 0_u8;
     loop {
@@ -900,12 +933,14 @@ mod tests {
     use super::{
         acquire_runtime_cache_lock, cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
         ensure_runtime_cache_key_stable, native_runtime_cache_eligible, open_runtime_cache_archive,
-        publish_runtime_cache, runtime_cache_attempt_should_retry, runtime_cache_hit,
-        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args,
-        runtime_cache_temp_path, runtime_compiler_args, runtime_compiler_environment_frame,
-        runtime_include_literals,
+        prepare_runtime_cache_dir, publish_runtime_cache, runtime_cache_attempt_should_retry,
+        runtime_cache_hit, runtime_cache_key, runtime_cache_key_with_asan,
+        runtime_cache_key_with_asan_and_args, runtime_cache_temp_path, runtime_compiler_args,
+        runtime_compiler_environment_frame, runtime_include_literals,
     };
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
 
     #[test]
@@ -957,6 +992,15 @@ mod tests {
         assert_eq!(
             fs::read(&cache_path).expect("read published runtime archive"),
             b"runtime archive"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&cache_path)
+                .expect("stat published runtime archive")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
 
         fs::remove_dir_all(&dir).ok();
@@ -1595,9 +1639,27 @@ mod tests {
 
         let archive = dir.join("runtime.a");
         fs::write(&archive, b"!<arch>\nruntime archive").expect("write runtime archive");
+        #[cfg(unix)]
+        {
+            let mut broad = fs::metadata(&archive)
+                .expect("stat runtime archive before hit")
+                .permissions();
+            broad.set_mode(0o644);
+            fs::set_permissions(&archive, broad)
+                .expect("broaden runtime archive permissions before hit");
+        }
         assert_eq!(
             runtime_cache_hit(&archive).expect("regular archive is a cache hit"),
             Some(archive.clone())
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&archive)
+                .expect("stat repaired runtime archive")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
 
         let corrupt = dir.join("corrupt.a");
@@ -1618,6 +1680,82 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_directory_rejects_file_collision() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-directory-file-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::write(&root, b"not a directory").expect("write runtime cache file collision");
+
+        let error = prepare_runtime_cache_dir(&root)
+            .expect_err("runtime cache directory must reject a file path");
+        assert!(error.starts_with("create runtime cache:"), "{error}");
+        assert!(root.is_file());
+        fs::remove_file(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_directory_is_owner_only_and_repairs_existing_permissions() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-directory-permissions-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache directory");
+        let mut broad = fs::metadata(&dir)
+            .expect("stat runtime cache directory")
+            .permissions();
+        broad.set_mode(0o755);
+        fs::set_permissions(&dir, broad).expect("broaden runtime cache directory permissions");
+
+        prepare_runtime_cache_dir(&dir).expect("repair runtime cache directory permissions");
+        assert_eq!(
+            fs::metadata(&dir)
+                .expect("stat repaired runtime cache directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_directory_rejects_symlink_path() {
+        let root = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-directory-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let target = root.with_extension("target");
+        fs::create_dir_all(&target).expect("create runtime cache directory target");
+        std::os::unix::fs::symlink(&target, &root).expect("create runtime cache directory link");
+
+        let error = prepare_runtime_cache_dir(&root)
+            .expect_err("runtime cache directory must reject a symlink path");
+        assert!(
+            error.starts_with("runtime cache path is not a directory:"),
+            "{error}"
+        );
+        assert!(root.is_symlink());
+        assert!(target.is_dir());
+        fs::remove_file(&root).ok();
+        fs::remove_dir_all(&target).ok();
     }
 
     #[cfg(unix)]
@@ -1716,8 +1854,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runtime_cache_lock_is_owner_only_and_repairs_existing_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!(
             "mimi-runtime-cache-lock-permissions-test-{}-{}",
             std::process::id(),
