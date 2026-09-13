@@ -7666,6 +7666,121 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_nested_failure_preserves_prefix_and_recovers_same_vm() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_missing_library(value: i64) -> i64; }
+func helper(value: i64) -> i64 {
+    println(2);
+    let result = mir_ffi_missing_library(value);
+    println(result);
+    result
+}
+func main() -> i64 {
+    println(1);
+    helper(7 as i64);
+    0
+}
+"#;
+
+    struct NestedRecoveryOracle;
+    impl MirReferenceFfiResolver for NestedRecoveryOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_missing_library" {
+                return Err(format!("unexpected recovery symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("recovery FFI arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let missing = fixture.dir.join("missing.so");
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(SOURCE)
+            .tokenize()
+            .expect("lex nested recovery fixture"),
+    )
+    .parse_file()
+    .expect("parse nested recovery fixture");
+    let checked = crate::core::check_program(&file).expect("check nested recovery fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize nested recovery MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&NestedRecoveryOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested recovery execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "1\n2\n8\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free nested recovery bytecode");
+    assert!(bytecode.ast.is_none());
+    guard.set_path(&missing);
+    let mut vm = BytecodeVM::new(bytecode);
+    let missing_error = vm
+        .run_value()
+        .expect_err("nested missing-library call must fail closed");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(
+        missing_error.to_string().contains("failed to load"),
+        "{missing_error}"
+    );
+    assert_eq!(
+        vm.stdout(),
+        "1\n2\n",
+        "nested load failure must preserve output from parent and helper frames"
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    guard.set_path(&library);
+    assert_eq!(
+        vm.run_value()
+            .expect("same VM must recover after nested load failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n2\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    assert_eq!(
+        vm.call_named("function:helper", vec![Value::Int(7)])
+            .expect("direct helper entry after nested recovery"),
+        Value::Int(8)
+    );
+    assert_eq!(vm.stdout(), "2\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_nested_recovery");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native nested recovery lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid nested recovery LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_LIBRARY_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native nested recovery execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n2\n8\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
