@@ -4438,6 +4438,153 @@ fn canonical_scalar_ffi_imported_default_libc_negative_contract_fails_before_lin
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_default_libc_multi_failure_is_ordered_and_atomic() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-default-libc-multi-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported default-libc multi-failure fixture");
+    fs::write(
+        dir.join("libc_guarded.mimi"),
+        "extern \"C\" { func labs(value: i64) -> i64 requires: value <= 0; }\npub func first(value: i64) -> i64 { labs(value) }\npub func second(value: i64) -> i64 { labs(value) }\n",
+    )
+    .expect("write imported default-libc multi-failure helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use libc_guarded\nfunc main() -> i64 { first(41 as i64); second(42 as i64); 0 }\n",
+    )
+    .expect("write imported default-libc multi-failure entry");
+
+    let canonical_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&output.stderr).lines())
+            .filter(|line| line.contains("canonical MIR extern requires contract"))
+            .filter_map(|line| {
+                if line.contains("function:first") {
+                    Some("function:first")
+                } else if line.contains("function:second") {
+                    Some("function:second")
+                } else {
+                    None
+                }
+            })
+            .fold(Vec::new(), |mut functions, function| {
+                if functions.last().copied() != Some(function) {
+                    functions.push(function);
+                }
+                functions
+            })
+    };
+    let mut verify_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc multi-failure verification");
+        assert!(
+            !verify.status.success(),
+            "imported default-libc multi-failure unexpectedly verified (explicit_mir={explicit_mir})"
+        );
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert_eq!(
+            canonical_summary(&verify).len(),
+            2,
+            "imported default-libc verification must report both failed receipts: {verify_text}"
+        );
+        assert!(
+            verify_text.contains("function:first") && verify_text.contains("function:second"),
+            "imported default-libc verification lost wrapper provenance: {verify_text}"
+        );
+        assert!(
+            !verify_text.contains("canonical route disposition: legacy"),
+            "imported default-libc multi-failure verification fell back to legacy: {verify_text}"
+        );
+        verify_outputs.push(verify);
+    }
+    assert_eq!(
+        canonical_summary(&verify_outputs[0]),
+        canonical_summary(&verify_outputs[1]),
+        "default and explicit MIR imported failure ordering diverged"
+    );
+
+    let mut build_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "multi-failure-mir"
+        } else {
+            "multi-failure-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc multi-failure build");
+        assert!(
+            !build.status.success(),
+            "imported default-libc multi-failure unexpectedly built (explicit_mir={explicit_mir})"
+        );
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert_eq!(
+            canonical_summary(&build).len(),
+            2,
+            "imported default-libc build must report both failed receipts: {stderr}"
+        );
+        assert!(
+            stderr.contains("FFI contract verification failed"),
+            "imported default-libc multi-failure lost verification stage: {stderr}"
+        );
+        assert!(
+            !stderr.contains("undefined symbol: labs"),
+            "imported default-libc multi-failure attempted a linker lookup: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "imported default-libc multi-failure build fell back to legacy: {stderr}"
+        );
+        assert!(
+            !binary.exists(),
+            "failed imported default-libc build left an artifact"
+        );
+        build_outputs.push(build);
+    }
+    assert_eq!(
+        build_outputs[0].stderr, build_outputs[1].stderr,
+        "default and explicit MIR imported build diagnostics diverged"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-imported-alias-negative-{}-{}",
