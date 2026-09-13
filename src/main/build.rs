@@ -163,6 +163,25 @@ impl Drop for TempFileGuard {
 
 fn publish_runtime_cache(tmp_path: &Path, cache_path: &Path) -> Result<std::path::PathBuf, String> {
     let _tmp_guard = TempFileGuard::new(tmp_path.to_path_buf());
+    let tmp_metadata = std::fs::symlink_metadata(tmp_path)
+        .map_err(|error| format!("inspect runtime cache temporary: {error}"))?;
+    if !tmp_metadata.file_type().is_file() {
+        return Err(format!(
+            "runtime cache temporary path is not a regular file: {tmp_path:?}"
+        ));
+    }
+    match std::fs::symlink_metadata(cache_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "runtime cache publish path is not a regular file: {cache_path:?}"
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("inspect runtime cache publish path: {error}"));
+        }
+    }
     std::fs::rename(tmp_path, cache_path).map_err(|e| format!("publish runtime cache: {e}"))?;
     Ok(cache_path.to_path_buf())
 }
@@ -912,6 +931,99 @@ mod tests {
         assert_eq!(
             fs::read(&cache_path).expect("read published runtime archive"),
             b"runtime archive"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_publish_atomically_replaces_existing_regular_archive() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-publish-replace-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache publish replace directory");
+        let tmp_path = dir.join("runtime.tmp");
+        let cache_path = dir.join("runtime.a");
+        fs::write(&cache_path, b"previous archive").expect("write previous runtime archive");
+        fs::write(&tmp_path, b"replacement archive").expect("write replacement archive");
+
+        publish_runtime_cache(&tmp_path, &cache_path)
+            .expect("regular runtime cache target should be atomically replaced");
+        assert!(!tmp_path.exists());
+        assert_eq!(
+            fs::read(&cache_path).expect("read replaced runtime archive"),
+            b"replacement archive"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn runtime_cache_publish_rejects_directory_target_and_cleans_temporary() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-publish-directory-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache publish directory collision root");
+        let tmp_path = dir.join("runtime.tmp");
+        let cache_path = dir.join("runtime.a");
+        fs::write(&tmp_path, b"temporary runtime archive")
+            .expect("write temporary runtime archive");
+        fs::create_dir(&cache_path).expect("create runtime archive directory collision");
+
+        let error = publish_runtime_cache(&tmp_path, &cache_path)
+            .expect_err("directory cache target must fail closed");
+        assert!(
+            error.starts_with("runtime cache publish path is not a regular file:"),
+            "{error}"
+        );
+        assert!(!tmp_path.exists());
+        assert!(cache_path.is_dir());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_publish_rejects_symlink_target_and_cleans_temporary() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-publish-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache publish symlink root");
+        let tmp_path = dir.join("runtime.tmp");
+        let target_path = dir.join("external.a");
+        let cache_path = dir.join("runtime.a");
+        fs::write(&tmp_path, b"temporary runtime archive")
+            .expect("write temporary runtime archive");
+        fs::write(&target_path, b"external archive").expect("write symlink target archive");
+        std::os::unix::fs::symlink(&target_path, &cache_path)
+            .expect("create runtime archive symlink collision");
+
+        let error = publish_runtime_cache(&tmp_path, &cache_path)
+            .expect_err("symlink cache target must fail closed");
+        assert!(
+            error.starts_with("runtime cache publish path is not a regular file:"),
+            "{error}"
+        );
+        assert!(!tmp_path.exists());
+        assert!(cache_path.is_symlink());
+        assert_eq!(
+            fs::read(&target_path).expect("read untouched symlink target archive"),
+            b"external archive"
         );
 
         fs::remove_dir_all(&dir).ok();
