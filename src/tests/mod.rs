@@ -893,6 +893,7 @@ mod test_runtime_cache_regressions {
             "MIMI_STDLIB_LOCK_PROBE",
             "MIMI_STDLIB_LOCK_EOF_PROBE",
             "MIMI_STDLIB_READER_PROBE",
+            "MIMI_STDLIB_READER_EXIT_PROBE",
         ] {
             command.env_remove(variable);
         }
@@ -1317,6 +1318,68 @@ mod test_runtime_cache_regressions {
         );
 
         let _guard = StdlibEnvGuard::read();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_stdlib_reader_normal_exit_releases_writer() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        if std::env::var_os("MIMI_STDLIB_READER_EXIT_PROBE").is_some() {
+            let _reader = StdlibEnvGuard::read();
+            println!("stdlib-reader-exit-ready");
+            std::io::stdout()
+                .flush()
+                .expect("flush stdlib normal-exit reader probe");
+            // Exit immediately after the handshake. libtest would otherwise
+            // write its summary after the parent closes the readiness pipe,
+            // turning a successful probe into a BrokenPipe status 101.
+            std::process::exit(0);
+        }
+
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = ProbeChildGuard::new(
+            probe_command(executable)
+                .arg("--exact")
+                .arg(
+                    "tests::test_runtime_cache_regressions::process_global_stdlib_reader_normal_exit_releases_writer",
+                )
+                .arg("--nocapture")
+                .env("MIMI_STDLIB_READER_EXIT_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "stdlib normal-exit reader",
+        )
+        .expect("spawn stdlib normal-exit reader probe child");
+        child
+            .wait_ready("stdlib-reader-exit-ready", "stdlib normal-exit reader")
+            .expect("read stdlib normal-exit reader probe readiness");
+        let status = child
+            .wait("stdlib normal-exit reader")
+            .expect("wait for stdlib normal-exit reader probe child");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "normal-exit reader probe status: {status}"
+        );
+
+        let lock_path = std::env::temp_dir()
+            .join("mimi_test_locks")
+            .join("stdlib.lock");
+        let writer = crate::runtime_cache::open_private_cache_lock(
+            &lock_path,
+            "stdlib writer after normal reader exit",
+        )
+        .expect("open stdlib writer after normal reader exit");
+        let guard = acquire_test_file_lock(
+            writer,
+            libc::LOCK_EX,
+            "stdlib writer after normal reader exit",
+        )
+        .expect("writer must acquire after normal reader exit");
+        drop(guard);
     }
 
     #[cfg(unix)]
