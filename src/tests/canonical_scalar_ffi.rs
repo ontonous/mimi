@@ -7585,7 +7585,7 @@ func main() -> i64 {
         project.join("libc_guarded.mimi"),
         r#"
 extern "C" {
-    func labs(value: i64) -> i64 requires: value <= 0;
+    func labs(value: i64) -> i64 requires: value <= 0 ensures: value <= 0;
     func sched_yield() -> i32;
 }
 pub func call_labs(value: i64) -> i64 {
@@ -7650,6 +7650,10 @@ pub func call_sched() -> i32 { sched_yield() }
         .requires
         .as_ref()
         .is_some_and(|requires| requires.canonical_text().contains("le(")));
+    assert!(labs_receipt
+        .ensures
+        .as_ref()
+        .is_some_and(|ensures| ensures.canonical_text().contains("le(")));
 
     let receipt = mir.route_receipt("scalar-ffi-v1");
     crate::core::CheckedProgram::reset_test_legacy_body_access();
