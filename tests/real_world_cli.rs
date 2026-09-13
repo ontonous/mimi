@@ -4135,6 +4135,156 @@ fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_default_libc_contract_matches_cli_consumers() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-default-libc-contract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported default-libc contract fixture directory");
+    fs::write(
+        dir.join("libc_guarded.mimi"),
+        "extern \"C\" {\n    func labs(value: i64) -> i64 requires: value <= 0;\n    func sched_yield() -> i32;\n}\npub func call_labs(value: i64) -> i64 {\n    requires: value <= 0\n    labs(value)\n}\npub func call_sched() -> i32 { sched_yield() }\n",
+    )
+    .expect("write imported default-libc contract helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use libc_guarded\nfunc main() -> i64 { println(call_labs(-41 as i64)); println(call_sched()); 0 }\n",
+    )
+    .expect("write imported default-libc contract entry");
+    let binary = dir.join("imported-default-libc-contract");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc contract run");
+        assert!(
+            run.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"41\n0\n", "explicit_mir={explicit_mir}");
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            !run_stderr.contains("canonical route disposition: legacy"),
+            "imported default-libc contract run fell back to legacy: {run_stderr}"
+        );
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc contract verification");
+        assert!(
+            verify.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        assert!(
+            verify_stdout.contains("canonical MIR extern requires contract proven"),
+            "imported default-libc contract proof missing: {verify_stdout}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&verify.stderr)
+                .contains("canonical route disposition: legacy"),
+            "imported default-libc contract verification fell back to legacy: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+
+        let mut build_ir = Command::new(mimi_bin());
+        build_ir.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build_ir.arg("--mir");
+        }
+        let build_ir = build_ir
+            .arg("--emit-ir")
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc contract IR build");
+        assert!(
+            build_ir.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&build_ir.stderr)
+        );
+        let ir = String::from_utf8_lossy(&build_ir.stdout);
+        assert!(
+            ir.contains("labs"),
+            "imported default-libc IR lost labs: {ir}"
+        );
+        assert!(
+            ir.contains("sched_yield"),
+            "imported default-libc IR lost sched_yield: {ir}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&build_ir.stderr)
+                .contains("canonical route disposition: legacy"),
+            "imported default-libc IR build fell back to legacy: {}",
+            String::from_utf8_lossy(&build_ir.stderr)
+        );
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc contract native build");
+        assert!(
+            build.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy"),
+            "imported default-libc contract native build fell back to legacy: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native = Command::new(&binary)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("run imported default-libc contract native binary");
+        assert!(
+            native.status.success(),
+            "explicit_mir={explicit_mir}: {}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(native.stdout, b"41\n0\n", "explicit_mir={explicit_mir}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-imported-alias-negative-{}-{}",
