@@ -131,6 +131,14 @@ const MISSING_SYMBOL_SOURCE: &str = r#"
 extern "C" { func mir_ffi_absent_symbol(value: i64) -> i64; }
 func main() -> i64 { println(9); mir_ffi_absent_symbol(7 as i64); 0 }
 "#;
+const MISSING_LIBRARY_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_missing_library(int64_t value) { return value + 1; }
+"#;
+const MISSING_LIBRARY_SOURCE: &str = r#"
+extern "C" { func mir_ffi_missing_library(value: i64) -> i64; }
+func main() -> i64 { println(13); println(mir_ffi_missing_library(7 as i64)); 0 }
+"#;
 const REBINDABLE_SYMBOL_A_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_rebindable(int64_t value) { return value + 11; }
@@ -2772,6 +2780,94 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     let native_error = super::link_and_observe_module(&generator, &config, counter)
         .expect_err("native link must reject the absent C symbol");
     assert!(native_error.contains("linker failed"), "{native_error}");
+}
+
+#[test]
+fn scalar_ffi_missing_library_preserves_prefix_and_recovers() {
+    struct MissingLibraryOracle;
+    impl MirReferenceFfiResolver for MissingLibraryOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_missing_library" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("missing-library oracle expects one i64".into());
+            };
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let missing = fixture.dir.join("missing.so");
+    guard.set_path(&library);
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(MISSING_LIBRARY_SOURCE)
+            .tokenize()
+            .expect("lex missing-library FFI fixture"),
+    )
+    .parse_file()
+    .expect("parse missing-library FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check missing-library FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize missing-library FFI fixture MIR");
+
+    let reference_interpreter =
+        MirReferenceInterpreter::new(&mir).with_ffi_resolver(&MissingLibraryOracle);
+    let reference = reference_interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference host binding for missing-library fixture");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "13\n8\n");
+
+    let bytecode = compile_mir_program(&mir).expect("missing-library AST-free bytecode");
+    guard.set_path(&missing);
+    let mut missing_vm = BytecodeVM::new(bytecode.clone());
+    let missing_error = missing_vm
+        .run_value()
+        .expect_err("bytecode must fail closed when its library path is absent");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(
+        missing_error.to_string().contains("failed to load"),
+        "{missing_error}"
+    );
+    assert_eq!(missing_vm.stdout(), "13\n");
+
+    guard.set_path(&library);
+    let mut recovered_vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        recovered_vm
+            .run_value()
+            .expect("a later valid library path must recover the bytecode consumer"),
+        Value::Int(0)
+    );
+    assert_eq!(recovered_vm.stdout(), "13\n8\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_missing_lib");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native missing-library fixture lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid missing-library fixture native module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_LIBRARY_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native fixture remains linkable with its C definition");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "13\n8\n");
+    assert_eq!(native.stderr, "");
 }
 
 #[test]
