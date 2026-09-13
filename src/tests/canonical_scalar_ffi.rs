@@ -3889,6 +3889,77 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_forged_binding_descriptor_index_before_reuse() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("cached forged-index FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize cached forged-index MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached forged-index bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial cached multi-site run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original = vm.program().canonical_ffi_bindings[1].clone();
+    let mut forged = original.clone();
+    forged.extern_idx = vm.program().canonical_ffi_bindings[0].extern_idx;
+    assert_ne!(forged.extern_idx, original.extern_idx);
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged);
+
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject a forged multi-site descriptor index");
+    assert!(
+        first
+            .to_string()
+            .contains("descriptor index 1 disagrees with compiler binding index 0"),
+        "{first}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must share forged multi-site index rejection");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, original);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("canonical VM must recover after descriptor-index restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
