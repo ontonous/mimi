@@ -720,10 +720,27 @@ mod test_runtime_cache_regressions {
     }
 
     #[cfg(unix)]
+    fn assert_test_lock_busy(lock_path: &std::path::Path, operation: libc::c_int, label: &str) {
+        use std::os::unix::io::AsRawFd;
+
+        let file = crate::runtime_cache::open_private_cache_lock(lock_path, label)
+            .expect("open nonblocking test lock probe");
+        // SAFETY: file is an open regular lock file; LOCK_NB only asks
+        // the kernel whether another process still owns its advisory lock.
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
+        assert_ne!(result, 0, "{label} must be held by the probe child");
+        let error = std::io::Error::last_os_error();
+        let raw_error = error.raw_os_error();
+        assert!(
+            raw_error == Some(libc::EAGAIN) || raw_error == Some(libc::EWOULDBLOCK),
+            "unexpected nonblocking lock error for {label}: {error}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn process_global_ffi_lock_recovers_after_child_exit() {
         use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::io::AsRawFd;
         use std::process::{Command, Stdio};
 
         if std::env::var_os("MIMI_FFI_LOCK_PROBE").is_some() {
@@ -773,20 +790,7 @@ mod test_runtime_cache_regressions {
 
         let lock_dir = std::env::temp_dir().join("mimi_test_locks");
         let lock_path = lock_dir.join("ffi.lock");
-        let probe_file =
-            crate::runtime_cache::open_private_cache_lock(&lock_path, "FFI lock recovery probe")
-                .expect("open FFI lock recovery probe");
-        // SAFETY: probe_file is an open regular lock file; LOCK_NB only asks
-        // the kernel whether the child still owns its advisory lock.
-        let result = unsafe { libc::flock(probe_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_ne!(result, 0, "child must hold FFI lock before termination");
-        let error = std::io::Error::last_os_error();
-        assert_eq!(
-            error.raw_os_error(),
-            Some(libc::EAGAIN),
-            "unexpected nonblocking lock error: {error}"
-        );
-        drop(probe_file);
+        assert_test_lock_busy(&lock_path, libc::LOCK_EX, "FFI lock recovery probe");
 
         child.kill().expect("terminate FFI lock probe child");
         let status = child.wait().expect("wait for FFI lock probe child");
@@ -796,6 +800,64 @@ mod test_runtime_cache_regressions {
         );
 
         let _guard = FfiEnvLock::lock();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_global_stdlib_lock_recovers_after_child_exit() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        if std::env::var_os("MIMI_STDLIB_LOCK_PROBE").is_some() {
+            let _guard = StdlibEnvGuard::set(std::path::Path::new("/tmp/mimi_stdlib_probe"));
+            println!("stdlib-lock-ready");
+            std::io::stdout().flush().expect("flush stdlib lock probe");
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = Command::new(executable)
+            .arg("--exact")
+            .arg("tests::test_runtime_cache_regressions::process_global_stdlib_lock_recovers_after_child_exit")
+            .arg("--nocapture")
+            .env("MIMI_STDLIB_LOCK_PROBE", "hold")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn stdlib lock probe child");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("capture stdlib lock probe output");
+        let mut lines = BufReader::new(stdout).lines();
+        let ready = loop {
+            match lines.next() {
+                Some(Ok(line)) if line == "stdlib-lock-ready" => break line,
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => panic!("decode stdlib lock probe readiness: {error}"),
+                None => panic!("read stdlib lock probe readiness"),
+            }
+        };
+        assert_eq!(ready, "stdlib-lock-ready");
+
+        let lock_path = std::env::temp_dir()
+            .join("mimi_test_locks")
+            .join("stdlib.lock");
+        assert_test_lock_busy(&lock_path, libc::LOCK_SH, "stdlib lock recovery probe");
+
+        child.kill().expect("terminate stdlib lock probe child");
+        let status = child.wait().expect("wait for stdlib lock probe child");
+        assert!(
+            !status.success(),
+            "terminated stdlib lock probe must not report success"
+        );
+        assert!(
+            lock_path.is_file(),
+            "stdlib lock file disappeared after exit"
+        );
+
+        let _guard = StdlibEnvGuard::read();
     }
 }
 
