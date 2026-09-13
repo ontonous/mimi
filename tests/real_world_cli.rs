@@ -5828,6 +5828,170 @@ fn canonical_scalar_ffi_imported_bool_result_ensures_match_cli_consumers() {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_unit_result_ensures_match_cli_consumers() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-unit-result-ensures-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported unit result-ensures fixture");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nstatic int32_t stored;\nvoid mir_ffi_import_store(int32_t value) { stored = value; }\nint64_t mir_ffi_import_read(void) { return stored; }\n",
+    )
+    .expect("write imported unit result-ensures C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported unit result-ensures C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"extern "C" {
+    func mir_ffi_import_store(value: i32) ensures: true;
+    func mir_ffi_import_read() -> i64;
+}
+pub func write(value: i32) -> i64 {
+    mir_ffi_import_store(value)
+    0
+}
+pub func read() -> i64 { mir_ffi_import_read() }
+"#,
+    )
+    .expect("write imported unit result-ensures module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use ffi_types\nfunc main() -> i64 { println(write(4)); println(read()); 0 }\n",
+    )
+    .expect("write imported unit result-ensures entry");
+
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported unit result-ensures verification");
+        assert!(
+            verify.status.success(),
+            "imported unit result-ensures verification failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            verify_text.contains("canonical MIR extern ensures contract proven"),
+            "imported unit result-ensures proof missing: {verify_text}"
+        );
+        assert!(
+            !verify_text.contains("canonical route disposition: legacy"),
+            "imported unit result-ensures verification fell back to legacy: {verify_text}"
+        );
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--verify-ffi")
+            .arg("--emit-ir")
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported unit result-ensures build");
+        assert!(
+            build.status.success(),
+            "imported unit result-ensures build failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let build_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            build_text.contains("mir_ffi_import_store")
+                && build_text.contains("mir_ffi_import_read"),
+            "imported unit result-ensures build lost extern symbols: {build_text}"
+        );
+        assert!(
+            !build_text.contains("canonical route disposition: legacy"),
+            "imported unit result-ensures build fell back to legacy: {build_text}"
+        );
+
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported unit result-ensures run");
+        assert!(
+            run.status.success(),
+            "imported unit result-ensures run failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"0\n4\n", "explicit_mir={explicit_mir}");
+        assert!(
+            !String::from_utf8_lossy(&run.stderr).contains("canonical route disposition: legacy"),
+            "imported unit result-ensures run fell back to legacy: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let mut skipped = Command::new(mimi_bin());
+        skipped.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            skipped.arg("--mir");
+        }
+        let skipped = skipped
+            .arg("--skip-verify-ffi")
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported unit result-ensures skipped run");
+        assert!(
+            skipped.status.success(),
+            "skipped imported unit result-ensures run failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&skipped.stderr)
+        );
+        assert_eq!(skipped.stdout, b"0\n4\n", "explicit_mir={explicit_mir}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_native_declaration_error_keeps_call_span() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-native-ffi-diagnostic-{}-{}",
