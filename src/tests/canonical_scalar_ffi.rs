@@ -7562,6 +7562,110 @@ fn scalar_ffi_wrapped_entrypoint_reuses_vm_after_malformed_preflight() {
 }
 
 #[test]
+fn scalar_ffi_nested_call_preserves_parent_stdout_and_direct_entry_snapshot() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_entry(int64_t value) { return value + 100; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_entry(value: i64) -> i64; }
+func helper(value: i64) -> i64 {
+    println(2);
+    let result = mir_ffi_nested_entry(value);
+    println(result);
+    result
+}
+func main() -> i64 {
+    println(1);
+    let value = helper(7 as i64);
+    println(value);
+    0
+}
+"#;
+
+    struct NestedOracle;
+    impl MirReferenceFfiResolver for NestedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_nested_entry" {
+                return Err(format!("unexpected nested symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("nested FFI arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 100))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(SOURCE)
+            .tokenize()
+            .expect("lex nested FFI fixture"),
+    )
+    .parse_file()
+    .expect("parse nested FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check nested FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize nested FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&NestedOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "1\n2\n107\n107\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free nested FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode nested FFI execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n2\n107\n107\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    assert_eq!(
+        vm.call_named("function:helper", vec![Value::Int(7)])
+            .expect("direct nested helper entry"),
+        Value::Int(107)
+    );
+    assert_eq!(
+        vm.stdout(),
+        "2\n107\n",
+        "empty-stack direct entry resets only its own snapshot; nested FFI keeps helper output"
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_nested");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native nested FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid nested FFI LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native nested FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n2\n107\n107\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
