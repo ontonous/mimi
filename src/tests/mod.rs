@@ -814,6 +814,41 @@ mod test_runtime_cache_regressions {
         drop(ffi_lock);
     }
 
+    #[test]
+    fn stdlib_reader_guard_releases_on_early_return_and_unwind() {
+        fn early_return() -> Option<std::ffi::OsString> {
+            let _reader = StdlibEnvGuard::read();
+            std::env::var_os("MIMI_STDLIB")
+        }
+
+        let previous = early_return();
+        assert_eq!(
+            std::env::var_os("MIMI_STDLIB"),
+            previous,
+            "reader guard must leave the environment unchanged on return"
+        );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _reader = StdlibEnvGuard::read();
+            panic!("stdlib reader unwind probe");
+        }));
+        assert!(unwind.is_err(), "unwind probe must panic inside the guard");
+
+        // A writer can acquire the same lock after both reader exits. This
+        // proves Drop released the flock on ordinary return and unwinding.
+        let sentinel = std::env::temp_dir().join(format!(
+            "mimi-stdlib-reader-release-{}",
+            std::process::id()
+        ));
+        let writer = StdlibEnvGuard::set(&sentinel);
+        assert_eq!(
+            std::env::var_os("MIMI_STDLIB"),
+            Some(sentinel.into_os_string())
+        );
+        drop(writer);
+        assert_eq!(std::env::var_os("MIMI_STDLIB"), previous);
+    }
+
     #[cfg(unix)]
     fn assert_test_lock_busy(lock_path: &std::path::Path, operation: libc::c_int, label: &str) {
         use std::os::unix::io::AsRawFd;
