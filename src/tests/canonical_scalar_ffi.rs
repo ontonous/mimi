@@ -8068,6 +8068,144 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_nested_ensures_wrapped_entry_failure_recovers_same_vm() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+static int64_t call_count;
+int64_t mir_ffi_nested_wrapped_ensures(int64_t value) {
+    ++call_count;
+    return call_count == 2 ? value + 1 : value;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_wrapped_ensures(value: i64) -> i64 ensures: result == value; }
+func helper(value: i64) -> i64 {
+    println(2);
+    let result = mir_ffi_nested_wrapped_ensures(value);
+    println(result);
+    result
+}
+func main() -> i64 {
+    println(1);
+    let value = helper(7 as i64);
+    println(value);
+    0
+}
+"#;
+
+    struct WrappedEnsuresOracle {
+        call_count: Cell<i64>,
+    }
+    impl MirReferenceFfiResolver for WrappedEnsuresOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_nested_wrapped_ensures" {
+                return Err(format!(
+                    "unexpected wrapped ensures symbol {}",
+                    receipt.symbol
+                ));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("wrapped ensures arguments {arguments:?}"));
+            };
+            let count = self.call_count.get() + 1;
+            self.call_count.set(count);
+            Ok(MirRuntimeValue::Int(if count == 2 {
+                value + 1
+            } else {
+                *value
+            }))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(SOURCE)
+            .tokenize()
+            .expect("lex wrapped nested ensures fixture"),
+    )
+    .parse_file()
+    .expect("parse wrapped nested ensures fixture");
+    let checked = crate::core::check_program(&file).expect("check wrapped nested ensures fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize wrapped nested ensures MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+
+    let oracle = WrappedEnsuresOracle {
+        call_count: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let first = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference wrapped entry first main");
+    assert_eq!(first.value, MirRuntimeValue::Int(0));
+    assert_eq!(first.output, "1\n2\n7\n7\n");
+
+    let reference_error = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference wrapped entry must reject the second postcondition");
+    assert!(reference_error.to_string().contains("postcondition"));
+    assert_eq!(reference.captured_output(), "1\n2\n");
+
+    let recovered_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference wrapped entry must recover on the third call");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "1\n2\n7\n7\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free wrapped nested ensures bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect("bytecode wrapped entry first main");
+    assert_eq!(vm.stdout(), "1\n2\n7\n7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let bytecode_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject nested postcondition after host return");
+    assert_eq!(bytecode_error.code(), "E0808");
+    assert!(bytecode_error.to_string().contains("postcondition"));
+    assert_eq!(vm.stdout(), "1\n2\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("ordinary entry must recover after wrapped postcondition failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n2\n7\n7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_nested_wrapped_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native wrapped nested ensures lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid wrapped nested ensures LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native wrapped nested ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n2\n7\n7\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
