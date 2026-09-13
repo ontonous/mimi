@@ -129,7 +129,7 @@ int64_t mir_ffi_present_only(int64_t value) { return value + 1; }
 "#;
 const MISSING_SYMBOL_SOURCE: &str = r#"
 extern "C" { func mir_ffi_absent_symbol(value: i64) -> i64; }
-func main() -> i64 { mir_ffi_absent_symbol(7 as i64) }
+func main() -> i64 { println(9); mir_ffi_absent_symbol(7 as i64); 0 }
 "#;
 const REBINDABLE_SYMBOL_A_C_SOURCE: &str = r#"
 #include <stdint.h>
@@ -2726,12 +2726,14 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
         .values()
         .any(|receipt| receipt.symbol == "mir_ffi_absent_symbol"));
 
-    let reference_error = MirReferenceInterpreter::new(&mir)
-        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+    let reference_interpreter = MirReferenceInterpreter::new(&mir);
+    let reference_error = reference_interpreter
+        .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference execution must require an explicit host binding");
     assert!(reference_error
         .to_string()
         .contains("no reference FFI host binding"));
+    assert_eq!(reference_interpreter.captured_output(), "9\n");
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-missing-symbol".into())
@@ -2752,7 +2754,7 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     assert!(bytecode_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.stdout(), "9\n");
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_missing");
