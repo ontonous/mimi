@@ -7130,6 +7130,108 @@ func main() -> i64 { println(labs(-41 as i64)); 0 }
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_default_libc_zero_argument_matches_reference_bytecode_and_native() {
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol == "sched_yield" && arguments.is_empty() {
+                Ok(MirRuntimeValue::Int(0))
+            } else {
+                Err(format!(
+                    "unexpected sched_yield receipt/arguments: {receipt:?} {arguments:?}"
+                ))
+            }
+        }
+    }
+
+    let guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let source = r#"
+extern "C" { func sched_yield() -> i32; }
+func main() -> i64 { println(sched_yield()); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("default libc zero-argument scalar FFI fixture");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "default libc zero-argument scalar FFI must stay on canonical admission"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize default libc zero-argument scalar FFI MIR");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("zero-argument default libc receipt");
+    assert_eq!(receipt.symbol, "sched_yield");
+    assert!(receipt.parameter_types.is_empty());
+    assert!(receipt.parameter_conversions.is_empty());
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc-zero-arg".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc-zero-arg".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("default libc zero-argument scalar FFI verification");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference default libc zero-argument scalar FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "0\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free zero-argument scalar FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode zero-argument scalar FFI"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_default_libc_zero_arg");
+    generator
+        .compile_mir_native(&mir)
+        .expect("same MIR native zero-argument scalar FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native zero-argument scalar FFI module");
+    let config = super::E2EConfig::default();
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native zero-argument scalar FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "0\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    drop(guard);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
