@@ -756,6 +756,20 @@ mod test_runtime_cache_regressions {
     }
 
     #[cfg(unix)]
+    fn probe_command(executable: std::path::PathBuf) -> std::process::Command {
+        let mut command = std::process::Command::new(executable);
+        for variable in [
+            "MIMI_FFI_LOCK_PROBE",
+            "MIMI_FFI_LOCK_EOF_PROBE",
+            "MIMI_STDLIB_LOCK_PROBE",
+            "MIMI_STDLIB_READER_PROBE",
+        ] {
+            command.env_remove(variable);
+        }
+        command
+    }
+
+    #[cfg(unix)]
     struct ProbeChildGuard {
         child: std::process::Child,
         reaped: bool,
@@ -791,6 +805,13 @@ mod test_runtime_cache_regressions {
                     None => return Err(format!("read {label} probe readiness: EOF")),
                 }
             }
+        }
+
+        fn take_stderr(&mut self) -> Result<std::process::ChildStderr, String> {
+            self.child
+                .stderr
+                .take()
+                .ok_or_else(|| "capture probe stderr: stderr unavailable".to_string())
         }
 
         fn kill(&mut self, label: &str) -> Result<(), String> {
@@ -880,6 +901,59 @@ mod test_runtime_cache_regressions {
 
     #[cfg(unix)]
     #[test]
+    fn lock_probe_readiness_without_stdout_has_structured_diagnostic() {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = ProbeChildGuard::new(command.spawn(), "no-stdout")
+            .expect("spawn no-stdout readiness probe child");
+        let error = child
+            .wait_ready("ready", "no-stdout")
+            .expect_err("missing stdout must fail closed");
+        assert_eq!(error, "capture no-stdout probe output: stdout unavailable");
+        assert!(child
+            .wait("no-stdout")
+            .expect("reap no-stdout readiness probe child")
+            .success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_probe_exit_status_and_stderr_are_observable() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf 'probe-failure\\n' >&2; exit 23"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = ProbeChildGuard::new(command.spawn(), "status")
+            .expect("spawn status framing probe child");
+        let mut stderr = child
+            .take_stderr()
+            .expect("capture status framing probe stderr");
+        let status = child
+            .wait("status")
+            .expect("wait for status framing probe child");
+        let mut message = String::new();
+        stderr
+            .read_to_string(&mut message)
+            .expect("read status framing probe stderr");
+        assert_eq!(
+            status.code(),
+            Some(23),
+            "status framing probe status: {status}"
+        );
+        assert_eq!(message, "probe-failure\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn lock_probe_readiness_skips_noise_before_marker() {
         use std::process::{Command, Stdio};
 
@@ -945,7 +1019,7 @@ mod test_runtime_cache_regressions {
     #[test]
     fn process_global_ffi_lock_recovers_after_child_exit() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         if std::env::var_os("MIMI_FFI_LOCK_PROBE").is_some() {
             let _guard = FfiEnvLock::lock();
@@ -957,7 +1031,7 @@ mod test_runtime_cache_regressions {
 
         let executable = std::env::current_exe().expect("locate test executable");
         let mut child = ProbeChildGuard::new(
-            Command::new(executable)
+            probe_command(executable)
                 .arg("--exact")
                 .arg("tests::test_runtime_cache_regressions::process_global_ffi_lock_recovers_after_child_exit")
                 .arg("--nocapture")
@@ -1007,9 +1081,42 @@ mod test_runtime_cache_regressions {
 
     #[cfg(unix)]
     #[test]
+    fn process_global_ffi_lock_readiness_eof_releases_after_child_exit() {
+        use std::process::Stdio;
+
+        if std::env::var_os("MIMI_FFI_LOCK_EOF_PROBE").is_some() {
+            let _guard = FfiEnvLock::lock();
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("locate test executable");
+        let mut child = ProbeChildGuard::new(
+            probe_command(executable)
+                .arg("--exact")
+                .arg("tests::test_runtime_cache_regressions::process_global_ffi_lock_readiness_eof_releases_after_child_exit")
+                .arg("--nocapture")
+                .env("MIMI_FFI_LOCK_EOF_PROBE", "hold")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn(),
+            "FFI EOF",
+        )
+        .expect("spawn FFI EOF probe child");
+        let error = child
+            .wait_ready("ffi-lock-ready", "FFI EOF")
+            .expect_err("EOF before FFI readiness must fail closed");
+        assert_eq!(error, "read FFI EOF probe readiness: EOF");
+        let status = child.wait("FFI EOF").expect("wait for FFI EOF probe child");
+        assert_eq!(status.code(), Some(0), "FFI EOF probe status: {status}");
+
+        let _guard = FfiEnvLock::lock();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn process_global_stdlib_lock_recovers_after_child_exit() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         if std::env::var_os("MIMI_STDLIB_LOCK_PROBE").is_some() {
             let _guard = StdlibEnvGuard::set(std::path::Path::new("/tmp/mimi_stdlib_probe"));
@@ -1021,7 +1128,7 @@ mod test_runtime_cache_regressions {
 
         let executable = std::env::current_exe().expect("locate test executable");
         let mut child = ProbeChildGuard::new(
-            Command::new(executable)
+            probe_command(executable)
                 .arg("--exact")
                 .arg("tests::test_runtime_cache_regressions::process_global_stdlib_lock_recovers_after_child_exit")
                 .arg("--nocapture")
@@ -1063,7 +1170,7 @@ mod test_runtime_cache_regressions {
     #[test]
     fn process_global_stdlib_readers_share_and_writer_waits() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         if std::env::var_os("MIMI_STDLIB_READER_PROBE").is_some() {
             let _guard = StdlibEnvGuard::read();
@@ -1077,7 +1184,7 @@ mod test_runtime_cache_regressions {
 
         let executable = std::env::current_exe().expect("locate test executable");
         let mut child = ProbeChildGuard::new(
-            Command::new(executable)
+            probe_command(executable)
                 .arg("--exact")
                 .arg(
                     "tests::test_runtime_cache_regressions::process_global_stdlib_readers_share_and_writer_waits",
