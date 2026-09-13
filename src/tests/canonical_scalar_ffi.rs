@@ -5192,6 +5192,72 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_multisite_failure_recovery_preserves_receipts() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let missing = library_fixture(counter + 2, MISSING_SYMBOL_C_SOURCE);
+    let first_path = first.dir.join("ffi.so").to_string_lossy().into_owned();
+    let second_path = second.dir.join("ffi.so").to_string_lossy().into_owned();
+    let missing_path = missing.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&first.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("explicit multisite fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize explicit multisite MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit multisite bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(missing_path);
+    let missing_error = vm
+        .run_value()
+        .expect_err("explicit missing library must fail at the first call site");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.set_canonical_ffi_library_path(second_path);
+    assert_eq!(
+        vm.run_value()
+            .expect("explicit B must recover both call sites"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n24\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(first_path);
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("wrapped entry must recover both call sites on explicit A"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
