@@ -4831,6 +4831,177 @@ fn canonical_scalar_ffi_imported_alias_negative_contract_matches_explicit_mir() 
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_alias_negative_consumers_match_explicit_mir() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-alias-negative-consumers-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported alias negative-consumers fixture");
+    let library = dir.join("ffi.so");
+    fs::write(
+        dir.join("ffi.c"),
+        "#include <stdint.h>\nint64_t mir_ffi_cli_import_alias(double value) { return (int64_t)value; }\n",
+    )
+    .expect("write imported alias negative-consumers C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(dir.join("ffi.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported alias negative-consumers C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        "pub type Scalar = f64\npub type Real = Scalar\npub type ScalarInt = i64\npub type ResultId = ScalarInt\nextern \"C\" { func mir_ffi_cli_import_alias(value: Real) -> ResultId requires: value >= 0; }\npub func imported_alias(value: i64) -> ResultId { mir_ffi_cli_import_alias(value) }\n",
+    )
+    .expect("write imported alias negative-consumers module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use ffi_types;\nfunc main() -> i64 { println(9); println(imported_alias(-7 as i64)); 0 }\n",
+    )
+    .expect("write imported alias negative-consumers entry");
+
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported alias negative-consumers verification");
+        assert!(
+            !verify.status.success(),
+            "invalid imported alias consumers unexpectedly verified (explicit_mir={explicit_mir})"
+        );
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            verify_text.contains("canonical MIR extern requires contract disproven"),
+            "negative imported alias consumers lost canonical disproven diagnostic: {verify_text}"
+        );
+        assert!(
+            !verify_text.contains("canonical route disposition: legacy"),
+            "negative imported alias consumers fell back to legacy: {verify_text}"
+        );
+
+        let binary = dir.join(if explicit_mir {
+            "imported-alias-negative-mir"
+        } else {
+            "imported-alias-negative-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported alias negative-consumers build");
+        assert!(
+            !build.status.success(),
+            "invalid imported alias consumers unexpectedly built (explicit_mir={explicit_mir})"
+        );
+        let build_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            build_text.contains("canonical MIR extern requires contract disproven"),
+            "negative imported alias build lost canonical disproven diagnostic: {build_text}"
+        );
+        assert!(
+            build_text.contains("FFI contract verification failed"),
+            "negative imported alias build lost verification stage: {build_text}"
+        );
+        assert!(
+            !build_text.contains("undefined symbol: mir_ffi_cli_import_alias"),
+            "negative imported alias build attempted unresolved linking: {build_text}"
+        );
+        assert!(
+            !build_text.contains("canonical route disposition: legacy"),
+            "negative imported alias build fell back to legacy: {build_text}"
+        );
+        assert!(
+            !binary.exists(),
+            "failed negative imported alias build left artifact"
+        );
+
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported alias negative-consumers run");
+        assert!(
+            !run.status.success(),
+            "invalid imported alias consumers unexpectedly ran (explicit_mir={explicit_mir})"
+        );
+        assert_eq!(run.stdout, b"9\n", "explicit_mir={explicit_mir}");
+        let run_text = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            run_text.contains("[E0808]"),
+            "negative imported alias run lost E0808: {run_text}"
+        );
+        assert!(
+            !run_text.contains("canonical route disposition: legacy"),
+            "negative imported alias run fell back to legacy: {run_text}"
+        );
+
+        let mut skipped = Command::new(mimi_bin());
+        skipped.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            skipped.arg("--mir");
+        }
+        let skipped = skipped
+            .arg("--skip-verify-ffi")
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .expect("spawn imported alias negative-consumers skipped run");
+        assert!(
+            skipped.status.success(),
+            "skipped imported alias consumers failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&skipped.stderr)
+        );
+        assert_eq!(skipped.stdout, b"9\n-7\n", "explicit_mir={explicit_mir}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_native_declaration_error_keeps_call_span() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-native-ffi-diagnostic-{}-{}",
