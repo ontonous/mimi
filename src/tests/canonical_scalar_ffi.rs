@@ -3404,6 +3404,66 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_call_site_direct_and_wrapped_entries_share_failure_snapshot() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(0)
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let valid = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let missing = library_fixture(counter + 1, MISSING_SYMBOL_C_SOURCE);
+    let valid_library = valid.dir.join("ffi.so");
+    let missing_library = missing.dir.join("ffi.so");
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("direct/wrapped multi-call-site FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize direct/wrapped multi-call-site MIR");
+    let bytecode = compile_mir_program(&mir).expect("direct/wrapped multi-call-site bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+
+    guard.set_path(&missing_library);
+    let direct_error = vm
+        .call_named("function:main", Vec::new())
+        .expect_err("direct entry must fail at the first missing-symbol call site");
+    assert_eq!(direct_error.code(), "E0800");
+    assert!(direct_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must share the missing-symbol failure boundary");
+    assert_eq!(wrapped_error.code(), "E0800");
+    assert_eq!(wrapped_error.to_string(), direct_error.to_string());
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&valid_library);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("ordinary direct entry must recover after wrapped failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
