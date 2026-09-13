@@ -3172,6 +3172,128 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_vm_rebind_preserves_two_call_site_identities() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    println(mir_ffi_rebindable(2 as i64))
+    0
+}
+"#;
+    struct RebindOracle;
+    impl MirReferenceFfiResolver for RebindOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_rebindable" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 11))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_library = first.dir.join("ffi.so");
+    let second_library = second.dir.join("ffi.so");
+    guard.set_path(&first_library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("two-call-site rebind FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize two-call-site rebind MIR");
+    let receipts = mir
+        .ffi_call_entries_in_source_order()
+        .into_iter()
+        .map(|(_, receipt)| {
+            (
+                receipt.caller.0.clone(),
+                receipt.instruction.as_str().to_owned(),
+                receipt.callee.0.clone(),
+                receipt.symbol.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert_ne!(receipts[0].1, receipts[1].1);
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&RebindOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("two-call-site reference execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "12\n13\n");
+
+    let bytecode = compile_mir_program(&mir).expect("two-call-site rebind bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("first library two-call-site VM run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n13\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&second_library);
+    assert_eq!(
+        vm.run_value()
+            .expect("same VM must rebind both canonical call sites"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "23\n24\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(
+        vm.program()
+            .canonical_ffi
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.caller.clone(),
+                    descriptor.instruction.clone(),
+                    descriptor.callee.clone(),
+                    descriptor.symbol.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        receipts
+    );
+
+    guard.set_path(&first_library);
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_rebind_sites");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native two-call-site rebind lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native two-call-site rebind module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(REBINDABLE_SYMBOL_A_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native two-call-site rebind execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "12\n13\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
