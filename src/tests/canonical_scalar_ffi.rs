@@ -151,6 +151,10 @@ const REBINDABLE_SYMBOL_C_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_rebindable(int64_t value) { return value + 33; }
 "#;
+const REBINDABLE_SYMBOL_D_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_rebindable(int64_t value) { return value + 44; }
+"#;
 const ALIASED_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_expect_alias_f64(double x) { return x == 7.0 ? 42 : -1; }
@@ -6567,6 +6571,145 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         Value::Int(0)
     );
     assert_eq!(explicit_vm.stdout(), "0\n34\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(fallback_descriptor_snapshot, descriptor_snapshot);
+}
+
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_repeated_path_replacements_preserve_cached_entrypoint_identity() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1_000_000_000);
+    let explicit = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let environment = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_replacement = library_fixture(counter + 2, REBINDABLE_SYMBOL_C_C_SOURCE);
+    let second_replacement = library_fixture(counter + 3, REBINDABLE_SYMBOL_D_C_SOURCE);
+    let explicit_path = explicit.dir.join("ffi.so");
+    let environment_path = environment.dir.join("ffi.so");
+    let first_replacement_path = first_replacement.dir.join("ffi.so");
+    let second_replacement_path = second_replacement.dir.join("ffi.so");
+    let first_pending_path = environment.dir.join("environment-repeated-one.pending.so");
+    let second_pending_path = environment.dir.join("environment-repeated-two.pending.so");
+    let third_pending_path = environment
+        .dir
+        .join("environment-repeated-three.pending.so");
+    guard.set_path(&environment_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("repeated replacement fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize repeated replacement MIR");
+    let bytecode = compile_mir_program(&mir).expect("repeated replacement bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut fallback_vm = BytecodeVM::new(bytecode.clone());
+    let mut explicit_vm = BytecodeVM::new(bytecode);
+
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("fallback VM must initially cache library B"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&environment_path, &first_pending_path)
+        .expect("library B must move before the first replacement");
+    std::fs::rename(&first_replacement_path, &environment_path)
+        .expect("library C must occupy the environment path");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        fallback_vm
+            .call_function_wrap_ok(fallback_vm.program().entry, &[], Value::Unit)
+            .expect("first replacement must not change the cached fallback handle"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&environment_path, &second_pending_path)
+        .expect("library C must move before the second replacement");
+    std::fs::rename(&second_replacement_path, &environment_path)
+        .expect("library D must occupy the environment path");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        fallback_vm
+            .call_named("function:main", Vec::new())
+            .expect("second replacement must still use cached library B"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let fallback_descriptor_snapshot = fallback_vm.program().canonical_ffi.clone();
+    drop(fallback_vm);
+
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must cache library A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("clear must load the second replacement library D"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n45\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    std::fs::rename(&environment_path, &third_pending_path)
+        .expect("library D must move before the cached replacement check");
+    std::fs::rename(&first_pending_path, &environment_path)
+        .expect("library B must be restored at the environment path");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        explicit_vm
+            .call_function_wrap_ok(explicit_vm.program().entry, &[], Value::Unit)
+            .expect("cached replacement handle must survive a later path replacement"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n45\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit rebinding must reuse cached library A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("cleared binding must reuse cached library D after repeated replacements"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n45\n");
     assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
     assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
