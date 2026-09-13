@@ -7535,6 +7535,207 @@ pub func call_sched() -> i32 { sched_yield() }
     drop(guard);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_imported_default_libc_contract_preserves_verifier_and_consumers() {
+    use crate::verifier::{ProofArtifact, VerifStatus};
+    use std::fs;
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("labs", [MirRuntimeValue::Int(value)]) if *value == -41 => {
+                    Ok(MirRuntimeValue::Int(41))
+                }
+                ("sched_yield", []) => Ok(MirRuntimeValue::Int(0)),
+                _ => Err(format!(
+                    "unexpected imported default-libc contract receipt/arguments: {receipt:?} {arguments:?}"
+                )),
+            }
+        }
+    }
+
+    let guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-import-default-libc-contract-{}-{counter}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create imported default-libc contract project");
+    let main_path = project.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use libc_guarded
+func main() -> i64 {
+    println(call_labs(-41 as i64))
+    println(call_sched())
+    0
+}
+"#,
+    )
+    .expect("write imported default-libc contract main");
+    fs::write(
+        project.join("libc_guarded.mimi"),
+        r#"
+extern "C" {
+    func labs(value: i64) -> i64 requires: value <= 0;
+    func sched_yield() -> i32;
+}
+pub func call_labs(value: i64) -> i64 {
+    requires: value <= 0
+    labs(value)
+}
+pub func call_sched() -> i32 { sched_yield() }
+"#,
+    )
+    .expect("write imported default-libc contract module");
+
+    let source = fs::read_to_string(&main_path).expect("read imported default-libc contract main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex imported default-libc contract main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select imported default-libc contract parser")
+        .parse_file()
+        .expect("parse imported default-libc contract main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load imported default-libc contract graph");
+    let mut merged = loader
+        .merge_all()
+        .expect("merge imported default-libc contract graph");
+    crate::loader::merge_prelude_into(&mut merged);
+    let checked =
+        crate::core::check_program(&merged).expect("check imported default-libc contract graph");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "imported default-libc contracts must stay on canonical scalar FFI admission"
+    );
+    let excluded_sources = merged
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+            .expect("materialize imported default-libc contract route");
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+        "imported default-libc contracts must materialize scalar FFI"
+    );
+    let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize imported default-libc contract MIR");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.symbol, "labs");
+    assert_eq!(ordered[1].1.symbol, "sched_yield");
+    let labs_receipt = ordered[0].1;
+    assert_eq!(labs_receipt.caller.0, "function:call_labs");
+    assert!(
+        labs_receipt.callee.0.contains("labs"),
+        "merged declaration identity must retain the imported labs symbol: {}",
+        labs_receipt.callee.0
+    );
+    assert!(labs_receipt
+        .requires
+        .as_ref()
+        .is_some_and(|requires| requires.canonical_text().contains("le(")));
+
+    let receipt = mir.route_receipt("scalar-ffi-v1");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let mir_results = crate::verifier::verify_mir(&mir, "imported-default-libc-contract".into())
+        .expect("verify imported default-libc contract MIR");
+    assert!(
+        mir_results.iter().all(|result| matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations
+        )),
+        "{mir_results:?}"
+    );
+    assert!(mir_results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == receipt.mir_digest
+        })
+    }));
+    for results in [
+        crate::verifier::verify_checked(&checked, "imported-default-libc-contract-public".into()),
+        crate::verifier::verify_checked_dual(
+            &checked,
+            "imported-default-libc-contract-dual".into(),
+        ),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("verify imported default-libc contract checked program");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                VerifStatus::Proven | VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == receipt.mir_digest
+            })
+        }));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference imported default-libc contract execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "41\n0\n");
+
+    let bytecode =
+        compile_mir_program(&mir).expect("AST-free imported default-libc contract bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode imported default-libc contract"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_imported_default_libc_contract");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native imported default-libc contract lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid imported default-libc contract LLVM module");
+    let native = super::link_and_observe_module(&generator, &super::E2EConfig::default(), counter)
+        .expect("native imported default-libc contract execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "41\n0\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    fs::remove_dir_all(project).expect("remove imported default-libc contract project");
+    drop(guard);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
