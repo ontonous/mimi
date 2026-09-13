@@ -226,15 +226,10 @@ impl MirReferenceFfiResolver for Oracle {
 
 struct LibraryFixture {
     dir: PathBuf,
-    previous_trace: Option<std::ffi::OsString>,
 }
 
 impl Drop for LibraryFixture {
     fn drop(&mut self) {
-        match &self.previous_trace {
-            Some(value) => std::env::set_var("MIMI_CANONICAL_FFI_TRACE", value),
-            None => std::env::remove_var("MIMI_CANONICAL_FFI_TRACE"),
-        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -245,7 +240,6 @@ fn library_fixture(counter: u64, c_source: &str) -> LibraryFixture {
             "mimi-canonical-ffi-{}-{counter}",
             std::process::id()
         )),
-        previous_trace: std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
     };
     std::fs::create_dir_all(&fixture.dir).expect("create C FFI fixture directory");
     let c_path = fixture.dir.join("ffi.c");
@@ -7922,7 +7916,7 @@ int64_t mir_ffi_mark(int64_t x) {{
     let fixture = library_fixture(counter, &c_source);
     let trace_path = fixture.dir.join("trace.txt");
     guard.set_path(&fixture.dir.join("ffi.so"));
-    std::env::set_var("MIMI_CANONICAL_FFI_TRACE", &trace_path);
+    guard.set_trace_path(&trace_path);
 
     for (requires, body, expected_trace, error, return_value, verify_ffi) in [
         ("x > 0", "mir_ffi_mark(4 as i64); let top = mir_ffi_i64(9223372036854775807 as i64); let value = top + (1 as i64); mir_ffi_mark(9 as i64); value",

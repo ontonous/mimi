@@ -720,6 +720,37 @@ mod test_runtime_cache_regressions {
         drop(stdlib_guard);
     }
 
+    #[test]
+    fn ffi_env_guard_restores_library_and_trace_after_scope() {
+        let ffi_path =
+            std::env::temp_dir().join(format!("mimi-ffi-guard-library-{}", std::process::id()));
+        let trace_path =
+            std::env::temp_dir().join(format!("mimi-ffi-guard-trace-{}", std::process::id()));
+
+        let (previous_ffi, previous_trace) = {
+            let mut guard = FfiEnvGuard::lock();
+            let previous_ffi = guard.prev.clone();
+            let previous_trace = guard.trace_prev.clone();
+            guard.set_path(&ffi_path);
+            guard.set_trace_path(&trace_path);
+            assert_eq!(
+                std::env::var_os("MIMI_FFI_LIB"),
+                Some(ffi_path.clone().into_os_string())
+            );
+            assert_eq!(
+                std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
+                Some(trace_path.clone().into_os_string())
+            );
+            drop(guard);
+            (previous_ffi, previous_trace)
+        };
+
+        let verification_guard = FfiEnvLock::lock();
+        assert_eq!(std::env::var_os("MIMI_FFI_LIB"), previous_ffi);
+        assert_eq!(std::env::var_os("MIMI_CANONICAL_FFI_TRACE"), previous_trace);
+        drop(verification_guard);
+    }
+
     #[cfg(unix)]
     fn assert_test_lock_busy(lock_path: &std::path::Path, operation: libc::c_int, label: &str) {
         use std::os::unix::io::AsRawFd;
@@ -1369,6 +1400,8 @@ impl FfiEnvLock {
 pub(crate) struct FfiEnvGuard {
     _lock_guard: FfiEnvLock,
     prev: Option<std::ffi::OsString>,
+    trace_prev: Option<std::ffi::OsString>,
+    trace_touched: bool,
 }
 
 impl FfiEnvGuard {
@@ -1382,6 +1415,8 @@ impl FfiEnvGuard {
         Self {
             _lock_guard: lock_guard,
             prev,
+            trace_prev: None,
+            trace_touched: false,
         }
     }
 
@@ -1396,6 +1431,18 @@ impl FfiEnvGuard {
     pub fn set_path(&mut self, value: &std::path::Path) {
         std::env::set_var("MIMI_FFI_LIB", value);
     }
+
+    /// Set the canonical FFI trace path and restore its prior value on drop.
+    ///
+    /// The trace is process-global just like `MIMI_FFI_LIB`, so it shares the
+    /// same lock and is restored before the lock is released.
+    pub fn set_trace_path(&mut self, value: &std::path::Path) {
+        if !self.trace_touched {
+            self.trace_prev = std::env::var_os("MIMI_CANONICAL_FFI_TRACE");
+            self.trace_touched = true;
+        }
+        std::env::set_var("MIMI_CANONICAL_FFI_TRACE", value);
+    }
 }
 
 impl Drop for FfiEnvGuard {
@@ -1403,6 +1450,12 @@ impl Drop for FfiEnvGuard {
         match self.prev.take() {
             Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
             None => std::env::remove_var("MIMI_FFI_LIB"),
+        }
+        if self.trace_touched {
+            match self.trace_prev.take() {
+                Some(value) => std::env::set_var("MIMI_CANONICAL_FFI_TRACE", value),
+                None => std::env::remove_var("MIMI_CANONICAL_FFI_TRACE"),
+            }
         }
     }
 }
