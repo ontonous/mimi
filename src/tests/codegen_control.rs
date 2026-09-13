@@ -1808,7 +1808,7 @@ fn codegen_stdlib_collections_parse_only() {
     let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
     assert!(std_dir.exists());
 
-    std::env::set_var("MIMI_STDLIB", &std_dir);
+    let _stdlib_guard = super::StdlibEnvGuard::set(&std_dir);
     let coll_path = std_dir.join("collections.mimi");
     let mut loader = crate::loader::ModuleLoader::new(std_dir.clone());
     let loaded = loader
@@ -1818,7 +1818,6 @@ fn codegen_stdlib_collections_parse_only() {
         !loaded.file.items.is_empty(),
         "collections.mimi should have items"
     );
-    std::env::remove_var("MIMI_STDLIB");
 }
 
 #[test]
@@ -1828,7 +1827,7 @@ fn codegen_stdlib_loader_roundtrip() {
     let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
     assert!(std_dir.exists());
 
-    std::env::set_var("MIMI_STDLIB", &std_dir);
+    let _stdlib_guard = super::StdlibEnvGuard::set(&std_dir);
     // mymath.mimi uses only basic arithmetic + if — supported by codegen
     let math_path = std_dir.join("mymath.mimi");
     let mut loader = crate::loader::ModuleLoader::new(std_dir.clone());
@@ -1842,7 +1841,6 @@ fn codegen_stdlib_loader_roundtrip() {
     if let Err(ref e) = codegen.compile_file(&merged) {
         panic!("mymath.mimi compile error: {}", e);
     }
-    std::env::remove_var("MIMI_STDLIB");
 }
 
 // ===================== For-Loop List Iteration Tests =====================

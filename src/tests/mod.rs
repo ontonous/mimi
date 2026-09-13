@@ -751,6 +751,69 @@ mod test_runtime_cache_regressions {
         drop(verification_guard);
     }
 
+    #[test]
+    fn process_global_environment_guards_compose_and_restore() {
+        let ffi_path =
+            std::env::temp_dir().join(format!("mimi-ffi-compose-library-{}", std::process::id()));
+        let trace_path =
+            std::env::temp_dir().join(format!("mimi-ffi-compose-trace-{}", std::process::id()));
+        let stdlib_path =
+            std::env::temp_dir().join(format!("mimi-stdlib-compose-{}", std::process::id()));
+
+        let (previous_ffi, previous_trace, previous_stdlib) = {
+            let mut ffi_guard = FfiEnvGuard::lock();
+            let previous_ffi = ffi_guard.prev.clone();
+            let previous_trace = ffi_guard.trace_prev.clone();
+            ffi_guard.set_path(&ffi_path);
+            ffi_guard.set_trace_path(&trace_path);
+
+            let previous_stdlib;
+            {
+                let stdlib_guard = StdlibEnvGuard::set(&stdlib_path);
+                previous_stdlib = stdlib_guard.prev.clone();
+                assert_eq!(
+                    std::env::var_os("MIMI_FFI_LIB"),
+                    Some(ffi_path.clone().into_os_string())
+                );
+                assert_eq!(
+                    std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
+                    Some(trace_path.clone().into_os_string())
+                );
+                assert_eq!(
+                    std::env::var_os("MIMI_STDLIB"),
+                    Some(stdlib_path.clone().into_os_string())
+                );
+            }
+
+            // Releasing the stdlib writer must not disturb the two FFI
+            // variables still protected by the outer guard.
+            assert_eq!(
+                std::env::var_os("MIMI_FFI_LIB"),
+                Some(ffi_path.clone().into_os_string())
+            );
+            assert_eq!(
+                std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
+                Some(trace_path.clone().into_os_string())
+            );
+            drop(ffi_guard);
+            (previous_ffi, previous_trace, previous_stdlib)
+        };
+
+        // Reacquire both lock domains before observing restored values. This
+        // keeps the assertion meaningful even when another test binary starts
+        // a new environment override immediately after this scope ends.
+        let ffi_lock = FfiEnvLock::lock();
+        let stdlib_lock = StdlibEnvGuard::read();
+        assert_eq!(std::env::var_os("MIMI_FFI_LIB"), previous_ffi);
+        assert_eq!(
+            std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
+            previous_trace
+        );
+        assert_eq!(std::env::var_os("MIMI_STDLIB"), previous_stdlib);
+        drop(stdlib_lock);
+        drop(ffi_lock);
+    }
+
     #[cfg(unix)]
     fn assert_test_lock_busy(lock_path: &std::path::Path, operation: libc::c_int, label: &str) {
         use std::os::unix::io::AsRawFd;
