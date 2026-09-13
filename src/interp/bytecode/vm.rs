@@ -5539,6 +5539,7 @@ impl BytecodeVM {
         // at that fresh entry boundary as well; nested calls inherit the
         // already-validated program from their enclosing execution.
         if self.stack.is_empty() {
+            self.stdout.clear();
             self.validate_canonical_ffi_program()?;
         }
         // H-14: snapshot for residual-frame cleanup on failure.
@@ -5570,6 +5571,7 @@ impl BytecodeVM {
         source_state: Value,
     ) -> Result<Value, InterpError> {
         if self.stack.is_empty() {
+            self.stdout.clear();
             self.validate_canonical_ffi_program()?;
         }
         // Keep the wrapped public entry point on the same residual-frame
