@@ -7781,6 +7781,144 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_nested_requires_failure_recovers_reference_and_same_vm() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_requires(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_requires(value: i64) -> i64 requires: value >= 0; }
+func helper(value: i64) -> i64 {
+    println(2);
+    let result = mir_ffi_nested_requires(value);
+    println(result);
+    result
+}
+func main() -> i64 {
+    println(1);
+    let value = helper(7 as i64);
+    println(value);
+    0
+}
+"#;
+
+    struct NestedRequiresOracle;
+    impl MirReferenceFfiResolver for NestedRequiresOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_nested_requires" {
+                return Err(format!(
+                    "unexpected nested requires symbol {}",
+                    receipt.symbol
+                ));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("nested requires arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(SOURCE)
+            .tokenize()
+            .expect("lex nested requires fixture"),
+    )
+    .parse_file()
+    .expect("parse nested requires fixture");
+    let checked = crate::core::check_program(&file).expect("check nested requires fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize nested requires MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&NestedRequiresOracle);
+    let main_observation = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested requires main execution");
+    assert_eq!(main_observation.value, MirRuntimeValue::Int(0));
+    assert_eq!(main_observation.output, "1\n2\n8\n8\n");
+
+    let reference_error = reference
+        .execute_with_output(
+            &crate::core::NodeId("function:helper".into()),
+            &[MirRuntimeValue::Int(-7)],
+        )
+        .expect_err("reference must reject nested FFI requires before host call");
+    assert!(
+        reference_error.to_string().contains("precondition")
+            || reference_error.to_string().contains("requires"),
+        "{reference_error}"
+    );
+    assert_eq!(
+        reference.captured_output(),
+        "2\n",
+        "reference must retain helper output before the failed nested precondition"
+    );
+
+    let recovered_reference = reference
+        .execute_with_output(
+            &crate::core::NodeId("function:helper".into()),
+            &[MirRuntimeValue::Int(7)],
+        )
+        .expect("reference must recover after nested precondition failure");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(8));
+    assert_eq!(recovered_reference.output, "2\n8\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free nested requires bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode nested requires main"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n2\n8\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let bytecode_error = vm
+        .call_named("function:helper", vec![Value::Int(-7)])
+        .expect_err("bytecode must reject nested FFI requires before host call");
+    assert_eq!(bytecode_error.code(), "E0808");
+    assert!(bytecode_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "2\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    assert_eq!(
+        vm.call_named("function:helper", vec![Value::Int(7)])
+            .expect("same bytecode VM must recover after nested precondition failure"),
+        Value::Int(8)
+    );
+    assert_eq!(vm.stdout(), "2\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_nested_requires");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native nested requires lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid nested requires LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native nested requires execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n2\n8\n8\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
