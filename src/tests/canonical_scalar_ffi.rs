@@ -5022,6 +5022,104 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_requires_failure_precedes_library_load() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64 requires: value >= 0; }
+func invoke(value: i64) -> i64 {
+    println(0 as i64)
+    println(mir_ffi_rebindable(value))
+    0
+}
+func main() -> i64 {
+    invoke(-1 as i64)
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let second_path = second.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&first.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("explicit-binding requires fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize explicit-binding requires MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit-binding requires bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(second_path.clone());
+    let first_error = vm
+        .call_named("function:invoke", vec![Value::Int(-1)])
+        .expect_err("explicit B requires failure must precede its library load");
+    assert_eq!(first_error.code(), "E0808");
+    assert!(first_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        0,
+        "a failed requires predicate must not load the explicit library"
+    );
+
+    let wrapped_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve the pre-load requires boundary");
+    assert_eq!(wrapped_error.code(), "E0808");
+    assert!(wrapped_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm.clear_canonical_ffi_library_path();
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_named("function:invoke", vec![Value::Int(-1)])
+            .expect("unchecked direct entry must execute through environment A"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n10\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.set_canonical_ffi_library_path(second_path);
+    assert_eq!(
+        vm.call_named("function:invoke", vec![Value::Int(1)])
+            .expect("unchecked direct entry must execute through explicit B"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n23\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_verify_ffi(true);
+    let second_requires_error = vm
+        .call_named("function:invoke", vec![Value::Int(-1)])
+        .expect_err("re-enabled requires must fail before a cached-library call");
+    assert_eq!(second_requires_error.code(), "E0808");
+    assert!(second_requires_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.clear_canonical_ffi_library_path();
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("unchecked wrapped entry must recover through environment A"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n10\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
