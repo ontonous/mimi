@@ -6033,6 +6033,51 @@ func main() -> i64 { println(mir_ffi_rebindable(1 as i64)); 0 }
     assert_eq!(cached_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_failed_load_reopens_same_path_after_library_appears() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let pending = fixture.dir.join("ffi.pending.so");
+    guard.set_path(&library);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("failed-load reopen fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize failed-load reopen MIR");
+    let bytecode = compile_mir_program(&mir).expect("failed-load reopen bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    std::fs::rename(&library, &pending).expect("fixture library must be temporarily hidden");
+    let missing = vm
+        .run_value()
+        .expect_err("missing binding path must fail before caching");
+    assert_eq!(missing.code(), "E0800");
+    assert!(missing.to_string().contains("failed to load"), "{missing}");
+    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    std::fs::rename(&pending, &library).expect("fixture library must reappear at its binding path");
+    assert_eq!(
+        vm.run_value()
+            .expect("same VM must reopen a path that appears after failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
