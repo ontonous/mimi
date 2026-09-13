@@ -756,6 +756,40 @@ mod test_runtime_cache_regressions {
     }
 
     #[cfg(unix)]
+    struct ProbeChildGuard {
+        child: std::process::Child,
+    }
+
+    #[cfg(unix)]
+    impl ProbeChildGuard {
+        fn take_stdout(&mut self) -> std::process::ChildStdout {
+            self.child.stdout.take().expect("capture lock probe output")
+        }
+
+        fn kill(&mut self) {
+            self.child.kill().expect("terminate lock probe child");
+        }
+
+        fn wait(&mut self) -> std::process::ExitStatus {
+            self.child.wait().expect("wait for lock probe child")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ProbeChildGuard {
+        fn drop(&mut self) {
+            let running = match self.child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) | Err(_) => true,
+            };
+            if running {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn process_global_ffi_lock_recovers_after_child_exit() {
         use std::io::{BufRead, BufReader, Write};
@@ -770,7 +804,8 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = Command::new(executable)
+        let mut child = ProbeChildGuard {
+            child: Command::new(executable)
             .arg("--exact")
             .arg("tests::test_runtime_cache_regressions::process_global_ffi_lock_recovers_after_child_exit")
             .arg("--nocapture")
@@ -778,8 +813,9 @@ mod test_runtime_cache_regressions {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn FFI lock probe child");
-        let stdout = child.stdout.take().expect("capture FFI lock probe output");
+            .expect("spawn FFI lock probe child"),
+        };
+        let stdout = child.take_stdout();
         let mut lines = BufReader::new(stdout).lines();
         let ready = loop {
             match lines.next() {
@@ -810,8 +846,8 @@ mod test_runtime_cache_regressions {
         let lock_path = lock_dir.join("ffi.lock");
         assert_test_lock_busy(&lock_path, libc::LOCK_EX, "FFI lock recovery probe");
 
-        child.kill().expect("terminate FFI lock probe child");
-        let status = child.wait().expect("wait for FFI lock probe child");
+        child.kill();
+        let status = child.wait();
         assert!(
             !status.success(),
             "terminated lock probe must not report success"
@@ -835,7 +871,8 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = Command::new(executable)
+        let mut child = ProbeChildGuard {
+            child: Command::new(executable)
             .arg("--exact")
             .arg("tests::test_runtime_cache_regressions::process_global_stdlib_lock_recovers_after_child_exit")
             .arg("--nocapture")
@@ -843,11 +880,9 @@ mod test_runtime_cache_regressions {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn stdlib lock probe child");
-        let stdout = child
-            .stdout
-            .take()
-            .expect("capture stdlib lock probe output");
+            .expect("spawn stdlib lock probe child"),
+        };
+        let stdout = child.take_stdout();
         let mut lines = BufReader::new(stdout).lines();
         let ready = loop {
             match lines.next() {
@@ -864,8 +899,8 @@ mod test_runtime_cache_regressions {
             .join("stdlib.lock");
         assert_test_lock_busy(&lock_path, libc::LOCK_SH, "stdlib lock recovery probe");
 
-        child.kill().expect("terminate stdlib lock probe child");
-        let status = child.wait().expect("wait for stdlib lock probe child");
+        child.kill();
+        let status = child.wait();
         assert!(
             !status.success(),
             "terminated stdlib lock probe must not report success"
@@ -895,7 +930,8 @@ mod test_runtime_cache_regressions {
         }
 
         let executable = std::env::current_exe().expect("locate test executable");
-        let mut child = Command::new(executable)
+        let mut child = ProbeChildGuard {
+            child: Command::new(executable)
             .arg("--exact")
             .arg(
                 "tests::test_runtime_cache_regressions::process_global_stdlib_readers_share_and_writer_waits",
@@ -905,11 +941,9 @@ mod test_runtime_cache_regressions {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn stdlib reader probe child");
-        let stdout = child
-            .stdout
-            .take()
-            .expect("capture stdlib reader probe output");
+            .expect("spawn stdlib reader probe child"),
+        };
+        let stdout = child.take_stdout();
         let mut lines = BufReader::new(stdout).lines();
         let ready = loop {
             match lines.next() {
@@ -933,8 +967,8 @@ mod test_runtime_cache_regressions {
             "stdlib writer while child reader holds",
         );
 
-        child.kill().expect("terminate stdlib reader probe child");
-        let status = child.wait().expect("wait for stdlib reader probe child");
+        child.kill();
+        let status = child.wait();
         assert!(
             !status.success(),
             "terminated stdlib reader probe must not report success"
