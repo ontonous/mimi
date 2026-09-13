@@ -4224,6 +4224,100 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_shared_program_vm_contract_modes_and_snapshots_are_isolated() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_contract_isolated(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_contract_isolated(value: i64) -> i64 ensures: result == value; }
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_contract_isolated(5 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, BAD_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("shared-program contract-mode fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize shared-program contract-mode MIR");
+    let bytecode = compile_mir_program(&mir).expect("shared-program contract-mode bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut unchecked_vm = BytecodeVM::new(bytecode.clone());
+    let mut checked_vm = BytecodeVM::new(bytecode);
+
+    unchecked_vm.set_verify_ffi(false);
+    assert_eq!(
+        unchecked_vm
+            .run_value()
+            .expect("unchecked VM must accept the violating host result"),
+        Value::Int(0)
+    );
+    assert_eq!(unchecked_vm.stdout(), "0\n6\n");
+    assert_eq!(unchecked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(unchecked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let checked_error = checked_vm
+        .run_value()
+        .expect_err("checked VM must reject the violating host result");
+    assert_eq!(checked_error.code(), "E0808");
+    assert!(checked_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(checked_vm.stdout(), "0\n");
+    assert_eq!(checked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(checked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(unchecked_vm.stdout(), "0\n6\n");
+    assert_eq!(unchecked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    checked_vm.set_verify_ffi(false);
+    assert_eq!(
+        checked_vm
+            .call_function_wrap_ok(checked_vm.program().entry, &[], Value::Unit)
+            .expect("wrapped entry must recover after disabling FFI checks"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(checked_vm.stdout(), "0\n6\n");
+    assert_eq!(checked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(checked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    unchecked_vm.set_verify_ffi(true);
+    let unchecked_error = unchecked_vm
+        .run_value()
+        .expect_err("re-enabled checks must reject on the same VM");
+    assert_eq!(unchecked_error.code(), "E0808");
+    assert!(unchecked_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(unchecked_vm.stdout(), "0\n");
+    assert_eq!(unchecked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(unchecked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(checked_vm.stdout(), "0\n6\n");
+    assert_eq!(checked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    unchecked_vm.set_verify_ffi(false);
+    assert_eq!(
+        unchecked_vm
+            .call_named("function:main", Vec::new())
+            .expect("direct entry must recover after re-enabling unchecked mode"),
+        Value::Int(0)
+    );
+    assert_eq!(unchecked_vm.stdout(), "0\n6\n");
+    assert_eq!(unchecked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(unchecked_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(unchecked_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(checked_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
