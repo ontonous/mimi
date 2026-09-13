@@ -7831,7 +7831,7 @@ int64_t mir_ffi_bad(int64_t x) { return x + 1; }
 extern "C" {
     func mir_ffi_bad(x: i64) -> i64 ensures: result == x;
 }
-func main() -> i64 { mir_ffi_bad(41 as i64); 0 }
+func main() -> i64 { println(5); mir_ffi_bad(41 as i64); 0 }
 "#;
     let tokens = crate::lexer::Lexer::new(source)
         .tokenize()
@@ -7841,14 +7841,15 @@ func main() -> i64 { mir_ffi_bad(41 as i64); 0 }
         .expect("parse bad FFI");
     let checked = crate::core::check_program(&file).expect("check bad FFI");
     let mir = MirProgram::from_checked_program(&checked).expect("materialize bad FFI");
-    let reference = MirReferenceInterpreter::new(&mir)
-        .with_ffi_resolver(&BadOracle)
+    let reference_interpreter = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&BadOracle);
+    let reference = reference_interpreter
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must enforce the FFI postcondition");
     assert!(
         reference.message.contains("FFI postcondition failed"),
         "{reference}"
     );
+    assert_eq!(reference_interpreter.captured_output(), "5\n");
 
     let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("bad FFI bytecode"));
     let vm_error = vm
@@ -7856,6 +7857,7 @@ func main() -> i64 { mir_ffi_bad(41 as i64); 0 }
         .expect_err("bytecode must enforce the FFI postcondition");
     assert_eq!(vm_error.code(), "E0808");
     assert!(vm_error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "5\n");
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_bad_ensures");
@@ -7877,6 +7879,7 @@ func main() -> i64 { mir_ffi_bad(41 as i64); 0 }
     )
     .expect("native bad FFI execution");
     assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "5\n");
     assert!(native.stderr.contains("E0808"), "{}", native.stderr);
 }
 

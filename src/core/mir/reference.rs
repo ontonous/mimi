@@ -5324,6 +5324,10 @@ impl<'a> MirReferenceInterpreter<'a> {
         arguments: &[MirRuntimeValue],
         queues: &[MirSessionQueueInput],
     ) -> Result<MirExecutionObservation, MirExecutionError> {
+        // Clear the previous attempt before any receipt or symbol validation
+        // can fail. Callers that inspect `captured_output()` after an error
+        // must never observe stdout left over from an earlier invocation.
+        self.output.borrow_mut().clear();
         if let Some(message) =
             super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
                 .into_iter()
@@ -5338,7 +5342,6 @@ impl<'a> MirReferenceInterpreter<'a> {
         {
             return Err(self.error(owner, message));
         }
-        self.output.borrow_mut().clear();
         *self.next_session_handle.borrow_mut() = 1;
         self.session_peers.borrow_mut().clear();
         let mut session_queues = self.session_queues.borrow_mut();
