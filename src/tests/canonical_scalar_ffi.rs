@@ -4055,6 +4055,100 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_cached_vm_rejects_descriptor_and_binding_table_tail_forgery() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("cached table-tail FFI fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize cached table-tail MIR");
+    let bytecode = compile_mir_program(&mir).expect("cached table-tail bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial cached table-tail run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_descriptors = vm.program().canonical_ffi.clone();
+    let original_bindings = vm.program().canonical_ffi_bindings.clone();
+
+    vm.replace_canonical_ffi_tables_for_test_only(Vec::new(), original_bindings.clone());
+    let empty_error = vm
+        .run_value()
+        .expect_err("empty descriptor table must fail after cache population");
+    assert!(
+        empty_error
+            .to_string()
+            .contains("binding manifest is non-empty while descriptor table is empty"),
+        "{empty_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let mut unreferenced_descriptors = original_descriptors.clone();
+    unreferenced_descriptors.push(unreferenced_descriptors[0].clone());
+    vm.replace_canonical_ffi_tables_for_test_only(
+        unreferenced_descriptors,
+        original_bindings.clone(),
+    );
+    let tail_error = vm
+        .run_value()
+        .expect_err("unreferenced descriptor tail must fail after cache population");
+    assert!(
+        tail_error
+            .to_string()
+            .contains("descriptor index 1 is unreferenced by bytecode"),
+        "{tail_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let mut duplicate_bindings = original_bindings.clone();
+    duplicate_bindings.push(duplicate_bindings[0].clone());
+    vm.replace_canonical_ffi_tables_for_test_only(original_descriptors.clone(), duplicate_bindings);
+    let duplicate_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("duplicate binding tail must fail through the wrapped entry");
+    assert!(
+        duplicate_error
+            .to_string()
+            .contains("duplicate call-site binding"),
+        "{duplicate_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.replace_canonical_ffi_tables_for_test_only(original_descriptors, original_bindings);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("canonical VM must recover after table-tail restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
