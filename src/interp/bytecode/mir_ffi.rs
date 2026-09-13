@@ -1155,8 +1155,7 @@ mod tests {
 
     #[test]
     fn scalar_ffi_runtime_load_failure_does_not_poison_library_cache() {
-        let _guard = crate::tests::FfiEnvLock::lock();
-        let previous = std::env::var_os("MIMI_FFI_LIB");
+        let mut guard = crate::tests::FfiEnvGuard::lock();
         let missing = std::env::temp_dir().join(format!(
             "mimi-canonical-ffi-missing-{}-{}.so",
             std::process::id(),
@@ -1165,7 +1164,7 @@ mod tests {
                 .expect("system clock is before Unix epoch")
                 .as_nanos()
         ));
-        std::env::set_var("MIMI_FFI_LIB", &missing);
+        guard.set_path(&missing);
 
         let mut runtime = CanonicalMirFfiRuntime::new();
         let error = runtime
@@ -1182,7 +1181,7 @@ mod tests {
             .into_iter()
             .find(|candidate| std::path::Path::new(candidate).exists())
             .expect("a discoverable libc is required for the scalar FFI runtime test");
-        std::env::set_var("MIMI_FFI_LIB", libc);
+        guard.set_path(std::path::Path::new(libc));
         assert_eq!(
             runtime
                 .call(
@@ -1193,22 +1192,16 @@ mod tests {
             Value::Int(41)
         );
         assert_eq!(runtime.loaded_libs.len(), 1);
-
-        match previous {
-            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
-            None => std::env::remove_var("MIMI_FFI_LIB"),
-        }
     }
 
     #[test]
     fn scalar_ffi_runtime_missing_symbol_preserves_cached_library_for_next_call() {
-        let _guard = crate::tests::FfiEnvLock::lock();
-        let previous = std::env::var_os("MIMI_FFI_LIB");
+        let mut guard = crate::tests::FfiEnvGuard::lock();
         let libc = default_libc_candidates()
             .into_iter()
             .find(|candidate| std::path::Path::new(candidate).exists())
             .expect("a discoverable libc is required for the scalar FFI runtime test");
-        std::env::set_var("MIMI_FFI_LIB", libc);
+        guard.set_path(std::path::Path::new(libc));
 
         let mut runtime = CanonicalMirFfiRuntime::new();
         let missing = runtime
@@ -1236,11 +1229,6 @@ mod tests {
             Value::Int(41)
         );
         assert_eq!(runtime.loaded_libs.len(), 1);
-
-        match previous {
-            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
-            None => std::env::remove_var("MIMI_FFI_LIB"),
-        }
     }
 
     #[test]

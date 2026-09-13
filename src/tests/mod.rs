@@ -1372,14 +1372,29 @@ pub(crate) struct FfiEnvGuard {
 }
 
 impl FfiEnvGuard {
-    pub fn set(value: &std::path::Path) -> Self {
+    /// Acquire the FFI environment lock while preserving the current value.
+    ///
+    /// Call [`Self::set_path`] once the test has finished preparing its
+    /// library path but still needs the lock held across that setup.
+    pub fn lock() -> Self {
         let lock_guard = FfiEnvLock::lock();
         let prev = std::env::var_os("MIMI_FFI_LIB");
-        std::env::set_var("MIMI_FFI_LIB", value);
         Self {
             _lock_guard: lock_guard,
             prev,
         }
+    }
+
+    pub fn set(value: &std::path::Path) -> Self {
+        let mut guard = Self::lock();
+        guard.set_path(value);
+        guard
+    }
+
+    /// Replace the current process-wide FFI library path while retaining the
+    /// guard's original value for restoration on drop.
+    pub fn set_path(&mut self, value: &std::path::Path) {
+        std::env::set_var("MIMI_FFI_LIB", value);
     }
 }
 

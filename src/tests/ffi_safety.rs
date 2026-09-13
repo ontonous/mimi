@@ -30,10 +30,8 @@ fn expect_ffi_safety_error(src: &str, expected_substring: &str) {
 }
 
 fn expect_symbol_not_found(src: &str) {
-    let _guard = super::FfiEnvLock::lock();
-    std::env::set_var("MIMI_FFI_LIB", ffi_lib_path());
+    let _guard = super::FfiEnvGuard::set(std::path::Path::new(ffi_lib_path()));
     let result = run_source_bytecode_result(src);
-    std::env::remove_var("MIMI_FFI_LIB");
 
     assert!(
         result.is_err(),

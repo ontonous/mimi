@@ -31,8 +31,7 @@ func main() -> i32 {
     missing_func(42)
 }
 "#;
-    let _guard = FfiEnvLock::lock();
-    std::env::set_var("MIMI_FFI_LIB", "/nonexistent/lib.so");
+    let _guard = FfiEnvGuard::set(std::path::Path::new("/nonexistent/lib.so"));
     let result = run_source_bytecode_result(src);
     assert!(
         result.is_err(),
@@ -48,7 +47,6 @@ func main() -> i32 {
         "error should mention library issue: {}",
         err
     );
-    std::env::remove_var("MIMI_FFI_LIB");
 }
 
 #[test]
@@ -62,8 +60,7 @@ func main() -> i32 {
     my_func(1)
 }
 "#;
-    let _guard = FfiEnvLock::lock();
-    std::env::set_var("MIMI_FFI_LIB", "/nonexistent/ffi_test_lib.so");
+    let _guard = FfiEnvGuard::set(std::path::Path::new("/nonexistent/ffi_test_lib.so"));
     let result = run_source_bytecode_result(src);
     assert!(result.is_err(), "calling extern with bad lib should fail");
     let err = result.unwrap_err();
@@ -72,7 +69,6 @@ func main() -> i32 {
         "error should mention library issue: {}",
         err
     );
-    std::env::remove_var("MIMI_FFI_LIB");
 }
 
 #[test]
