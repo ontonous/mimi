@@ -2975,6 +2975,72 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
 }
 
 #[test]
+fn scalar_ffi_runtime_missing_symbol_does_not_poison_cached_libraries() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let valid = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let missing = library_fixture(counter + 1, MISSING_SYMBOL_C_SOURCE);
+    let valid_library = valid.dir.join("ffi.so");
+    let missing_library = missing.dir.join("ffi.so");
+    let i64_abi = crate::core::mir::types::MirAbiClass::Integer {
+        bits: 64,
+        signed: true,
+    };
+    let descriptor = CanonicalFfiDescriptor {
+        caller: "function:main".into(),
+        instruction: "ffi-test-missing-symbol-recovery".into(),
+        callee: "extern:C:test/function:mir_ffi_rebindable:0000000000000000".into(),
+        symbol: "mir_ffi_rebindable".into(),
+        abi: "C".into(),
+        arguments: vec![CanonicalFfiScalarType::I64],
+        parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
+            from: i64_abi,
+            to: i64_abi,
+        }],
+        result: CanonicalFfiScalarType::I64,
+        result_conversion: Some(crate::core::mir::MirFfiAbiConversion {
+            from: i64_abi,
+            to: i64_abi,
+        }),
+        argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-missing-arg").unwrap()],
+        requires: None,
+        result_id: Some(crate::core::mir::MirValueId::new("ffi-test-missing-result").unwrap()),
+        ensures: None,
+    };
+
+    let mut runtime = crate::interp::bytecode::mir_ffi::CanonicalMirFfiRuntime::new();
+    guard.set_path(&valid_library);
+    assert_eq!(
+        runtime
+            .call(&descriptor, &[Value::Int(1)])
+            .expect("initial valid library binding"),
+        Value::Int(12)
+    );
+    assert_eq!(runtime.loaded_library_count_for_test(), 1);
+
+    guard.set_path(&missing_library);
+    let error = runtime
+        .call(&descriptor, &[Value::Int(1)])
+        .expect_err("a loaded library without the canonical symbol must fail closed");
+    assert_eq!(error.code(), "E0800");
+    assert!(error.to_string().contains("mir_ffi_rebindable"));
+    assert_eq!(
+        runtime.loaded_library_count_for_test(),
+        2,
+        "the missing-symbol library may be cached, but its failed lookup must not corrupt the cache"
+    );
+
+    guard.set_path(&valid_library);
+    assert_eq!(
+        runtime
+            .call(&descriptor, &[Value::Int(1)])
+            .expect("valid cached library must recover after missing-symbol failure"),
+        Value::Int(12)
+    );
+    assert_eq!(runtime.loaded_library_count_for_test(), 2);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
