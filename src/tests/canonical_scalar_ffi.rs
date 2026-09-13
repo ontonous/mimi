@@ -4318,6 +4318,96 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_shared_program_cache_lifetime_is_local_after_vm_drop() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_library = first.dir.join("ffi.so");
+    let second_library = second.dir.join("ffi.so");
+    guard.set_path(&first_library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("shared-program cache-lifetime fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize shared-program cache-lifetime MIR");
+    let bytecode = compile_mir_program(&mir).expect("shared-program cache-lifetime bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let shared_program = bytecode.clone();
+    let mut transient_vm = BytecodeVM::new(shared_program.clone());
+    let mut survivor_vm = BytecodeVM::new(shared_program.clone());
+
+    assert_eq!(
+        transient_vm
+            .run_value()
+            .expect("transient VM must load library A"),
+        Value::Int(0)
+    );
+    assert_eq!(transient_vm.stdout(), "12\n");
+    assert_eq!(transient_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(survivor_vm.stdout(), "");
+    assert_eq!(survivor_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    assert_eq!(
+        survivor_vm
+            .run_value()
+            .expect("survivor VM must independently load library A"),
+        Value::Int(0)
+    );
+    assert_eq!(survivor_vm.stdout(), "12\n");
+    assert_eq!(survivor_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    drop(transient_vm);
+
+    guard.set_path(&second_library);
+    assert_eq!(
+        survivor_vm
+            .run_value()
+            .expect("survivor VM must rebind to library B after peer drop"),
+        Value::Int(0)
+    );
+    assert_eq!(survivor_vm.stdout(), "23\n");
+    assert_eq!(survivor_vm.debug_stack_state(), (0, 0));
+    assert_eq!(survivor_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    let mut recreated_vm = BytecodeVM::new(shared_program);
+    assert_eq!(recreated_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(
+        recreated_vm
+            .run_value()
+            .expect("recreated VM must start a fresh library cache"),
+        Value::Int(0)
+    );
+    assert_eq!(recreated_vm.stdout(), "23\n");
+    assert_eq!(recreated_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recreated_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(survivor_vm.stdout(), "23\n");
+    assert_eq!(survivor_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&first_library);
+    assert_eq!(
+        survivor_vm
+            .run_value()
+            .expect("survivor VM must retain its own A binding after recreation"),
+        Value::Int(0)
+    );
+    assert_eq!(survivor_vm.stdout(), "12\n");
+    assert_eq!(survivor_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(recreated_vm.stdout(), "23\n");
+    assert_eq!(recreated_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(survivor_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(recreated_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
