@@ -5446,6 +5446,130 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_clear_rebind_multisite_fallback_keeps_cache_identity() {
+    const FIRST_ONLY_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_first(int64_t value) { return value + 90; }
+"#;
+    const BOTH_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_first(int64_t value) { return value + 100; }
+int64_t mir_ffi_second(int64_t value) { return value + 110; }
+"#;
+    const ENVIRONMENT_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_first(int64_t value) { return value + 120; }
+int64_t mir_ffi_second(int64_t value) { return value + 130; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_first(value: i64) -> i64;
+    func mir_ffi_second(value: i64) -> i64;
+}
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_first(1 as i64))
+    println(mir_ffi_second(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, FIRST_ONLY_C_SOURCE);
+    let both = library_fixture(counter + 1, BOTH_C_SOURCE);
+    let environment = library_fixture(counter + 2, ENVIRONMENT_C_SOURCE);
+    let first_path = first.dir.join("ffi.so").to_string_lossy().into_owned();
+    let both_path = both.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&environment.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("explicit clear/rebind multisite fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize clear/rebind multisite MIR");
+    let bytecode = compile_mir_program(&mir).expect("clear/rebind multisite bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(first_path.clone());
+    let first_error = vm
+        .run_value()
+        .expect_err("first-only explicit binding must fail at the second site");
+    assert_eq!(first_error.code(), "E0800");
+    assert!(first_error.to_string().contains("mir_ffi_second"));
+    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.set_canonical_ffi_library_path(both_path.clone());
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("complete explicit binding must recover both sites"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n101\n112\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(first_path.clone());
+    let repeated_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("first-only binding must fail again through wrapped entry");
+    assert_eq!(repeated_error.code(), "E0800");
+    assert_eq!(repeated_error.to_string(), first_error.to_string());
+    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        vm.run_value()
+            .expect("clearing explicit binding must restore environment fallback"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n121\n132\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        3,
+        "environment fallback must load its distinct library exactly once"
+    );
+
+    vm.set_canonical_ffi_library_path(first_path);
+    let rebound_error = vm
+        .call_named("function:main", Vec::new())
+        .expect_err("rebinding first-only library must preserve second-site failure");
+    assert_eq!(rebound_error.code(), "E0800");
+    assert_eq!(rebound_error.to_string(), first_error.to_string());
+    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
+
+    vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("wrapped fallback must recover after repeated rebind failure"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n121\n132\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
+
+    vm.set_canonical_ffi_library_path(both_path);
+    assert_eq!(
+        vm.run_value()
+            .expect("complete explicit binding must reuse its cached handle"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n101\n112\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
