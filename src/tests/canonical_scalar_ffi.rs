@@ -3464,6 +3464,130 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_call_site_wrapped_postcondition_failure_replaces_snapshot() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+static int call_count;
+int64_t mir_ffi_multi_ensures(int64_t value) {
+    ++call_count;
+    return call_count == 4 ? value + 1 : value;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_multi_ensures(value: i64) -> i64 ensures: result == value; }
+func main() -> i64 {
+    println(0)
+    let first = mir_ffi_multi_ensures(1 as i64)
+    println(first)
+    let second = mir_ffi_multi_ensures(2 as i64)
+    println(second)
+    0
+}
+"#;
+    struct Oracle {
+        call_count: Cell<i64>,
+    }
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_multi_ensures" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected arguments {arguments:?}"));
+            };
+            let count = self.call_count.get() + 1;
+            self.call_count.set(count);
+            Ok(MirRuntimeValue::Int(if count == 4 {
+                value + 1
+            } else {
+                *value
+            }))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-call-site wrapped ensures fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize multi-call-site wrapped ensures MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+
+    let oracle = Oracle {
+        call_count: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let first_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference wrapped ensures first run");
+    assert_eq!(first_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(first_reference.output, "0\n1\n2\n");
+    let reference_error = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference wrapped ensures second run must fail at the second site");
+    assert!(reference_error.to_string().contains("postcondition"));
+    assert_eq!(reference.captured_output(), "0\n1\n");
+    let recovered_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference wrapped ensures third run must recover");
+    assert_eq!(recovered_reference.output, "0\n1\n2\n");
+
+    let bytecode = compile_mir_program(&mir).expect("multi-call-site wrapped ensures bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect("bytecode wrapped ensures first run");
+    assert_eq!(vm.stdout(), "0\n1\n2\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let wrapped_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("bytecode wrapped ensures second run must fail at the second site");
+    assert_eq!(wrapped_error.code(), "E0808");
+    assert!(wrapped_error.to_string().contains("postcondition"));
+    assert_eq!(vm.stdout(), "0\n1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("bytecode ordinary entry must recover after wrapped failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n1\n2\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_multi_wrapped_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-call-site wrapped ensures lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native multi-call-site wrapped ensures module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native multi-call-site wrapped ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "0\n1\n2\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
