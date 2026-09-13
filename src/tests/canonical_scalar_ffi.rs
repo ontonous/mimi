@@ -8393,7 +8393,7 @@ pub type Scalar = f64
 pub type Real = Scalar
 pub type ScalarInt = i64
 pub type ResultId = ScalarInt
-extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> ResultId requires: value >= 0; }
+extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> ResultId requires: value >= 0 ensures: value >= 0; }
 pub func call_imported_alias(first: i64, second: i64) -> ResultId {
     requires: first >= 0 and second >= 0
     let first_result = mir_ffi_import_alias_sequence(first)
@@ -8410,7 +8410,7 @@ pub type ExtraScalar = f64
 pub type ExtraReal = ExtraScalar
 pub type ExtraScalarInt = i64
 pub type ExtraResultId = ExtraScalarInt
-extern "C" { func mir_ffi_import_alias_sequence_extra(value: ExtraReal) -> ExtraResultId requires: value >= 0; }
+extern "C" { func mir_ffi_import_alias_sequence_extra(value: ExtraReal) -> ExtraResultId requires: value >= 0 ensures: value >= 0; }
 pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     requires: value >= 0
     mir_ffi_import_alias_sequence_extra(value)
@@ -8480,6 +8480,12 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     assert_eq!(receipts[0].symbol, "mir_ffi_import_alias_sequence");
     assert_eq!(receipts[1].symbol, "mir_ffi_import_alias_sequence");
     assert_eq!(receipts[2].symbol, "mir_ffi_import_alias_sequence_extra");
+    assert!(receipts.iter().all(|receipt| {
+        receipt
+            .ensures
+            .as_ref()
+            .is_some_and(|ensures| ensures.canonical_text().contains("ge("))
+    }));
     assert_eq!(
         receipts[0].caller,
         crate::core::NodeId("function:call_imported_alias".into())
