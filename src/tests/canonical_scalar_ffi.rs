@@ -7513,6 +7513,55 @@ fn scalar_ffi_direct_entrypoints_reset_stdout_before_preflight() {
 }
 
 #[test]
+fn scalar_ffi_wrapped_entrypoint_reuses_vm_after_malformed_preflight() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(MISSING_LIBRARY_SOURCE)
+            .tokenize()
+            .expect("lex wrapped-entry fixture"),
+    )
+    .parse_file()
+    .expect("parse wrapped-entry fixture");
+    let checked = crate::core::check_program(&file).expect("check wrapped-entry fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("canonical wrapped-entry MIR");
+    let bytecode = compile_mir_program(&mir).expect("AST-free wrapped-entry bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    let original = vm.program().canonical_ffi[0].clone();
+    let mut forged = original.clone();
+    forged.symbol = "forged_wrapped_entry_symbol".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);
+
+    let first = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject a forged descriptor before frame creation");
+    assert!(first
+        .to_string()
+        .contains("differs from its compiler binding"));
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("repeated wrapped preflight must be deterministic");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, original);
+    assert!(matches!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("valid call after wrapped preflight failure"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "13\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
