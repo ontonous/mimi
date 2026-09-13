@@ -4408,6 +4408,73 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_shared_program_concurrent_vms_keep_thread_local_state() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("shared-program concurrent VM fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize shared-program concurrent VM MIR");
+    let bytecode = compile_mir_program(&mir).expect("shared-program concurrent VM bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let first_program = bytecode.clone();
+    let second_program = bytecode;
+
+    let first = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(first_program);
+        let value = vm.run_value();
+        (
+            value,
+            vm.stdout().to_owned(),
+            vm.debug_stack_state(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+    let second = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(second_program);
+        let value = vm.call_named("function:main", Vec::new());
+        (
+            value,
+            vm.stdout().to_owned(),
+            vm.debug_stack_state(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+
+    let first = first
+        .join()
+        .expect("first canonical FFI VM thread must join");
+    let second = second
+        .join()
+        .expect("second canonical FFI VM thread must join");
+    assert_eq!(first.0.expect("first concurrent VM run"), Value::Int(0));
+    assert_eq!(second.0.expect("second concurrent VM call"), Value::Int(0));
+    assert_eq!(first.1, "12\n");
+    assert_eq!(second.1, "12\n");
+    assert_eq!(first.2, (0, 0));
+    assert_eq!(second.2, (0, 0));
+    assert_eq!(first.3, 1);
+    assert_eq!(second.3, 1);
+    assert_eq!(first.4, descriptor_snapshot);
+    assert_eq!(second.4, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
