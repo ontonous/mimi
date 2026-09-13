@@ -5500,6 +5500,7 @@ mod tests {
 
     fn reference_observation(
         result: Result<MirExecutionObservation, crate::core::mir::reference::MirExecutionError>,
+        captured_output: String,
     ) -> DifferentialObservation {
         match result {
             Ok(observation) => DifferentialObservation {
@@ -5511,7 +5512,7 @@ mod tests {
                     class: reference_error_class(&error.message),
                     message: error.message,
                 },
-                output: String::new(),
+                output: captured_output,
             },
         }
     }
@@ -5585,9 +5586,10 @@ mod tests {
         let mir = MirProgram::from_checked_program(&checked)
             .map_err(|error| DifferentialHarnessError::CanonicalMir(format!("{error:?}")))?;
         let owner = crate::core::NodeId("function:main".into());
-        let reference = reference_observation(
-            MirReferenceInterpreter::new(&mir).execute_with_output(&owner, &[]),
-        );
+        let reference_interpreter = MirReferenceInterpreter::new(&mir);
+        let reference_result = reference_interpreter.execute_with_output(&owner, &[]);
+        let reference =
+            reference_observation(reference_result, reference_interpreter.captured_output());
 
         // The canonical production backend is compiled from MIR only.  Its
         // AST-free program is an explicit contract of this harness.
@@ -6027,6 +6029,25 @@ mod tests {
                 &observation.outcome,
                 DifferentialOutcome::Error { class, .. } if class == "runtime:E0801"
             ));
+        }
+    }
+
+    #[test]
+    fn canonical_mir_differential_preserves_stdout_prefix_on_runtime_error() {
+        let report = run_canonical_differential(
+            "func divide(value: i32) -> i32 { 1 / value }\nfunc main() -> i32 {\n    println(7)\n    divide(0)\n}",
+        )
+        .expect("stdout-prefix runtime error differential");
+        for observation in [
+            &report.reference,
+            &report.mir_bytecode,
+            &report.legacy_bytecode,
+        ] {
+            assert!(matches!(
+                &observation.outcome,
+                DifferentialOutcome::Error { class, .. } if class == "runtime:E0801"
+            ));
+            assert_eq!(observation.output, "7\n");
         }
     }
 

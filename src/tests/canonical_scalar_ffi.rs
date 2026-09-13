@@ -1930,8 +1930,8 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
     }
 
     let oracle = RequiresSequenceOracle(Cell::new(0));
-    let reference_error = MirReferenceInterpreter::new(&mir)
-        .with_ffi_resolver(&oracle)
+    let reference_interpreter = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let reference_error = reference_interpreter
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must stop at the disproven second requires");
     assert!(
@@ -1943,6 +1943,11 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
         oracle.0.get(),
         1,
         "reference must invoke only the first call"
+    );
+    assert_eq!(
+        reference_interpreter.captured_output(),
+        "107\n",
+        "reference must preserve stdout produced before the failed call"
     );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();

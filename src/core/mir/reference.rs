@@ -4981,6 +4981,17 @@ impl<'a> MirReferenceInterpreter<'a> {
         self
     }
 
+    /// Return output captured during the most recent execution attempt.
+    ///
+    /// The reference executor keeps output independently from the success
+    /// value so callers can preserve observable stdout even when execution
+    /// stops with a runtime or contract error.  This is intentionally a
+    /// snapshot rather than a mutable stream, matching the bytecode
+    /// consumer's `stdout()` observation API.
+    pub fn captured_output(&self) -> String {
+        self.output.borrow().clone()
+    }
+
     fn is_generic_result_projection(&self, owner: &NodeId) -> bool {
         self.program.instances.values().any(|instance| {
             instance.function == *owner
