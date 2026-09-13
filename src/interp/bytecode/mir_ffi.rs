@@ -376,9 +376,11 @@ impl CanonicalMirFfiRuntime {
     ) -> Result<Value, String> {
         let lib_path = match self.library_path.clone() {
             Some(path) => path,
-            None => match std::env::var("MIMI_FFI_LIB") {
-                Ok(path) => path,
-                Err(_) => default_libc_candidates()
+            None => match std::env::var_os("MIMI_FFI_LIB") {
+                Some(path) => path.into_string().map_err(|_| {
+                    "failed to load 'MIMI_FFI_LIB': path is not valid UTF-8".to_owned()
+                })?,
+                None => default_libc_candidates()
                     .into_iter()
                     .find(|candidate| std::path::Path::new(candidate).exists())
                     .map(str::to_owned)
