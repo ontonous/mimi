@@ -7117,6 +7117,17 @@ func main() -> i64 { println(labs(-41 as i64)); 0 }
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    std::env::remove_var("MIMI_FFI_LIB");
+    assert_eq!(
+        vm.run_value()
+            .expect("default libc fallback must recover after missing override"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
 #[test]
