@@ -7232,6 +7232,132 @@ func main() -> i64 { println(sched_yield()); 0 }
     drop(guard);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_default_libc_multiple_symbols_reuse_one_handle_across_consumers() {
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("labs", [MirRuntimeValue::Int(value)]) if *value == -41 => {
+                    Ok(MirRuntimeValue::Int(41))
+                }
+                ("sched_yield", []) => Ok(MirRuntimeValue::Int(0)),
+                _ => Err(format!(
+                    "unexpected default-libc receipt/arguments: {receipt:?} {arguments:?}"
+                )),
+            }
+        }
+    }
+
+    let guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let source = r#"
+extern "C" {
+    func labs(value: i64) -> i64;
+    func sched_yield() -> i32;
+}
+func main() -> i64 {
+    println(labs(-41 as i64))
+    println(sched_yield())
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("default libc multi-symbol scalar FFI fixture");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "default libc multi-symbol FFI must stay on canonical admission"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize default libc multi-symbol scalar FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|(_, receipt)| receipt.symbol.as_str())
+            .collect::<Vec<_>>(),
+        vec!["labs", "sched_yield"]
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc-multi".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc-multi".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("default libc multi-symbol scalar FFI verification");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference default libc multi-symbol execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "41\n0\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free default libc multi-symbol bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode default libc multi-symbol run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "all symbols from the default libc must reuse one VM-local handle"
+    );
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("bytecode default libc multi-symbol re-entry"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_default_libc_multi");
+    generator
+        .compile_mir_native(&mir)
+        .expect("same MIR native default libc multi-symbol lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native default libc multi-symbol module");
+    let config = super::E2EConfig::default();
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native default libc multi-symbol execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "41\n0\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    drop(guard);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
