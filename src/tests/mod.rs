@@ -235,6 +235,148 @@ impl Drop for TestRuntimeTempGuard {
     }
 }
 
+struct TestRuntimeCacheLockGuard {
+    file: std::fs::File,
+}
+
+impl Drop for TestRuntimeCacheLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: file is an open regular lock file and flock only changes
+            // its advisory lock state; no Rust references cross the FFI boundary.
+            unsafe {
+                libc::flock(
+                    std::os::unix::io::AsRawFd::as_raw_fd(&self.file),
+                    libc::LOCK_UN,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_test_runtime_cache_lock(
+    file: std::fs::File,
+) -> Result<TestRuntimeCacheLockGuard, String> {
+    loop {
+        // SAFETY: file is an open regular lock file and flock only changes its
+        // advisory lock state; no Rust references cross the FFI boundary.
+        let result =
+            unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+        if result == 0 {
+            return Ok(TestRuntimeCacheLockGuard { file });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(format!("lock test runtime cache: {error}"));
+    }
+}
+
+#[cfg(not(unix))]
+fn acquire_test_runtime_cache_lock(
+    file: std::fs::File,
+) -> Result<TestRuntimeCacheLockGuard, String> {
+    Ok(TestRuntimeCacheLockGuard { file })
+}
+
+fn is_test_runtime_cache_temp_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix("libmimi_runtime_") else {
+        return false;
+    };
+    let Some((key, nonce)) = rest.split_once(".tmp-") else {
+        return false;
+    };
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        && !nonce.is_empty()
+}
+
+fn is_test_runtime_cache_archive_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(key) = name
+        .strip_prefix("libmimi_runtime_")
+        .and_then(|rest| rest.strip_suffix(".a"))
+    else {
+        return false;
+    };
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn cleanup_test_runtime_cache_stale_temps(cache_dir: &std::path::Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(cache_dir)
+        .map_err(|error| format!("read stale test runtime cache entries: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read stale test runtime cache entry: {error}"))?;
+        let name = entry.file_name();
+        if !is_test_runtime_cache_temp_name(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect stale test runtime cache: {error}"))?;
+        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            return Err(format!(
+                "stale test runtime cache path is not a regular file: {path:?}"
+            ));
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("remove stale test runtime cache: {error}"))?;
+    }
+    Ok(())
+}
+
+fn cleanup_test_runtime_cache_stale_archives(
+    cache_dir: &std::path::Path,
+    current_name: &str,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(cache_dir)
+        .map_err(|error| format!("read stale test runtime archives: {error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read stale test runtime archive entry: {error}"))?;
+        let name = entry.file_name();
+        if !is_test_runtime_cache_archive_name(&name) || name.to_string_lossy() == current_name {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect stale test runtime archive: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "stale test runtime cache path is not a regular file: {path:?}"
+            ));
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("remove stale test runtime archive: {error}"))?;
+    }
+    Ok(())
+}
+
+fn test_runtime_cache_temp_path(cache_dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    cache_dir.join(format!(
+        "libmimi_runtime_{key}.tmp-{}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn test_runtime_cache_hit(path: &std::path::Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -282,9 +424,6 @@ fn publish_test_runtime_cache(
 }
 
 pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
-    #[cfg(unix)]
-    use std::os::unix::io::AsRawFd;
-
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runtime_rs = manifest.join("src/runtime/standalone.rs");
     let runtime_dir = manifest.join("src/runtime");
@@ -370,24 +509,22 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
     // File lock to serialize runtime compilation across parallel tests
     let lock_file =
         crate::runtime_cache::open_private_cache_lock(&lock_path, "test runtime cache lock")?;
-    #[cfg(unix)]
-    // SAFETY: fd 是上方 OpenOptions 真实打开的锁文件，flock 参数满足 libc 前置条件。
-    unsafe {
-        libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX);
-    }
+    let _lock_guard = acquire_test_runtime_cache_lock(lock_file)?;
+
+    let current_name = lib_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    cleanup_test_runtime_cache_stale_temps(&cache_dir)?;
+    cleanup_test_runtime_cache_stale_archives(&cache_dir, &current_name)?;
 
     // Check again after acquiring lock (another thread may have compiled it)
     if test_runtime_cache_hit(&lib_path)? {
-        #[cfg(unix)]
-        // SAFETY: 同上——已持有锁的同一 fd 释放，无别名；参数有效。
-        unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
         return Ok(lib_path);
     }
 
     // Write a temp file then atomically rename to avoid partial writes
-    let tmp_path = cache_dir.join(format!("libmimi_runtime_{hash}.tmp"));
+    let tmp_path = test_runtime_cache_temp_path(&cache_dir, &hash);
     let _tmp_guard = TestRuntimeTempGuard {
         path: tmp_path.clone(),
     };
@@ -400,11 +537,6 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("rustc not found: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        #[cfg(unix)]
-        // SAFETY: 同上——同一 fd 释放锁，参数有效。
-        unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
         return Err(format!(
             "runtime compilation failed, exit: {:?}, stderr: {}",
             output.status.code(),
@@ -421,36 +553,132 @@ pub(crate) fn cached_runtime_lib() -> Result<std::path::PathBuf, String> {
         .status();
     test_runtime_cache_hit(&lib_path)?;
 
-    // Remove stale runtime archives from previous builds (different source hash).
-    let current_name = lib_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("libmimi_runtime_") && name.ends_with(".a") && name != current_name
-            {
-                let path = entry.path();
-                let metadata = std::fs::symlink_metadata(&path)
-                    .map_err(|error| format!("inspect stale test runtime cache: {error}"))?;
-                if !metadata.file_type().is_file() {
-                    return Err(format!(
-                        "stale test runtime cache path is not a regular file: {path:?}"
-                    ));
-                }
-                std::fs::remove_file(path)
-                    .map_err(|error| format!("remove stale test runtime cache: {error}"))?;
-            }
-        }
+    Ok(lib_path)
+}
+
+#[cfg(test)]
+mod test_runtime_cache_regressions {
+    use super::{
+        acquire_test_runtime_cache_lock, cleanup_test_runtime_cache_stale_archives,
+        cleanup_test_runtime_cache_stale_temps, is_test_runtime_cache_archive_name,
+        is_test_runtime_cache_temp_name, test_runtime_cache_temp_path,
+    };
+    use std::ffi::OsStr;
+    use std::fs;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-test-runtime-cache-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create test runtime cache directory");
+        dir
     }
 
-    #[cfg(unix)]
-    // SAFETY: 同上——正常路径释放锁。
-    unsafe {
-        libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN);
+    #[test]
+    fn test_runtime_cache_temp_names_are_unique_and_strict() {
+        let key = "a".repeat(64);
+        let first = test_runtime_cache_temp_path(std::path::Path::new("/tmp"), &key);
+        let second = test_runtime_cache_temp_path(std::path::Path::new("/tmp"), &key);
+        assert_ne!(first, second);
+        assert!(is_test_runtime_cache_temp_name(
+            first.file_name().expect("first temp name")
+        ));
+        assert!(first
+            .file_name()
+            .expect("first temp name")
+            .to_string_lossy()
+            .starts_with(&format!(
+                "libmimi_runtime_{key}.tmp-{}-",
+                std::process::id()
+            )));
+        assert!(!is_test_runtime_cache_temp_name(OsStr::new(
+            "libmimi_runtime_deadbeef.tmp-old"
+        )));
+        assert!(!is_test_runtime_cache_temp_name(OsStr::new(
+            "libmimi_runtime_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.tmp-x"
+        )));
     }
-    Ok(lib_path)
+
+    #[test]
+    fn test_runtime_cache_stale_temp_cleanup_is_fail_closed() {
+        let dir = temp_dir("stale-temp");
+        let key = "b".repeat(64);
+        let stale = test_runtime_cache_temp_path(&dir, &key);
+        let unrelated = dir.join("libmimi_runtime_deadbeef.tmp-old");
+        let archive = dir.join(format!("libmimi_runtime_{key}.a"));
+        fs::write(&stale, b"stale").expect("write stale temporary");
+        fs::write(&unrelated, b"unrelated").expect("write unrelated temporary");
+        fs::write(&archive, b"archive").expect("write archive");
+        cleanup_test_runtime_cache_stale_temps(&dir).expect("clean stale temporary");
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+        assert!(archive.exists());
+
+        let collision = test_runtime_cache_temp_path(&dir, &key);
+        fs::create_dir(&collision).expect("create temporary directory collision");
+        let error = cleanup_test_runtime_cache_stale_temps(&dir)
+            .expect_err("directory collision must fail closed");
+        assert!(error.starts_with("stale test runtime cache path is not a regular file:"));
+        assert!(collision.is_dir());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_runtime_cache_stale_archive_cleanup_matches_only_real_keys() {
+        let dir = temp_dir("stale-archive");
+        let current_key = "c".repeat(64);
+        let stale_key = "d".repeat(64);
+        let current = format!("libmimi_runtime_{current_key}.a");
+        let stale = dir.join(format!("libmimi_runtime_{stale_key}.a"));
+        let malformed = dir.join("libmimi_runtime_deadbeef.a");
+        fs::write(&stale, b"stale").expect("write stale archive");
+        fs::write(&malformed, b"malformed").expect("write malformed archive");
+        cleanup_test_runtime_cache_stale_archives(&dir, &current).expect("clean stale archives");
+        assert!(!stale.exists());
+        assert!(malformed.exists());
+
+        let collision = dir.join(format!("libmimi_runtime_{current_key}.a"));
+        fs::create_dir(&collision).expect("create archive directory collision");
+        let error = cleanup_test_runtime_cache_stale_archives(&dir, "different-current.a")
+            .expect_err("archive directory collision must fail closed");
+        assert!(error.starts_with("stale test runtime cache path is not a regular file:"));
+        assert!(collision.is_dir());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_runtime_cache_lock_guard_releases_after_scope() {
+        let dir = temp_dir("lock");
+        let path = dir.join("lock");
+        let first = crate::runtime_cache::open_private_cache_lock(&path, "test lock")
+            .expect("open first lock");
+        let guard = acquire_test_runtime_cache_lock(first).expect("acquire first lock");
+        drop(guard);
+        let second = crate::runtime_cache::open_private_cache_lock(&path, "test lock")
+            .expect("open second lock");
+        let guard = acquire_test_runtime_cache_lock(second).expect("reacquire lock");
+        drop(guard);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_runtime_cache_archive_name_rejects_malformed_keys() {
+        assert!(is_test_runtime_cache_archive_name(OsStr::new(&format!(
+            "libmimi_runtime_{}.a",
+            "e".repeat(64)
+        ))));
+        assert!(!is_test_runtime_cache_archive_name(OsStr::new(
+            "libmimi_runtime_deadbeef.a"
+        )));
+        assert!(!is_test_runtime_cache_archive_name(OsStr::new(
+            "libmimi_runtime_gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.a"
+        )));
+    }
 }
 
 /// File-based lock for tests that mutate the process-wide `MIMI_FFI_LIB` environment
