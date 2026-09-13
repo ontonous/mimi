@@ -229,6 +229,11 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn debug_canonical_ffi_loaded_library_count(&self) -> usize {
+        self.canonical_ffi_runtime.loaded_library_count_for_test()
+    }
+
+    #[cfg(test)]
     pub(crate) fn debug_recycled_reg(&self, r: Reg) -> Option<&Value> {
         self.free_regs.last().and_then(|regs| regs.get(r as usize))
     }

@@ -3041,6 +3041,137 @@ fn scalar_ffi_runtime_missing_symbol_does_not_poison_cached_libraries() {
 }
 
 #[test]
+fn scalar_ffi_vm_missing_symbol_recovers_same_vm_and_isolates_compatibility() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(1)
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_rebindable" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 11))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let valid = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let missing = library_fixture(counter + 1, MISSING_SYMBOL_C_SOURCE);
+    let valid_library = valid.dir.join("ffi.so");
+    let missing_library = missing.dir.join("ffi.so");
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(SOURCE)
+            .tokenize()
+            .expect("lex VM missing-symbol recovery fixture"),
+    )
+    .parse_file()
+    .expect("parse VM missing-symbol recovery fixture");
+    let checked = crate::core::check_program(&file).expect("check VM missing-symbol fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize VM missing-symbol recovery MIR");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference VM recovery fixture");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "1\n12\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free VM recovery bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    guard.set_path(&missing_library);
+    let missing_error = vm
+        .run_value()
+        .expect_err("missing-symbol VM call must fail closed after the prefix print");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "the missing-symbol library is cached without leaving a frame or poisoning the VM"
+    );
+
+    let compat_source = r#"func main() -> i64 { println(2); 0 }"#;
+    let compat_file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(compat_source)
+            .tokenize()
+            .expect("lex compatibility isolation fixture"),
+    )
+    .parse_file()
+    .expect("parse compatibility isolation fixture");
+    let compat_checked =
+        crate::core::check_program(&compat_file).expect("check compatibility isolation fixture");
+    let compat_mir = MirProgram::from_checked_program(&compat_checked)
+        .expect("materialize compatibility isolation MIR");
+    let compat_bytecode =
+        compile_mir_program(&compat_mir).expect("compile compatibility isolation bytecode");
+    assert!(compat_bytecode.ast.is_none());
+    assert!(compat_bytecode.canonical_ffi.is_empty());
+    let mut compat_vm = BytecodeVM::new(compat_bytecode);
+    assert_eq!(
+        compat_vm
+            .run_value()
+            .expect("compatibility VM must remain usable"),
+        Value::Int(0)
+    );
+    assert_eq!(compat_vm.stdout(), "2\n");
+    assert_eq!(compat_vm.debug_stack_state(), (0, 0));
+
+    guard.set_path(&valid_library);
+    assert_eq!(
+        vm.run_value()
+            .expect("the same canonical VM must recover after missing-symbol failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        2,
+        "recovery binds the valid library as a second isolated cache entry"
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_vm_recovery");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native VM recovery fixture lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native VM recovery module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(REBINDABLE_SYMBOL_A_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native VM recovery fixture remains linkable");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n12\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
