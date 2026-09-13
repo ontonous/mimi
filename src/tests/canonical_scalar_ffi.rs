@@ -5258,6 +5258,90 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_second_site_failure_recovers_without_cache_drift() {
+    const FIRST_ONLY_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_first(int64_t value) { return value + 30; }
+"#;
+    const BOTH_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_first(int64_t value) { return value + 40; }
+int64_t mir_ffi_second(int64_t value) { return value + 50; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_first(value: i64) -> i64;
+    func mir_ffi_second(value: i64) -> i64;
+}
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_first(1 as i64))
+    println(mir_ffi_second(2 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, FIRST_ONLY_C_SOURCE);
+    let both = library_fixture(counter + 1, BOTH_C_SOURCE);
+    let first_path = first.dir.join("ffi.so").to_string_lossy().into_owned();
+    let both_path = both.dir.join("ffi.so").to_string_lossy().into_owned();
+    guard.set_path(&first.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("explicit second-site fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize explicit second-site MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit second-site bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(first_path.clone());
+    let first_error = vm
+        .run_value()
+        .expect_err("first-only library must fail at the second call site");
+    assert_eq!(first_error.code(), "E0800");
+    assert!(first_error.to_string().contains("mir_ffi_second"));
+    assert_eq!(vm.stdout(), "0\n31\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    vm.set_canonical_ffi_library_path(both_path.clone());
+    assert_eq!(
+        vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect("complete library must recover both explicit call sites"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(vm.stdout(), "0\n41\n52\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(first_path);
+    let second_error = vm
+        .run_value()
+        .expect_err("switching back must reproduce the second-site failure");
+    assert_eq!(second_error.code(), "E0800");
+    assert_eq!(second_error.to_string(), first_error.to_string());
+    assert_eq!(vm.stdout(), "0\n31\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(both_path);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("direct entry must recover after repeated second-site failure"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n41\n52\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
