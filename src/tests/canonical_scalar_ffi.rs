@@ -5796,6 +5796,59 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
 }
 
 #[test]
+fn scalar_ffi_environment_empty_and_whitespace_paths_preserve_cache_identity() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("empty environment-path fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize empty environment-path MIR");
+    let bytecode = compile_mir_program(&mir).expect("empty environment-path bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    assert_eq!(
+        vm.run_value()
+            .expect("initial environment binding must load"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    for malformed_path in [std::path::Path::new(""), std::path::Path::new("   ")] {
+        guard.set_path(malformed_path);
+        let error = vm
+            .run_value()
+            .expect_err("empty or whitespace environment path must fail before a load");
+        assert_eq!(error.code(), "E0800");
+        assert!(error.to_string().contains("failed to load"), "{error}");
+        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    }
+
+    guard.set_path(&library);
+    assert_eq!(
+        vm.run_value()
+            .expect("restoring environment A must reuse cached handle"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "0\n12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
