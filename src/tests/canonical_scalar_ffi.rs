@@ -5475,7 +5475,11 @@ func main() -> i64 {
 "#;
 
     let mut guard = super::FfiEnvGuard::lock();
-    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Reserve a disjoint namespace because this test owns three fixture paths
+    // and the parallel suite has older tests that derive `counter + 1`/`+2`.
+    let counter = super::E2E_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1_000_000_000);
     let first = library_fixture(counter, FIRST_ONLY_C_SOURCE);
     let both = library_fixture(counter + 1, BOTH_C_SOURCE);
     let environment = library_fixture(counter + 2, ENVIRONMENT_C_SOURCE);
