@@ -4475,6 +4475,120 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_shared_program_concurrent_failure_recovery_is_isolated() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_concurrent_failure(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_concurrent_failure(value: i64) -> i64 ensures: result == value; }
+func main() -> i64 {
+    println(0 as i64)
+    println(mir_ffi_concurrent_failure(5 as i64))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, BAD_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("shared-program concurrent failure fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize shared-program concurrent failure MIR");
+    let bytecode = compile_mir_program(&mir).expect("shared-program concurrent failure bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let first_program = bytecode.clone();
+    let second_program = bytecode;
+
+    let first = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(first_program);
+        let first_error = vm
+            .run_value()
+            .expect_err("first concurrent VM must reject the bad result");
+        assert_eq!(first_error.code(), "E0808");
+        assert!(first_error.to_string().contains("FFI postcondition failed"));
+        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+        vm.set_verify_ffi(false);
+        let recovered = vm
+            .call_named("function:main", Vec::new())
+            .expect("first concurrent VM must recover in unchecked mode");
+        assert_eq!(recovered, Value::Int(0));
+        assert_eq!(vm.stdout(), "0\n6\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+        vm.set_verify_ffi(true);
+        let second_error = vm
+            .run_value()
+            .expect_err("first concurrent VM must fail again after re-enabling checks");
+        assert_eq!(second_error.code(), "E0808");
+        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+        (
+            vm.stdout().to_owned(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+    let second = std::thread::spawn(move || {
+        let mut vm = BytecodeVM::new(second_program);
+        let first_error = vm
+            .run_value()
+            .expect_err("second concurrent VM must reject the bad result");
+        assert_eq!(first_error.code(), "E0808");
+        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+        vm.set_verify_ffi(false);
+        assert_eq!(
+            vm.call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+                .expect("second concurrent VM must recover through wrapped entry"),
+            Value::Variant("Ok".into(), vec![Value::Int(0)])
+        );
+        assert_eq!(vm.stdout(), "0\n6\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+        vm.set_verify_ffi(true);
+        let second_error = vm
+            .run_value()
+            .expect_err("second concurrent VM must fail again after re-enabling checks");
+        assert_eq!(second_error.code(), "E0808");
+        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+        (
+            vm.stdout().to_owned(),
+            vm.debug_canonical_ffi_loaded_library_count(),
+            vm.program().canonical_ffi.clone(),
+        )
+    });
+
+    let first = first
+        .join()
+        .expect("first concurrent failure/recovery VM thread must join");
+    let second = second
+        .join()
+        .expect("second concurrent failure/recovery VM thread must join");
+    assert_eq!(first.0, "0\n");
+    assert_eq!(second.0, "0\n");
+    assert_eq!(first.1, 1);
+    assert_eq!(second.1, 1);
+    assert_eq!(first.2, descriptor_snapshot);
+    assert_eq!(second.2, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
