@@ -226,16 +226,11 @@ impl MirReferenceFfiResolver for Oracle {
 
 struct LibraryFixture {
     dir: PathBuf,
-    previous: Option<std::ffi::OsString>,
     previous_trace: Option<std::ffi::OsString>,
 }
 
 impl Drop for LibraryFixture {
     fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
-            None => std::env::remove_var("MIMI_FFI_LIB"),
-        }
         match &self.previous_trace {
             Some(value) => std::env::set_var("MIMI_CANONICAL_FFI_TRACE", value),
             None => std::env::remove_var("MIMI_CANONICAL_FFI_TRACE"),
@@ -250,7 +245,6 @@ fn library_fixture(counter: u64, c_source: &str) -> LibraryFixture {
             "mimi-canonical-ffi-{}-{counter}",
             std::process::id()
         )),
-        previous: std::env::var_os("MIMI_FFI_LIB"),
         previous_trace: std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
     };
     std::fs::create_dir_all(&fixture.dir).expect("create C FFI fixture directory");
@@ -274,7 +268,7 @@ fn library_fixture(counter: u64, c_source: &str) -> LibraryFixture {
 
 #[test]
 fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
@@ -326,14 +320,14 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     let bytecode = compile_mir_program(&mir).expect("AST-free C ABI bytecode");
     assert!(bytecode.ast.is_none());
     assert!(bytecode.extern_names.is_empty());
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("missing.so"));
+    guard.set_path(&fixture.dir.join("missing.so"));
     let error = BytecodeVM::new(bytecode.clone())
         .run_value()
         .expect_err("missing library");
     assert_eq!(error.code(), "E0800");
     assert!(error.to_string().contains("failed to load"), "{error}");
 
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let mut vm = BytecodeVM::new(bytecode);
     assert!(matches!(
         vm.run_value().expect("real C ABI bytecode execution"),
@@ -379,11 +373,11 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
 fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MIXED_WIDTH_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MIXED_WIDTH_SOURCE)
         .tokenize()
@@ -518,11 +512,11 @@ fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
 fn scalar_ffi_result_conversion_matches_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, RESULT_CONVERSION_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(RESULT_CONVERSION_F64_SOURCE)
         .tokenize()
@@ -671,11 +665,11 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
 fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, RESULT_CONVERSION_I64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(RESULT_CONVERSION_I64_SOURCE)
         .tokenize()
@@ -846,11 +840,11 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
 fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, RESULT_RANGE_I64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(RESULT_RANGE_I64_SOURCE)
         .tokenize()
@@ -1002,11 +996,11 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
 fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, RESULT_RANGE_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(RESULT_RANGE_F64_SOURCE)
         .tokenize()
@@ -1149,11 +1143,11 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
 fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MULTI_CALL_NONFINITE_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MULTI_CALL_NONFINITE_SOURCE)
         .tokenize()
@@ -1313,11 +1307,11 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
 fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, RESULT_CONVERSION_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(RESULT_CONVERSION_F64_SOURCE)
         .tokenize()
@@ -1469,11 +1463,11 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
 fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MIXED_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MIXED_F64_SOURCE)
         .tokenize()
@@ -1682,11 +1676,11 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
 fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, F64_I32_RANGE_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(F64_I32_RANGE_SOURCE)
         .tokenize()
@@ -1859,11 +1853,11 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
 
 #[test]
 fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MULTI_CALL_REQUIRES_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MULTI_CALL_REQUIRES_SOURCE)
         .tokenize()
@@ -2025,11 +2019,11 @@ func main() -> i64 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(SOURCE)
         .tokenize()
@@ -2181,11 +2175,11 @@ func main() -> i64 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(SOURCE)
         .tokenize()
@@ -2712,11 +2706,11 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MISSING_SYMBOL_SOURCE)
         .tokenize()
@@ -2781,13 +2775,12 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
 
 #[test]
 fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
     let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
     let first_library = first.dir.join("ffi.so");
     let second_library = second.dir.join("ffi.so");
-    let previous = std::env::var_os("MIMI_FFI_LIB");
     let i64_abi = crate::core::mir::types::MirAbiClass::Integer {
         bits: 64,
         signed: true,
@@ -2814,7 +2807,7 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
         ensures: None,
     };
 
-    std::env::set_var("MIMI_FFI_LIB", &first_library);
+    guard.set_path(&first_library);
     let mut runtime = crate::interp::bytecode::mir_ffi::CanonicalMirFfiRuntime::new();
     assert_eq!(
         runtime
@@ -2824,7 +2817,7 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
     );
     assert_eq!(runtime.loaded_library_count_for_test(), 1);
 
-    std::env::set_var("MIMI_FFI_LIB", &second_library);
+    guard.set_path(&second_library);
     assert_eq!(
         runtime
             .call(&descriptor, &[Value::Int(1)])
@@ -2833,7 +2826,7 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
     );
     assert_eq!(runtime.loaded_library_count_for_test(), 2);
 
-    std::env::set_var("MIMI_FFI_LIB", &first_library);
+    guard.set_path(&first_library);
     assert_eq!(
         runtime
             .call(&descriptor, &[Value::Int(1)])
@@ -2841,22 +2834,17 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
         Value::Int(12)
     );
     assert_eq!(runtime.loaded_library_count_for_test(), 2);
-
-    match previous {
-        Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
-        None => std::env::remove_var("MIMI_FFI_LIB"),
-    }
 }
 
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, MIXED_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(MIXED_F64_SOURCE)
         .tokenize()
@@ -2941,11 +2929,11 @@ fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
 fn scalar_ffi_transparent_alias_chain_preserves_float_argument_abi_across_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, ALIASED_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let tokens = crate::lexer::Lexer::new(ALIASED_F64_SOURCE)
         .tokenize()
@@ -3094,11 +3082,11 @@ func main() -> i64 {
 fn scalar_ffi_transparent_aliases_cover_every_scalar_endpoint_across_consumers() {
     use crate::core::mir::types::MirAbiClass;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, ALIASED_SCALAR_MATRIX_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let file = crate::parser::Parser::new(
         crate::lexer::Lexer::new(ALIASED_SCALAR_MATRIX_SOURCE)
@@ -3263,11 +3251,11 @@ fn scalar_ffi_imported_alias_keeps_checker_identity_after_file_merge() {
     use crate::core::mir::types::MirAbiClass;
     use std::fs;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, IMPORTED_ALIAS_F64_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
 
     let project = std::env::temp_dir().join(format!(
         "mimi-canonical-ffi-import-alias-{}-{counter}",
@@ -3470,10 +3458,10 @@ int64_t mir_ffi_import_alias_sequence_extra(double value) {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
 
     let project = std::env::temp_dir().join(format!(
         "mimi-canonical-ffi-import-alias-sequence-{}-{counter}",
@@ -4284,11 +4272,11 @@ fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
 
 #[test]
 fn scalar_ffi_ensures_binds_call_result_across_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_i64(x: i64) -> i64 ensures: result == x;
@@ -4405,11 +4393,11 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_requires_and_ensures_share_one_result_with_ordered_summary() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_i64(x: i64) -> i64 requires: x >= 0 ensures: result == x;
@@ -4506,11 +4494,11 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_unit_ensures_runs_after_void_call_across_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_store(x: i32) ensures: true;
@@ -4653,11 +4641,11 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_bool_ensures_binds_bool_result_across_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_bool(x: bool) -> bool ensures: result == not x;
@@ -4780,11 +4768,11 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_ensures_short_circuit_division_matches_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_i64(x: i64) -> i64 ensures: x == 0 or result / x == 1;
@@ -4922,11 +4910,11 @@ fn scalar_ffi_ensures_division_by_zero_traps_after_foreign_call() {
         }
     }
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_i64(x: i64) -> i64 ensures: result / x == 1;
@@ -5026,7 +5014,7 @@ fn scalar_ffi_ensures_checked_arithmetic_overflow_parity() {
         }
     }
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     for (label, contract, argument, expected_status, expected_message, expected_code, output) in [
         (
             "add-overflow",
@@ -5077,7 +5065,7 @@ fn scalar_ffi_ensures_checked_arithmetic_overflow_parity() {
         let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let fixture = library_fixture(counter, C_SOURCE);
         let library = fixture.dir.join("ffi.so");
-        std::env::set_var("MIMI_FFI_LIB", &library);
+        guard.set_path(&library);
         let source = format!(
             r#"
 extern "C" {{
@@ -5212,10 +5200,10 @@ fn scalar_ffi_ensures_remainder_sign_and_short_circuit_parity() {
         }
     }
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
 
     for (label, contract, argument, expected_status, expected_code, expected_output) in [
         (
@@ -5383,10 +5371,10 @@ func main() -> i64 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("multi-argument remainder FFI fixture");
     let mir = MirProgram::from_checked_program(&checked)
@@ -5501,10 +5489,10 @@ func main() -> i32 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("mixed i32/i64 scalar FFI fixture");
     let mir = MirProgram::from_checked_program(&checked)
@@ -5618,10 +5606,10 @@ func main() -> i32 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("mixed-width boundary FFI fixture");
     let mir = MirProgram::from_checked_program(&checked)
@@ -5735,10 +5723,10 @@ func main() -> i32 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("mixed-width arithmetic FFI fixture");
     let mir = MirProgram::from_checked_program(&checked)
@@ -6009,10 +5997,10 @@ func main() -> i64 {
 
 #[test]
 fn scalar_ffi_bytecode_applies_parameter_conversion_before_libffi_call() {
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let source = r#"
 extern "C" { func mir_ffi_f64(x: f64) -> f64; }
 func main() -> i64 {
@@ -7733,10 +7721,10 @@ func main() -> i64 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("mixed call-site width FFI fixture");
     let mir = MirProgram::from_checked_program(&checked)
@@ -7835,11 +7823,11 @@ fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
 #include <stdint.h>
 int64_t mir_ffi_bad(int64_t x) { return x + 1; }
 "#;
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, BAD_C_SOURCE);
     let library = fixture.dir.join("ffi.so");
-    std::env::set_var("MIMI_FFI_LIB", &library);
+    guard.set_path(&library);
     let source = r#"
 extern "C" {
     func mir_ffi_bad(x: i64) -> i64 ensures: result == x;
@@ -7929,11 +7917,11 @@ int64_t mir_ffi_mark(int64_t x) {{
 }}
 "#
     );
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, &c_source);
     let trace_path = fixture.dir.join("trace.txt");
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     std::env::set_var("MIMI_CANONICAL_FFI_TRACE", &trace_path);
 
     for (requires, body, expected_trace, error, return_value, verify_ffi) in [
@@ -8272,10 +8260,10 @@ fn scalar_ffi_seeded_composition_matrix_shares_one_mir_across_consumers() {
 #include <stdint.h>
 int64_t generated_foreign(int64_t x) { return x; }
 "#;
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let config = super::E2EConfig {
         extra_c_src: Some(C_SOURCE.into()),
         ..Default::default()
@@ -8443,10 +8431,10 @@ func main() -> i64 {
 }
 "#;
 
-    let _guard = super::FfiEnvLock::lock();
+    let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
-    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    guard.set_path(&fixture.dir.join("ffi.so"));
     let file = super::parse_prod(SOURCE);
     let checked = crate::core::check_program(&file).expect("multi-argument C ABI fixture");
     let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
