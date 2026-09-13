@@ -4769,6 +4769,9 @@ func main() -> i64 {
 }
 "#;
 
+    // Fixture allocation must share the process-wide guard with the other
+    // explicit-binding tests; this test derives a second path from `counter`.
+    let _guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
     let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
