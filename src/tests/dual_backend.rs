@@ -10545,10 +10545,10 @@ fn dual_ffi_reprc_struct() {
         eprintln!("SKIP: linker not available");
         return;
     }
-    let _guard = FfiEnvLock::lock();
+    let mut guard = FfiEnvGuard::lock();
     // Build the shared library containing test_struct_by_val
     let so_path = build_interp_ffi_so().expect("dual_ffi_reprc_struct: build so failed");
-    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    guard.set_path(&so_path);
     // Codegen links test_struct_by_val from the Rust runtime;
     // interpreter loads it from .so via MIMI_FFI_LIB.
     let src = r#"
@@ -10576,7 +10576,6 @@ fn dual_ffi_reprc_struct() {
     let _interp = run_source(src);
     // Codegen: compile and run, capture stdout
     let codegen_stdout = compile_and_run(src).expect("codegen failed");
-    std::env::remove_var("MIMI_FFI_LIB");
     assert_eq!(
         codegen_stdout.trim(),
         "30",
@@ -10594,9 +10593,9 @@ fn dual_ffi_struct_multiple_fields() {
         eprintln!("SKIP: linker not available");
         return;
     }
-    let _guard = FfiEnvLock::lock();
+    let mut guard = FfiEnvGuard::lock();
     let so_path = build_interp_ffi_so().expect("dual_ffi_struct_multiple: build so failed");
-    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    guard.set_path(&so_path);
     let src = r#"
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
@@ -10620,7 +10619,6 @@ fn dual_ffi_struct_multiple_fields() {
     });
     let _interp = run_source(src);
     let codegen_stdout = compile_and_run(src).expect("codegen failed");
-    std::env::remove_var("MIMI_FFI_LIB");
     // 10 + 3.5 + 1 = 14.5 (the C function sums all fields)
     // P0-3: %g shortest round-trip, matches interp.
     assert_eq!(
@@ -10640,9 +10638,9 @@ fn dual_ffi_struct_return_complex() {
         eprintln!("SKIP: linker not available");
         return;
     }
-    let _guard = FfiEnvLock::lock();
+    let mut guard = FfiEnvGuard::lock();
     let so_path = build_interp_ffi_so().expect("dual_ffi_struct_return_complex: build so failed");
-    std::env::set_var("MIMI_FFI_LIB", &so_path);
+    guard.set_path(&so_path);
     let src = r#"
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
@@ -10670,7 +10668,6 @@ fn dual_ffi_struct_return_complex() {
     let _interp = run_source(src);
     // Keep MIMI_FFI_LIB set; the codegen binary is statically linked and ignores it.
     let codegen_stdout = compile_and_run(src);
-    std::env::remove_var("MIMI_FFI_LIB");
     match codegen_stdout {
         Ok(out) => {
             let lines: Vec<&str> = out.trim().lines().collect();
