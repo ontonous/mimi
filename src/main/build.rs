@@ -383,8 +383,15 @@ fn runtime_cache_key_with_asan_and_args(
 fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
     match std::fs::symlink_metadata(cache_path) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            let mut file = std::fs::File::open(cache_path)
-                .map_err(|error| format!("open runtime cache archive: {error}"))?;
+            let mut file = open_runtime_cache_archive(cache_path)?;
+            let handle_metadata = file
+                .metadata()
+                .map_err(|error| format!("inspect runtime cache archive handle: {error}"))?;
+            if !handle_metadata.file_type().is_file() {
+                return Err(format!(
+                    "runtime cache archive handle is not a regular file: {cache_path:?}"
+                ));
+            }
             let mut magic = [0_u8; 8];
             std::io::Read::read_exact(&mut file, &mut magic)
                 .map_err(|error| format!("read runtime cache archive header: {error}"))?;
@@ -401,6 +408,24 @@ fn runtime_cache_hit(cache_path: &Path) -> Result<Option<std::path::PathBuf>, St
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("inspect runtime cache: {error}")),
     }
+}
+
+fn open_runtime_cache_archive(cache_path: &Path) -> Result<std::fs::File, String> {
+    let file = {
+        #[cfg(unix)]
+        {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(cache_path)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::File::open(cache_path)
+        }
+    }
+    .map_err(|error| format!("open runtime cache archive: {error}"))?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -874,10 +899,11 @@ pub(crate) fn build(
 mod tests {
     use super::{
         acquire_runtime_cache_lock, cleanup_runtime_cache_stale_temps, cleanup_runtime_cache_temps,
-        ensure_runtime_cache_key_stable, native_runtime_cache_eligible, publish_runtime_cache,
-        runtime_cache_attempt_should_retry, runtime_cache_hit, runtime_cache_key,
-        runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args, runtime_cache_temp_path,
-        runtime_compiler_args, runtime_compiler_environment_frame, runtime_include_literals,
+        ensure_runtime_cache_key_stable, native_runtime_cache_eligible, open_runtime_cache_archive,
+        publish_runtime_cache, runtime_cache_attempt_should_retry, runtime_cache_hit,
+        runtime_cache_key, runtime_cache_key_with_asan, runtime_cache_key_with_asan_and_args,
+        runtime_cache_temp_path, runtime_compiler_args, runtime_compiler_environment_frame,
+        runtime_include_literals,
     };
     use std::fs;
     use std::process::{Command, Stdio};
@@ -1615,6 +1641,31 @@ mod tests {
             error.starts_with("runtime cache path is not a regular file:"),
             "{error}"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_cache_archive_open_rejects_symlink_at_descriptor_boundary() {
+        let dir = std::env::temp_dir().join(format!(
+            "mimi-runtime-cache-open-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create runtime cache open symlink directory");
+        let target = dir.join("target.a");
+        let link = dir.join("link.a");
+        fs::write(&target, b"!<arch>\nexternal archive").expect("write archive target");
+        std::os::unix::fs::symlink(&target, &link).expect("create archive symlink");
+
+        let error = open_runtime_cache_archive(&link)
+            .expect_err("descriptor-level archive open must reject symlink");
+        assert!(error.starts_with("open runtime cache archive:"), "{error}");
+        assert!(link.is_symlink());
+
         fs::remove_dir_all(&dir).ok();
     }
 
