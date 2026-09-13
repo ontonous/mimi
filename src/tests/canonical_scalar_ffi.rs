@@ -4760,6 +4760,83 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_explicit_binding_never_bypasses_cached_descriptor_preflight() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let first = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let second = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let first_path = first.dir.join("ffi.so").to_string_lossy().into_owned();
+    let second_path = second.dir.join("ffi.so").to_string_lossy().into_owned();
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("explicit preflight fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize explicit preflight MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit preflight bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(first_path.clone());
+    assert_eq!(
+        vm.run_value().expect("initial explicit A run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original = vm.program().canonical_ffi[0].clone();
+    let mut forged = original.clone();
+    forged.symbol = "forged_after_explicit_rebind".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);
+    vm.set_canonical_ffi_library_path(second_path.clone());
+    let forged_error = vm
+        .run_value()
+        .expect_err("explicit path changes must not bypass descriptor preflight");
+    assert!(
+        forged_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{forged_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "forged preflight must reject before loading the rebound library"
+    );
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, original);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("restored descriptor must permit explicit B binding"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "23\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(first_path);
+    assert_eq!(
+        vm.run_value()
+            .expect("explicit A rebinding after restoration"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
+#[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
 
