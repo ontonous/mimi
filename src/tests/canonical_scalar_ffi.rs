@@ -7358,6 +7358,183 @@ func main() -> i64 {
     drop(guard);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_imported_default_libc_module_preserves_receipts_and_binding() {
+    use std::fs;
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("labs", [MirRuntimeValue::Int(value)]) if *value == -41 => {
+                    Ok(MirRuntimeValue::Int(41))
+                }
+                ("sched_yield", []) => Ok(MirRuntimeValue::Int(0)),
+                _ => Err(format!(
+                    "unexpected imported default-libc receipt/arguments: {receipt:?} {arguments:?}"
+                )),
+            }
+        }
+    }
+
+    let guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let project = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-import-default-libc-{}-{counter}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&project).expect("create imported default-libc project");
+    let main_path = project.join("main.mimi");
+    fs::write(
+        &main_path,
+        r#"
+use libc_bindings
+func main() -> i64 {
+    println(call_labs(-41 as i64))
+    println(call_sched())
+    0
+}
+"#,
+    )
+    .expect("write imported default-libc main");
+    fs::write(
+        project.join("libc_bindings.mimi"),
+        r#"
+extern "C" {
+    func labs(value: i64) -> i64;
+    func sched_yield() -> i32;
+}
+pub func call_labs(value: i64) -> i64 { labs(value) }
+pub func call_sched() -> i32 { sched_yield() }
+"#,
+    )
+    .expect("write imported default-libc module");
+
+    let source = fs::read_to_string(&main_path).expect("read imported default-libc main");
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("lex imported default-libc main");
+    let file = crate::loader::parser_for_path(tokens, &main_path)
+        .expect("select imported default-libc parser")
+        .parse_file()
+        .expect("parse imported default-libc main");
+    let mut loader = crate::loader::ModuleLoader::new(project.clone());
+    loader
+        .load_main_with_file(&main_path, file)
+        .expect("load imported default-libc graph");
+    let mut merged = loader
+        .merge_all()
+        .expect("merge imported default-libc graph");
+    crate::loader::merge_prelude_into(&mut merged);
+    let checked = crate::core::check_program(&merged).expect("check imported default-libc graph");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "imported default-libc declarations must stay on canonical scalar FFI admission"
+    );
+    let excluded_sources = merged
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+            .expect("materialize imported default-libc route");
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+        "imported default-libc declarations must materialize scalar FFI"
+    );
+    let mir = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize imported default-libc MIR");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|(_, receipt)| receipt.symbol.as_str())
+            .collect::<Vec<_>>(),
+        vec!["labs", "sched_yield"]
+    );
+    assert!(ordered.iter().all(|(_, receipt)| {
+        receipt.caller.0.contains("call_labs") || receipt.caller.0.contains("call_sched")
+    }));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-imported-default-libc".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-imported-default-libc".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("imported default-libc scalar FFI verification");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference imported default-libc execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "41\n0\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free imported default-libc bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode imported default-libc execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("bytecode imported default-libc re-entry"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n0\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_imported_default_libc");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native imported default-libc lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid imported default-libc LLVM module");
+    let config = super::E2EConfig::default();
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native imported default-libc execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "41\n0\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    fs::remove_dir_all(project).expect("remove imported default-libc project");
+    drop(guard);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
