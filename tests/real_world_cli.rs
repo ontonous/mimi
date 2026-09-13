@@ -5199,6 +5199,207 @@ fn canonical_scalar_ffi_imported_default_libc_mixed_ensures_preserves_success_pr
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_imported_default_libc_mixed_contract_phases_are_ordered() {
+    if !can_link() {
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-default-libc-mixed-contract-phases-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported default-libc mixed-contract fixture");
+    fs::write(
+        dir.join("libc_guarded.mimi"),
+        "extern \"C\" { func labs(value: i64) -> i64 requires: value <= 0 ensures: value >= 0; }\npub func first() -> i64 { labs(-1 as i64) }\npub func second() -> i64 { labs(41 as i64) }\n",
+    )
+    .expect("write imported default-libc mixed-contract helper");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use libc_guarded\nfunc main() -> i64 { println(9); println(first()); println(second()); 0 }\n",
+    )
+    .expect("write imported default-libc mixed-contract entry");
+
+    let phase_summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&output.stderr).lines())
+            .filter_map(|line| {
+                let phase = if line.contains("canonical MIR extern requires contract disproven") {
+                    "requires"
+                } else if line.contains("canonical MIR extern ensures contract disproven") {
+                    "ensures"
+                } else {
+                    return None;
+                };
+                let function = if line.contains("function:first") {
+                    "first"
+                } else if line.contains("function:second") {
+                    "second"
+                } else {
+                    return None;
+                };
+                Some((function, phase))
+            })
+            .fold(Vec::new(), |mut phases, phase| {
+                if phases.last().copied() != Some(phase) {
+                    phases.push(phase);
+                }
+                phases
+            })
+    };
+    let expected = vec![("first", "ensures"), ("second", "requires")];
+    let mut verify_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc mixed-contract verification");
+        assert!(
+            !verify.status.success(),
+            "mixed imported default-libc contract unexpectedly verified (explicit_mir={explicit_mir})"
+        );
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert_eq!(
+            phase_summary(&verify),
+            expected,
+            "mixed imported default-libc contract phases changed: {verify_text}"
+        );
+        assert!(
+            !verify_text.contains("canonical route disposition: legacy"),
+            "mixed imported default-libc contract verification fell back to legacy: {verify_text}"
+        );
+        verify_outputs.push(verify);
+    }
+    assert_eq!(
+        phase_summary(&verify_outputs[0]),
+        phase_summary(&verify_outputs[1]),
+        "default and explicit MIR mixed imported contract phases diverged"
+    );
+
+    let mut build_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "mixed-contract-phases-mir"
+        } else {
+            "mixed-contract-phases-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc mixed-contract build");
+        assert!(
+            !build.status.success(),
+            "mixed imported default-libc contract unexpectedly built (explicit_mir={explicit_mir})"
+        );
+        let build_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert_eq!(
+            phase_summary(&build),
+            expected,
+            "mixed imported default-libc build phases changed: {build_text}"
+        );
+        assert!(
+            build_text.contains("FFI contract verification failed"),
+            "mixed imported default-libc build lost verification stage: {build_text}"
+        );
+        assert!(
+            !build_text.contains("undefined symbol: labs"),
+            "mixed imported default-libc build attempted unresolved linking: {build_text}"
+        );
+        assert!(
+            !build_text.contains("canonical route disposition: legacy"),
+            "mixed imported default-libc build fell back to legacy: {build_text}"
+        );
+        assert!(
+            !binary.exists(),
+            "failed mixed imported default-libc build left artifact"
+        );
+        build_outputs.push(build);
+    }
+    assert_eq!(
+        build_outputs[0].stderr, build_outputs[1].stderr,
+        "default and explicit MIR mixed imported contract build diagnostics diverged"
+    );
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc mixed-contract run");
+        assert!(
+            !run.status.success(),
+            "mixed imported default-libc contract run unexpectedly succeeded (explicit_mir={explicit_mir})"
+        );
+        assert_eq!(run.stdout, b"9\n", "explicit_mir={explicit_mir}");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("[E0808]"),
+            "mixed contract run lost E0808: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "mixed imported default-libc contract run fell back to legacy: {stderr}"
+        );
+
+        let mut skipped = Command::new(mimi_bin());
+        skipped.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            skipped.arg("--mir");
+        }
+        let skipped = skipped
+            .arg("--skip-verify-ffi")
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported default-libc mixed-contract skipped run");
+        assert!(
+            skipped.status.success(),
+            "skipped mixed imported default-libc contract run failed (explicit_mir={explicit_mir}): {}",
+            String::from_utf8_lossy(&skipped.stderr)
+        );
+        assert_eq!(skipped.stdout, b"9\n1\n41\n", "explicit_mir={explicit_mir}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_native_declaration_error_keeps_call_span() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-native-ffi-diagnostic-{}-{}",
