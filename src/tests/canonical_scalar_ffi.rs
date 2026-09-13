@@ -7004,6 +7004,121 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(recovered_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_default_libc_fallback_matches_reference_bytecode_and_native() {
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "labs" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            match arguments {
+                [MirRuntimeValue::Int(value)] if *value == -41 => Ok(MirRuntimeValue::Int(41)),
+                _ => Err(format!("unexpected labs arguments {arguments:?}")),
+            }
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let source = r#"
+extern "C" { func labs(value: i64) -> i64; }
+func main() -> i64 { println(labs(-41 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("default libc scalar FFI fixture");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "default libc scalar FFI must stay on canonical admission"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize default libc scalar FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("default libc scalar FFI verification");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference default libc scalar FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "41\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free default libc scalar FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode default libc scalar FFI execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("bytecode default libc cache reuse"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "41\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_default_libc");
+    generator
+        .compile_mir_native(&mir)
+        .expect("same MIR native default libc scalar FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native default libc scalar FFI module");
+    let config = super::E2EConfig::default();
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native default libc scalar FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "41\n");
+    assert_eq!(native.stderr, "");
+
+    guard.set_path(std::path::Path::new(
+        "/definitely/missing/mimi-default-libc-after-check.so",
+    ));
+    assert_eq!(
+        vm.run_value()
+            .expect_err("explicit missing path must fail after default fallback cache")
+            .code(),
+        "E0800"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
