@@ -6716,6 +6716,126 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(fallback_descriptor_snapshot, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_malformed_replacement_reopens_after_failure_without_cache_drift() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1_000_000_000);
+    let explicit = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let environment = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let repair = library_fixture(counter + 2, REBINDABLE_SYMBOL_C_C_SOURCE);
+    let explicit_path = explicit.dir.join("ffi.so");
+    let environment_path = environment.dir.join("ffi.so");
+    let repair_path = repair.dir.join("ffi.so");
+    let pending_path = environment.dir.join("environment-malformed.pending.so");
+    guard.set_path(&environment_path);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("malformed replacement fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize malformed replacement MIR");
+    let bytecode = compile_mir_program(&mir).expect("malformed replacement bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut fallback_vm = BytecodeVM::new(bytecode.clone());
+    let mut explicit_vm = BytecodeVM::new(bytecode);
+
+    assert_eq!(
+        fallback_vm
+            .run_value()
+            .expect("fallback VM must initially cache library B"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::rename(&environment_path, &pending_path)
+        .expect("library B must move before malformed replacement");
+    std::fs::write(&environment_path, b"this is not a shared library")
+        .expect("malformed library payload must be written");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        fallback_vm
+            .call_named("function:main", Vec::new())
+            .expect("cached fallback must ignore malformed replacement bytes"),
+        Value::Int(0)
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let fallback_descriptor_snapshot = fallback_vm.program().canonical_ffi.clone();
+    drop(fallback_vm);
+
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must cache library A"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    let malformed_error = explicit_vm
+        .call_function_wrap_ok(explicit_vm.program().entry, &[], Value::Unit)
+        .expect_err("malformed replacement must fail through the wrapped entry");
+    assert_eq!(malformed_error.code(), "E0800");
+    assert!(
+        malformed_error.to_string().contains("failed to load"),
+        "{malformed_error}"
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    std::fs::remove_file(&environment_path).expect("malformed replacement must be removed");
+    std::fs::rename(&repair_path, &environment_path)
+        .expect("repair library must replace malformed bytes at a new inode");
+    guard.set_path(&environment_path);
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("same VM must reopen the repaired library after malformed failure"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n34\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("explicit A rebinding must reuse its cached handle"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    explicit_vm.clear_canonical_ffi_library_path();
+    assert_eq!(
+        explicit_vm
+            .call_function_wrap_ok(explicit_vm.program().entry, &[], Value::Unit)
+            .expect("cleared binding must reuse repaired library C"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n34\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(fallback_descriptor_snapshot, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
