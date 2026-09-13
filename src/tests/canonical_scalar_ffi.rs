@@ -6270,6 +6270,78 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_environment_repair_does_not_cross_explicit_vm_binding() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let explicit = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
+    let repair = library_fixture(counter + 1, REBINDABLE_SYMBOL_B_C_SOURCE);
+    let explicit_path = explicit.dir.join("ffi.so");
+    let target = explicit.dir.join("environment-late.so");
+    let repair_path = repair.dir.join("ffi.so");
+    guard.set_path(&target);
+
+    let source = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0 }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("environment/explicit VM repair fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize environment/explicit VM repair MIR");
+    let bytecode = compile_mir_program(&mir).expect("environment/explicit VM repair bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let mut explicit_vm = BytecodeVM::new(bytecode.clone());
+    let mut fallback_vm = BytecodeVM::new(bytecode);
+    explicit_vm.set_canonical_ffi_library_path(explicit_path.to_string_lossy().into_owned());
+
+    assert_eq!(
+        explicit_vm
+            .run_value()
+            .expect("explicit VM must use library A despite the missing environment path"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let missing = fallback_vm
+        .run_value()
+        .expect_err("unbound VM must fail while its environment path is absent");
+    assert_eq!(missing.code(), "E0800");
+    assert!(missing.to_string().contains("failed to load"), "{missing}");
+    assert_eq!(fallback_vm.stdout(), "0\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    std::fs::rename(&repair_path, &target)
+        .expect("repair library must appear at the environment binding path");
+    guard.set_path(&target);
+    assert_eq!(
+        fallback_vm
+            .call_function_wrap_ok(fallback_vm.program().entry, &[], Value::Unit)
+            .expect("unbound VM must recover through the repaired environment path"),
+        Value::Variant("Ok".into(), vec![Value::Int(0)])
+    );
+    assert_eq!(fallback_vm.stdout(), "0\n23\n");
+    assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
+    assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    assert_eq!(
+        explicit_vm
+            .call_named("function:main", Vec::new())
+            .expect("explicit VM must remain isolated from the repaired environment path"),
+        Value::Int(0)
+    );
+    assert_eq!(explicit_vm.stdout(), "0\n12\n");
+    assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
+    assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(explicit_vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
     use crate::core::mir::types::MirAbiClass;
