@@ -4725,6 +4725,134 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn scalar_ffi_flow_actor_transition_inherits_contract_mode_and_binding() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_flow_actor_contract(int64_t value) { return value + 1; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_flow_actor_contract(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_flow_actor_contract(value: i64) -> i64 ensures: result == value; }
+func advance_state(self: i64) -> i64 {
+    mir_ffi_flow_actor_contract(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("flow actor canonical FFI contract fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize flow actor canonical FFI contract MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("compile flow actor canonical FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let transition = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:advance_state")
+        .expect("canonical flow transition function") as u32;
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+    program.flow_transition_funcs.insert(
+        (
+            "WorkerFlow".to_string(),
+            "advance".to_string(),
+            "Start".to_string(),
+        ),
+        transition,
+    );
+
+    let actor_instance = || crate::interp::ActorInstance {
+        actor_name: "WorkerFlow".to_string(),
+        fields: std::collections::HashMap::new(),
+        methods: Vec::new(),
+        runs_flow: Some("WorkerFlow".to_string()),
+        flow_state: Some(Value::Record(
+            Some("Start".to_string()),
+            std::collections::HashMap::new(),
+        )),
+        faulted: false,
+        peer_links: Vec::new(),
+        parent_id: None,
+        is_detached: false,
+        producers: Vec::new(),
+    };
+    let program = bytecode;
+    let empty_ast = std::sync::Arc::new(crate::ast::File {
+        sources: crate::span::SourceRegistry::default(),
+        imports: Vec::new(),
+        items: Vec::new(),
+        implicit_single: false,
+    });
+
+    let disabled = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast.clone(),
+        program.clone(),
+        None,
+        true,
+        false,
+        None,
+    );
+    let response = disabled
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue disabled flow transition")
+        .recv()
+        .expect("disabled flow actor worker response")
+        .expect("disabled flow actor FFI contract check");
+    assert_eq!(response, Value::Int(6));
+
+    let enabled = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast.clone(),
+        program.clone(),
+        None,
+        true,
+        true,
+        None,
+    );
+    let error = enabled
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue enabled flow transition")
+        .recv()
+        .expect("enabled flow actor worker response")
+        .expect_err("enabled flow actor worker must enforce FFI postcondition");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+
+    let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast,
+        program,
+        None,
+        true,
+        true,
+        Some(
+            good_fixture
+                .dir
+                .join("ffi.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    let response = explicitly_bound
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue explicitly bound flow transition")
+        .recv()
+        .expect("explicitly bound flow actor worker response")
+        .expect("explicitly bound flow actor FFI contract check");
+    assert_eq!(response, Value::Int(5));
+}
+
+#[test]
 fn scalar_ffi_shared_program_cache_lifetime_is_local_after_vm_drop() {
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
