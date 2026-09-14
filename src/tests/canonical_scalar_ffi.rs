@@ -16482,6 +16482,10 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                 );
                 assert_eq!(result.mir_hash, verifier_receipt.mir_digest);
                 assert_eq!(
+                    result.source_hash, source_hash,
+                    "MIR proof artifact must retain the source provenance used by its verifier"
+                );
+                assert_eq!(
                     result
                         .mir_route_receipt
                         .as_ref()

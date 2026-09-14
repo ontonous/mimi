@@ -6706,6 +6706,81 @@ fn mir_proof_cache_key_binds_route_identity_without_profile() {
 }
 
 #[test]
+fn mir_result_provenance_gate_rejects_mixed_multi_call_batch() {
+    let receipt = crate::core::mir::CanonicalMirRouteReceipt {
+        schema: crate::core::mir::MIR_ROUTE_RECEIPT_SCHEMA,
+        profile: "r6-701-verifier-v1".into(),
+        mir_digest: "a".repeat(64),
+        type_desc_digest: "b".repeat(64),
+        abi_digest: "c".repeat(64),
+        ffi_digest: "d".repeat(64),
+        ownership_digest: "e".repeat(64),
+        flow_transition_digest: "f".repeat(64),
+        root_owners: vec![crate::core::NodeId("function:main".into())],
+    };
+    let source_hash = "source-r6-701";
+    let result = |name: &str| VerificationResult {
+        func_name: name.into(),
+        status: VerifStatus::Proven,
+        message: "proof".into(),
+        diagnostic: None,
+        duration_us: 0,
+        constraint_count: 1,
+        artifact: Some(ProofArtifact {
+            semantics_version: ProofArtifact::SEMANTICS_VERSION,
+            integer_model: "checked_i32_i64".into(),
+            float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
+            solver_version: "z3 test".into(),
+            source_hash: source_hash.into(),
+            resolved_ir_hash: String::new(),
+            mir_hash: receipt.mir_digest.clone(),
+            mir_route_receipt: Some(receipt.clone()),
+            vir_hash: String::new(),
+            engine: ProofArtifact::ENGINE_MIR.into(),
+        }),
+        trusted_subset_domain: None,
+    };
+    let results = vec![result("function:first"), result("extern second")];
+    assert!(validate_mir_result_provenance(&results, &receipt, source_hash, "test-batch").is_ok());
+
+    let mut source_mismatch = results.clone();
+    source_mismatch[1]
+        .artifact
+        .as_mut()
+        .expect("second artifact")
+        .source_hash = "other-source".into();
+    let error =
+        validate_mir_result_provenance(&source_mismatch, &receipt, source_hash, "test-batch")
+            .expect_err("mixed source provenance must fail closed");
+    assert!(error.contains("source_hash"), "{error}");
+
+    let mut route_mismatch = results.clone();
+    route_mismatch[1]
+        .artifact
+        .as_mut()
+        .expect("second artifact")
+        .mir_route_receipt
+        .as_mut()
+        .expect("second route receipt")
+        .abi_digest = "0".repeat(64);
+    let error =
+        validate_mir_result_provenance(&route_mismatch, &receipt, source_hash, "test-batch")
+            .expect_err("mixed route provenance must fail closed");
+    assert!(error.contains("route receipt"), "{error}");
+
+    let mut engine_mismatch = results;
+    engine_mismatch[0]
+        .artifact
+        .as_mut()
+        .expect("first artifact")
+        .engine = ProofArtifact::ENGINE_RESOLVED.into();
+    let error =
+        validate_mir_result_provenance(&engine_mismatch, &receipt, source_hash, "test-batch")
+            .expect_err("mixed engine provenance must fail closed");
+    assert!(error.contains("carries engine"), "{error}");
+}
+
+#[test]
 fn lsp_verification_cache_key_is_engine_scoped() {
     let key = crate::lsp::verification_cache_key("file:///a.mimi", "double");
     // Engine identity + semantics version are mandatory segments.

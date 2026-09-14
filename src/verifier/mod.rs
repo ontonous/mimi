@@ -29,7 +29,10 @@ pub fn verify_mir(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    mir::verify_program(program, source_hash)
+    let results = mir::verify_program(program, source_hash.clone())?;
+    let receipt = program.route_receipt("verifier-mir-v1");
+    validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_mir")?;
+    Ok(results)
 }
 
 /// Verify canonical MIR after checking the caller-supplied route receipt.
@@ -45,8 +48,14 @@ pub fn verify_mir_with_route_receipt(
         .map_err(|message| {
             format!("MIR-RECEIPT-001: canonical route receipt rejected: {message}")
         })?;
-    let mut results = verify_mir(program, source_hash)?;
+    let mut results = verify_mir(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
+    validate_mir_result_provenance(
+        &results,
+        receipt,
+        &source_hash,
+        "verify_mir_with_route_receipt",
+    )?;
     Ok(results)
 }
 
@@ -61,6 +70,50 @@ fn bind_route_receipt(
             }
         }
     }
+}
+
+/// Enforce that one MIR verifier result batch carries one immutable execution
+/// identity. A verifier emits one result per contract-bearing function and
+/// one result per FFI call-site; checking only the first result would allow a
+/// future aggregation change to silently mix source, MIR, or route witnesses
+/// across the batch. Results without an artifact are inconclusive observations
+/// and therefore have no provenance to validate.
+fn validate_mir_result_provenance(
+    results: &[VerificationResult],
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: &str,
+    consumer: &str,
+) -> Result<(), String> {
+    for (index, result) in results.iter().enumerate() {
+        let Some(artifact) = result.artifact.as_ref() else {
+            continue;
+        };
+        if artifact.engine != ProofArtifact::ENGINE_MIR {
+            return Err(format!(
+                "MIR-PROVENANCE-001: {consumer} result {index} for '{}' carries engine '{}'",
+                result.func_name, artifact.engine
+            ));
+        }
+        if artifact.source_hash != source_hash {
+            return Err(format!(
+                "MIR-PROVENANCE-001: {consumer} result {index} for '{}' carries a different source_hash",
+                result.func_name
+            ));
+        }
+        if artifact.mir_hash != receipt.mir_digest {
+            return Err(format!(
+                "MIR-PROVENANCE-001: {consumer} result {index} for '{}' carries a different mir_hash",
+                result.func_name
+            ));
+        }
+        if artifact.mir_route_receipt.as_ref() != Some(receipt) {
+            return Err(format!(
+                "MIR-PROVENANCE-001: {consumer} result {index} for '{}' carries a different route receipt",
+                result.func_name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Replay a canonical MIR verification from the line-oriented receipt
@@ -243,7 +296,10 @@ pub fn verify_ffi_mir_with_source_hash(
     validate_mir_capabilities(program).map_err(|errors| {
         format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
     })?;
-    mir::verify_ffi_program(program, source_hash)
+    let results = mir::verify_ffi_program(program, source_hash.clone())?;
+    let receipt = program.route_receipt("verifier-mir-v1");
+    validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?;
+    Ok(results)
 }
 
 /// Verify canonical FFI MIR after checking the caller-supplied route receipt.
@@ -259,8 +315,14 @@ pub fn verify_ffi_mir_with_route_receipt(
         .map_err(|message| {
             format!("MIR-FFI-RECEIPT-001: canonical route receipt rejected: {message}")
         })?;
-    let mut results = verify_ffi_mir_with_source_hash(program, source_hash)?;
+    let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
+    validate_mir_result_provenance(
+        &results,
+        receipt,
+        &source_hash,
+        "verify_ffi_mir_with_route_receipt",
+    )?;
     Ok(results)
 }
 
