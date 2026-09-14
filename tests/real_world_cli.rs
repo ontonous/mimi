@@ -16548,6 +16548,80 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_mir_cli_orders_multi_source_ffi_boundary_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_multi_source_boundary_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-source FFI boundary directory");
+    fs::write(
+        dir.join("left.mimi"),
+        r#"pub extern "Rust" { func left_bad(value: i64) -> i64; }
+pub func call_left(value: i64) -> i64 { left_bad(value) }
+"#,
+    )
+    .expect("write left FFI boundary module");
+    fs::write(
+        dir.join("right.mimi"),
+        r#"pub extern "Rust" { func right_bad(value: i64) -> i64; }
+pub func call_right(value: i64) -> i64 { right_bad(value) }
+"#,
+    )
+    .expect("write right FFI boundary module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use left;\nuse right;\nfunc main() -> i64 { println(1); call_left(2); call_right(3) }\n",
+    )
+    .expect("write multi-source FFI entry");
+
+    for command in ["run", "build", "verify"] {
+        let invoke = |explicit_mir: bool| {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if explicit_mir {
+                invocation.arg("--mir");
+            }
+            invocation
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("multi-source {command} {explicit_mir}: {error}"))
+        };
+        let default_first = invoke(false);
+        let default_second = invoke(false);
+        let mir_first = invoke(true);
+        let mir_second = invoke(true);
+        assert_eq!(default_first.status, default_second.status);
+        assert_eq!(default_first.stdout, default_second.stdout);
+        assert_eq!(default_first.stderr, default_second.stderr);
+        assert_eq!(mir_first.status, mir_second.status);
+        assert_eq!(mir_first.stdout, mir_second.stdout);
+        assert_eq!(mir_first.stderr, mir_second.stderr);
+        assert_eq!(default_first.status, mir_first.status);
+        assert_eq!(default_first.stdout, mir_first.stdout);
+        for (label, output) in [("default", &default_first), ("--mir", &mir_first)] {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "multi-source {command} {label} must fail closed"
+            );
+            assert!(output.stdout.is_empty(), "multi-source {command} {label}");
+            assert!(
+                stderr.contains("outside the canonical C ABI"),
+                "multi-source {command} {label}: {stderr}"
+            );
+            assert!(!stderr.contains("canonical route disposition: legacy"));
+            assert!(!stderr.contains("flow_ast"));
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove multi-source FFI boundary directory");
+}
+
+#[test]
 fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
     let fixture = project_root()
         .join("tests")
