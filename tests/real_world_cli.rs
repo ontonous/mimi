@@ -4108,6 +4108,116 @@ pub func read() -> i64 { mir_ffi_receipt_read() }
 }
 
 #[test]
+fn canonical_mir_cli_receipt_manifest_imported_unit_ffi_rejects_replay_after_source_change() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-import-unit-replay-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported unit FFI replay fixture directory");
+    let helper = dir.join("ffi_types.mimi");
+    let write_helper = |symbol: &str| {
+        fs::write(
+            &helper,
+            format!(
+                "extern \"C\" {{\n    func {symbol}(value: i32) ensures: true;\n    func mir_ffi_receipt_read() -> i64;\n}}\npub func write(value: i32) -> i64 {{\n    {symbol}(value)\n    0\n}}\npub func read() -> i64 {{ mir_ffi_receipt_read() }}\n"
+            ),
+        )
+        .expect("write imported unit FFI replay helper");
+    };
+    write_helper("mir_ffi_receipt_store");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use ffi_types;\nfunc main() -> i64 { write(4); read() }\n",
+    )
+    .expect("write imported unit FFI replay entry");
+
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn imported unit FFI replay receipt")
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "initial imported unit FFI receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    let stale_text = String::from_utf8_lossy(&first.stdout).into_owned();
+    let stale = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&stale_text)
+        .expect("initial imported unit FFI receipt must parse");
+    let stale_checked = checked_route_receipt(&main);
+    assert_eq!(
+        stale, stale_checked,
+        "initial imported unit FFI receipt must match its checker route"
+    );
+
+    // Keep the callable shape unchanged while changing the imported symbol.
+    // A previously issued manifest is structurally valid evidence, but it must
+    // not be replayable as the receipt for this new checker-owned program.
+    write_helper("mir_ffi_receipt_store_v2");
+    let second = run();
+    assert!(
+        second.status.success(),
+        "updated imported unit FFI receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&second.stderr),
+        String::from_utf8_lossy(&second.stdout)
+    );
+    let fresh_text = String::from_utf8_lossy(&second.stdout).into_owned();
+    let fresh = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&fresh_text)
+        .expect("updated imported unit FFI receipt must parse");
+    let fresh_checked = checked_route_receipt(&main);
+    assert_eq!(
+        fresh, fresh_checked,
+        "updated imported unit FFI receipt must match its checker route"
+    );
+    assert_ne!(
+        stale_text, fresh_text,
+        "source change must change the manifest"
+    );
+    assert_ne!(stale, fresh, "source change must change the route receipt");
+    assert_ne!(
+        stale.ffi_digest, fresh.ffi_digest,
+        "imported symbol change must change the FFI digest"
+    );
+    assert_ne!(
+        stale.mir_digest, fresh.mir_digest,
+        "imported symbol change must change the MIR digest"
+    );
+    assert_ne!(
+        stale, fresh_checked,
+        "stale imported receipt must be rejected by checker-route equality"
+    );
+
+    let stale_again = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&stale_text)
+        .expect("stale evidence remains structurally parseable");
+    assert_ne!(
+        stale_again, fresh_checked,
+        "structurally valid stale evidence must not replay against a new program"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("lowered") && stderr.contains("canonical MIR"),
+        "updated imported unit FFI receipt lost lowering diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "updated imported unit FFI receipt must not report legacy: {stderr}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
