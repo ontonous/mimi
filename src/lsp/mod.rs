@@ -460,8 +460,12 @@ impl LspServer {
         if cache.version != VERIFICATION_CACHE_VERSION {
             return;
         }
-        let mut loaded_keys = Vec::new();
-        for (key, entry) in &cache.entries {
+        // Keep only the lexicographically newest bounded set while consuming
+        // the decoded map.  Persistent cache files are workspace input, so a
+        // stale or hand-written file must not temporarily expand the runtime
+        // cache far beyond its hard limit before post-load pruning.
+        let mut retained = std::collections::BTreeMap::new();
+        for (key, entry) in cache.entries {
             let status = match entry.status.as_str() {
                 "Verified" | "Proven" => VerifStatus::Proven,
                 "Failed" | "Disproven" => VerifStatus::Disproven,
@@ -479,22 +483,34 @@ impl LspServer {
             if matches!(status, VerifStatus::InfrastructureError) {
                 continue;
             }
-            self.verification_cache.insert(
-                key.clone(),
+            retained.insert(
+                key,
                 VerificationCacheEntry {
                     body_hash: entry.body_hash,
                     status,
-                    message: entry.message.clone(),
+                    message: entry.message,
                     diagnostic: None,
-                    persisted_diagnostic: entry.diagnostic.clone(),
+                    persisted_diagnostic: entry.diagnostic,
                 },
             );
-            loaded_keys.push(key.clone());
+            if retained.len() > MAX_VERIFICATION_CACHE {
+                let oldest = retained
+                    .keys()
+                    .next()
+                    .cloned()
+                    .expect("non-empty retained cache");
+                retained.remove(&oldest);
+            }
         }
         // Disk entries participate in the same LRU budget as entries created
         // during this session.  The persistent schema has no access timestamp,
         // so use a stable key order; this is deterministic and prevents a
         // restart from making loaded entries invisible to eviction.
+        let mut loaded_keys = Vec::with_capacity(retained.len());
+        for (key, entry) in retained {
+            self.verification_cache.insert(key.clone(), entry);
+            loaded_keys.push(key);
+        }
         loaded_keys.sort();
         self.cache_access_order
             .retain(|key| self.verification_cache.contains_key(key));

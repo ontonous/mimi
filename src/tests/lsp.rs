@@ -778,6 +778,61 @@ fn lsp_verification_cache_load_hydrates_lru_capacity() {
 }
 
 #[test]
+fn lsp_verification_cache_load_bounds_oversized_persistent_files() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_lru_oversized_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+
+    let mut entries = serde_json::Map::new();
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE + 64) {
+        entries.insert(
+            format!("persisted-key-{index:05}"),
+            serde_json::json!({
+                "body_hash": index,
+                "status": "Verified",
+                "message": "cached proof"
+            }),
+        );
+    }
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({ "version": 4, "entries": entries }).to_string(),
+    )
+    .expect("write oversized persisted cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert_eq!(
+        server.verification_cache.len(),
+        crate::lsp::MAX_VERIFICATION_CACHE,
+        "oversized persistent files must be bounded during load"
+    );
+    assert!(
+        server
+            .verification_cache
+            .contains_key("persisted-key-04159"),
+        "stable newest-key retention should keep the upper boundary"
+    );
+    assert!(
+        !server
+            .verification_cache
+            .contains_key("persisted-key-00000"),
+        "stable oldest-key retention should evict the lower boundary"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
