@@ -358,7 +358,7 @@ impl BytecodeVM {
     /// Enable or disable FFI contract verification at runtime.
     pub fn set_verify_ffi(&mut self, verify: bool) {
         self.ffi_runtime.verify_ffi = verify;
-        self.canonical_ffi_runtime.verify_requires = verify;
+        self.canonical_ffi_runtime.verify_contracts = verify;
     }
 
     /// Bind Canonical MIR scalar FFI for this VM to one explicit dynamic

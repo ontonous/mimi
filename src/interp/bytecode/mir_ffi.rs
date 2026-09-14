@@ -75,7 +75,10 @@ pub(crate) struct CanonicalMirFfiRuntime {
     /// run multiple VMs against different libraries without racing a
     /// process-global environment variable.
     library_path: Option<String>,
-    pub(crate) verify_requires: bool,
+    /// Whether this VM evaluates both FFI requires and ensures predicates.
+    /// The public switch is named `set_verify_ffi`; keep the storage name
+    /// explicit so a future change cannot accidentally gate only one phase.
+    pub(crate) verify_contracts: bool,
 }
 
 impl CanonicalMirFfiRuntime {
@@ -83,7 +86,7 @@ impl CanonicalMirFfiRuntime {
         Self {
             loaded_libs: Vec::new(),
             library_path: None,
-            verify_requires: true,
+            verify_contracts: true,
         }
     }
 
@@ -162,7 +165,7 @@ impl CanonicalMirFfiRuntime {
         if let Some(condition) = descriptor
             .requires
             .as_ref()
-            .filter(|_| self.verify_requires)
+            .filter(|_| self.verify_contracts)
         {
             crate::core::mir::evaluate_ffi_requires(condition, |id| {
                 let index = descriptor
@@ -185,7 +188,11 @@ impl CanonicalMirFfiRuntime {
         let output = self
             .call_abi(descriptor, &converted_args)
             .map_err(ffi_runtime_error)?;
-        if let Some(condition) = descriptor.ensures.as_ref().filter(|_| self.verify_requires) {
+        if let Some(condition) = descriptor
+            .ensures
+            .as_ref()
+            .filter(|_| self.verify_contracts)
+        {
             crate::core::mir::evaluate_ffi_ensures(condition, |id| {
                 if let Some(index) = descriptor
                     .argument_ids
