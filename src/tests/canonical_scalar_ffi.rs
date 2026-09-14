@@ -6243,6 +6243,64 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let forged_combo_argc = if original_b.argc == u16::MAX {
+        0
+    } else {
+        original_b.argc + 1
+    };
+    let forged_combo_args_base =
+        vm.program().functions[original_b.function as usize].register_count;
+    let mut forged_combo_binding = binding_snapshot[1].clone();
+    forged_combo_binding.args_base = forged_combo_args_base;
+    forged_combo_binding.argc = forged_combo_argc;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_combo_binding);
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        forged_combo_args_base,
+        forged_combo_argc,
+    );
+    stdout.lock().unwrap().clear();
+    let combo_error = vm
+        .run_value()
+        .expect_err("window and descriptor arity forgery must fail before nested children start");
+    assert_eq!(combo_error.code(), "E0800");
+    assert!(
+        combo_error.to_string().contains("argument register window"),
+        "{combo_error}"
+    );
+    assert!(
+        combo_error.to_string().contains("exceeds function frame"),
+        "{combo_error}"
+    );
+    assert!(
+        !combo_error.to_string().contains("descriptor arity"),
+        "window validation must precede descriptor arity: {combo_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        original_b.argc,
+    );
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("combined argument validation restoration must recover"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
 #[test]
