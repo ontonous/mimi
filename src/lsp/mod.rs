@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::diagnostic::{Diagnostic, DiagnosticNote, DiagnosticOrigin, Severity};
 use crate::loader::stdlib_dir;
-use crate::span::{SourceKey, SourceRegistry, Span};
+use crate::span::{SourceId, SourceKey, SourceRegistry, Span};
 use crate::verifier::{VerifStatus, Verifier};
 
 pub(crate) mod code_actions;
@@ -54,6 +54,10 @@ pub(crate) const MAX_VERIFICATION_CACHE: usize = 4096;
 /// origin alongside the stable SourceKey/span. Earlier schemas cannot prove
 /// provenance and are rejected wholesale.
 const VERIFICATION_CACHE_VERSION: u32 = 4;
+/// Version of the framed key stored inside the v4 cache map.  This is kept
+/// separate from the JSON schema because a key-shape change should invalidate
+/// old entries without requiring another diagnostic serialization migration.
+const VERIFICATION_CACHE_KEY_VERSION: u32 = 2;
 
 /// Consume the separator between the header block and the body. The protocol
 /// requires `\r\n`; tolerate a bare `\n` sent by some clients. `read_line`
@@ -192,13 +196,60 @@ pub(crate) struct VerificationCacheEntry {
 ///   on-disk cache auto-invalidates on upgrade (fail-loud, never silent reuse);
 /// - any future engine switch or semantics bump invalidates every entry.
 pub(crate) fn verification_cache_key(uri: &str, func_name: &str) -> String {
+    // Length framing makes URI/function boundaries unambiguous even when a
+    // URI contains additional ':' characters. The payload is kept readable
+    // for debugging, while the parser below validates the exact engine and
+    // semantics suffix before a persisted entry is admitted.
     format!(
-        "{}:{}:{}:v{}",
+        "mimi-lsp-cache:v{}:{}:{}:{}{}:{}:v{}",
+        VERIFICATION_CACHE_KEY_VERSION,
+        uri.len(),
+        func_name.len(),
         uri,
         func_name,
         crate::verifier::ProofArtifact::ENGINE_RESOLVED,
-        crate::verifier::ProofArtifact::SEMANTICS_VERSION
+        crate::verifier::ProofArtifact::SEMANTICS_VERSION,
     )
+}
+
+/// Parse and validate the versioned, length-framed verification-cache key.
+/// Returning the URI/function pair also makes the framing contract directly
+/// testable without exposing the cache's internal map representation.
+pub(crate) fn parse_verification_cache_key(key: &str) -> Option<(&str, &str)> {
+    let prefix = format!("mimi-lsp-cache:v{}:", VERIFICATION_CACHE_KEY_VERSION);
+    let mut cursor = prefix.len();
+    if !key.starts_with(&prefix) {
+        return None;
+    }
+
+    fn read_length(key: &str, cursor: &mut usize) -> Option<usize> {
+        let start = *cursor;
+        let rest = key.get(start..)?;
+        let separator = rest.find(':')?;
+        let digits = &rest[..separator];
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *cursor = start.checked_add(separator + 1)?;
+        digits.parse().ok()
+    }
+
+    let uri_len = read_length(key, &mut cursor)?;
+    let func_len = read_length(key, &mut cursor)?;
+    let payload_end = cursor.checked_add(uri_len.checked_add(func_len)?)?;
+    let payload = key.get(cursor..payload_end)?;
+    let uri = payload.get(..uri_len)?;
+    let func_name = payload.get(uri_len..)?;
+    if uri.is_empty() || func_name.is_empty() {
+        return None;
+    }
+    cursor = payload_end;
+    let suffix = format!(
+        ":{}:v{}",
+        crate::verifier::ProofArtifact::ENGINE_RESOLVED,
+        crate::verifier::ProofArtifact::SEMANTICS_VERSION
+    );
+    key.get(cursor..)?.eq(&suffix).then_some((uri, func_name))
 }
 
 #[derive(Clone, Default)]
@@ -311,6 +362,21 @@ impl VerificationCacheEntry {
                     .as_ref()
                     .and_then(|diagnostic| diagnostic.to_runtime(registry))
             })
+    }
+
+    /// Resolve a cached diagnostic only when its primary span belongs to the
+    /// source currently being verified. A persistent cache is workspace input
+    /// and may contain a valid SourceKey for another URI; replaying that span
+    /// against the active document would produce a plausible but false LSP
+    /// diagnostic. Notes may legitimately point at imported declarations, so
+    /// the binding is anchored to the primary diagnostic span.
+    pub(crate) fn diagnostic_for_source(
+        &self,
+        registry: &SourceRegistry,
+        source_id: SourceId,
+    ) -> Option<Diagnostic> {
+        let diagnostic = self.diagnostic(registry)?;
+        (diagnostic.span.source_id == source_id).then_some(diagnostic)
     }
 }
 
@@ -466,6 +532,12 @@ impl LspServer {
         // cache far beyond its hard limit before post-load pruning.
         let mut retained = std::collections::BTreeMap::new();
         for (key, entry) in cache.entries {
+            // v4 entries with the pre-framed key shape cannot be tied back to
+            // a URI/function pair. Drop them during load rather than keeping
+            // unreachable or hand-written entries in the bounded cache.
+            if parse_verification_cache_key(&key).is_none() {
+                continue;
+            }
             let status = match entry.status.as_str() {
                 "Verified" | "Proven" => VerifStatus::Proven,
                 "Failed" | "Disproven" => VerifStatus::Disproven,

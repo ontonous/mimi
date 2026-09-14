@@ -788,9 +788,15 @@ fn lsp_verification_cache_load_bounds_oversized_persistent_files() {
     std::fs::create_dir_all(&cache_dir).expect("create cache directory");
 
     let mut entries = serde_json::Map::new();
+    let mut persisted_keys = Vec::new();
     for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE + 64) {
+        let key = crate::lsp::verification_cache_key(
+            &format!("file:///workspace/persisted-{index:05}.mimi"),
+            "persisted",
+        );
+        persisted_keys.push(key.clone());
         entries.insert(
-            format!("persisted-key-{index:05}"),
+            key,
             serde_json::json!({
                 "body_hash": index,
                 "status": "Verified",
@@ -819,14 +825,126 @@ fn lsp_verification_cache_load_bounds_oversized_persistent_files() {
     assert!(
         server
             .verification_cache
-            .contains_key("persisted-key-04159"),
+            .contains_key(&persisted_keys[crate::lsp::MAX_VERIFICATION_CACHE + 63]),
         "stable newest-key retention should keep the upper boundary"
     );
     assert!(
-        !server
-            .verification_cache
-            .contains_key("persisted-key-00000"),
+        !server.verification_cache.contains_key(&persisted_keys[0]),
         "stable oldest-key retention should evict the lower boundary"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_verification_cache_key_is_length_framed_and_validated() {
+    let uri = "file:///workspace/cache:a.mimi?fragment=x:y";
+    let key = crate::lsp::verification_cache_key(uri, "bad");
+    assert_eq!(
+        crate::lsp::parse_verification_cache_key(&key),
+        Some((uri, "bad")),
+        "framed keys must recover URI and function boundaries"
+    );
+    assert!(
+        crate::lsp::parse_verification_cache_key("file:///workspace/cache:a.mimi:bad:resolved:v1")
+            .is_none(),
+        "legacy delimiter keys must not enter the v4 cache"
+    );
+    assert!(
+        crate::lsp::parse_verification_cache_key(&key.replacen(":resolved:v", ":flow:v", 1))
+            .is_none(),
+        "a key for another engine must fail closed"
+    );
+}
+
+#[test]
+fn lsp_verification_cache_rejects_cross_uri_diagnostic_replay() {
+    let root =
+        std::env::temp_dir().join(format!("mimi_lsp_cross_uri_cache_{}", std::process::id()));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let uri_a = "untitled://workspace/cache-a.mimi";
+    let uri_b = "untitled://workspace/cache-b.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+
+    // Derive the exact body hash and foreign SourceKey through the same
+    // source-aware parser path used by the server.
+    let probe = LspServer::new();
+    let file_a = probe
+        .parse_with_recovery_for_uri(text, Some(uri_a))
+        .expect("parse source A");
+    let func_a = file_a
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad in source A");
+    let body_hash = crate::lsp::util::hash_func_body(text, func_a);
+    let file_b = probe
+        .parse_with_recovery_for_uri(text, Some(uri_b))
+        .expect("parse source B");
+    let source_b = file_b.sources.id_for_uri(uri_b).expect("source B id");
+    let source_b_key = file_b
+        .sources
+        .key(source_b)
+        .expect("source B key")
+        .as_str()
+        .to_string();
+    let cache_key = crate::lsp::verification_cache_key(uri_a, "bad");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                cache_key.clone(): {
+                    "body_hash": body_hash,
+                    "status": "Failed",
+                    "message": "cross URI cached failure",
+                    "diagnostic": {
+                        "source_key": source_b_key,
+                        "start_line": 1,
+                        "start_col": 1,
+                        "end_line": 1,
+                        "end_col": 4,
+                        "severity": 1,
+                        "code": "E0999",
+                        "message": "cross URI cached failure",
+                        "notes": [],
+                        "help": null,
+                        "origin": {
+                            "kind": "user",
+                            "rule": null,
+                            "parent_node_id": null
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write cross URI cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    // Keep the foreign source registered so a plain SourceKey remap would
+    // succeed; the source-aware cache hit must still reject it for URI A.
+    server
+        .parse_with_recovery_for_uri(text, Some(uri_b))
+        .expect("register source B");
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri_a);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "E0999"),
+        "a diagnostic owned by URI B must not be replayed for URI A: {diagnostics:?}"
     );
 
     let _ = std::fs::remove_dir_all(root);

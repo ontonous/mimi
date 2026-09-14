@@ -626,7 +626,9 @@ impl LspServer {
                 match cached.status.clone() {
                     VerifStatus::Disproven => {
                         let registry = self.source_registry.borrow();
-                        if let Some(cached_diagnostic) = cached.diagnostic(&registry) {
+                        if let Some(cached_diagnostic) =
+                            cached.diagnostic_for_source(&registry, source_id)
+                        {
                             diagnostics.push(diagnostic::diagnostic_to_lsp(
                                 &cached_diagnostic,
                                 Some(text),
