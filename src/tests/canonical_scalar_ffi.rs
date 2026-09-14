@@ -4840,8 +4840,8 @@ func main() -> i64 { 0 }
 
     let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
-        empty_ast,
-        program,
+        empty_ast.clone(),
+        program.clone(),
         None,
         true,
         true,
@@ -4860,6 +4860,57 @@ func main() -> i64 { 0 }
         .expect("explicitly bound flow actor worker response")
         .expect("explicitly bound flow actor FFI contract check");
     assert_eq!(response, Value::Int(5));
+
+    let missing_path = bad_fixture.dir.join("missing.so");
+    let missing_library = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast.clone(),
+        program.clone(),
+        None,
+        true,
+        true,
+        Some(missing_path.to_string_lossy().into_owned()),
+    );
+    let isolated_good = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast,
+        program,
+        None,
+        true,
+        true,
+        Some(
+            good_fixture
+                .dir
+                .join("ffi.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    let missing_rx = missing_library
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue missing-library flow transition");
+    let good_rx = isolated_good
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue isolated good-library flow transition");
+    let missing_response = missing_rx
+        .recv()
+        .expect("missing-library flow actor worker response")
+        .expect_err("missing-library flow actor must fail to load its binding");
+    assert_eq!(missing_response.code(), "E0800");
+    assert!(missing_response.to_string().contains("failed to load"));
+    let good_response = good_rx
+        .recv()
+        .expect("isolated good-library flow actor worker response")
+        .expect("a missing binding in one actor must not poison another actor");
+    assert_eq!(good_response, Value::Int(5));
+    let repeated_missing = missing_library
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue repeated missing-library flow transition")
+        .recv()
+        .expect("repeated missing-library flow actor worker response")
+        .expect_err("missing-library actor must remain dispatchable after failure");
+    assert_eq!(repeated_missing.code(), "E0800");
+    assert!(repeated_missing.to_string().contains("failed to load"));
 }
 
 #[test]
