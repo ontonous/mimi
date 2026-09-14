@@ -3447,6 +3447,140 @@ func main() -> i32 {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_cross_call_conversion_matrix_matches_default_and_mir() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cross_call_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create cross-call conversion CLI fixture directory");
+    let c_path = dir.join("cross_call.c");
+    let library = dir.join("cross_call.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nint32_t generated_cli_cross_f64(double value) { return value == 7.0 ? 42 : -1; }\nint32_t generated_cli_cross_i64(int64_t value) { return (int32_t)(value + 42); }\n",
+    )
+    .expect("write cross-call conversion C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile cross-call conversion C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+
+    let source = dir.join("cross_call.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" {
+    func generated_cli_cross_f64(value: f64) -> i32
+        ensures: result + 1 > result;
+    func generated_cli_cross_i64(value: i64) -> i32
+        requires: value >= 0
+        ensures: result + 1 > result;
+}
+func main() -> i32 {
+    println(7 as i64);
+    println(generated_cli_cross_f64(7 as i32));
+    println(generated_cli_cross_i64(20 as i32));
+    0
+}
+"#,
+    )
+    .expect("write cross-call conversion Mimi source");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| panic!("cross-call run {explicit_mir}: {error}"));
+        let run_stdout = String::from_utf8_lossy(&run.stdout);
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            run.status.success(),
+            "cross-call run {explicit_mir}: stdout={run_stdout} stderr={run_stderr}"
+        );
+        assert_eq!(run_stdout, "7\n42\n62\n");
+        assert!(
+            run_stderr.is_empty(),
+            "cross-call run {explicit_mir}: {run_stderr}"
+        );
+        assert!(!run_stderr.contains("canonical route disposition: legacy"));
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("cross-call verify {explicit_mir}: {error}"));
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            verify.status.success(),
+            "cross-call verify {explicit_mir}: stdout={verify_stdout} stderr={verify_stderr}"
+        );
+        assert!(verify_stdout.contains("2/2 verified"), "{verify_stdout}");
+        assert!(
+            verify_stdout.contains("canonical MIR extern ensures contract proven"),
+            "{verify_stdout}"
+        );
+        assert!(!verify_stdout.contains("canonical route disposition: legacy"));
+        assert!(!verify_stderr.contains("canonical route disposition: legacy"));
+
+        let mut build = Command::new(mimi_bin());
+        build
+            .current_dir(project_root())
+            .arg("build")
+            .arg("--verify-ffi")
+            .arg("--emit-ir");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("cross-call build {explicit_mir}: {error}"));
+        let build_stdout = String::from_utf8_lossy(&build.stdout);
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build.status.success(),
+            "cross-call build {explicit_mir}: stdout={build_stdout} stderr={build_stderr}"
+        );
+        assert!(
+            build_stdout.contains("generated_cli_cross_f64")
+                && build_stdout.contains("generated_cli_cross_i64"),
+            "{build_stdout}"
+        );
+        assert!(!build_stdout.contains("canonical route disposition: legacy"));
+        assert!(!build_stderr.contains("canonical route disposition: legacy"));
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_mixed_width_error_phases_match_default_and_mir() {
     if !can_link() {
         return;
