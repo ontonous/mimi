@@ -17166,6 +17166,175 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_missing_symbol_preserves_receipt_and_recovers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_absent(int64_t left, int32_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_mixed_absent(left: i64, right: i32) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    let result = generated_mixed_absent(20 as i32, 22 as i32);
+    println(result);
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let missing_fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let missing_path = missing_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&missing_path);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width missing-symbol fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("mixed-width missing-symbol MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("mixed-width missing-symbol receipt");
+    assert_eq!(receipt.symbol, "generated_mixed_absent");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-missing-symbol".into())
+        .expect("verify mixed-width missing-symbol MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must require an explicit mixed-width host binding");
+    assert!(reference_error
+        .to_string()
+        .contains("no reference FFI host binding"));
+    assert!(reference_error
+        .to_string()
+        .contains("generated_mixed_absent"));
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the absent mixed-width symbol");
+    assert_eq!(first.code(), "E0800");
+    assert!(first
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the absent mixed-width symbol diagnostic");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the absent mixed-width symbol diagnostic");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover after the mixed-width symbol appears"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&missing_path);
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "multi_argument_mixed_missing_symbol");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width missing-symbol lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width missing-symbol module before link");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_error = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect_err("native link must reject the absent mixed-width symbol");
+    assert!(native_error.contains("linker failed"), "{native_error}");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
