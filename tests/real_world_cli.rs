@@ -4161,6 +4161,9 @@ fn canonical_mir_cli_receipt_manifest_imported_unit_ffi_rejects_replay_after_sou
         stale, stale_checked,
         "initial imported unit FFI receipt must match its checker route"
     );
+    stale
+        .verify_against_receipt(&stale_checked)
+        .expect("initial imported unit FFI receipt comparison must succeed");
 
     // Keep the callable shape unchanged while changing the imported symbol.
     // A previously issued manifest is structurally valid evidence, but it must
@@ -4198,12 +4201,23 @@ fn canonical_mir_cli_receipt_manifest_imported_unit_ffi_rejects_replay_after_sou
         stale, fresh_checked,
         "stale imported receipt must be rejected by checker-route equality"
     );
+    let replay_error = stale
+        .verify_against_receipt(&fresh_checked)
+        .expect_err("stale imported receipt must fail checker-route comparison");
+    assert!(
+        replay_error.contains("mir_digest") && replay_error.contains("ffi_digest"),
+        "replay diagnostic omitted changed identity fields: {replay_error}"
+    );
 
     let stale_again = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&stale_text)
         .expect("stale evidence remains structurally parseable");
     assert_ne!(
         stale_again, fresh_checked,
         "structurally valid stale evidence must not replay against a new program"
+    );
+    assert!(
+        stale_again.verify_against_receipt(&fresh_checked).is_err(),
+        "structurally valid stale evidence must fail closed against a new checker receipt"
     );
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(

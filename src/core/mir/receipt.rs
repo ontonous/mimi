@@ -154,6 +154,60 @@ impl CanonicalMirRouteReceipt {
         Ok(())
     }
 
+    /// Compare this evidence manifest with a checker-owned receipt.
+    ///
+    /// Both values are validated before comparison so a structurally malformed
+    /// manifest cannot be accepted merely because it happens to differ from
+    /// the expected route.  Returning the changed field names gives CLI and
+    /// evidence consumers one fail-closed comparison path without requiring
+    /// them to duplicate receipt identity knowledge.
+    pub fn verify_against_receipt(
+        &self,
+        expected: &CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        self.validate()
+            .map_err(|error| format!("invalid route receipt: {error}"))?;
+        expected
+            .validate()
+            .map_err(|error| format!("invalid expected route receipt: {error}"))?;
+        let mut mismatches = Vec::new();
+        if self.schema != expected.schema {
+            mismatches.push("schema");
+        }
+        if self.profile != expected.profile {
+            mismatches.push("profile");
+        }
+        if self.mir_digest != expected.mir_digest {
+            mismatches.push("mir_digest");
+        }
+        if self.type_desc_digest != expected.type_desc_digest {
+            mismatches.push("type_desc_digest");
+        }
+        if self.abi_digest != expected.abi_digest {
+            mismatches.push("abi_digest");
+        }
+        if self.ffi_digest != expected.ffi_digest {
+            mismatches.push("ffi_digest");
+        }
+        if self.ownership_digest != expected.ownership_digest {
+            mismatches.push("ownership_digest");
+        }
+        if self.flow_transition_digest != expected.flow_transition_digest {
+            mismatches.push("flow_transition_digest");
+        }
+        if self.root_owners != expected.root_owners {
+            mismatches.push("root_owners");
+        }
+        if mismatches.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "route receipt does not match expected checker receipt: {}",
+                mismatches.join(", ")
+            ))
+        }
+    }
+
     /// Render the validated receipt as the stable, line-oriented manifest
     /// shared by the CLI and evidence consumers.  Keeping field lookup beside
     /// the public field-order constant prevents a frontend or CLI edit from
@@ -596,6 +650,33 @@ mod tests {
         let mut receipt = valid_receipt();
         receipt.root_owners[1] = receipt.root_owners[0].clone();
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn route_receipt_comparison_reports_identity_drift() {
+        let receipt = valid_receipt();
+        receipt
+            .verify_against_receipt(&receipt)
+            .expect("identical receipts must compare successfully");
+
+        let mut drifted = receipt.clone();
+        drifted.ffi_digest = "b".repeat(64);
+        let error = receipt
+            .verify_against_receipt(&drifted)
+            .expect_err("receipt identity drift must fail closed");
+        assert_eq!(
+            error,
+            "route receipt does not match expected checker receipt: ffi_digest"
+        );
+
+        drifted.profile = "bad=profile".into();
+        let error = receipt
+            .verify_against_receipt(&drifted)
+            .expect_err("invalid expected receipt must fail before comparison");
+        assert_eq!(
+            error,
+            "invalid expected route receipt: route receipt profile is empty or not manifest-safe"
+        );
     }
 
     #[test]
