@@ -5510,6 +5510,205 @@ func main() -> i64 { 0 }
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_fanout_descriptor_forge_preserves_siblings_and_recovers() {
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_fanout_descriptor(int64_t value) { return value; }
+"#;
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_fanout_descriptor(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_fanout_descriptor(value: i64) -> i64 ensures: result == value; }
+func plain_leaf() -> i64 {
+    println(42)
+    9
+}
+func ffi_leaf() -> i64 {
+    println(41)
+    mir_ffi_nested_fanout_descriptor(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let good_fixture = library_fixture(counter, GOOD_C_SOURCE);
+    let bad_fixture = library_fixture(counter + 1, BAD_C_SOURCE);
+    guard.set_path(&good_fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("nested fanout descriptor fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize nested fanout descriptor MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("compile nested fanout descriptor bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+    let plain_leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:plain_leaf")
+        .expect("canonical descriptor plain leaf") as u32;
+    let ffi_leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:ffi_leaf")
+        .expect("canonical descriptor FFI leaf") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical descriptor main");
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut plain_middle =
+        crate::interp::bytecode::instr::FunctionProto::new("function:plain_middle".into(), 0);
+    let plain_task = plain_middle.alloc_reg();
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: plain_task,
+        func: plain_leaf,
+        args_base: plain_task,
+        argc: 0,
+    });
+    let plain_result = plain_middle.alloc_reg();
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: plain_result,
+        ra: plain_task,
+    });
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_result });
+    let plain_middle_id = program.functions.len() as u32;
+    program.functions.push(plain_middle);
+
+    let mut ffi_middle =
+        crate::interp::bytecode::instr::FunctionProto::new("function:ffi_middle".into(), 0);
+    let ffi_task = ffi_middle.alloc_reg();
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: ffi_task,
+        func: ffi_leaf,
+        args_base: ffi_task,
+        argc: 0,
+    });
+    let ffi_result = ffi_middle.alloc_reg();
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: ffi_result,
+        ra: ffi_task,
+    });
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Ret { ra: ffi_result });
+    let ffi_middle_id = program.functions.len() as u32;
+    program.functions.push(ffi_middle);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let plain_outer = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: plain_outer,
+        func: plain_middle_id,
+        args_base: plain_outer,
+        argc: 0,
+    });
+    let ffi_outer = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: ffi_outer,
+        func: ffi_middle_id,
+        args_base: ffi_outer,
+        argc: 0,
+    });
+    let plain_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: plain_value,
+        ra: plain_outer,
+    });
+    let _ffi_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: _ffi_value,
+        ra: ffi_outer,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_value });
+    program.functions[main] = main_proto;
+
+    let sorted_lines = |stdout: &str| {
+        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        lines.sort_unstable();
+        lines
+    };
+    let good_path = good_fixture
+        .dir
+        .join("ffi.so")
+        .to_string_lossy()
+        .into_owned();
+    let bad_path = bad_fixture
+        .dir
+        .join("ffi.so")
+        .to_string_lossy()
+        .into_owned();
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_stdout_buf(stdout.clone());
+    vm.set_canonical_ffi_library_path(good_path.clone());
+    assert_eq!(
+        vm.run_value().expect("nested fanout descriptor good run"),
+        Value::Int(9)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let original = descriptor_snapshot[0].clone();
+    let mut forged = original.clone();
+    forged.symbol = "mir_ffi_nested_fanout_forged_symbol".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);
+    stdout.lock().unwrap().clear();
+    let preflight_error = vm
+        .run_value()
+        .expect_err("forged nested descriptor must fail before either sibling starts");
+    assert_eq!(preflight_error.code(), "E0800");
+    assert!(
+        preflight_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{preflight_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_ne!(vm.program().canonical_ffi[0], original);
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(0, original.clone());
+    vm.set_canonical_ffi_library_path(bad_path);
+    stdout.lock().unwrap().clear();
+    let runtime_error = vm
+        .run_value()
+        .expect_err("bad nested FFI sibling must fail after plain sibling completes");
+    assert_eq!(runtime_error.code(), "E0808");
+    assert!(
+        runtime_error
+            .to_string()
+            .contains("FFI postcondition failed"),
+        "{runtime_error}"
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm.set_canonical_ffi_library_path(good_path);
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.run_value()
+            .expect("restored nested descriptor must recover after sibling failure"),
+        Value::Int(9)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi[0], original);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
