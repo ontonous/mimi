@@ -199,6 +199,13 @@ impl LspServer {
 
     /// Insert into verification cache with LRU eviction.
     pub(crate) fn cache_put_verification(&mut self, key: String, value: VerificationCacheEntry) {
+        // Infrastructure failures are environmental and may recover without
+        // a document edit (for example after Z3 restarts).  Keeping such a
+        // no-proof result would make every subsequent request return an empty
+        // diagnostic list without retrying verification.
+        if matches!(value.status, VerifStatus::InfrastructureError) {
+            return;
+        }
         self.cache_access_order.retain(|k| *k != key);
         self.cache_access_order.push_back(key.clone());
         while self.cache_access_order.len() > crate::lsp::MAX_VERIFICATION_CACHE {

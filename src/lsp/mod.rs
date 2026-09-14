@@ -472,6 +472,12 @@ impl LspServer {
                 "NoObligations" => VerifStatus::NoObligations,
                 _ => VerifStatus::SolverUnknown,
             };
+            // Infrastructure failures are retryable environment state, not
+            // a stable property of the function body.  Drop old persisted
+            // entries so a recovered solver is actually probed again.
+            if matches!(status, VerifStatus::InfrastructureError) {
+                continue;
+            }
             self.verification_cache.insert(
                 key.clone(),
                 VerificationCacheEntry {
@@ -493,6 +499,7 @@ impl LspServer {
         let entries: HashMap<String, CacheEntry> = self
             .verification_cache
             .iter()
+            .filter(|(_, entry)| !matches!(&entry.status, VerifStatus::InfrastructureError))
             .map(|(key, entry)| {
                 let status_str = match entry.status.clone() {
                     VerifStatus::Proven => "Verified",

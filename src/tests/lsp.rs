@@ -658,6 +658,66 @@ fn lsp_verification_cache_invalidates_when_function_moves() {
 }
 
 #[test]
+fn lsp_verification_cache_does_not_retain_infrastructure_errors() {
+    let mut server = LspServer::new();
+    let key = crate::lsp::verification_cache_key("file:///workspace/retry.mimi", "retry");
+    server.cache_put_verification(
+        key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            7,
+            crate::verifier::VerifStatus::InfrastructureError,
+            "solver unavailable".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        !server.verification_cache.contains_key(&key),
+        "retryable infrastructure failures must not become cache hits"
+    );
+}
+
+#[test]
+fn lsp_verification_cache_drops_persisted_infrastructure_errors() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_infrastructure_cache_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let key = crate::lsp::verification_cache_key("file:///workspace/retry.mimi", "retry");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                key.clone(): {
+                    "body_hash": 7,
+                    "status": "InfrastructureError",
+                    "message": "solver unavailable"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write infrastructure cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(
+        !server.verification_cache.contains_key(&key),
+        "persisted infrastructure failures must be invalidated on load"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
