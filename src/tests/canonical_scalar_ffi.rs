@@ -5029,6 +5029,171 @@ func main() -> i64 { 0 }
     assert_eq!(bad_cache, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_fanout_failure_preserves_sibling_effects() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_fanout(int64_t value) { return value + 1; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_fanout(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_fanout(value: i64) -> i64 ensures: result == value; }
+func plain_leaf() -> i64 {
+    println(42)
+    9
+}
+func ffi_leaf() -> i64 {
+    println(41)
+    mir_ffi_nested_fanout(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("nested fanout sibling fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize nested fanout sibling MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile nested fanout sibling bytecode");
+    assert!(bytecode.ast.is_none());
+    let plain_leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:plain_leaf")
+        .expect("canonical plain leaf function") as u32;
+    let ffi_leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:ffi_leaf")
+        .expect("canonical ffi leaf function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical fanout main function");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut plain_middle =
+        crate::interp::bytecode::instr::FunctionProto::new("function:plain_middle".into(), 0);
+    let plain_task = plain_middle.alloc_reg();
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: plain_task,
+        func: plain_leaf,
+        args_base: plain_task,
+        argc: 0,
+    });
+    let plain_result = plain_middle.alloc_reg();
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: plain_result,
+        ra: plain_task,
+    });
+    plain_middle.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_result });
+    let plain_middle_id = program.functions.len() as u32;
+    program.functions.push(plain_middle);
+
+    let mut ffi_middle =
+        crate::interp::bytecode::instr::FunctionProto::new("function:ffi_middle".into(), 0);
+    let ffi_task = ffi_middle.alloc_reg();
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: ffi_task,
+        func: ffi_leaf,
+        args_base: ffi_task,
+        argc: 0,
+    });
+    let ffi_result = ffi_middle.alloc_reg();
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: ffi_result,
+        ra: ffi_task,
+    });
+    ffi_middle.emit(crate::interp::bytecode::instr::Op::Ret { ra: ffi_result });
+    let ffi_middle_id = program.functions.len() as u32;
+    program.functions.push(ffi_middle);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let plain_outer = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: plain_outer,
+        func: plain_middle_id,
+        args_base: plain_outer,
+        argc: 0,
+    });
+    let ffi_outer = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: ffi_outer,
+        func: ffi_middle_id,
+        args_base: ffi_outer,
+        argc: 0,
+    });
+    let plain_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: plain_value,
+        ra: plain_outer,
+    });
+    let _ffi_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: _ffi_value,
+        ra: ffi_outer,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_value });
+    program.functions[main] = main_proto;
+
+    let sorted_lines = |stdout: &str| {
+        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        lines.sort_unstable();
+        lines
+    };
+
+    let good_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut good_vm = BytecodeVM::new(bytecode.clone());
+    good_vm.set_stdout_buf(good_stdout.clone());
+    good_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        good_vm.run_value().expect("fanout good path must complete"),
+        Value::Int(9)
+    );
+    assert_eq!(sorted_lines(&good_stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(good_vm.debug_stack_state(), (0, 0));
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let bad_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut bad_vm = BytecodeVM::new(bytecode);
+    bad_vm.set_stdout_buf(bad_stdout.clone());
+    bad_vm.set_canonical_ffi_library_path(
+        bad_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let error = bad_vm
+        .run_value()
+        .expect_err("fanout bad path must fail only at the FFI sibling");
+    assert_eq!(error.code(), "E0808");
+    assert!(
+        error.to_string().contains("FFI postcondition failed"),
+        "{error}"
+    );
+    assert_eq!(sorted_lines(&bad_stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(bad_vm.debug_stack_state(), (0, 0));
+    assert_eq!(bad_vm.debug_canonical_ffi_loaded_library_count(), 0);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
