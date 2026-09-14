@@ -16622,6 +16622,86 @@ pub func call_right(value: i64) -> i64 { right_bad(value) }
 }
 
 #[test]
+fn canonical_mir_cli_build_verify_ffi_preflights_declaration_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_build_verify_boundary_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create build verification boundary directory");
+    let source = dir.join("contracted_foreign.mimi");
+    fs::write(
+        &source,
+        r#"extern "Rust" { func foreign(value: i64) -> i64 requires: value >= 0; }
+func main() -> i64 { foreign(-1 as i64) }
+"#,
+    )
+    .expect("write contracted FFI boundary fixture");
+
+    let default_output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--verify-ffi")
+        .arg(&source)
+        .output()
+        .expect("failed to spawn default build verification boundary");
+    let mir_output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg("--verify-ffi")
+        .arg(&source)
+        .output()
+        .expect("failed to spawn explicit MIR build verification boundary");
+
+    assert_eq!(default_output.status, mir_output.status);
+    assert_eq!(default_output.stdout, mir_output.stdout);
+    assert!(!default_output.status.success());
+    assert!(default_output.stdout.is_empty());
+
+    let default_stderr = String::from_utf8_lossy(&default_output.stderr);
+    assert!(
+        default_stderr.contains("canonical scalar FFI declaration boundary"),
+        "default build must preflight the route boundary: {default_stderr}"
+    );
+    assert!(
+        default_stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
+        "default build must preserve declaration attribution: {default_stderr}"
+    );
+    assert!(
+        !default_stderr.contains("FFI contract verification failed"),
+        "compatibility FFI verifier ran before route admission: {default_stderr}"
+    );
+    assert!(
+        !default_stderr.contains("could not encode precondition in Z3"),
+        "compatibility FFI verifier leaked an inconclusive contract result: {default_stderr}"
+    );
+    assert!(!default_stderr.contains("flow_ast"));
+    assert!(!default_stderr.contains("canonical route disposition: legacy"));
+
+    let mir_stderr = String::from_utf8_lossy(&mir_output.stderr);
+    assert!(
+        mir_stderr.contains("MIR validation failed"),
+        "explicit MIR build must retain canonical validation attribution: {mir_stderr}"
+    );
+    assert!(
+        mir_stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
+        "explicit MIR build must preserve declaration attribution: {mir_stderr}"
+    );
+    assert!(
+        !mir_stderr.contains("FFI contract verification failed"),
+        "compatibility FFI verifier ran before explicit MIR validation: {mir_stderr}"
+    );
+    assert!(!mir_stderr.contains("could not encode precondition in Z3"));
+    assert!(!mir_stderr.contains("flow_ast"));
+
+    fs::remove_dir_all(&dir).expect("remove build verification boundary directory");
+}
+
+#[test]
 fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
     let fixture = project_root()
         .join("tests")

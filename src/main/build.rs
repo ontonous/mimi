@@ -578,6 +578,24 @@ pub(crate) fn build(
         }
     };
 
+    // A declaration-level FFI boundary is a route decision, not an optional
+    // verification result.  Preflight it before --verify-ffi can invoke the
+    // retained compatibility verifier; otherwise an unsupported ABI with a
+    // contract would report a legacy verifier failure before the canonical
+    // dispatcher gets a chance to reject it.  Explicit --mir uses the shared
+    // MIR constructor so its validation diagnostic remains identical to the
+    // normal canonical build path.
+    if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(&checked_program) {
+        if mir {
+            let _ =
+                crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?;
+        } else {
+            return Err(format!(
+                "default Canonical MIR route rejected: canonical scalar FFI declaration boundary: {reason}"
+            ));
+        }
+    }
+
     if verify_ffi {
         match verifier::verify_ffi_checked(&checked_program) {
             Ok(ffi_results) => {
