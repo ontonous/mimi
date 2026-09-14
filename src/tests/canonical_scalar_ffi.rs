@@ -5950,7 +5950,7 @@ func main() -> i64 { 0 }
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
-    vm.set_canonical_ffi_library_path(bad_library);
+    vm.set_canonical_ffi_library_path(bad_library.clone());
     stdout.lock().unwrap().clear();
     let direct_error = vm
         .call_named("function:main", Vec::new())
@@ -5971,7 +5971,7 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
-    vm.set_canonical_ffi_library_path(good_library);
+    vm.set_canonical_ffi_library_path(good_library.clone());
     stdout.lock().unwrap().clear();
     assert_eq!(
         vm.call_function(vm.program().entry, &[])
@@ -6314,6 +6314,45 @@ func main() -> i64 { 0 }
     assert_eq!(
         vm.call_function(vm.program().entry, &[])
             .expect("combined argument validation restoration must recover"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.set_canonical_ffi_library_path(bad_library);
+    stdout.lock().unwrap().clear();
+    let bad_run_error = vm
+        .run_value()
+        .expect_err("bad library must remain observable after restored entry diagnostics");
+    assert_eq!(bad_run_error.code(), "E0808");
+    assert!(
+        bad_run_error
+            .to_string()
+            .contains("FFI postcondition failed"),
+        "{bad_run_error}"
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    stdout.lock().unwrap().clear();
+    let bad_wrapped_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve bad-library failure after preflight recovery");
+    assert_eq!(bad_wrapped_error.code(), "E0808");
+    assert_eq!(bad_wrapped_error.to_string(), bad_run_error.to_string());
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm.set_canonical_ffi_library_path(good_library);
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("good library must recover after repeated bad entry calls"),
         Value::Int(5)
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
