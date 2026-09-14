@@ -18750,6 +18750,177 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_instruction_identity_and_order_forgery_recover() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_identity_first(int64_t left, int64_t right) { return left + right; }
+int64_t generated_identity_second(int64_t left, int64_t right) { return left + right; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_identity_first(left: i64, right: i64) -> i64;
+    func generated_identity_second(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(5 as i64);
+    println(generated_identity_first(1 as i32, 2 as i32));
+    println(generated_identity_second(20 as i32, 22 as i32));
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width instruction identity fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width instruction identity fixture MIR");
+    let bytecode = compile_mir_program(&mir).expect("mixed-width instruction identity bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("initial mixed-width instruction identity run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "5\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_descriptors = vm.program().canonical_ffi.clone();
+    let original_bindings = vm.program().canonical_ffi_bindings.clone();
+    let first_binding = original_bindings[0].clone();
+    let second_binding = original_bindings[1].clone();
+
+    vm.replace_canonical_ffi_call_instruction_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        first_binding.instruction,
+    );
+    let instruction_error = vm
+        .run_value()
+        .expect_err("run_value must reject a mixed-width instruction identity forgery");
+    assert!(
+        instruction_error
+            .to_string()
+            .contains("instruction constant"),
+        "{instruction_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let wrapped_instruction_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject the instruction identity forgery");
+    assert_eq!(
+        wrapped_instruction_error.to_string(),
+        instruction_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let direct_instruction_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must reject the instruction identity forgery");
+    assert_eq!(
+        direct_instruction_error.to_string(),
+        instruction_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_call_instruction_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        second_binding.instruction,
+    );
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("instruction identity restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "5\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut forged_binding = second_binding.clone();
+    forged_binding.instruction = first_binding.instruction;
+    forged_binding.instruction_text = first_binding.instruction_text.clone();
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    let binding_instruction_error = vm
+        .run_value()
+        .expect_err("run_value must reject a forged binding instruction identity");
+    assert!(
+        binding_instruction_error
+            .to_string()
+            .contains("instruction constant"),
+        "{binding_instruction_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let wrapped_binding_instruction_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject a forged binding instruction identity");
+    assert_eq!(
+        wrapped_binding_instruction_error.to_string(),
+        binding_instruction_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    vm.replace_canonical_ffi_binding_for_test_only(1, second_binding.clone());
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("binding instruction restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "5\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let swapped_descriptors = vec![
+        original_descriptors[1].clone(),
+        original_descriptors[0].clone(),
+    ];
+    vm.replace_canonical_ffi_tables_for_test_only(swapped_descriptors, original_bindings.clone());
+    let order_error = vm
+        .run_value()
+        .expect_err("run_value must reject a mixed-width descriptor order forgery");
+    assert!(
+        order_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{order_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let wrapped_order_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject descriptor order forgery");
+    assert_eq!(wrapped_order_error.to_string(), order_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let direct_order_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must reject descriptor order forgery");
+    assert_eq!(direct_order_error.to_string(), order_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_tables_for_test_only(original_descriptors, original_bindings);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("descriptor order restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "5\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
