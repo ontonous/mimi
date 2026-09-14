@@ -16310,14 +16310,14 @@ func main() -> i64 { foreign(42 as i64) }
 extern "C" { func foreign(value: i64) -> i64; }
 func main() -> i64 { foreign(42 as i64) }
 "#,
-            "unsupported no_panic FFI protection semantics",
+            "no_panic",
         ),
         (
             "variadic",
             r#"extern "C" { func foreign(value: i64 ...) -> i64; }
 func main() -> i64 { foreign(42 as i64) }
 "#,
-            "unsupported variadic ABI semantics in canonical scalar FFI",
+            "variadic",
         ),
     ];
 
@@ -16325,34 +16325,66 @@ func main() -> i64 { foreign(42 as i64) }
         let source = dir.join(format!("{label}.mimi"));
         fs::write(&source, source_text).expect("write FFI boundary CLI fixture");
         for command in ["run", "build", "verify"] {
-            let output = Command::new(mimi_bin())
-                .current_dir(project_root())
-                .arg(command)
-                .arg(&source)
-                .arg("--mir")
-                .output()
-                .unwrap_or_else(|error| panic!("{label} {command}: {error}"));
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                !output.status.success(),
-                "{label} {command} must reject an unmigrated declaration boundary"
+            // The default route reports the checker-owned declaration boundary;
+            // explicit --mir reaches the same rejection during MIR validation.
+            // Their diagnostics therefore have different prefixes, while the
+            // outcome, stdout, and boundary attribution must remain aligned.
+            let mut route_outputs = Vec::new();
+            for explicit_mir in [false, true] {
+                let mut invocation = Command::new(mimi_bin());
+                invocation.current_dir(project_root()).arg(command);
+                if explicit_mir {
+                    invocation.arg("--mir");
+                }
+                let output = invocation
+                    .arg(&source)
+                    .output()
+                    .unwrap_or_else(|error| panic!("{label} {command} {explicit_mir}: {error}"));
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                route_outputs.push((output.status, stdout, stderr));
+            }
+            assert_eq!(
+                route_outputs[0].0, route_outputs[1].0,
+                "{label} {command} default and --mir status diverged"
             );
-            assert!(stdout.is_empty(), "{label} {command}: {stdout}");
-            assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
-            assert!(
-                stderr.contains("MIR validation failed"),
-                "{label} {command}: {stderr}"
+            assert_eq!(
+                route_outputs[0].1, route_outputs[1].1,
+                "{label} {command} default and --mir stdout diverged"
             );
-            assert!(
-                !stderr.contains("Validation(["),
-                "{label} {command} leaked debug-shaped MIR error: {stderr}"
-            );
-            assert!(
-                !stderr.contains("canonical route disposition: legacy"),
-                "{label} {command} leaked a legacy route: {stderr}"
-            );
-            assert!(!stderr.contains("flow_ast"), "{label} {command}: {stderr}");
+            for (explicit_mir, (status, stdout, stderr)) in route_outputs.iter().enumerate() {
+                assert!(
+                    !status.success(),
+                    "{label} {command} {} must reject an unmigrated declaration boundary",
+                    if explicit_mir == 0 {
+                        "default"
+                    } else {
+                        "--mir"
+                    }
+                );
+                assert!(stdout.is_empty(), "{label} {command}: {stdout}");
+                assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
+                if explicit_mir == 0 {
+                    assert!(
+                        stderr.contains("canonical scalar FFI declaration boundary"),
+                        "{label} {command}: default route must reject before legacy: {stderr}"
+                    );
+                } else {
+                    assert!(
+                        stderr.contains("MIR validation failed"),
+                        "{label} {command}: explicit MIR must report validation: {stderr}"
+                    );
+                }
+                assert!(
+                    !stderr.contains("Validation(["),
+                    "{label} {command} leaked debug-shaped MIR error: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("canonical route disposition: legacy"),
+                    "{label} {command} leaked a legacy route: {stderr}"
+                );
+                assert!(!stderr.contains("flow_ast"), "{label} {command}: {stderr}");
+            }
         }
     }
     fs::remove_dir_all(&dir).expect("remove FFI boundary CLI fixture directory");

@@ -138,6 +138,15 @@ pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
+    // A called extern declaration that is outside the migrated scalar C ABI
+    // is still a canonical FFI boundary.  Reject it before considering any
+    // unrelated island or the compatibility route; otherwise default `run`,
+    // `build`, or `verify` could silently hand the call to the old emitter.
+    if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(checked) {
+        return DefaultMirRoute::Rejected(format!(
+            "canonical scalar FFI declaration boundary: {reason}"
+        ));
+    }
     // Admission is checker-owned and must happen before MIR construction.
     // The shared envelope also owns the materialization receipts, preventing
     // this selector from growing a second Set/record lowering walk.
@@ -1578,6 +1587,39 @@ mod tests {
                 matches!(route, DefaultMirRoute::Canonical(_)),
                 "{body}: {route:?}"
             );
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_default_route_rejects_unsupported_declaration_before_legacy() {
+        for (source, expected) in [
+            (
+                r#"extern "Rust" { func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }"#,
+                "ABI 'Rust' is outside the canonical C ABI",
+            ),
+            (
+                r#"#[no_panic]
+                extern "C" { func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }"#,
+                "no_panic FFI protection",
+            ),
+            (
+                r#"extern "C" { func foreign(value: i64 ...) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }"#,
+                "variadic ABI",
+            ),
+        ] {
+            let (checked, file) = checked(source);
+            let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+                panic!("unsupported FFI declaration must reject before legacy: {expected}");
+            };
+            assert!(
+                reason.contains("canonical scalar FFI declaration boundary"),
+                "{reason}"
+            );
+            assert!(reason.contains(expected), "{expected}: {reason}");
+            assert!(!reason.contains("legacy"), "{reason}");
         }
     }
 
