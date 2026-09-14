@@ -5712,12 +5712,16 @@ func main() -> i64 { 0 }
 #[cfg(unix)]
 #[test]
 fn scalar_ffi_nested_fanout_binding_index_pair_forge_rejects_before_children_and_recovers() {
-    const C_SOURCE: &str = r#"
+    const GOOD_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_nested_pair_forge(int64_t value) { return value; }
 "#;
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_pair_forge(int64_t value) { return value + 1; }
+"#;
     const SOURCE: &str = r#"
-extern "C" { func mir_ffi_nested_pair_forge(value: i64) -> i64; }
+extern "C" { func mir_ffi_nested_pair_forge(value: i64) -> i64 ensures: result == value; }
 func leaf_a() -> i64 {
     println(41)
     mir_ffi_nested_pair_forge(5 as i64)
@@ -5731,8 +5735,9 @@ func main() -> i64 { 0 }
 
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let fixture = library_fixture(counter, C_SOURCE);
-    guard.set_path(&fixture.dir.join("ffi.so"));
+    let good_fixture = library_fixture(counter, GOOD_C_SOURCE);
+    let bad_fixture = library_fixture(counter + 1, BAD_C_SOURCE);
+    guard.set_path(&good_fixture.dir.join("ffi.so"));
 
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("nested fanout paired-forge fixture");
@@ -5835,10 +5840,19 @@ func main() -> i64 { 0 }
         lines
     };
     let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let library = fixture.dir.join("ffi.so").to_string_lossy().into_owned();
+    let good_library = good_fixture
+        .dir
+        .join("ffi.so")
+        .to_string_lossy()
+        .into_owned();
+    let bad_library = bad_fixture
+        .dir
+        .join("ffi.so")
+        .to_string_lossy()
+        .into_owned();
     let mut vm = BytecodeVM::new(bytecode);
     vm.set_stdout_buf(stdout.clone());
-    vm.set_canonical_ffi_library_path(library);
+    vm.set_canonical_ffi_library_path(good_library.clone());
 
     assert_eq!(
         vm.run_value().expect("initial paired-forge run"),
@@ -5896,6 +5910,35 @@ func main() -> i64 { 0 }
     assert_eq!(
         vm.run_value()
             .expect("paired binding/index forgery must recover after restoration"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.set_canonical_ffi_library_path(bad_library);
+    stdout.lock().unwrap().clear();
+    let direct_error = vm
+        .call_named("function:main", Vec::new())
+        .expect_err("direct nested fanout entry must surface the bad-library postcondition");
+    assert_eq!(direct_error.code(), "E0808");
+    assert!(
+        direct_error
+            .to_string()
+            .contains("FFI postcondition failed"),
+        "{direct_error}"
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm.set_canonical_ffi_library_path(good_library);
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover after the nested bad-library call"),
         Value::Int(5)
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
