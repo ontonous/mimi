@@ -6152,6 +6152,97 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let forged_instruction_argc = if original_b.argc == u16::MAX {
+        0
+    } else {
+        original_b.argc + 1
+    };
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        forged_instruction_argc,
+    );
+    stdout.lock().unwrap().clear();
+    let instruction_argc_error = vm
+        .run_value()
+        .expect_err("forged instruction argument count must fail before nested children start");
+    assert_eq!(instruction_argc_error.code(), "E0800");
+    assert!(
+        instruction_argc_error
+            .to_string()
+            .contains("argument count"),
+        "{instruction_argc_error}"
+    );
+    assert!(
+        instruction_argc_error
+            .to_string()
+            .contains("disagrees with compiler binding count"),
+        "{instruction_argc_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        original_b.argc,
+    );
+    let forged_descriptor_argc = if original_b.argc == 0 { 1 } else { 0 };
+    let mut forged_descriptor_binding = binding_snapshot[1].clone();
+    forged_descriptor_binding.argc = forged_descriptor_argc;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_descriptor_binding);
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        forged_descriptor_argc,
+    );
+    stdout.lock().unwrap().clear();
+    let descriptor_arity_error = vm
+        .run_value()
+        .expect_err("forged descriptor arity must fail before nested children start");
+    assert_eq!(descriptor_arity_error.code(), "E0800");
+    assert!(
+        descriptor_arity_error
+            .to_string()
+            .contains("argument count"),
+        "{descriptor_arity_error}"
+    );
+    assert!(
+        descriptor_arity_error
+            .to_string()
+            .contains("descriptor arity"),
+        "{descriptor_arity_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        original_b.argc,
+    );
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.run_value()
+            .expect("instruction argc and descriptor arity restoration must recover"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
 #[test]
