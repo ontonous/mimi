@@ -17757,6 +17757,251 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_result_range_reentry_recovers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_range_reentry(int64_t left, int64_t right) {
+    (void)left;
+    (void)right;
+    return 2147483648LL;
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_range_reentry(int64_t left, int64_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_mixed_range_reentry(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    generated_mixed_range_reentry(20 as i32, 22 as i32)
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let bad_path = bad_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&bad_path);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width range reentry fixture");
+    let mut mir =
+        MirProgram::from_checked_program(&checked).expect("mixed-width range reentry MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt
+                    .result
+                    .clone()
+                    .expect("mixed-width range reentry result value"),
+            )
+        })
+        .expect("mixed-width range reentry receipt");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("mixed-width range reentry i32 TypeDesc");
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    let receipt = receipts
+        .get_mut(&instruction_id)
+        .expect("mixed-width range reentry receipt");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+        ]
+    );
+    receipt.result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct OutOfRangeOracle;
+    impl MirReferenceFfiResolver for OutOfRangeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_range_reentry"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err(format!(
+                    "unexpected mixed-width reentry call: {arguments:?}"
+                ));
+            }
+            Ok(MirRuntimeValue::Int(i64::from(i32::MAX) + 1))
+        }
+    }
+    struct InRangeOracle;
+    impl MirReferenceFfiResolver for InRangeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_range_reentry"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err(format!(
+                    "unexpected mixed-width recovery call: {arguments:?}"
+                ));
+            }
+            Ok(MirRuntimeValue::Int(42))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&OutOfRangeOracle);
+    let reference_error = reference
+        .execute(&owner, &[])
+        .expect_err("reference must reject the out-of-range reentry result");
+    assert!(reference_error.to_string().contains("outside i32"));
+    assert_eq!(reference.captured_output(), "7\n");
+    let recovering_reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&InRangeOracle);
+    let reference_result = recovering_reference
+        .execute_with_output(&owner, &[])
+        .expect("reference must recover with the in-range host");
+    assert_eq!(reference_result.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference_result.output, "7\n");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range-reentry".into())
+        .expect("verify mixed-width range reentry MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width range reentry bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the out-of-range reentry result");
+    assert_eq!(first.code(), "E0802");
+    assert!(first.to_string().contains("outside i32"));
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the out-of-range reentry result");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the out-of-range reentry result");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover with the in-range host"),
+        Value::Int(42)
+    );
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&bad_path);
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "multi_argument_mixed_range_reentry");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width range reentry lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width range reentry module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native mixed-width range reentry execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
