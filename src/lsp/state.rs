@@ -128,6 +128,10 @@ impl LspServer {
         let snapshot = registry.clone();
         if registry.records().len() > super::MAX_SOURCE_RECORDS {
             *registry = crate::span::SourceRegistry::default();
+            // A parse-cache entry may carry SourceIds from the pre-reset
+            // snapshot. Invalidate it immediately so the next equal-text
+            // request is parsed against the fresh session interner.
+            self.clear_parse_cache();
         }
         Ok((source_id, snapshot))
     }
@@ -147,6 +151,7 @@ impl LspServer {
         let snapshot = registry.clone();
         if registry.records().len() > super::MAX_SOURCE_RECORDS {
             *registry = crate::span::SourceRegistry::default();
+            self.clear_parse_cache();
         }
         Ok((source_id, snapshot))
     }
@@ -808,6 +813,55 @@ mod m10_tests {
         assert!(
             len <= cap,
             "source registry must stay bounded, got {len} records (cap {cap})"
+        );
+    }
+
+    #[test]
+    fn source_registry_reset_invalidates_parse_cache_snapshot() {
+        let server = LspServer::new();
+        let old_text = "func old() -> i32 {\n    1\n}";
+        let _ = server.register_memory_source("seed");
+        let old_file = server
+            .parse_with_recovery_for_uri(old_text, None)
+            .expect("parse old source");
+        let old_id = old_file
+            .sources
+            .records()
+            .last()
+            .expect("old source record")
+            .id;
+        let cap = crate::lsp::MAX_SOURCE_RECORDS;
+        for index in 0..(cap - 2) {
+            let _ = server.register_memory_source(&format!("fill-{index}"));
+        }
+        assert_eq!(
+            server.source_registry.borrow().records().len(),
+            cap,
+            "test must fill the session registry before triggering reset"
+        );
+        let _ = server.register_memory_source("trigger-reset");
+        assert!(
+            server.source_registry.borrow().records().is_empty(),
+            "registration past the cap must reset the shared pool"
+        );
+
+        let refreshed = server
+            .parse_with_recovery_for_uri(old_text, None)
+            .expect("reparse old source after reset");
+        let refreshed_id = refreshed
+            .sources
+            .records()
+            .last()
+            .expect("refreshed source record")
+            .id;
+        assert_ne!(
+            old_id, refreshed_id,
+            "reset must prevent an old parse-cache SourceId from resurfacing"
+        );
+        assert_eq!(
+            refreshed_id.raw(),
+            1,
+            "the refreshed snapshot should start at the new session boundary"
         );
     }
 }
