@@ -524,6 +524,12 @@ impl LspServer {
     }
 
     pub(crate) fn load_cache(&mut self) {
+        // `initialize` may be received again for a new workspace. Never let
+        // entries from the previous workspace survive a failed or empty load;
+        // URI/key overlap (especially untitled documents) would otherwise
+        // turn the old verdict into a cross-workspace cache hit.
+        self.verification_cache.clear();
+        self.cache_access_order.clear();
         let path = self.cache_file_path();
         self.cache_path = path.clone();
         let Some(path) = path else { return };

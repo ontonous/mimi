@@ -1162,6 +1162,68 @@ fn lsp_verification_cache_hit_refreshes_lru_position() {
 }
 
 #[test]
+fn lsp_reinitialize_clears_previous_workspace_verification_cache() {
+    let root_a =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_cache_a_{}", std::process::id()));
+    let root_b =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_cache_b_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_a);
+    let _ = std::fs::remove_dir_all(&root_b);
+    std::fs::create_dir_all(root_a.join(".mimi")).expect("create workspace A");
+    std::fs::create_dir_all(&root_b).expect("create workspace B");
+    let old_key = crate::lsp::verification_cache_key("untitled://shared.mimi", "old");
+    std::fs::write(
+        root_a.join(".mimi/verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                old_key.clone(): {
+                    "body_hash": 1,
+                    "status": "Verified",
+                    "message": "workspace A proof"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write workspace A cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root_a.to_string_lossy() }
+    }));
+    assert!(server.verification_cache.contains_key(&old_key));
+    server.cache_put_verification(
+        "session-only".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            2,
+            crate::verifier::VerifStatus::Proven,
+            "session proof".to_string(),
+            None,
+        ),
+    );
+
+    // Reinitialize against a workspace with no cache. Both the persisted
+    // entry and the session-only entry must disappear before the new load.
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": { "rootPath": root_b.to_string_lossy() }
+    }));
+    assert!(
+        server.verification_cache.is_empty(),
+        "reinitializing must not carry verification state across workspaces"
+    );
+
+    let _ = std::fs::remove_dir_all(root_a);
+    let _ = std::fs::remove_dir_all(root_b);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
