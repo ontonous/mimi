@@ -17562,6 +17562,201 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_result_range_preserves_prefix() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_range(int64_t left, int64_t right) {
+    (void)left;
+    (void)right;
+    return 2147483648LL;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_mixed_range(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    generated_mixed_range(20 as i32, 22 as i32)
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width result-range fixture");
+    let mut mir = MirProgram::from_checked_program(&checked).expect("mixed-width result-range MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .next()
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt
+                    .result
+                    .clone()
+                    .expect("mixed-width result-range result value"),
+            )
+        })
+        .expect("mixed-width result-range receipt");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("mixed-width result-range i32 TypeDesc");
+    // Model the caller's narrower result slot at the canonical receipt
+    // boundary.  The C host still returns i64, so every consumer must reject
+    // the conversion before exposing the out-of-range value to main.
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    let receipt = receipts
+        .get_mut(&instruction_id)
+        .expect("mixed-width result-range receipt");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+        ]
+    );
+    receipt.result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct OutOfRangeMixedOracle;
+    impl MirReferenceFfiResolver for OutOfRangeMixedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_range"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err(format!("unexpected mixed-width range call: {arguments:?}"));
+            }
+            if receipt.result_conversion
+                != Some(crate::core::mir::MirFfiAbiConversion {
+                    from: MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    to: MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                })
+            {
+                return Err("mixed-width result-range receipt mismatch".into());
+            }
+            Ok(MirRuntimeValue::Int(i64::from(i32::MAX) + 1))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&OutOfRangeMixedOracle);
+    let reference_error = reference
+        .execute(&owner, &[])
+        .expect_err("reference must reject the out-of-range mixed-width result");
+    assert!(reference_error.to_string().contains("outside i32"));
+    assert_eq!(reference.captured_output(), "7\n");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range".into())
+        .expect("verify mixed-width result-range MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width result-range bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must reject the out-of-range mixed-width result");
+    assert_eq!(bytecode_error.code(), "E0802");
+    assert!(bytecode_error.to_string().contains("outside i32"));
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_argument_mixed_range");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width result-range lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width result-range module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native mixed-width result-range execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
