@@ -17057,6 +17057,115 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_missing_symbol_reentry_preserves_prefix_and_recovers() {
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_pair_absent(int64_t left, int64_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_pair_absent(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    let result = generated_pair_absent(20 as i64, 22 as i64);
+    println(result);
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let missing_fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let missing_path = missing_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&missing_path);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-argument missing-symbol fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("multi-argument missing-symbol MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    assert_eq!(mir.ffi_calls().values().next().unwrap().arguments.len(), 2);
+
+    let reference = MirReferenceInterpreter::new(&mir);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must require an explicit host binding");
+    assert!(reference_error
+        .to_string()
+        .contains("no reference FFI host binding"));
+    assert_eq!(reference.captured_output(), "7\n");
+
+    let bytecode = compile_mir_program(&mir).expect("multi-argument missing-symbol bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the absent multi-argument symbol");
+    assert_eq!(first.code(), "E0800");
+    assert!(first
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the absent-symbol diagnostic");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the absent-symbol diagnostic");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover after the symbol appears"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&missing_path);
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "multi_argument_missing_symbol");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-argument missing-symbol lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native multi-argument missing-symbol module before link");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_error = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect_err("native link must reject the absent multi-argument symbol");
+    assert!(native_error.contains("linker failed"), "{native_error}");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
