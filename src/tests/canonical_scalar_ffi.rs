@@ -19294,6 +19294,24 @@ func main() -> i64 {
         }),
         "MIR verifier must expose a proof artifact bound to the route receipt digest"
     );
+    let snapshot_artifact = verifier_snapshot
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("MIR verifier proof artifact");
+    let alternate_verifier = crate::verifier::verify_mir(&mir, "r6-683-alternate-source".into())
+        .expect("MIR verifier alternate source projection");
+    let alternate_artifact = alternate_verifier
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("alternate MIR verifier proof artifact");
+    assert_ne!(
+        snapshot_artifact.source_hash, alternate_artifact.source_hash,
+        "source identity must remain distinct from canonical MIR identity"
+    );
+    assert_eq!(
+        snapshot_artifact.mir_hash, alternate_artifact.mir_hash,
+        "same canonical MIR must retain one proof identity across source-hash callers"
+    );
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
