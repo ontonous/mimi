@@ -1224,6 +1224,113 @@ fn lsp_reinitialize_clears_previous_workspace_verification_cache() {
 }
 
 #[test]
+fn lsp_reinitialize_resets_workspace_state_and_rebinds_cache_path() {
+    let root_a =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_state_a_{}", std::process::id()));
+    let root_b =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_state_b_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_a);
+    let _ = std::fs::remove_dir_all(&root_b);
+    std::fs::create_dir_all(&root_a).expect("create workspace A");
+    std::fs::create_dir_all(&root_b).expect("create workspace B");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root_a.to_string_lossy() }
+    }));
+    server.cache_put(
+        "untitled://workspace-a.mimi".to_string(),
+        "old text".to_string(),
+    );
+    server.set_document_version("untitled://workspace-a.mimi", 7);
+    let old_source = server
+        .parse_with_recovery_for_uri(
+            "func old() -> i32 {\n    1\n}",
+            Some("untitled://workspace-a.mimi"),
+        )
+        .expect("register workspace A source");
+    assert!(!old_source.sources.records().is_empty());
+    let old_key = crate::lsp::verification_cache_key("untitled://workspace-a.mimi", "old");
+    server.cache_put_verification(
+        old_key,
+        crate::lsp::VerificationCacheEntry::new(
+            1,
+            crate::verifier::VerifStatus::Proven,
+            "workspace A proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+    let cache_a = root_a.join(".mimi/verify_cache.json");
+    let before_reinitialize = std::fs::read(&cache_a).expect("read workspace A cache");
+
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": { "rootPath": root_b.to_string_lossy() }
+    }));
+    assert!(
+        server.documents.is_empty(),
+        "old workspace buffers must be dropped"
+    );
+    assert_eq!(
+        server.total_doc_bytes, 0,
+        "buffer byte accounting must reset"
+    );
+    assert!(
+        server.document_versions.is_empty(),
+        "old workspace versions must be dropped"
+    );
+    assert!(
+        server.source_registry.borrow().records().is_empty(),
+        "old workspace source identities must be dropped"
+    );
+
+    let new_key = crate::lsp::verification_cache_key("untitled://workspace-b.mimi", "new");
+    server.cache_put_verification(
+        new_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            2,
+            crate::verifier::VerifStatus::Proven,
+            "workspace B proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+    assert_eq!(
+        std::fs::read(&cache_a).expect("workspace A cache remains readable"),
+        before_reinitialize,
+        "saving after reinitialize must not rewrite the previous workspace"
+    );
+    let cache_b = root_b.join(".mimi/verify_cache.json");
+    let cache_b_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&cache_b).expect("workspace B cache should be written"),
+    )
+    .expect("parse workspace B cache");
+    assert!(cache_b_json["entries"][new_key].is_object());
+
+    let _ = std::fs::remove_dir_all(root_a);
+    let _ = std::fs::remove_dir_all(root_b);
+}
+
+#[test]
+fn lsp_document_close_reclaims_byte_budget() {
+    let mut server = LspServer::new();
+    server.cache_put("untitled://closed.mimi".to_string(), "12345".to_string());
+    server.cache_put("untitled://kept.mimi".to_string(), "678".to_string());
+    assert_eq!(server.total_doc_bytes, 8);
+
+    server.cache_remove("untitled://closed.mimi");
+    assert_eq!(server.total_doc_bytes, 3);
+    assert!(!server.documents.contains_key("untitled://closed.mimi"));
+    assert!(server.documents.contains_key("untitled://kept.mimi"));
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",

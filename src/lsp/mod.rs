@@ -493,6 +493,27 @@ impl LspServer {
             .map(|root| root.join(".mimi").join("verify_cache.json"))
     }
 
+    /// Reset state whose identity is scoped to the active workspace.
+    ///
+    /// A second `initialize` may select a different workspace while reusing
+    /// this server process. Keeping buffers or source snapshots from the old
+    /// root would expose stale text and SourceIds; keeping its cache path could
+    /// write new verification results into the previous workspace.
+    pub(crate) fn reset_workspace_state(&mut self) {
+        self.documents.clear();
+        self.total_doc_bytes = 0;
+        self.document_versions.clear();
+        self.access_order.clear();
+        self.last_cursor_line = 0;
+        self.verification_cache.clear();
+        self.cache_access_order.clear();
+        self.cache_path = None;
+        self.clear_parse_cache();
+        *self.source_registry.borrow_mut() = crate::span::SourceRegistry::default();
+        self.pending_notifications.clear();
+        self.active_document_uri = None;
+    }
+
     /// Insert a verification result into the cache. Used by tests.
     #[cfg(test)]
     pub(crate) fn insert_verification_cache(
@@ -869,6 +890,7 @@ impl LspServer {
                 // value is dropped and *self is Default — restore everything that
                 // does not hold live Z3 state (verifier is intentionally cleared).
                 let backup_docs = self.documents.clone();
+                let backup_total_doc_bytes = self.total_doc_bytes;
                 let backup_versions = self.document_versions.clone();
                 let backup_access = self.access_order.clone();
                 let backup_workspace = self.workspace_root.clone();
@@ -904,6 +926,7 @@ impl LspServer {
                         // AU-H2: restore caches + stdlib; drop verifier so AU-H3
                         // can recreate a fresh Z3 session on next verify.
                         self.documents = backup_docs;
+                        self.total_doc_bytes = backup_total_doc_bytes;
                         self.document_versions = backup_versions;
                         self.access_order = backup_access;
                         self.workspace_root = backup_workspace;

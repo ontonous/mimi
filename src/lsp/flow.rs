@@ -185,25 +185,26 @@ fn initialize(
     id: Option<&Value>,
 ) -> (LspServer, Option<Value>) {
     server.lifecycle = crate::lsp::LifecycleState::Initializing;
-    server.workspace_root = msg
+    let requested_root = msg
         .get("params")
         .and_then(|p| p.get("rootUri"))
         .and_then(|u| u.as_str())
         .and_then(|u| u.strip_prefix("file://"))
         .map(|p| PathBuf::from(percent_decode(p)));
-    if server.workspace_root.is_none() {
-        server.workspace_root = msg
-            .get("params")
+    let requested_root = requested_root.or_else(|| {
+        msg.get("params")
             .and_then(|p| p.get("rootPath"))
             .and_then(|p| p.as_str())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+    });
+    // Normalize the workspace root before installing it. Comparing the
+    // normalized value makes a symlink/relative spelling of the same root
+    // behave as one workspace identity.
+    let workspace_root = requested_root.map(|root| root.canonicalize().unwrap_or(root));
+    if server.workspace_root != workspace_root {
+        server.reset_workspace_state();
     }
-    // Normalize the workspace root so sandbox checks and cache writes use the
-    // canonical path rather than a client-supplied symlink/relative spelling
-    // (batch4/10 P3).
-    if let Some(root) = &server.workspace_root {
-        server.workspace_root = Some(root.canonicalize().unwrap_or_else(|_| root.clone()));
-    }
+    server.workspace_root = workspace_root;
     server.load_cache();
     let result = serde_json::json!({
         "capabilities": {

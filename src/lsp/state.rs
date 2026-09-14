@@ -237,7 +237,9 @@ impl LspServer {
 
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
-        self.documents.remove(uri);
+        if let Some(removed) = self.documents.remove(uri) {
+            self.total_doc_bytes = self.total_doc_bytes.saturating_sub(removed.len());
+        }
         self.document_versions.remove(uri);
         self.clear_parse_cache();
     }
