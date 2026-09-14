@@ -223,6 +223,18 @@ impl LspServer {
         self.verification_cache.insert(key, value);
     }
 
+    /// Mark an existing verification entry as recently used. Cache hits must
+    /// participate in the same LRU order as fresh verification results;
+    /// otherwise a frequently queried proof can be evicted solely because no
+    /// new verification was needed.
+    pub(crate) fn cache_touch_verification(&mut self, key: &str) {
+        if !self.verification_cache.contains_key(key) {
+            return;
+        }
+        self.cache_access_order.retain(|cached| cached != key);
+        self.cache_access_order.push_back(key.to_string());
+    }
+
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
         self.documents.remove(uri);
@@ -646,6 +658,7 @@ impl LspServer {
 
         // Check cache
         if let Some(cached) = self.verification_cache.get(&cache_key).cloned() {
+            self.cache_touch_verification(&cache_key);
             if cached.body_hash == body_hash {
                 match cached.status.clone() {
                     VerifStatus::Disproven => {

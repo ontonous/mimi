@@ -1095,6 +1095,73 @@ fn lsp_cache_save_rejects_reused_source_id_after_registry_reset() {
 }
 
 #[test]
+fn lsp_verification_cache_hit_refreshes_lru_position() {
+    let uri = "untitled://workspace/cache-hot.mimi";
+    let text = "func hot(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse hot source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "hot" => Some(func),
+            _ => None,
+        })
+        .expect("find hot function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    let hot_key = crate::lsp::verification_cache_key(uri, "hot");
+    let mut server = LspServer::new();
+    server.cache_put_verification(
+        hot_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::Proven,
+            "hot proof".to_string(),
+            None,
+        ),
+    );
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 1) {
+        server.cache_put_verification(
+            format!("cold-key-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+
+    // A matching Proven entry returns before Z3; that cache hit must still
+    // move hot_key behind the existing cold entries.
+    assert!(
+        server
+            .compute_verification_diagnostics(text, 0, uri)
+            .is_empty(),
+        "cached Proven result should remain diagnostic-free"
+    );
+    server.cache_put_verification(
+        "new-key".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "new proof".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        server.verification_cache.contains_key(&hot_key),
+        "a frequently hit verification entry must survive the next eviction"
+    );
+    assert!(
+        !server.verification_cache.contains_key("cold-key-0"),
+        "the oldest cold entry should be evicted after the hot hit"
+    );
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
