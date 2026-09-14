@@ -4606,6 +4606,92 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
+    const SOURCE: &str = r#"
+func worker() -> i64 {
+    println(41)
+    6
+}
+func main() -> i64 { 0 }
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("spawned ordinary contract fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize spawned ordinary contract MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("compile spawned ordinary contract bytecode");
+    assert!(bytecode.ast.is_none());
+    let worker = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("canonical worker function");
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical main function");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    // Canonical MIR currently carries ordinary contracts as typed predicates,
+    // while the bytecode VM's legacy contract hook consumes mini-function
+    // metadata.  Attach a tiny AST-free false predicate here so this test
+    // isolates the child VM's inherited `verify_contracts` switch without
+    // asking the MIR adapter to reopen the surface AST.
+    let mut contract_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("__contract_false".into(), 1);
+    contract_proto.emit(crate::interp::bytecode::instr::Op::LoadFalse { rd: 0 });
+    contract_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: 0 });
+    let contract_func = program.functions.len() as u32;
+    program.functions.push(contract_proto);
+    program.functions[worker].has_ensures = true;
+    program.functions[worker].ensures_funcs = vec![contract_func];
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task,
+        func: worker as u32,
+        args_base: task,
+        argc: 0,
+    });
+    let result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result,
+        ra: task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
+    program.functions[main] = main_proto;
+    program.entry = main as u32;
+
+    let verified_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut verified = BytecodeVM::new(bytecode.clone());
+    verified.set_stdout_buf(verified_stdout.clone());
+    let error = verified
+        .run_value()
+        .expect_err("ordinary child contract must be enforced when enabled");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("ensures condition failed"));
+    assert_eq!(&*verified_stdout.lock().unwrap(), "41\n");
+    assert_eq!(verified.debug_stack_state(), (0, 0));
+
+    let unchecked_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut unchecked = BytecodeVM::new(bytecode);
+    unchecked.set_stdout_buf(unchecked_stdout.clone());
+    unchecked.verify_contracts = false;
+    assert_eq!(
+        unchecked
+            .run_value()
+            .expect("ordinary child contract must follow the parent switch when disabled"),
+        Value::Int(6)
+    );
+    assert_eq!(&*unchecked_stdout.lock().unwrap(), "41\n");
+    assert_eq!(unchecked.debug_stack_state(), (0, 0));
+}
+
+#[test]
 fn scalar_ffi_actor_worker_inherits_contract_mode() {
     const BAD_C_SOURCE: &str = r#"
 #include <stdint.h>
