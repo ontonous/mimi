@@ -19212,8 +19212,10 @@ int64_t generated_rebind_first(int64_t left, int64_t right) { return left + righ
 "#;
     const SOURCE: &str = r#"
 extern "C" {
-    func generated_rebind_first(left: i64, right: i64) -> i64;
-    func generated_rebind_second(left: i64, right: i64) -> i64;
+    func generated_rebind_first(left: i64, right: i64) -> i64
+        ensures: result == left + right;
+    func generated_rebind_second(left: i64, right: i64) -> i64
+        ensures: result == left + right;
 }
 func main() -> i64 {
     println(8 as i64);
@@ -19283,6 +19285,15 @@ func main() -> i64 {
             .collect::<Vec<_>>()
     };
     let verifier_snapshot_projection = verifier_projection(&verifier_snapshot);
+    assert!(
+        verifier_snapshot.iter().any(|result| {
+            result
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.mir_hash == route_snapshot.mir_digest)
+        }),
+        "MIR verifier must expose a proof artifact bound to the route receipt digest"
+    );
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
