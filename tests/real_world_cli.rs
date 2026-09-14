@@ -16391,6 +16391,90 @@ func main() -> i64 { foreign(42 as i64) }
 }
 
 #[test]
+fn canonical_mir_cli_rejects_imported_ffi_boundary_without_fallback() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_import_boundary_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported FFI boundary directory");
+    fs::write(
+        dir.join("ffi.mimi"),
+        r#"pub extern "Rust" { func foreign(value: i64) -> i64; }
+pub func call_foreign(value: i64) -> i64 { foreign(value) }
+"#,
+    )
+    .expect("write imported FFI declaration");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "use ffi;\nfunc main() -> i64 { call_foreign(42 as i64) }\n",
+    )
+    .expect("write imported FFI entry");
+
+    for command in ["run", "build", "verify"] {
+        let mut route_outputs = Vec::new();
+        for explicit_mir in [false, true] {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if explicit_mir {
+                invocation.arg("--mir");
+            }
+            let output = invocation
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("imported {command} {explicit_mir}: {error}"));
+            route_outputs.push((
+                output.status,
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        assert_eq!(
+            route_outputs[0].0, route_outputs[1].0,
+            "imported {command} default and --mir status diverged"
+        );
+        assert_eq!(
+            route_outputs[0].1, route_outputs[1].1,
+            "imported {command} default and --mir stdout diverged"
+        );
+        for (explicit_mir, (status, stdout, stderr)) in route_outputs.iter().enumerate() {
+            assert!(
+                !status.success(),
+                "imported {command} {} must reject an unmigrated declaration boundary",
+                if explicit_mir == 0 {
+                    "default"
+                } else {
+                    "--mir"
+                }
+            );
+            assert!(stdout.is_empty(), "imported {command}: {stdout}");
+            assert!(
+                stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
+                "imported {command}: {stderr}"
+            );
+            if explicit_mir == 0 {
+                assert!(
+                    stderr.contains("canonical scalar FFI declaration boundary"),
+                    "imported {command}: default route must reject before legacy: {stderr}"
+                );
+            } else {
+                assert!(
+                    stderr.contains("MIR validation failed"),
+                    "imported {command}: explicit MIR must report validation: {stderr}"
+                );
+            }
+            assert!(!stderr.contains("canonical route disposition: legacy"));
+            assert!(!stderr.contains("flow_ast"));
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove imported FFI boundary directory");
+}
+
+#[test]
 fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
     let fixture = project_root()
         .join("tests")
