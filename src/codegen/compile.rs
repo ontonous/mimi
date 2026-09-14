@@ -39,7 +39,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // canonical lowering has not materialized one of these candidates,
         // this remains the compatibility path for unrelated legacy programs.
         if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
-            return self.compile_mir_native(&canonical);
+            let receipt = canonical.route_receipt("native-direct-v1");
+            return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
         }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
         // gate — fail closed on native return types whose heap ownership the

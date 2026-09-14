@@ -16441,6 +16441,27 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             "{bytecode_error:?}"
         );
         let context = inkwell::context::Context::create();
+        let mut native = crate::codegen::CodeGenerator::new(&context, "receipt_bound_native");
+        native
+            .compile_mir_native_with_route_receipt(&route.program, &bytecode_receipt)
+            .expect("receipt-bound canonical FFI native emission");
+        native
+            .module
+            .verify()
+            .expect("valid receipt-bound native module");
+        let forged_native_context = inkwell::context::Context::create();
+        let mut forged_native =
+            crate::codegen::CodeGenerator::new(&forged_native_context, "forged_receipt_native");
+        let native_error = forged_native
+            .compile_mir_native_with_route_receipt(&route.program, &forged_receipt)
+            .expect_err("native must reject a route receipt from another MIR graph");
+        assert!(
+            native_error
+                .iter()
+                .any(|error| error.message.contains("MIR digest")),
+            "{native_error:?}"
+        );
+        let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
         generator
             .compile_checked(&checked)

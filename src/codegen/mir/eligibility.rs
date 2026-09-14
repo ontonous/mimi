@@ -58,6 +58,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             .compile()
             .map_err(|error| vec![error.diagnostic()])
     }
+
+    /// Compile canonical MIR after checking the route receipt supplied by the
+    /// caller. This keeps native emission on the exact immutable graph whose
+    /// receipt admitted the route, matching the bytecode consumer boundary.
+    pub fn compile_mir_native_with_route_receipt(
+        &mut self,
+        program: &MirProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if let Err(message) = receipt.validate() {
+            return Err(vec![NativeMirError::new(
+                "mir-program",
+                format!("canonical route receipt is invalid: {message}"),
+            )
+            .diagnostic()]);
+        }
+        let actual_digest = program.canonical_digest();
+        if receipt.mir_digest != actual_digest {
+            return Err(vec![NativeMirError::new(
+                "mir-program",
+                format!(
+                    "canonical route receipt MIR digest {} does not match native input {}",
+                    receipt.mir_digest, actual_digest
+                ),
+            )
+            .diagnostic()]);
+        }
+        self.compile_mir_native(program)
+    }
 }
 
 pub(super) fn instruction_kind(

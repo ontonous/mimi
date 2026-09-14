@@ -693,13 +693,25 @@ pub(crate) fn build(
                 crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?
             }
         };
-        (codegen.compile_mir_native(&canonical), false)
+        let receipt = canonical.route_receipt("build-canonical-v1");
+        (
+            codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+            false,
+        )
     } else if let Some(canonical) = canonical_for_build.take() {
-        (codegen.compile_mir_native(&canonical), true)
+        let receipt = canonical.route_receipt("build-canonical-v1");
+        (
+            codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+            true,
+        )
     } else {
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                (codegen.compile_mir_native(&canonical), true)
+                let receipt = canonical.route_receipt("build-canonical-v1");
+                (
+                    codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+                    true,
+                )
             }
             crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
                 crate::canonical_dispatch::report_legacy_route(_reason);
