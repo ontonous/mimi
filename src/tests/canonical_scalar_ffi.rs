@@ -18266,6 +18266,146 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_verifier_projection_preserves_order() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_projection_first(left: i64, right: i64) -> i64
+        requires: left >= 0 and right >= 0 ensures: true;
+    func generated_projection_second(left: i64, right: i64) -> i64
+        requires: left >= 0 and right >= 0 ensures: result == left + right;
+}
+func main() -> i64 {
+    generated_projection_first(7 as i32, 8 as i32);
+    generated_projection_second(-8 as i32, 1 as i32);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width verifier projection fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("mixed-width verifier projection MIR");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].1.symbol, "generated_projection_first");
+    assert_eq!(ordered[1].1.symbol, "generated_projection_second");
+    assert!(ordered[0].1.span.start_line < ordered[1].1.span.start_line);
+    assert!(ordered[0].1.instruction > ordered[1].1.instruction);
+    let widening = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    assert!(ordered
+        .iter()
+        .all(|(_, receipt)| receipt.parameter_conversions == vec![widening, widening]));
+
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize mixed-width verifier projection route");
+    let route_receipt = route.program.route_receipt("r6-668-projection");
+    assert_eq!(route.program.canonical_digest(), mir.canonical_digest());
+    assert_eq!(route_receipt.mir_digest, mir.canonical_digest());
+    assert_eq!(route_receipt.ffi_digest.len(), 64);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width projection bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(
+        bytecode.canonical_ffi[0].symbol,
+        "generated_projection_first"
+    );
+    assert_eq!(
+        bytecode.canonical_ffi[1].symbol,
+        "generated_projection_second"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let mir_results = crate::verifier::verify_mir(&mir, "r6-668-projection".into())
+        .expect("verify mixed-width projection MIR");
+    assert_eq!(mir_results.len(), 2);
+    assert_eq!(mir_results[0].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(
+        mir_results[1].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+    assert_eq!(
+        mir_results[1]
+            .diagnostic
+            .as_ref()
+            .expect("second requires diagnostic")
+            .span,
+        ordered[1].1.span
+    );
+    assert!(mir_results.iter().all(|result| {
+        result.func_name == "function:main"
+            && result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == route_receipt.mir_digest
+            })
+    }));
+
+    let mut projections = Vec::new();
+    for results in [
+        crate::verifier::verify_checked(&checked, "r6-668-projection".into()),
+        crate::verifier::verify_checked_dual(&checked, "r6-668-projection-dual".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public mixed-width projection verifier");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+        assert_eq!(
+            results[1]
+                .diagnostic
+                .as_ref()
+                .expect("public second requires diagnostic")
+                .span,
+            ordered[1].1.span
+        );
+        assert!(
+            results.iter().all(|result| {
+                result
+                    .func_name
+                    .strip_prefix("function:")
+                    .unwrap_or(result.func_name.as_str())
+                    == "main"
+                    && result.artifact.as_ref().is_some_and(|artifact| {
+                        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                            && artifact.mir_hash == route_receipt.mir_digest
+                    })
+            }),
+            "unexpected public verifier projection: {results:?}"
+        );
+        projections.push(
+            results
+                .iter()
+                .map(|result| {
+                    (
+                        result.status.clone(),
+                        result.message.clone(),
+                        result.constraint_count,
+                        result.diagnostic.as_ref().map(|diagnostic| diagnostic.span),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(
+        projections.windows(2).all(|pair| pair[0] == pair[1]),
+        "public verifier APIs must expose one ordered mixed-width projection"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
