@@ -659,19 +659,45 @@ mod tests {
             .verify_against_receipt(&receipt)
             .expect("identical receipts must compare successfully");
 
-        let mut drifted = receipt.clone();
-        drifted.ffi_digest = "b".repeat(64);
-        let error = receipt
-            .verify_against_receipt(&drifted)
-            .expect_err("receipt identity drift must fail closed");
-        assert_eq!(
-            error,
-            "route receipt does not match expected checker receipt: ffi_digest"
-        );
+        let mut profile = receipt.clone();
+        profile.profile = "other-v1".into();
+        let mut mir_digest = receipt.clone();
+        mir_digest.mir_digest = "b".repeat(64);
+        let mut type_desc_digest = receipt.clone();
+        type_desc_digest.type_desc_digest = "b".repeat(64);
+        let mut abi_digest = receipt.clone();
+        abi_digest.abi_digest = "b".repeat(64);
+        let mut ffi_digest = receipt.clone();
+        ffi_digest.ffi_digest = "b".repeat(64);
+        let mut ownership_digest = receipt.clone();
+        ownership_digest.ownership_digest = "b".repeat(64);
+        let mut flow_transition_digest = receipt.clone();
+        flow_transition_digest.flow_transition_digest = "b".repeat(64);
+        let mut root_owners = receipt.clone();
+        root_owners.root_owners = vec![NodeId("function:a".into()), NodeId("function:z".into())];
+        for (field, drifted) in [
+            ("profile", profile),
+            ("mir_digest", mir_digest),
+            ("type_desc_digest", type_desc_digest),
+            ("abi_digest", abi_digest),
+            ("ffi_digest", ffi_digest),
+            ("ownership_digest", ownership_digest),
+            ("flow_transition_digest", flow_transition_digest),
+            ("root_owners", root_owners),
+        ] {
+            let error = receipt
+                .verify_against_receipt(&drifted)
+                .expect_err("receipt identity drift must fail closed");
+            assert_eq!(
+                error,
+                format!("route receipt does not match expected checker receipt: {field}")
+            );
+        }
 
-        drifted.profile = "bad=profile".into();
+        let mut invalid = receipt.clone();
+        invalid.profile = "bad=profile".into();
         let error = receipt
-            .verify_against_receipt(&drifted)
+            .verify_against_receipt(&invalid)
             .expect_err("invalid expected receipt must fail before comparison");
         assert_eq!(
             error,
