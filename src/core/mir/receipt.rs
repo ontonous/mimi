@@ -154,6 +154,60 @@ impl CanonicalMirRouteReceipt {
         Ok(())
     }
 
+    /// Validate this receipt against the immutable MIR graph it claims to
+    /// describe. This compares the whole identity tuple, including the FFI
+    /// and ABI sub-digests, so consumers cannot accept a locally edited
+    /// receipt merely because its top-level digest was left unchanged.
+    pub fn validate_against_program(&self, program: &MirProgram) -> Result<(), String> {
+        self.validate()?;
+        let actual = program.route_receipt(self.profile.clone());
+        for (field, expected, observed) in [
+            (
+                "mir_digest",
+                self.mir_digest.as_str(),
+                actual.mir_digest.as_str(),
+            ),
+            (
+                "type_desc_digest",
+                self.type_desc_digest.as_str(),
+                actual.type_desc_digest.as_str(),
+            ),
+            (
+                "abi_digest",
+                self.abi_digest.as_str(),
+                actual.abi_digest.as_str(),
+            ),
+            (
+                "ffi_digest",
+                self.ffi_digest.as_str(),
+                actual.ffi_digest.as_str(),
+            ),
+            (
+                "ownership_digest",
+                self.ownership_digest.as_str(),
+                actual.ownership_digest.as_str(),
+            ),
+            (
+                "flow_transition_digest",
+                self.flow_transition_digest.as_str(),
+                actual.flow_transition_digest.as_str(),
+            ),
+        ] {
+            if expected != observed {
+                return Err(format!(
+                    "route receipt {field} {expected} does not match MIR input {observed}"
+                ));
+            }
+        }
+        if self.root_owners != actual.root_owners {
+            return Err(format!(
+                "route receipt root_owners {:?} do not match MIR input {:?}",
+                self.root_owners, actual.root_owners
+            ));
+        }
+        Ok(())
+    }
+
     /// Compare this evidence manifest with a checker-owned receipt.
     ///
     /// Both values are validated before comparison so a structurally malformed

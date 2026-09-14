@@ -628,8 +628,10 @@ pub(crate) fn build(
 
     if verify_ffi {
         let ffi_verification = if let Some(canonical) = canonical_for_build.as_ref() {
-            verifier::verify_ffi_mir_with_source_hash(
+            let receipt = canonical.route_receipt("build-verify-v1");
+            verifier::verify_ffi_mir_with_route_receipt(
                 canonical,
+                &receipt,
                 blake3::hash(source.as_bytes()).to_hex().to_string(),
             )
         } else {

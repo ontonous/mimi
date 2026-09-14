@@ -81,20 +81,10 @@ pub fn compile_mir_program_with_route_receipt(
     program: &MirProgram,
     receipt: &CanonicalMirRouteReceipt,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
-    if let Err(message) = receipt.validate() {
+    if let Err(message) = receipt.validate_against_program(program) {
         return Err(vec![MirBytecodeError {
             function: NodeId("mir-program".into()),
-            message: format!("canonical route receipt is invalid: {message}"),
-        }]);
-    }
-    let actual_digest = program.canonical_digest();
-    if receipt.mir_digest != actual_digest {
-        return Err(vec![MirBytecodeError {
-            function: NodeId("mir-program".into()),
-            message: format!(
-                "canonical route receipt MIR digest {} does not match bytecode input {}",
-                receipt.mir_digest, actual_digest
-            ),
+            message: format!("canonical route receipt rejected: {message}"),
         }]);
     }
     compile_mir_program_inner(program)

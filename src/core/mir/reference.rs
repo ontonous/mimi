@@ -15,10 +15,10 @@ use super::types::{
     MirAbiClass, MirFfiScalarKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
 };
 use super::{
-    MirAggregateKind, MirBlockId, MirFfiAbiConversion, MirFfiConversionKind, MirFunction,
-    MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
-    MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
-    MirTransitionContract, MirTransitionEffect, MirValueId,
+    CanonicalMirRouteReceipt, MirAggregateKind, MirBlockId, MirFfiAbiConversion,
+    MirFfiConversionKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId,
+    MirInstruction, MirInstructionId, MirInstructionKind, MirProjection, MirSwitchArm,
+    MirSwitchCase, MirTerminator, MirTransitionContract, MirTransitionEffect, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4945,6 +4945,7 @@ pub struct MirReferenceInterpreter<'a> {
     next_session_handle: RefCell<i64>,
     ffi_resolver: Option<&'a dyn MirReferenceFfiResolver>,
     verify_ffi: bool,
+    expected_route_receipt: Option<CanonicalMirRouteReceipt>,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -4958,6 +4959,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             next_session_handle: RefCell::new(1),
             ffi_resolver: None,
             verify_ffi: true,
+            expected_route_receipt: None,
         }
     }
 
@@ -4973,6 +4975,14 @@ impl<'a> MirReferenceInterpreter<'a> {
     /// Checks are enabled by default and never evaluate an external function.
     pub fn with_ffi_verification(mut self, verify: bool) -> Self {
         self.verify_ffi = verify;
+        self
+    }
+
+    /// Require execution to use the immutable MIR graph identified by this
+    /// route receipt. Consumers clone the receipt so the caller can safely
+    /// reuse or mutate its own evidence object after configuration.
+    pub fn with_route_receipt(mut self, receipt: &CanonicalMirRouteReceipt) -> Self {
+        self.expected_route_receipt = Some(receipt.clone());
         self
     }
 
@@ -5328,6 +5338,16 @@ impl<'a> MirReferenceInterpreter<'a> {
         // can fail. Callers that inspect `captured_output()` after an error
         // must never observe stdout left over from an earlier invocation.
         self.output.borrow_mut().clear();
+        if let Some(receipt) = &self.expected_route_receipt {
+            receipt
+                .validate_against_program(self.program)
+                .map_err(|message| {
+                    self.error(
+                        owner,
+                        format!("canonical route receipt rejected: {message}"),
+                    )
+                })?;
+        }
         if let Some(message) =
             super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
                 .into_iter()

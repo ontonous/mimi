@@ -201,6 +201,22 @@ pub fn verify_ffi_mir_with_source_hash(
     mir::verify_ffi_program(program, source_hash)
 }
 
+/// Verify canonical FFI MIR after checking the caller-supplied route receipt.
+/// The verifier therefore proves the same immutable graph that the execution
+/// consumers admitted, including its ABI and FFI sub-digests.
+pub fn verify_ffi_mir_with_route_receipt(
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!("MIR-FFI-RECEIPT-001: canonical route receipt rejected: {message}")
+        })?;
+    verify_ffi_mir_with_source_hash(program, source_hash)
+}
+
 fn verify_ffi_checked_with_source_hash(
     program: &crate::core::CheckedProgram,
     source_hash: String,
@@ -247,7 +263,8 @@ fn verify_ffi_checked_with_source_hash(
         program,
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
     )? {
-        return verify_ffi_mir_with_source_hash(&canonical, source_hash);
+        let receipt = canonical.route_receipt("verify-ffi-v1");
+        return verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash);
     }
 
     if !has_extern_call {

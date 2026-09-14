@@ -16425,6 +16425,18 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                     && artifact.mir_hash == route.program.canonical_digest()
             })
         }));
+        let verifier_receipt = route.program.route_receipt("r6-695-verifier-v1");
+        let mir_ffi_with_receipt = crate::verifier::verify_ffi_mir_with_route_receipt(
+            &route.program,
+            &verifier_receipt,
+            source_hash.clone(),
+        )
+        .expect("receipt-bound canonical FFI verifier");
+        assert_eq!(
+            projection(&mir_ffi_with_source),
+            projection(&mir_ffi_with_receipt),
+            "receipt-bound verifier must preserve the source-provenance projection"
+        );
         let bytecode_receipt = route.program.route_receipt("r6-693-bytecode-v1");
         let bytecode = compile_mir_program_with_route_receipt(&route.program, &bytecode_receipt)
             .expect("receipt-bound canonical FFI bytecode");
@@ -16437,7 +16449,8 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
         assert!(
             bytecode_error
                 .iter()
-                .any(|error| error.message.contains("MIR digest")),
+                .any(|error| error.message.contains("MIR digest")
+                    || error.message.contains("mir_digest")),
             "{bytecode_error:?}"
         );
         let context = inkwell::context::Context::create();
@@ -16458,9 +16471,67 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
         assert!(
             native_error
                 .iter()
-                .any(|error| error.message.contains("MIR digest")),
+                .any(|error| error.message.contains("MIR digest")
+                    || error.message.contains("mir_digest")),
             "{native_error:?}"
         );
+        if expected == VerifStatus::NoObligations {
+            for field in ["ffi_digest", "abi_digest"] {
+                let mut forged_subdigest = bytecode_receipt.clone();
+                match field {
+                    "ffi_digest" => forged_subdigest.ffi_digest = "0".repeat(64),
+                    "abi_digest" => forged_subdigest.abi_digest = "0".repeat(64),
+                    _ => unreachable!(),
+                }
+                let bytecode_subdigest_error =
+                    compile_mir_program_with_route_receipt(&route.program, &forged_subdigest)
+                        .expect_err("bytecode must reject a forged route sub-digest");
+                assert!(
+                    bytecode_subdigest_error
+                        .iter()
+                        .any(|error| error.message.contains(field)),
+                    "{field}: {bytecode_subdigest_error:?}"
+                );
+
+                let subdigest_native_context = inkwell::context::Context::create();
+                let mut subdigest_native = crate::codegen::CodeGenerator::new(
+                    &subdigest_native_context,
+                    "forged_subdigest_native",
+                );
+                let native_subdigest_error = subdigest_native
+                    .compile_mir_native_with_route_receipt(&route.program, &forged_subdigest)
+                    .expect_err("native must reject a forged route sub-digest");
+                assert!(
+                    native_subdigest_error
+                        .iter()
+                        .any(|error| error.message.contains(field)),
+                    "{field}: {native_subdigest_error:?}"
+                );
+
+                let verifier_subdigest_error = crate::verifier::verify_ffi_mir_with_route_receipt(
+                    &route.program,
+                    &forged_subdigest,
+                    source_hash.clone(),
+                )
+                .expect_err("verifier must reject a forged route sub-digest");
+                assert!(
+                    verifier_subdigest_error.contains(field),
+                    "{field}: {verifier_subdigest_error}"
+                );
+
+                let reference_owner = crate::core::NodeId("function:main".into());
+                let reference = MirReferenceInterpreter::new(&route.program)
+                    .with_route_receipt(&forged_subdigest);
+                let reference_subdigest_error = reference
+                    .execute(&reference_owner, &[])
+                    .expect_err("reference must reject a forged route sub-digest");
+                assert!(
+                    reference_subdigest_error.message.contains(field),
+                    "{field}: {reference_subdigest_error:?}"
+                );
+                assert_eq!(reference.captured_output(), "");
+            }
+        }
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
         generator

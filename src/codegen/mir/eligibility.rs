@@ -67,21 +67,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &MirProgram,
         receipt: &crate::core::mir::CanonicalMirRouteReceipt,
     ) -> Result<(), Vec<Diagnostic>> {
-        if let Err(message) = receipt.validate() {
+        if let Err(message) = receipt.validate_against_program(program) {
             return Err(vec![NativeMirError::new(
                 "mir-program",
-                format!("canonical route receipt is invalid: {message}"),
-            )
-            .diagnostic()]);
-        }
-        let actual_digest = program.canonical_digest();
-        if receipt.mir_digest != actual_digest {
-            return Err(vec![NativeMirError::new(
-                "mir-program",
-                format!(
-                    "canonical route receipt MIR digest {} does not match native input {}",
-                    receipt.mir_digest, actual_digest
-                ),
+                format!("canonical route receipt rejected: {message}"),
             )
             .diagnostic()]);
         }
