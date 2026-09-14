@@ -27,7 +27,7 @@ pub use compiler::BytecodeCompiler;
 pub use instr::{
     BytecodeProgram, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstValue, FunctionProto, Op,
 };
-pub use mir::compile_mir_program;
+pub use mir::{compile_mir_program, compile_mir_program_with_route_receipt};
 pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};
 pub use vm::BytecodeVM;
 

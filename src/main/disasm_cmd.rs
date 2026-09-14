@@ -83,7 +83,10 @@ pub fn disasm_file(path: &Path) -> ! {
     let program =
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                match mimi::interp::bytecode::compile_mir_program(&canonical) {
+                let receipt = canonical.route_receipt("disasm-canonical-v1");
+                match mimi::interp::bytecode::compile_mir_program_with_route_receipt(
+                    &canonical, &receipt,
+                ) {
                     Ok(program) => program,
                     Err(errors) => {
                         eprintln!("error: canonical MIR bytecode is not eligible:");

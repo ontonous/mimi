@@ -1231,7 +1231,10 @@ pub(crate) fn select_default_route(
     // Bytecode and native are both checked only after the verifier capability
     // gate.  The actual consumers repeat their own validation immediately
     // before use.
-    if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&canonical) {
+    let receipt = canonical.route_receipt("canonical-dispatch-v1");
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+    {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
                 "managed Result direct-call MIR-bytecode preflight failed: {errors:?}"
@@ -1331,7 +1334,10 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
             "scalar FFI MIR verifier capability: {errors:?}"
         ));
     }
-    if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&program) {
+    let receipt = program.route_receipt("scalar-ffi-v1");
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
         return DefaultMirRoute::Rejected(format!(
             "scalar FFI MIR bytecode capability: {errors:?}"
         ));

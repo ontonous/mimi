@@ -135,15 +135,18 @@ pub(crate) fn test(
     let (prog, canonical_function_names) =
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                let prog =
-                    mimi::interp::bytecode::compile_mir_program(&canonical).map_err(|errors| {
-                        let details = errors
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("canonical MIR bytecode is not eligible:\n{details}")
-                    })?;
+                let receipt = canonical.route_receipt("test-canonical-v1");
+                let prog = mimi::interp::bytecode::compile_mir_program_with_route_receipt(
+                    &canonical, &receipt,
+                )
+                .map_err(|errors| {
+                    let details = errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("canonical MIR bytecode is not eligible:\n{details}")
+                })?;
                 (prog, true)
             }
             crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {

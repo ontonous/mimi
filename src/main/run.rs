@@ -170,14 +170,17 @@ fn run_once(
         }
     };
     if let Some(canonical) = canonical {
-        let prog = mimi::interp::bytecode::compile_mir_program(&canonical).map_err(|errors| {
-            let details = errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("canonical MIR bytecode is not eligible:\n{details}")
-        })?;
+        let receipt = canonical.route_receipt("run-canonical-v1");
+        let prog =
+            mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+                .map_err(|errors| {
+                    let details = errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("canonical MIR bytecode is not eligible:\n{details}")
+                })?;
         let mut vm =
             mimi::interp::bytecode::BytecodeVM::new(prog).with_cli_args(extra_args.to_vec());
         vm.verify_contracts = verify_contracts;

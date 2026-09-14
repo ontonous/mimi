@@ -11,7 +11,8 @@ use crate::core::mir::reference::{
 };
 use crate::core::mir::MirFfiCallContract;
 use crate::interp::bytecode::{
-    compile_mir_program, BytecodeVM, CanonicalFfiDescriptor, CanonicalFfiScalarType,
+    compile_mir_program, compile_mir_program_with_route_receipt, BytecodeVM,
+    CanonicalFfiDescriptor, CanonicalFfiScalarType,
 };
 use crate::interp::Value;
 
@@ -16424,6 +16425,21 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                     && artifact.mir_hash == route.program.canonical_digest()
             })
         }));
+        let bytecode_receipt = route.program.route_receipt("r6-693-bytecode-v1");
+        let bytecode = compile_mir_program_with_route_receipt(&route.program, &bytecode_receipt)
+            .expect("receipt-bound canonical FFI bytecode");
+        assert!(bytecode.ast.is_none());
+        let mut forged_receipt = bytecode_receipt.clone();
+        forged_receipt.mir_digest = "0".repeat(64);
+        let bytecode_error =
+            compile_mir_program_with_route_receipt(&route.program, &forged_receipt)
+                .expect_err("bytecode must reject a route receipt from another MIR graph");
+        assert!(
+            bytecode_error
+                .iter()
+                .any(|error| error.message.contains("MIR digest")),
+            "{bytecode_error:?}"
+        );
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
         generator

@@ -21,6 +21,7 @@ use crate::core::mir::types::{
     MirVariantPredicateContract, MirVariantProjectionFallbackContract,
     MirVariantProjectionTrapContract,
 };
+use crate::core::mir::CanonicalMirRouteReceipt;
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
     MirProjection, MirSetOperation, MirTerminator, MirValueId,
@@ -67,6 +68,39 @@ fn checked_function_index(index: usize, owner: &NodeId) -> Result<FuncIdx, MirBy
 /// an important migration invariant: this consumer can only execute facts
 /// carried by MIR and its type catalog.
 pub fn compile_mir_program(
+    program: &MirProgram,
+) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
+    compile_mir_program_inner(program)
+}
+
+/// Compile canonical MIR after checking the route receipt supplied by the
+/// caller.  Production route owners use this adapter when they already hold
+/// the receipt that admitted the same immutable `MirProgram`; the bytecode
+/// consumer therefore cannot silently accept a receipt from another graph.
+pub fn compile_mir_program_with_route_receipt(
+    program: &MirProgram,
+    receipt: &CanonicalMirRouteReceipt,
+) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
+    if let Err(message) = receipt.validate() {
+        return Err(vec![MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message: format!("canonical route receipt is invalid: {message}"),
+        }]);
+    }
+    let actual_digest = program.canonical_digest();
+    if receipt.mir_digest != actual_digest {
+        return Err(vec![MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message: format!(
+                "canonical route receipt MIR digest {} does not match bytecode input {}",
+                receipt.mir_digest, actual_digest
+            ),
+        }]);
+    }
+    compile_mir_program_inner(program)
+}
+
+fn compile_mir_program_inner(
     program: &MirProgram,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
     let ordered: Vec<(&NodeId, &MirFunction)> = program.functions().iter().collect();
