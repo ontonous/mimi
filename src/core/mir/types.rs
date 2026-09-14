@@ -89,6 +89,17 @@ pub enum MirOwnership {
 }
 
 impl MirOwnership {
+    /// Stable spelling used by canonical MIR contract text.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+            Self::Linear => "linear",
+            Self::SharedBorrow => "shared_borrow",
+            Self::WeakBorrow => "weak_borrow",
+        }
+    }
+
     pub fn needs_drop(self) -> bool {
         matches!(self, Self::Move | Self::Linear)
     }
@@ -571,6 +582,21 @@ pub enum MirGlueKind {
     /// explicit SessionCall receipt (for example `session_close`).
     Session,
     Unsupported,
+}
+
+impl MirGlueKind {
+    /// Stable spelling used by canonical MIR contract text.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Noop => "noop",
+            Self::OwnedString => "owned_string",
+            Self::List => "list",
+            Self::Set => "set",
+            Self::Aggregate => "aggregate",
+            Self::Session => "session",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

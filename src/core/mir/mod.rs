@@ -954,6 +954,233 @@ pub enum MirGenericInstanceContract {
     },
 }
 
+impl MirSetOperation {
+    /// Stable spelling used by canonical instance identity text.  The
+    /// semantic route digest must not inherit Rust's derived `Debug` format.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Size => "size",
+            Self::IsEmpty => "is_empty",
+            Self::Contains => "contains",
+            Self::Insert => "insert",
+            Self::Remove => "remove",
+            Self::ToList => "to_list",
+        }
+    }
+}
+
+impl MirListOperation {
+    /// Stable spelling used by canonical instance identity text.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Len => "len",
+            Self::Reverse => "reverse",
+            Self::Concat => "concat",
+        }
+    }
+}
+
+impl MirVariantPredicate {
+    /// Stable spelling used by canonical instance identity text.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::IsSome => "is_some",
+            Self::IsNone => "is_none",
+            Self::IsOk => "is_ok",
+            Self::IsErr => "is_err",
+        }
+    }
+}
+
+fn canonical_record_projection_contract(contract: &types::MirRecordProjectionContract) -> String {
+    format!(
+        "nominal={} field={} name={} index={} arity={} field_ty={}",
+        contract.nominal.as_str(),
+        contract.field.0,
+        contract.name,
+        contract.field_index,
+        contract.arity,
+        contract.field_ty.as_str()
+    )
+}
+
+fn canonical_variant_projection_contract(contract: &types::MirVariantProjectionContract) -> String {
+    format!(
+        "nominal={} variant={} field={} index={} arity={} field_ty={} ownership={} move_out_glue={}",
+        contract.nominal.as_str(),
+        contract.variant.0,
+        contract.field.0,
+        contract.field_index,
+        contract.arity,
+        contract.field_ty.as_str(),
+        contract.ownership.canonical_text(),
+        contract.move_out_glue.canonical_text()
+    )
+}
+
+fn canonical_instance_contract_text(contract: &MirGenericInstanceContract) -> String {
+    match contract {
+        MirGenericInstanceContract::ScalarIdentity => "scalar_identity".into(),
+        MirGenericInstanceContract::OwnedStringIdentity => "owned_string_identity".into(),
+        MirGenericInstanceContract::ScalarSetFacade { operation } => {
+            format!("scalar_set_facade operation={}", operation.canonical_text())
+        }
+        MirGenericInstanceContract::ScalarListFacade { operation } => {
+            format!("scalar_list_facade operation={}", operation.canonical_text())
+        }
+        MirGenericInstanceContract::ScalarListConstruct { contract } => format!(
+            "scalar_list_construct list_ty={} element_ty={} result_ty={} element_count={}",
+            contract.list_ty.as_str(),
+            contract.element_ty.as_str(),
+            contract.result_ty.as_str(),
+            contract.element_count
+        ),
+        MirGenericInstanceContract::ScalarListProjection {
+            contract,
+            index_value,
+        } => format!(
+            "scalar_list_projection list_ty={} element_ty={} index_ty={} result_ty={} mode={} index_value={}",
+            contract.list_ty.as_str(),
+            contract.element_ty.as_str(),
+            contract.index_ty.as_str(),
+            contract.result_ty.as_str(),
+            match contract.mode {
+                types::MirListIndexProjectionMode::CopyScalar => "copy_scalar",
+                types::MirListIndexProjectionMode::CloneNestedList => "clone_nested_list",
+            },
+            index_value
+        ),
+        MirGenericInstanceContract::ScalarRecordProjection { contract } => format!(
+            "scalar_record_projection {}",
+            canonical_record_projection_contract(contract)
+        ),
+        MirGenericInstanceContract::OwnedRecordProjection { contract } => format!(
+            "owned_record_projection {}",
+            canonical_record_projection_contract(contract)
+        ),
+        MirGenericInstanceContract::ScalarRecordUpdate { contract } => {
+            let fields = contract
+                .fields
+                .iter()
+                .map(canonical_record_projection_contract)
+                .collect::<Vec<_>>()
+                .join(";");
+            format!(
+                "scalar_record_update source_ty={} result_ty={} nominal={} arity={} fields=[{}]",
+                contract.source_ty.as_str(),
+                contract.result_ty.as_str(),
+                contract.nominal.as_str(),
+                contract.arity,
+                fields
+            )
+        }
+        MirGenericInstanceContract::OwnedRecordUpdate { contract } => {
+            let updates = contract
+                .updates
+                .iter()
+                .map(|update| {
+                    format!(
+                        "projection=({}) old_drop={} new_move={}",
+                        canonical_record_projection_contract(&update.projection),
+                        update.old_drop.canonical_text(),
+                        update.new_move.canonical_text()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            let residual = contract
+                .residual
+                .iter()
+                .map(|field| {
+                    format!(
+                        "id={} name={} index={} ty={} glue={}",
+                        field.id.0,
+                        field.name,
+                        field.index,
+                        field.ty.as_str(),
+                        field.glue.canonical_text()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            format!(
+                "owned_record_update source_ty={} result_ty={} nominal={} arity={} updates=[{}] residual=[{}]",
+                contract.source_ty.as_str(),
+                contract.result_ty.as_str(),
+                contract.nominal.as_str(),
+                contract.arity,
+                updates,
+                residual
+            )
+        }
+        MirGenericInstanceContract::ScalarTupleProjection { contract } => format!(
+            "scalar_tuple_projection tuple_ty={} field_index={} arity={} field_ty={}",
+            contract.tuple_ty.as_str(),
+            contract.field_index,
+            contract.arity,
+            contract.field_ty.as_str()
+        ),
+        MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } => {
+            let residual = contract
+                .residual
+                .iter()
+                .map(|field| {
+                    format!(
+                        "id={} name={} index={} ty={} glue={}",
+                        field.id.0,
+                        field.name,
+                        field.index,
+                        field.ty.as_str(),
+                        field.glue.canonical_text()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            format!(
+                "owned_record_projection_drop source_ty={} result_ty={} projection=({}) residual=[{}]",
+                contract.source_ty.as_str(),
+                contract.result_ty.as_str(),
+                canonical_record_projection_contract(&contract.projection),
+                residual
+            )
+        }
+        MirGenericInstanceContract::ScalarVariantPredicate { contract } => format!(
+            "scalar_variant_predicate variant_ty={} result_ty={} nominal={} variant={} variant_name={} alternate_variant={} alternate_variant_name={} predicate={} discriminant={}",
+            contract.variant_ty.as_str(),
+            contract.result_ty.as_str(),
+            contract.nominal.as_str(),
+            contract.variant.0,
+            contract.variant_name,
+            contract.alternate_variant.0,
+            contract.alternate_variant_name,
+            contract.predicate.canonical_text(),
+            contract.discriminant
+        ),
+        MirGenericInstanceContract::ScalarVariantProjection { contract } => format!(
+            "scalar_variant_projection source_ty={} result_ty={} projection=({}) variant_name={} discriminant={} trap_code={}",
+            contract.source_ty.as_str(),
+            contract.result_ty.as_str(),
+            canonical_variant_projection_contract(&contract.projection),
+            contract.variant_name,
+            contract.discriminant,
+            contract.trap_code
+        ),
+        MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } => format!(
+            "scalar_variant_projection_fallback source_ty={} result_ty={} fallback_ty={} projection=({}) variant_name={} discriminant={} fallback_variant={} fallback_variant_name={} fallback_discriminant={} fallback_arity={}",
+            contract.source_ty.as_str(),
+            contract.result_ty.as_str(),
+            contract.fallback_ty.as_str(),
+            canonical_variant_projection_contract(&contract.projection),
+            contract.variant_name,
+            contract.discriminant,
+            contract.fallback_variant.0,
+            contract.fallback_variant_name,
+            contract.fallback_discriminant,
+            contract.fallback_arity
+        ),
+    }
+}
+
 /// Operations with explicit value and ownership boundaries. The MIR validator
 /// checks their TypeDesc/glue contract before any backend; effect-bearing
 /// operations remain fail-closed until their own effect summary is materialized.

@@ -514,7 +514,10 @@ fn canonical_mir_text(program: &MirProgram) -> String {
             text.push_str(argument.as_str());
         }
         text.push_str("> contract=");
-        text.push_str(&format!("{:?}\n", instance.contract));
+        text.push_str(&crate::core::mir::canonical_instance_contract_text(
+            &instance.contract,
+        ));
+        text.push('\n');
     }
     for transition in program.transitions().values() {
         text.push_str(&transition.canonical_text());
@@ -1007,6 +1010,30 @@ mod tests {
                 .manifest_text()
                 .expect("render empty owner set"),
             empty_owner_manifest
+        );
+    }
+
+    #[test]
+    fn canonical_mir_instance_contract_uses_explicit_stable_spelling() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex generic instance fixture");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse generic instance fixture");
+        let checked = crate::core::check_program(&file).expect("check generic instance fixture");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("materialize generic instance fixture");
+        let text = canonical_mir_text(&program);
+
+        assert!(
+            text.contains("contract=scalar_list_facade operation=len\n"),
+            "canonical MIR must use the explicit instance contract spelling"
+        );
+        assert!(
+            !text.contains("ScalarListFacade"),
+            "canonical MIR must not inherit Rust Debug enum names"
         );
     }
 }
