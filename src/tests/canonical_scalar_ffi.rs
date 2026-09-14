@@ -16382,6 +16382,37 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                 "{ffi:?}"
             );
         }
+        let mir_ffi = crate::verifier::verify_ffi_mir(&route.program)
+            .expect("already-materialized canonical FFI verifier");
+        let projection = |results: &[crate::verifier::VerificationResult]| {
+            results
+                .iter()
+                .map(|result| {
+                    (
+                        result.func_name.clone(),
+                        result.status.clone(),
+                        result.message.clone(),
+                        result.constraint_count,
+                        result.diagnostic.as_ref().map(|diagnostic| diagnostic.span),
+                        result
+                            .artifact
+                            .as_ref()
+                            .map(|artifact| artifact.mir_hash.clone()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            projection(&ffi),
+            projection(&mir_ffi),
+            "checked and already-materialized FFI verifier adapters must expose one projection"
+        );
+        assert!(mir_ffi.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == route.program.canonical_digest()
+            })
+        }));
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
         generator

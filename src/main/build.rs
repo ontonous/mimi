@@ -585,10 +585,15 @@ pub(crate) fn build(
     // dispatcher gets a chance to reject it.  Explicit --mir uses the shared
     // MIR constructor so its validation diagnostic remains identical to the
     // normal canonical build path.
+    let scalar_ffi_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program).scalar_ffi;
+    let mut canonical_for_build = None;
     if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(&checked_program) {
         if mir {
-            let _ =
-                crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?;
+            canonical_for_build = Some(crate::canonical_dispatch::build_canonical_program(
+                &checked_program,
+                &merged_file,
+            )?);
         } else {
             return Err(format!(
                 "default Canonical MIR route rejected: canonical scalar FFI declaration boundary: {reason}"
@@ -596,8 +601,38 @@ pub(crate) fn build(
         }
     }
 
+    // A canonical scalar FFI build with --verify-ffi must verify and compile
+    // the same MIR object.  The default selector already performs all
+    // consumer preflights; explicit --mir uses the shared constructor above.
+    // Reusing that object keeps the route receipt/proof identity single-pass
+    // and prevents a later frontend materialization from drifting the build
+    // artifact away from the verifier input.
+    if verify_ffi && scalar_ffi_admitted && canonical_for_build.is_none() {
+        canonical_for_build = Some(if mir {
+            crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?
+        } else {
+            match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+                crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => canonical,
+                crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+                    return Err(format!("default Canonical MIR route rejected: {reason}"));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
+                    return Err(format!(
+                        "canonical scalar FFI route unexpectedly retained compatibility path: {}",
+                        reason.as_str()
+                    ));
+                }
+            }
+        });
+    }
+
     if verify_ffi {
-        match verifier::verify_ffi_checked(&checked_program) {
+        let ffi_verification = if let Some(canonical) = canonical_for_build.as_ref() {
+            verifier::verify_ffi_mir(canonical)
+        } else {
+            verifier::verify_ffi_checked(&checked_program)
+        };
+        match ffi_verification {
             Ok(ffi_results) => {
                 for res in &ffi_results {
                     if res.status == verifier::VerifStatus::Disproven {
@@ -649,9 +684,15 @@ pub(crate) fn build(
     codegen.target_triple = target.map(|s| s.to_string());
 
     let (compile_result, canonical_default) = if mir {
-        let canonical =
-            crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?;
+        let canonical = match canonical_for_build.take() {
+            Some(canonical) => canonical,
+            None => {
+                crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?
+            }
+        };
         (codegen.compile_mir_native(&canonical), false)
+    } else if let Some(canonical) = canonical_for_build.take() {
+        (codegen.compile_mir_native(&canonical), true)
     } else {
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {

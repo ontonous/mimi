@@ -170,6 +170,30 @@ pub fn verify_ffi_checked(
     verify_ffi_checked_with_source_hash(program, String::new())
 }
 
+/// Verify FFI obligations in an already-materialized canonical MIR program.
+///
+/// Build and other route owners use this adapter when they already hold the
+/// checker-approved scalar FFI `MirProgram`. Keeping the verifier on that
+/// exact object prevents a second frontend/materialization pass from drifting
+/// the route receipt between proof and code generation. The input is still
+/// validated at the verifier consumer boundary and never opens a legacy AST
+/// compatibility owner.
+pub fn verify_ffi_mir(
+    program: &crate::core::mir::reference::MirProgram,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_ffi_mir_with_source_hash(program, String::new())
+}
+
+fn verify_ffi_mir_with_source_hash(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    validate_mir_capabilities(program).map_err(|errors| {
+        format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
+    })?;
+    mir::verify_ffi_program(program, source_hash)
+}
+
 fn verify_ffi_checked_with_source_hash(
     program: &crate::core::CheckedProgram,
     source_hash: String,
@@ -216,12 +240,7 @@ fn verify_ffi_checked_with_source_hash(
         program,
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
     )? {
-        crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-            format!(
-                "MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}"
-            )
-        })?;
-        return mir::verify_ffi_program(&canonical, source_hash);
+        return verify_ffi_mir_with_source_hash(&canonical, source_hash);
     }
 
     if !has_extern_call {
