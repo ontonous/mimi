@@ -16922,6 +16922,141 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_failure_repeats_across_entries_and_recovers() {
+    struct BadPairOracle;
+    impl MirReferenceFfiResolver for BadPairOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_pair_reentry" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)] = args else {
+                return Err(format!(
+                    "unexpected generated_pair_reentry arguments {args:?}"
+                ));
+            };
+            Ok(MirRuntimeValue::Int(if *left == 1 && *right == 2 {
+                99
+            } else {
+                left + right
+            }))
+        }
+    }
+
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_pair_reentry(int64_t left, int64_t right) {
+    return (left == 1 && right == 2) ? 99 : left + right;
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_pair_reentry(int64_t left, int64_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_pair_reentry(left: i64, right: i64) -> i64
+        ensures: result == left + right;
+}
+func main() -> i64 {
+    let first = generated_pair_reentry(20 as i64, 22 as i64);
+    println(first);
+    let second = generated_pair_reentry(1 as i64, 2 as i64);
+    println(second);
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let bad_path = bad_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&bad_path);
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("multi-argument reentry fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("multi-argument reentry MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&BadPairOracle);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the second multi-argument call");
+    assert!(reference_error.message.contains("FFI postcondition failed"));
+    assert_eq!(reference.captured_output(), "42\n");
+
+    let bytecode = compile_mir_program(&mir).expect("multi-argument reentry bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the bad second call");
+    assert_eq!(first.code(), "E0808");
+    assert!(first.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the bad-call diagnostic");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the bad-call diagnostic");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover after switching libraries"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "42\n3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&bad_path);
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_argument_reentry");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-argument reentry lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native multi-argument reentry module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native multi-argument reentry execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
