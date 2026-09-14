@@ -1089,6 +1089,8 @@ impl ActorHandle {
         program: std::sync::Arc<crate::ast::File>,
         bytecode_prog: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
         stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+        verify_contracts: bool,
+        verify_ffi: bool,
     ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
@@ -1101,6 +1103,8 @@ impl ActorHandle {
         let mailbox_tx_clone = mailbox_tx.clone();
         let worker_program = program.clone();
         let worker_stdout = stdout_buf.clone();
+        let worker_verify_contracts = verify_contracts;
+        let worker_verify_ffi = verify_ffi;
 
         let _ = std::thread::Builder::new()
             .name(format!("actor-{}", id))
@@ -1179,6 +1183,8 @@ impl ActorHandle {
                                 if let Some(ref buf) = worker_stdout {
                                     vm.set_stdout_buf(buf.clone());
                                 }
+                                vm.verify_contracts = worker_verify_contracts;
+                                vm.set_verify_ffi(worker_verify_ffi);
                                 // Use wrap_ok for fails transitions so Op::Ret
                                 // wraps the body value in Ok/Err Variant matching
                                 // tree-walker's eval_flow_transition convention.
@@ -1256,6 +1262,8 @@ impl ActorHandle {
                                 if let Some(ref buf) = worker_stdout {
                                     vm.set_stdout_buf(buf.clone());
                                 }
+                                vm.verify_contracts = worker_verify_contracts;
+                                vm.set_verify_ffi(worker_verify_ffi);
                                 vm.call_function(func_idx, &args)
                             }
                             None => Err(InterpError::new(format!(

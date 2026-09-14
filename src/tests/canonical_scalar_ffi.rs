@@ -4412,6 +4412,95 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn scalar_ffi_actor_worker_inherits_contract_mode() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_actor_contract(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_actor_contract(value: i64) -> i64 ensures: result == value; }
+func worker(self: i64) -> i64 {
+    mir_ffi_actor_contract(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, BAD_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("actor canonical FFI contract fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize actor canonical FFI contract MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile actor canonical FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let worker = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("canonical actor worker function") as u32;
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+    program
+        .actor_method_funcs
+        .insert(("Worker".to_string(), "call".to_string()), worker);
+
+    let actor_instance = || crate::interp::ActorInstance {
+        actor_name: "Worker".to_string(),
+        fields: std::collections::HashMap::new(),
+        methods: Vec::new(),
+        runs_flow: None,
+        flow_state: None,
+        faulted: false,
+        peer_links: Vec::new(),
+        parent_id: None,
+        is_detached: false,
+        producers: Vec::new(),
+    };
+    let program = bytecode;
+    let empty_ast = std::sync::Arc::new(crate::ast::File {
+        sources: crate::span::SourceRegistry::default(),
+        imports: Vec::new(),
+        items: Vec::new(),
+        implicit_single: false,
+    });
+
+    let disabled = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast.clone(),
+        program.clone(),
+        None,
+        true,
+        false,
+    );
+    let response = disabled
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue disabled actor FFI call")
+        .recv()
+        .expect("disabled actor worker response")
+        .expect("disabled actor FFI contract check");
+    assert_eq!(response, Value::Int(6));
+
+    let enabled = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast,
+        program,
+        None,
+        true,
+        true,
+    );
+    let error = enabled
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue enabled actor FFI call")
+        .recv()
+        .expect("enabled actor worker response")
+        .expect_err("enabled actor worker must enforce FFI postcondition");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+}
+
+#[test]
 fn scalar_ffi_shared_program_cache_lifetime_is_local_after_vm_drop() {
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }

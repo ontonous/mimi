@@ -7267,7 +7267,14 @@ impl BytecodeVM {
             })
         });
         let bc_prog = self.program.clone();
-        let handle = ActorHandle::new_bytecode(instance, program, bc_prog, self.stdout_buf());
+        let handle = ActorHandle::new_bytecode(
+            instance,
+            program,
+            bc_prog,
+            self.stdout_buf(),
+            self.verify_contracts,
+            self.canonical_ffi_runtime.verify_contracts,
+        );
         self.spawn_count += 1;
         Ok(Value::Actor(handle))
     }
