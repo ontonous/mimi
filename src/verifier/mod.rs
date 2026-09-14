@@ -48,6 +48,20 @@ pub fn verify_mir_with_route_receipt(
     verify_mir(program, source_hash)
 }
 
+/// Replay a canonical MIR verification from the line-oriented receipt
+/// manifest emitted by `mimi mir --receipt`. Parsing is strict and the
+/// reconstituted receipt is still checked against the immutable MIR graph
+/// before any proof observation is produced.
+pub fn verify_mir_with_route_manifest(
+    program: &crate::core::mir::reference::MirProgram,
+    manifest: &str,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest)
+        .map_err(|message| format!("MIR-RECEIPT-MANIFEST-001: {message}"))?;
+    verify_mir_with_route_receipt(program, &receipt, source_hash)
+}
+
 /// Decide whether verifier observations are compatible with an execution
 /// route.  This is not a proof verdict: `NotInTrustedSubset` remains visible
 /// to callers and is only tolerated for the one recoverable Flow/f64 boundary
@@ -231,6 +245,17 @@ pub fn verify_ffi_mir_with_route_receipt(
             format!("MIR-FFI-RECEIPT-001: canonical route receipt rejected: {message}")
         })?;
     verify_ffi_mir_with_source_hash(program, source_hash)
+}
+
+/// Replay the FFI-only canonical verifier from a CLI route receipt manifest.
+pub fn verify_ffi_mir_with_route_manifest(
+    program: &crate::core::mir::reference::MirProgram,
+    manifest: &str,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest)
+        .map_err(|message| format!("MIR-FFI-RECEIPT-MANIFEST-001: {message}"))?;
+    verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
 fn verify_ffi_checked_with_source_hash(

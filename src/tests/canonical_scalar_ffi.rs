@@ -16437,12 +16437,37 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             projection(&mir_ffi_with_receipt),
             "receipt-bound verifier must preserve the source-provenance projection"
         );
-        crate::verifier::verify_mir_with_route_receipt(
+        let mir_with_receipt = crate::verifier::verify_mir_with_route_receipt(
             &route.program,
             &verifier_receipt,
             source_hash.clone(),
         )
         .expect("receipt-bound general canonical verifier");
+        let verifier_manifest = verifier_receipt
+            .manifest_text()
+            .expect("render verifier route manifest");
+        let mir_with_manifest = crate::verifier::verify_mir_with_route_manifest(
+            &route.program,
+            &verifier_manifest,
+            source_hash.clone(),
+        )
+        .expect("replay general verifier from route manifest");
+        assert_eq!(
+            projection(&mir_with_receipt),
+            projection(&mir_with_manifest),
+            "manifest replay must preserve the general verifier projection"
+        );
+        let ffi_with_manifest = crate::verifier::verify_ffi_mir_with_route_manifest(
+            &route.program,
+            &verifier_manifest,
+            source_hash.clone(),
+        )
+        .expect("replay FFI verifier from route manifest");
+        assert_eq!(
+            projection(&mir_ffi_with_receipt),
+            projection(&ffi_with_manifest),
+            "manifest replay must preserve the FFI verifier projection"
+        );
         let bytecode_receipt = route.program.route_receipt("r6-693-bytecode-v1");
         let bytecode = compile_mir_program_with_route_receipt(&route.program, &bytecode_receipt)
             .expect("receipt-bound canonical FFI bytecode");
@@ -16523,6 +16548,19 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                 assert!(
                     verifier_subdigest_error.contains(field),
                     "{field}: {verifier_subdigest_error}"
+                );
+                let forged_manifest = forged_subdigest
+                    .manifest_text()
+                    .expect("render forged route manifest");
+                let manifest_subdigest_error = crate::verifier::verify_ffi_mir_with_route_manifest(
+                    &route.program,
+                    &forged_manifest,
+                    source_hash.clone(),
+                )
+                .expect_err("manifest verifier must reject a forged route sub-digest");
+                assert!(
+                    manifest_subdigest_error.contains(field),
+                    "{field}: {manifest_subdigest_error}"
                 );
                 let general_verifier_subdigest_error =
                     crate::verifier::verify_mir_with_route_receipt(
