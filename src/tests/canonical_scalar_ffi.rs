@@ -19270,6 +19270,8 @@ func main() -> i64 {
         compile_mir_program(&mir).expect("mixed-width missing-symbol rebind AST-free bytecode");
     assert!(bytecode.ast.is_none());
     assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
     let mut vm = BytecodeVM::new(bytecode);
     guard.set_path(&bad_library);
     let bad_error = vm
@@ -19285,6 +19287,8 @@ func main() -> i64 {
     assert_eq!(vm.stdout(), "8\n3\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
 
     let repeated_bad_error = vm
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
@@ -19293,6 +19297,8 @@ func main() -> i64 {
     assert_eq!(vm.stdout(), "8\n3\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
 
     guard.set_path(&good_library);
     assert_eq!(
@@ -19303,6 +19309,8 @@ func main() -> i64 {
     assert_eq!(vm.stdout(), "8\n3\n42\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
 
     let context = inkwell::context::Context::create();
     let mut generator =
