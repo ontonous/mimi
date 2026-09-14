@@ -19312,6 +19312,26 @@ func main() -> i64 {
         snapshot_artifact.mir_hash, alternate_artifact.mir_hash,
         "same canonical MIR must retain one proof identity across source-hash callers"
     );
+    let mut forged_receipts = mir.ffi_calls().clone();
+    forged_receipts
+        .values_mut()
+        .next()
+        .expect("mixed-width rebind receipt")
+        .result = None;
+    let mut forged_mir = mir.clone();
+    forged_mir.replace_ffi_calls_for_test_only(forged_receipts);
+    let forged_a = crate::verifier::verify_mir(&forged_mir, "r6-684-source-a".into())
+        .expect_err("malformed FFI receipt must fail before proof identity");
+    let forged_b = crate::verifier::verify_mir(&forged_mir, "r6-684-source-b".into())
+        .expect_err("malformed FFI receipt must fail before source-hash projection");
+    assert_eq!(
+        forged_a, forged_b,
+        "receipt diagnostics must not depend on the caller source hash"
+    );
+    assert!(
+        forged_a.contains("FFI receipt") || forged_a.contains("result"),
+        "unexpected malformed receipt diagnostic: {forged_a}"
+    );
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
