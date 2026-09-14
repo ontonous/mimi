@@ -460,6 +460,7 @@ impl LspServer {
         if cache.version != VERIFICATION_CACHE_VERSION {
             return;
         }
+        let mut loaded_keys = Vec::new();
         for (key, entry) in &cache.entries {
             let status = match entry.status.as_str() {
                 "Verified" | "Proven" => VerifStatus::Proven,
@@ -488,6 +489,25 @@ impl LspServer {
                     persisted_diagnostic: entry.diagnostic.clone(),
                 },
             );
+            loaded_keys.push(key.clone());
+        }
+        // Disk entries participate in the same LRU budget as entries created
+        // during this session.  The persistent schema has no access timestamp,
+        // so use a stable key order; this is deterministic and prevents a
+        // restart from making loaded entries invisible to eviction.
+        loaded_keys.sort();
+        self.cache_access_order
+            .retain(|key| self.verification_cache.contains_key(key));
+        for key in loaded_keys {
+            self.cache_access_order.retain(|cached| cached != &key);
+            self.cache_access_order.push_back(key);
+        }
+        while self.cache_access_order.len() > MAX_VERIFICATION_CACHE {
+            if let Some(lru) = self.cache_access_order.pop_front() {
+                self.verification_cache.remove(&lru);
+            } else {
+                break;
+            }
         }
     }
 

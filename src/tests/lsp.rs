@@ -718,6 +718,66 @@ fn lsp_verification_cache_drops_persisted_infrastructure_errors() {
 }
 
 #[test]
+fn lsp_verification_cache_load_hydrates_lru_capacity() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_lru_hydration_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let persisted_key =
+        crate::lsp::verification_cache_key("file:///workspace/persisted.mimi", "persisted");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                persisted_key.clone(): {
+                    "body_hash": 1,
+                    "status": "Verified",
+                    "message": "cached proof"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write persisted cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(server.verification_cache.contains_key(&persisted_key));
+
+    // Fill the session with exactly the configured number of fresh entries.
+    // The hydrated persisted key must be the first LRU victim, keeping the
+    // map at its hard cap. Without hydration this leaves MAX+1 entries.
+    for index in 0..crate::lsp::MAX_VERIFICATION_CACHE {
+        server.cache_put_verification(
+            format!("session-key-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "cached proof".to_string(),
+                None,
+            ),
+        );
+    }
+    assert_eq!(
+        server.verification_cache.len(),
+        crate::lsp::MAX_VERIFICATION_CACHE,
+        "loaded entries must participate in the LRU capacity"
+    );
+    assert!(!server.verification_cache.contains_key(&persisted_key));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
