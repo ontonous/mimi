@@ -19259,6 +19259,30 @@ func main() -> i64 {
     let mir = MirProgram::from_checked_program(&checked)
         .expect("mixed-width missing-symbol rebind fixture MIR");
     assert_eq!(mir.ffi_calls().len(), 2);
+    let route_snapshot = mir.route_receipt("scalar-ffi-mixed-width-rebind-v1");
+    let route_manifest_snapshot = route_snapshot
+        .manifest_text()
+        .expect("mixed-width rebind route manifest");
+    let verifier_snapshot = crate::verifier::verify_mir(&mir, "r6-681-rebind".into())
+        .expect("mixed-width rebind MIR verifier projection");
+    let verifier_projection = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .map(|result| {
+                (
+                    result.func_name.clone(),
+                    result.status.clone(),
+                    result.message.clone(),
+                    result.constraint_count,
+                    result
+                        .artifact
+                        .as_ref()
+                        .map(|artifact| artifact.mir_hash.clone()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let verifier_snapshot_projection = verifier_projection(&verifier_snapshot);
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
@@ -19289,6 +19313,23 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-mixed-width-rebind-v1"),
+        route_snapshot
+    );
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-mixed-width-rebind-v1")
+            .manifest_text()
+            .expect("route manifest after bad host"),
+        route_manifest_snapshot
+    );
+    assert_eq!(
+        verifier_projection(
+            &crate::verifier::verify_mir(&mir, "r6-681-rebind".into())
+                .expect("MIR verifier projection after bad host")
+        ),
+        verifier_snapshot_projection
+    );
 
     let repeated_bad_error = vm
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
@@ -19299,6 +19340,17 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-mixed-width-rebind-v1"),
+        route_snapshot
+    );
+    assert_eq!(
+        verifier_projection(
+            &crate::verifier::verify_mir(&mir, "r6-681-rebind".into())
+                .expect("MIR verifier projection after repeated bad host")
+        ),
+        verifier_snapshot_projection
+    );
 
     guard.set_path(&good_library);
     assert_eq!(
@@ -19311,6 +19363,23 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-mixed-width-rebind-v1"),
+        route_snapshot
+    );
+    assert_eq!(
+        mir.route_receipt("scalar-ffi-mixed-width-rebind-v1")
+            .manifest_text()
+            .expect("route manifest after host recovery"),
+        route_manifest_snapshot
+    );
+    assert_eq!(
+        verifier_projection(
+            &crate::verifier::verify_mir(&mir, "r6-681-rebind".into())
+                .expect("MIR verifier projection after host recovery")
+        ),
+        verifier_snapshot_projection
+    );
 
     let context = inkwell::context::Context::create();
     let mut generator =
