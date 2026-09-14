@@ -4627,6 +4627,7 @@ func main() -> i64 { 0 }
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
     let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let isolated_fixture = library_fixture(counter + 2, GOOD_C_SOURCE);
     guard.set_path(&bad_fixture.dir.join("ffi.so"));
 
     let checked = crate::core::check_program(&super::parse(SOURCE))
@@ -4725,8 +4726,8 @@ func main() -> i64 { 0 }
 
     let failing_actor = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
-        empty_ast,
-        program,
+        empty_ast.clone(),
+        program.clone(),
         None,
         true,
         true,
@@ -4753,19 +4754,52 @@ func main() -> i64 { 0 }
     assert_eq!(recovered_response, Value::Int(5));
     assert!(!explicitly_bound.is_faulted());
 
+    let isolated_actor = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast.clone(),
+        program.clone(),
+        None,
+        true,
+        true,
+        Some(
+            isolated_fixture
+                .dir
+                .join("ffi.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    let isolated_initial = isolated_actor
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue isolated actor initial FFI call")
+        .recv()
+        .expect("isolated actor initial worker response")
+        .expect("isolated actor initial FFI call");
+    assert_eq!(isolated_initial, Value::Int(5));
+
     let good_path = good_fixture.dir.join("ffi.so");
     let good_backup = good_fixture.dir.join("ffi-good-backup.so");
     std::fs::copy(&good_path, &good_backup).expect("backup explicitly bound actor library");
     std::fs::copy(bad_fixture.dir.join("ffi.so"), &good_path)
         .expect("replace explicitly bound actor library with bad implementation");
-    let rebound_error = explicitly_bound
+    let rebound_rx = explicitly_bound
         .try_enqueue("call".to_string(), Vec::new())
-        .expect("enqueue actor call after library replacement")
+        .expect("enqueue actor call after library replacement");
+    let isolated_rebound_rx = isolated_actor
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue isolated actor call after neighboring replacement");
+    let rebound_error = rebound_rx
         .recv()
         .expect("actor worker response after library replacement")
         .expect_err("replaced actor library must trigger the FFI postcondition");
     assert_eq!(rebound_error.code(), "E0808");
     assert!(!explicitly_bound.is_faulted());
+    let isolated_rebound = isolated_rebound_rx
+        .recv()
+        .expect("isolated actor worker response after neighboring replacement")
+        .expect("a replacement in one actor path must not affect another path");
+    assert_eq!(isolated_rebound, Value::Int(5));
+    assert!(!isolated_actor.is_faulted());
     std::fs::copy(&good_backup, &good_path).expect("restore explicitly bound actor library");
     let restored_response = explicitly_bound
         .try_enqueue("call".to_string(), Vec::new())
@@ -4775,6 +4809,14 @@ func main() -> i64 { 0 }
         .expect("restored actor library must satisfy the FFI postcondition");
     assert_eq!(restored_response, Value::Int(5));
     assert!(!explicitly_bound.is_faulted());
+    let isolated_restored = isolated_actor
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue isolated actor call after restoration")
+        .recv()
+        .expect("isolated actor worker response after restoration")
+        .expect("isolated actor remains healthy after neighboring replacement");
+    assert_eq!(isolated_restored, Value::Int(5));
+    assert!(!isolated_actor.is_faulted());
 }
 
 #[test]
