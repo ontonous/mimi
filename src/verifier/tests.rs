@@ -6841,6 +6841,46 @@ fn merge_agreement_keeps_resolved_result() {
 }
 
 #[test]
+fn merge_source_provenance_conflict_discards_proof() {
+    let mut primary = vr_044("f", VerifStatus::Proven);
+    let mut resolved = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved.resolved_ir_hash = "resolved-f".into();
+    primary.artifact = Some(resolved);
+
+    let mut secondary = vr_044("f", VerifStatus::Proven);
+    let mut flow = ProofArtifact::new("z3 flow".into(), "source-b".into());
+    flow.vir_hash = "flow-f".into();
+    secondary.artifact = Some(flow);
+
+    let merged = merge_engine_verdicts(vec![primary], vec![secondary]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].status,
+        VerifStatus::InfrastructureError,
+        "source provenance conflict must become a no-proof result"
+    );
+    assert!(merged[0].artifact.is_none());
+    assert!(merged[0].message.contains("E0439"));
+    assert!(merged[0].message.contains("source provenance mismatch"));
+
+    // An unbound direct/legacy artifact remains mergeable with a bound one;
+    // the optional source provenance rule only rejects two known snapshots.
+    let mut primary = vr_044("g", VerifStatus::Proven);
+    let mut resolved = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved.resolved_ir_hash = "resolved-g".into();
+    primary.artifact = Some(resolved);
+    let mut secondary = vr_044("g", VerifStatus::Proven);
+    let mut flow = ProofArtifact::new("z3 flow".into(), String::new());
+    flow.vir_hash = "flow-g".into();
+    secondary.artifact = Some(flow);
+    let merged = merge_engine_verdicts(vec![primary], vec![secondary]);
+    assert_eq!(merged[0].status, VerifStatus::Proven);
+    assert!(merged[0].artifact.is_some());
+}
+
+#[test]
 fn merge_no_opinion_defers_to_the_proving_engine() {
     // resolved attempted no proof → flow verdict wins silently.
     let primary = vec![vr_044("f", VerifStatus::NoObligations)];

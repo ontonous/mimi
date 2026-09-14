@@ -874,12 +874,28 @@ fn verdict_class(status: &VerifStatus) -> VerdictClass {
     }
 }
 
+fn source_provenance_conflict(
+    primary: &VerificationResult,
+    secondary: &VerificationResult,
+) -> bool {
+    match (&primary.artifact, &secondary.artifact) {
+        (Some(primary), Some(secondary)) => {
+            !primary.source_hash.is_empty()
+                && !secondary.source_hash.is_empty()
+                && primary.source_hash != secondary.source_hash
+        }
+        _ => false,
+    }
+}
+
 /// Merge per-function verdicts from the two engines (ADR-008 §3).
 ///
 /// Rules:
 /// - both agree (same class) → primary (resolved) result wins;
 /// - one side is NoOpinion → the other side's result wins silently (no proof
 ///   was attempted on the silent side, so there is nothing to disagree with);
+/// - both sides carry different non-empty source hashes → the merged result
+///   is InfrastructureError with no artifact, even when verdict classes agree;
 /// - classes disagree → fail-closed: Disproven beats Inconclusive beats
 ///   Proven, and the merged result carries the E0439 divergence diagnostic.
 fn merge_engine_verdicts(
@@ -904,6 +920,36 @@ fn merge_engine_verdicts(
         let flow_result = &secondary[sec_index];
         let primary_class = verdict_class(&result.status);
         let flow_class = verdict_class(&flow_result.status);
+        if source_provenance_conflict(&result, flow_result) {
+            // A matching verdict is still unusable when the engines proved
+            // different source snapshots. Drop the artifact and expose a
+            // no-proof status instead of allowing agreement to hide the
+            // provenance conflict.
+            result.status = VerifStatus::InfrastructureError;
+            result.trusted_subset_domain = None;
+            result.constraint_count = 0;
+            result.message = format!(
+                "[{}] source provenance mismatch for '{}'; merged proof discarded",
+                crate::diagnostic::codes::E0439,
+                result.func_name
+            );
+            result.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+                format!(
+                    "{}: verification results for '{}' came from different source snapshots",
+                    crate::diagnostic::codes::E0439,
+                    result.func_name
+                ),
+                result
+                    .diagnostic
+                    .as_ref()
+                    .or(flow_result.diagnostic.as_ref())
+                    .map(|diagnostic| diagnostic.span)
+                    .unwrap_or_else(|| crate::span::Span::new(1, 1, 1, 1)),
+            ));
+            result.artifact = None;
+            merged.push(result);
+            continue;
+        }
         if primary_class == VerdictClass::NoOpinion {
             // Resolved engine attempted no proof — take the flow verdict.
             merged.push(flow_result.clone());
