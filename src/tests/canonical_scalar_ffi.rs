@@ -4618,6 +4618,7 @@ int64_t mir_ffi_actor_contract(int64_t value) { return value; }
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_actor_contract(value: i64) -> i64 ensures: result == value; }
 func worker(self: i64) -> i64 {
+    println(41)
     mir_ffi_actor_contract(5 as i64)
 }
 func main() -> i64 { 0 }
@@ -4701,11 +4702,12 @@ func main() -> i64 { 0 }
     assert_eq!(error.code(), "E0808");
     assert!(error.to_string().contains("FFI postcondition failed"));
 
+    let good_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
         empty_ast.clone(),
         program.clone(),
-        None,
+        Some(good_stdout.clone()),
         true,
         true,
         Some(
@@ -4723,12 +4725,14 @@ func main() -> i64 { 0 }
         .expect("explicitly bound actor worker response")
         .expect("explicitly bound actor FFI contract check");
     assert_eq!(response, Value::Int(5));
+    assert_eq!(&*good_stdout.lock().unwrap(), "41\n");
 
+    let failing_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let failing_actor = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
         empty_ast.clone(),
         program.clone(),
-        None,
+        Some(failing_stdout.clone()),
         true,
         true,
         None,
@@ -4743,6 +4747,7 @@ func main() -> i64 { 0 }
     assert!(failing_response
         .to_string()
         .contains("FFI postcondition failed"));
+    assert_eq!(&*failing_stdout.lock().unwrap(), "41\n");
     assert!(!failing_actor.is_faulted());
 
     let recovered_response = explicitly_bound
@@ -4752,13 +4757,15 @@ func main() -> i64 { 0 }
         .expect("repeated explicitly bound actor worker response")
         .expect("a neighboring failed actor must not poison the good binding");
     assert_eq!(recovered_response, Value::Int(5));
+    assert_eq!(&*good_stdout.lock().unwrap(), "41\n41\n");
     assert!(!explicitly_bound.is_faulted());
 
+    let isolated_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let isolated_actor = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
         empty_ast.clone(),
         program.clone(),
-        None,
+        Some(isolated_stdout.clone()),
         true,
         true,
         Some(
@@ -4776,6 +4783,7 @@ func main() -> i64 { 0 }
         .expect("isolated actor initial worker response")
         .expect("isolated actor initial FFI call");
     assert_eq!(isolated_initial, Value::Int(5));
+    assert_eq!(&*isolated_stdout.lock().unwrap(), "41\n");
 
     let good_path = good_fixture.dir.join("ffi.so");
     let good_backup = good_fixture.dir.join("ffi-good-backup.so");
@@ -4793,12 +4801,14 @@ func main() -> i64 { 0 }
         .expect("actor worker response after library replacement")
         .expect_err("replaced actor library must trigger the FFI postcondition");
     assert_eq!(rebound_error.code(), "E0808");
+    assert_eq!(&*good_stdout.lock().unwrap(), "41\n41\n41\n");
     assert!(!explicitly_bound.is_faulted());
     let isolated_rebound = isolated_rebound_rx
         .recv()
         .expect("isolated actor worker response after neighboring replacement")
         .expect("a replacement in one actor path must not affect another path");
     assert_eq!(isolated_rebound, Value::Int(5));
+    assert_eq!(&*isolated_stdout.lock().unwrap(), "41\n41\n");
     assert!(!isolated_actor.is_faulted());
     std::fs::copy(&good_backup, &good_path).expect("restore explicitly bound actor library");
     let restored_response = explicitly_bound
@@ -4808,6 +4818,7 @@ func main() -> i64 { 0 }
         .expect("actor worker response after library restoration")
         .expect("restored actor library must satisfy the FFI postcondition");
     assert_eq!(restored_response, Value::Int(5));
+    assert_eq!(&*good_stdout.lock().unwrap(), "41\n41\n41\n41\n");
     assert!(!explicitly_bound.is_faulted());
     let isolated_restored = isolated_actor
         .try_enqueue("call".to_string(), Vec::new())
@@ -4816,6 +4827,7 @@ func main() -> i64 { 0 }
         .expect("isolated actor worker response after restoration")
         .expect("isolated actor remains healthy after neighboring replacement");
     assert_eq!(isolated_restored, Value::Int(5));
+    assert_eq!(&*isolated_stdout.lock().unwrap(), "41\n41\n41\n");
     assert!(!isolated_actor.is_faulted());
 }
 
