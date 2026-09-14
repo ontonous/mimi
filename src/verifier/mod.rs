@@ -888,6 +888,65 @@ fn source_provenance_conflict(
     }
 }
 
+/// Return true when a merged batch carries proofs from more than one bound
+/// source snapshot.  A per-function comparison is insufficient here because
+/// the Flow engine can emit obligations (for example call-site obligations)
+/// that have no same-named result in the resolved batch.  Those unmatched
+/// results still become part of the merged proof observation and therefore
+/// must obey the same single-snapshot provenance invariant.
+fn batch_source_provenance_conflict(
+    primary: &[VerificationResult],
+    secondary: &[VerificationResult],
+) -> bool {
+    let mut source_hash: Option<&str> = None;
+    for result in primary.iter().chain(secondary.iter()) {
+        let Some(artifact) = result.artifact.as_ref() else {
+            continue;
+        };
+        if artifact.source_hash.is_empty() {
+            continue;
+        }
+        match source_hash {
+            None => source_hash = Some(artifact.source_hash.as_str()),
+            Some(existing) if existing != artifact.source_hash => return true,
+            Some(_) => {}
+        }
+    }
+    false
+}
+
+/// Convert a proof-bearing result into an explicit no-proof observation after
+/// a batch-level provenance conflict.  Results without an artifact are left
+/// untouched: they already carry no proof that could cross a source boundary.
+fn discard_batch_provenance_artifact(mut result: VerificationResult) -> VerificationResult {
+    if result.artifact.is_none() {
+        return result;
+    }
+    let span = result
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.span)
+        .unwrap_or_else(|| crate::span::Span::new(1, 1, 1, 1));
+    result.status = VerifStatus::InfrastructureError;
+    result.trusted_subset_domain = None;
+    result.constraint_count = 0;
+    result.message = format!(
+        "[{}] mixed source provenance mismatch in merged batch for '{}'; merged proof discarded",
+        crate::diagnostic::codes::E0439,
+        result.func_name
+    );
+    result.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+        format!(
+            "{}: merged verification results for '{}' came from different source snapshots",
+            crate::diagnostic::codes::E0439,
+            result.func_name
+        ),
+        span,
+    ));
+    result.artifact = None;
+    result
+}
+
 /// Merge per-function verdicts from the two engines (ADR-008 §3).
 ///
 /// Rules:
@@ -902,6 +961,26 @@ fn merge_engine_verdicts(
     primary: Vec<VerificationResult>,
     secondary: Vec<VerificationResult>,
 ) -> Vec<VerificationResult> {
+    // Normalize the inputs before matching names.  This closes the gap where
+    // an unmatched Flow-only result could otherwise smuggle a proof from a
+    // different source snapshot into the merged batch.
+    let batch_source_conflict = batch_source_provenance_conflict(&primary, &secondary);
+    let primary = if batch_source_conflict {
+        primary
+            .into_iter()
+            .map(discard_batch_provenance_artifact)
+            .collect()
+    } else {
+        primary
+    };
+    let secondary = if batch_source_conflict {
+        secondary
+            .into_iter()
+            .map(discard_batch_provenance_artifact)
+            .collect()
+    } else {
+        secondary
+    };
     let mut merged: Vec<VerificationResult> = Vec::with_capacity(primary.len());
     let mut secondary_by_name: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();

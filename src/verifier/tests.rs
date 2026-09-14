@@ -6881,6 +6881,37 @@ fn merge_source_provenance_conflict_discards_proof() {
 }
 
 #[test]
+fn merge_batch_source_provenance_conflict_covers_unmatched_results() {
+    // The Flow engine can contribute a call-site obligation with no matching
+    // resolved-engine function name.  A source mismatch must still invalidate
+    // both proof-bearing results instead of allowing that unmatched artifact
+    // to pass through the merge untouched.
+    let mut primary = vr_044("f", VerifStatus::Proven);
+    let mut resolved = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved.resolved_ir_hash = "resolved-f".into();
+    primary.artifact = Some(resolved);
+
+    let mut secondary = vr_044("extern sqrt", VerifStatus::Disproven);
+    let mut flow = ProofArtifact::new("z3 flow".into(), "source-b".into());
+    flow.vir_hash = "flow-sqrt".into();
+    secondary.artifact = Some(flow);
+
+    let merged = merge_engine_verdicts(vec![primary], vec![secondary]);
+    assert_eq!(merged.len(), 2);
+    for result in &merged {
+        assert_eq!(
+            result.status,
+            VerifStatus::InfrastructureError,
+            "every proof-bearing result in a mixed-source batch must be no-proof"
+        );
+        assert!(result.artifact.is_none());
+        assert!(result.message.contains("E0439"));
+        assert!(result.message.contains("mixed source provenance"));
+    }
+}
+
+#[test]
 fn merge_no_opinion_defers_to_the_proving_engine() {
     // resolved attempted no proof → flow verdict wins silently.
     let primary = vec![vr_044("f", VerifStatus::NoObligations)];
