@@ -16437,6 +16437,12 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             projection(&mir_ffi_with_receipt),
             "receipt-bound verifier must preserve the source-provenance projection"
         );
+        crate::verifier::verify_mir_with_route_receipt(
+            &route.program,
+            &verifier_receipt,
+            source_hash.clone(),
+        )
+        .expect("receipt-bound general canonical verifier");
         let bytecode_receipt = route.program.route_receipt("r6-693-bytecode-v1");
         let bytecode = compile_mir_program_with_route_receipt(&route.program, &bytecode_receipt)
             .expect("receipt-bound canonical FFI bytecode");
@@ -16517,6 +16523,17 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                 assert!(
                     verifier_subdigest_error.contains(field),
                     "{field}: {verifier_subdigest_error}"
+                );
+                let general_verifier_subdigest_error =
+                    crate::verifier::verify_mir_with_route_receipt(
+                        &route.program,
+                        &forged_subdigest,
+                        source_hash.clone(),
+                    )
+                    .expect_err("general verifier must reject a forged route sub-digest");
+                assert!(
+                    general_verifier_subdigest_error.contains(field),
+                    "{field}: {general_verifier_subdigest_error}"
                 );
 
                 let reference_owner = crate::core::NodeId("function:main".into());

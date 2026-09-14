@@ -104,7 +104,8 @@ pub(crate) fn verify(
         // The default route is selected only after the shared dispatcher has
         // preflighted every consumer.  The verifier still validates its own
         // input at the final consumer boundary and never falls back.
-        mimi::verifier::verify_mir(&canonical, source_hash)?
+        let receipt = canonical.route_receipt("verify-canonical-v1");
+        mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?
     } else if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
         // which the Flow state machine doesn't expose. Keep direct for this case.

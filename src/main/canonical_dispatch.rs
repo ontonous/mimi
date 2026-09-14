@@ -1277,31 +1277,32 @@ pub(crate) fn select_default_route(
     // disproven result is still a valid verifier observation; an unsupported
     // or inconclusive verifier result means this program is not yet a complete
     // default-switch island.
-    let verifier_ready = match mimi::verifier::verify_mir(&canonical, String::new()) {
-        Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
-            &results,
-            exact_f64_flow_failure_route_candidate,
-        ),
-        Err(error) => {
-            if materialized_managed_result_call_candidate {
-                return DefaultMirRoute::Rejected(format!(
-                    "managed Result direct-call verifier contract pass failed: {error}"
-                ));
+    let verifier_ready =
+        match mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new()) {
+            Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
+                &results,
+                exact_f64_flow_failure_route_candidate,
+            ),
+            Err(error) => {
+                if materialized_managed_result_call_candidate {
+                    return DefaultMirRoute::Rejected(format!(
+                        "managed Result direct-call verifier contract pass failed: {error}"
+                    ));
+                }
+                return reject_migrated_candidates_with_copy_f64(
+                    flow_route_candidate,
+                    collection_route_candidate,
+                    record_route_candidate,
+                    option_string_route_candidate,
+                    copy_option_i32_route_candidate,
+                    copy_option_bool_route_candidate,
+                    copy_option_i64_route_candidate,
+                    copy_option_f64_route_candidate,
+                    copy_result_i32_route_candidate,
+                    format!("verifier contract pass failed: {error}"),
+                );
             }
-            return reject_migrated_candidates_with_copy_f64(
-                flow_route_candidate,
-                collection_route_candidate,
-                record_route_candidate,
-                option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
-                format!("verifier contract pass failed: {error}"),
-            );
-        }
-    };
+        };
     if !verifier_ready {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(
@@ -1345,7 +1346,7 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
         return DefaultMirRoute::Rejected(format!("scalar FFI MIR native capability: {errors:?}"));
     }
-    match mimi::verifier::verify_mir(&program, String::new()) {
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false) =>
         {

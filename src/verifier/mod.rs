@@ -32,6 +32,22 @@ pub fn verify_mir(
     mir::verify_program(program, source_hash)
 }
 
+/// Verify canonical MIR after checking the caller-supplied route receipt.
+/// This keeps the general contract verifier on the same immutable graph
+/// identity as bytecode, native, and FFI-only verification consumers.
+pub fn verify_mir_with_route_receipt(
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!("MIR-RECEIPT-001: canonical route receipt rejected: {message}")
+        })?;
+    verify_mir(program, source_hash)
+}
+
 /// Decide whether verifier observations are compatible with an execution
 /// route.  This is not a proof verdict: `NotInTrustedSubset` remains visible
 /// to callers and is only tolerated for the one recoverable Flow/f64 boundary
