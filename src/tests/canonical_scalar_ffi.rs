@@ -18002,6 +18002,270 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_result_range_preserves_multi_call_prefix() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_prefix(int64_t left, int64_t right) {
+    return left + right;
+}
+int64_t generated_mixed_overflow(int64_t left, int64_t right) {
+    (void)left;
+    (void)right;
+    return 2147483648LL;
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_prefix(int64_t left, int64_t right) {
+    return left + right;
+}
+int64_t generated_mixed_overflow(int64_t left, int64_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_mixed_prefix(left: i64, right: i64) -> i64;
+    func generated_mixed_overflow(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    let first = generated_mixed_prefix(1 as i32, 2 as i32);
+    println(first);
+    generated_mixed_overflow(20 as i32, 22 as i32)
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let bad_path = bad_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&bad_path);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width multi-call range fixture");
+    let mut mir =
+        MirProgram::from_checked_program(&checked).expect("mixed-width multi-call range MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let owner = crate::core::NodeId("function:main".into());
+    let (instruction_id, result_id) = mir
+        .ffi_calls()
+        .iter()
+        .find(|(_, receipt)| receipt.symbol == "generated_mixed_overflow")
+        .map(|(instruction, receipt)| {
+            (
+                instruction.clone(),
+                receipt
+                    .result
+                    .clone()
+                    .expect("mixed-width multi-call overflow result value"),
+            )
+        })
+        .expect("mixed-width multi-call overflow receipt");
+    let i32_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("mixed-width multi-call i32 TypeDesc");
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type);
+    let result_conversion = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut receipts = mir.ffi_calls().clone();
+    let overflow = receipts
+        .get_mut(&instruction_id)
+        .expect("mixed-width multi-call overflow receipt");
+    assert_eq!(
+        overflow.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+        ]
+    );
+    overflow.result_conversion = Some(result_conversion);
+    mir.replace_ffi_calls_for_test_only(receipts);
+
+    struct MixedRangeOracle;
+    impl MirReferenceFfiResolver for MixedRangeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+                && arguments != [MirRuntimeValue::Int(1), MirRuntimeValue::Int(2)]
+            {
+                return Err(format!(
+                    "unexpected mixed-width multi-call arguments: {arguments:?}"
+                ));
+            }
+            match receipt.symbol.as_str() {
+                "generated_mixed_prefix" => Ok(MirRuntimeValue::Int(3)),
+                "generated_mixed_overflow" => Ok(MirRuntimeValue::Int(i64::from(i32::MAX) + 1)),
+                symbol => Err(format!("unexpected mixed-width multi-call symbol {symbol}")),
+            }
+        }
+    }
+    struct MixedRangeGoodOracle;
+    impl MirReferenceFfiResolver for MixedRangeGoodOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+                && arguments != [MirRuntimeValue::Int(1), MirRuntimeValue::Int(2)]
+            {
+                return Err(format!(
+                    "unexpected mixed-width recovery arguments: {arguments:?}"
+                ));
+            }
+            match receipt.symbol.as_str() {
+                "generated_mixed_prefix" => Ok(MirRuntimeValue::Int(3)),
+                "generated_mixed_overflow" => Ok(MirRuntimeValue::Int(42)),
+                symbol => Err(format!("unexpected mixed-width recovery symbol {symbol}")),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&MixedRangeOracle);
+    let reference_error = reference
+        .execute(&owner, &[])
+        .expect_err("reference must reject the second out-of-range result");
+    assert!(reference_error.to_string().contains("outside i32"));
+    assert_eq!(reference.captured_output(), "3\n");
+    let recovering_reference =
+        MirReferenceInterpreter::new(&mir).with_ffi_resolver(&MixedRangeGoodOracle);
+    let reference_result = recovering_reference
+        .execute_with_output(&owner, &[])
+        .expect("reference must recover the multi-call sequence");
+    assert_eq!(reference_result.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference_result.output, "3\n");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification =
+        crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range-multi-call".into())
+            .expect("verify mixed-width multi-call range MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width multi-call bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the second out-of-range result");
+    assert_eq!(first.code(), "E0802");
+    assert!(first.to_string().contains("outside i32"));
+    assert_eq!(vm.stdout(), "3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the second range diagnostic");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the second range diagnostic");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover the multi-call sequence"),
+        Value::Int(42)
+    );
+    assert_eq!(vm.stdout(), "3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    guard.set_path(&bad_path);
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "multi_argument_mixed_range_multi_call");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width multi-call range lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width multi-call range module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native mixed-width multi-call range execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "3\n");
+    assert!(
+        native.stderr.contains("E0802")
+            && native
+                .stderr
+                .contains("FFI integer result conversion out of range"),
+        "{}",
+        native.stderr
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
