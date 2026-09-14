@@ -4505,10 +4505,22 @@ func main() -> i64 { 0 }
         args_base: outer_task,
         argc: 0,
     });
+    let outer_task_2 = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_task_2,
+        func: middle,
+        args_base: outer_task_2,
+        argc: 0,
+    });
     let outer_result = main_proto.alloc_reg();
     main_proto.emit(crate::interp::bytecode::instr::Op::Await {
         rd: outer_result,
         ra: outer_task,
+    });
+    let outer_result_2 = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: outer_result_2,
+        ra: outer_task_2,
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
