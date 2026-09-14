@@ -951,6 +951,55 @@ fn lsp_verification_cache_rejects_cross_uri_diagnostic_replay() {
 }
 
 #[test]
+fn lsp_verification_cache_hit_survives_source_registry_reset() {
+    let uri = "untitled://workspace/cache-after-reset.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+
+    let mut server = LspServer::new();
+    // Fill the shared registry exactly to its cap. The next URI registration
+    // will return a valid snapshot and then reset the session pool.
+    for index in 0..crate::lsp::MAX_SOURCE_RECORDS {
+        let source = format!("func f_{index}() -> i32 {{\n    {index}\n}}");
+        server
+            .parse_with_recovery_for_uri(&source, None)
+            .expect("parse memory source");
+    }
+    let cache_key = crate::lsp::verification_cache_key(uri, "bad");
+    let span = crate::span::Span::new(1, 1, 1, 4).with_source(crate::span::SourceId::new(
+        (crate::lsp::MAX_SOURCE_RECORDS + 1) as u32,
+    ));
+    server.insert_verification_cache_with_diagnostic(
+        cache_key,
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "reset-safe cached failure".to_string(),
+        crate::diagnostic::Diagnostic::error_code("E0999", "reset-safe cached failure", span)
+            .with_origin(crate::diagnostic::DiagnosticOrigin::user()),
+    );
+
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "cache hit should survive registry reset"
+    );
+    assert_eq!(diagnostics[0]["code"], "E0999");
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",

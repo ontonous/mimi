@@ -582,6 +582,11 @@ impl LspServer {
                 return diagnostics;
             }
         };
+        // Keep the producing snapshot for cache replay/persistence. The
+        // session registry can be reset immediately after registration when
+        // its hard cap is crossed, but this snapshot still owns the current
+        // SourceId and all source records needed by diagnostics.
+        let cache_registry = source_registry.clone();
         let (file, _errors) =
             parser::Parser::new_with_source_registry(tokens, source_id, source_registry)
                 .parse_file_with_recovery();
@@ -625,9 +630,8 @@ impl LspServer {
             if cached.body_hash == body_hash {
                 match cached.status.clone() {
                     VerifStatus::Disproven => {
-                        let registry = self.source_registry.borrow();
                         if let Some(cached_diagnostic) =
-                            cached.diagnostic_for_source(&registry, source_id)
+                            cached.diagnostic_for_source(&cache_registry, source_id)
                         {
                             diagnostics.push(diagnostic::diagnostic_to_lsp(
                                 &cached_diagnostic,
@@ -635,10 +639,10 @@ impl LspServer {
                             ));
                             return diagnostics;
                         }
-                        // A persistent v1 cache entry, or a v2 entry whose
-                        // SourceKey cannot be remapped in this session, is not a
-                        // safe location cache hit. Re-run verification instead
-                        // of fabricating the function declaration range.
+                        // A persisted entry whose SourceKey cannot be remapped
+                        // in this snapshot is not a safe location cache hit.
+                        // Re-run verification instead of fabricating the
+                        // function declaration range.
                     }
                     _ => return diagnostics,
                 }
@@ -716,7 +720,7 @@ impl LspServer {
         }
 
         // Persist cache to disk
-        self.save_cache();
+        self.save_cache_with_registry(&cache_registry);
 
         diagnostics
     }

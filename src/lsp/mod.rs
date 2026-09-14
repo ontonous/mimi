@@ -600,10 +600,18 @@ impl LspServer {
     }
 
     pub(crate) fn save_cache(&self) {
+        let registry = self.source_registry.borrow();
+        self.save_cache_with_registry(&registry);
+    }
+
+    /// Persist the cache using the source-registry snapshot that produced the
+    /// current verification result. The session registry may be reset after
+    /// reaching its cap; consulting that freshly cleared pool would silently
+    /// drop valid diagnostics whose SourceId still lives in this snapshot.
+    pub(crate) fn save_cache_with_registry(&self, registry: &SourceRegistry) {
         let Some(ref path) = self.cache_path else {
             return;
         };
-        let registry = self.source_registry.borrow();
         let entries: HashMap<String, CacheEntry> = self
             .verification_cache
             .iter()
@@ -629,7 +637,7 @@ impl LspServer {
                             .diagnostic
                             .as_ref()
                             .and_then(|diagnostic| {
-                                PersistedDiagnostic::from_runtime(diagnostic, &registry)
+                                PersistedDiagnostic::from_runtime(diagnostic, registry)
                             })
                             .or_else(|| entry.persisted_diagnostic.clone()),
                     },
