@@ -4366,10 +4366,8 @@ func main() -> i64 { 0 }
         .position(|function| function.name == "function:main")
         .expect("canonical main function");
     let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
-    let mut main_proto = crate::interp::bytecode::instr::FunctionProto::new(
-        "function:main".into(),
-        0,
-    );
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
     let task = main_proto.alloc_reg();
     main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
         rd: task,
@@ -4378,7 +4376,10 @@ func main() -> i64 { 0 }
         argc: 0,
     });
     let result = main_proto.alloc_reg();
-    main_proto.emit(crate::interp::bytecode::instr::Op::Await { rd: result, ra: task });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result,
+        ra: task,
+    });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
@@ -4404,7 +4405,10 @@ func main() -> i64 { 0 }
     assert!(error.to_string().contains("FFI postcondition failed"));
     assert_eq!(generic_unchecked_vm.stdout(), "");
     assert_eq!(generic_unchecked_vm.debug_stack_state(), (0, 0));
-    assert_eq!(generic_unchecked_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(
+        generic_unchecked_vm.debug_canonical_ffi_loaded_library_count(),
+        0
+    );
 }
 
 #[test]
