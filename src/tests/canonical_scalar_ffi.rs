@@ -4327,6 +4327,87 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_spawned_vm_inherits_parent_contract_mode() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_spawn_contract(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_spawn_contract(value: i64) -> i64 ensures: result == value; }
+func worker() -> i64 {
+    mir_ffi_spawn_contract(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, BAD_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("spawned canonical FFI contract fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize spawned canonical FFI contract MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile spawned canonical FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    // Spawn is still outside the current MIR lowering island.  Assemble the
+    // concurrency shell around the already canonical worker call so this
+    // regression exercises the real AST-free child VM and its shared program
+    // metadata without widening MIR coverage just for the test.
+    let worker = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("canonical worker function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical main function");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+    let mut main_proto = crate::interp::bytecode::instr::FunctionProto::new(
+        "function:main".into(),
+        0,
+    );
+    let task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task,
+        func: worker,
+        args_base: task,
+        argc: 0,
+    });
+    let result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await { rd: result, ra: task });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
+    program.functions[main] = main_proto;
+    program.entry = main as u32;
+
+    let checked_program = bytecode.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.run_value()
+            .expect("spawned VM must inherit disabled FFI contract verification"),
+        Value::Int(6)
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let mut generic_unchecked_vm = BytecodeVM::new(checked_program);
+    generic_unchecked_vm.verify_contracts = false;
+    let error = generic_unchecked_vm
+        .run_value()
+        .expect_err("disabling ordinary contracts must not disable child FFI checks");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(generic_unchecked_vm.stdout(), "");
+    assert_eq!(generic_unchecked_vm.debug_stack_state(), (0, 0));
+    assert_eq!(generic_unchecked_vm.debug_canonical_ffi_loaded_library_count(), 0);
+}
+
+#[test]
 fn scalar_ffi_shared_program_cache_lifetime_is_local_after_vm_drop() {
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }

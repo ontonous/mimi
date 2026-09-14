@@ -7080,7 +7080,8 @@ impl BytecodeVM {
         let (tx, rx) = std::sync::mpsc::channel();
         let program = self.program.clone();
         let stdout = self.stdout_buf();
-        let verify = self.verify_contracts;
+        let verify_contracts = self.verify_contracts;
+        let verify_ffi = self.canonical_ffi_runtime.verify_contracts;
         std::thread::Builder::new()
             .name(format!("mimi-spawn-{}", func))
             .spawn(move || {
@@ -7088,7 +7089,14 @@ impl BytecodeVM {
                 if let Some(buf) = stdout {
                     vm.set_stdout_buf(buf);
                 }
-                vm.verify_contracts = verify;
+                // Preserve both independent switches.  `set_verify_ffi`
+                // deliberately controls FFI contracts only, while
+                // `verify_contracts` also covers ordinary function
+                // contracts.  Copying just the latter would silently
+                // re-enable canonical FFI requires/ensures checks after the
+                // parent explicitly chose `set_verify_ffi(false)`.
+                vm.verify_contracts = verify_contracts;
+                vm.set_verify_ffi(verify_ffi);
                 let result = vm.call_function(func, &args);
                 let _ = tx.send(result);
             })
