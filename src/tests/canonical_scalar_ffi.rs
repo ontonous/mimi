@@ -5709,6 +5709,202 @@ func main() -> i64 { 0 }
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_fanout_binding_index_pair_forge_rejects_before_children_and_recovers() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_pair_forge(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_pair_forge(value: i64) -> i64; }
+func leaf_a() -> i64 {
+    println(41)
+    mir_ffi_nested_pair_forge(5 as i64)
+}
+func leaf_b() -> i64 {
+    println(42)
+    mir_ffi_nested_pair_forge(6 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("nested fanout paired-forge fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize nested fanout paired-forge MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("compile nested fanout paired-forge bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 2);
+    let leaf_a = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf_a")
+        .expect("paired-forge leaf_a function") as u32;
+    let leaf_b = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf_b")
+        .expect("paired-forge leaf_b function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("paired-forge main function");
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let original_b = binding_snapshot[1].clone();
+    let first_binding = binding_snapshot[0].clone();
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut middle_a =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle_a".into(), 0);
+    let task_a = middle_a.alloc_reg();
+    middle_a.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task_a,
+        func: leaf_a,
+        args_base: task_a,
+        argc: 0,
+    });
+    let result_a = middle_a.alloc_reg();
+    middle_a.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result_a,
+        ra: task_a,
+    });
+    middle_a.emit(crate::interp::bytecode::instr::Op::Ret { ra: result_a });
+    let middle_a_id = program.functions.len() as u32;
+    program.functions.push(middle_a);
+
+    let mut middle_b =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle_b".into(), 0);
+    let task_b = middle_b.alloc_reg();
+    middle_b.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task_b,
+        func: leaf_b,
+        args_base: task_b,
+        argc: 0,
+    });
+    let result_b = middle_b.alloc_reg();
+    middle_b.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result_b,
+        ra: task_b,
+    });
+    middle_b.emit(crate::interp::bytecode::instr::Op::Ret { ra: result_b });
+    let middle_b_id = program.functions.len() as u32;
+    program.functions.push(middle_b);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let outer_a = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_a,
+        func: middle_a_id,
+        args_base: outer_a,
+        argc: 0,
+    });
+    let outer_b = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_b,
+        func: middle_b_id,
+        args_base: outer_b,
+        argc: 0,
+    });
+    let first_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: first_value,
+        ra: outer_a,
+    });
+    let second_value = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: second_value,
+        ra: outer_b,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: first_value });
+    program.functions[main] = main_proto;
+
+    let sorted_lines = |stdout: &str| {
+        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        lines.sort_unstable();
+        lines
+    };
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let library = fixture.dir.join("ffi.so").to_string_lossy().into_owned();
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_stdout_buf(stdout.clone());
+    vm.set_canonical_ffi_library_path(library);
+
+    assert_eq!(
+        vm.run_value().expect("initial paired-forge run"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let mut forged_binding = original_b.clone();
+    forged_binding.extern_idx = first_binding.extern_idx;
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        original_b.function,
+        original_b.pc,
+        first_binding.extern_idx,
+    );
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    stdout.lock().unwrap().clear();
+    let first = vm
+        .run_value()
+        .expect_err("paired binding/index forgery must fail before either child starts");
+    assert_eq!(first.code(), "E0800");
+    assert!(
+        first
+            .to_string()
+            .contains("descriptor index 0 at function 'function:leaf_b' pc 6 differs from its compiler binding"),
+        "{first}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    stdout.lock().unwrap().clear();
+    let second = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat paired binding/index rejection");
+    assert_eq!(second.to_string(), first.to_string());
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.extern_idx,
+    );
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_b);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.run_value()
+            .expect("paired binding/index forgery must recover after restoration"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
