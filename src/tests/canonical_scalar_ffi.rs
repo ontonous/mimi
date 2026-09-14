@@ -19332,6 +19332,50 @@ func main() -> i64 {
         forged_a.contains("FFI receipt") || forged_a.contains("result"),
         "unexpected malformed receipt diagnostic: {forged_a}"
     );
+    let reference_interpreter = MirReferenceInterpreter::new(&forged_mir);
+    let reference_error = reference_interpreter
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the malformed receipt");
+    assert!(
+        reference_error.to_string().contains("FFI receipt")
+            || reference_error.to_string().contains("result"),
+        "unexpected reference malformed receipt diagnostic: {reference_error}"
+    );
+    assert_eq!(
+        reference_interpreter.captured_output(),
+        "",
+        "malformed receipt validation must precede reference effects"
+    );
+    let bytecode_errors =
+        compile_mir_program(&forged_mir).expect_err("bytecode must reject the malformed receipt");
+    assert!(
+        bytecode_errors.iter().any(|error| {
+            error.message.contains("FFI")
+                && (error.message.contains("receipt") || error.message.contains("result"))
+        }),
+        "unexpected bytecode malformed receipt diagnostics: {bytecode_errors:?}"
+    );
+    let native_errors = crate::codegen::mir::validate_mir_native(&forged_mir)
+        .expect_err("native admission must reject the malformed receipt");
+    assert!(
+        native_errors.iter().any(|error| {
+            error.message.contains("FFI")
+                && (error.message.contains("receipt") || error.message.contains("result"))
+        }),
+        "unexpected native malformed receipt diagnostics: {native_errors:?}"
+    );
+    let capability_errors = crate::verifier::validate_mir_capabilities(&forged_mir)
+        .expect_err("capability gate must reject the malformed receipt");
+    assert!(
+        capability_errors.iter().any(|error| {
+            error.contains("FFI") && (error.contains("receipt") || error.contains("result"))
+        }),
+        "unexpected capability malformed receipt diagnostics: {capability_errors:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "malformed canonical receipt must not touch a compatibility owner"
+    );
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
