@@ -1318,6 +1318,118 @@ fn lsp_reinitialize_resets_workspace_state_and_rebinds_cache_path() {
 }
 
 #[test]
+fn lsp_reinitialize_same_root_resets_session_before_cache_reload() {
+    let root =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_same_root_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".mimi")).expect("create workspace cache directory");
+
+    let mut server = LspServer::new();
+    let initialize = |server: &mut LspServer, id| {
+        let _ = server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": { "rootPath": root.to_string_lossy() }
+        }));
+    };
+    initialize(&mut server, 1);
+    server.cache_put("file:///same-root.mimi".to_string(), "old text".to_string());
+    server.set_document_version("file:///same-root.mimi", 9);
+    let old_file = server
+        .parse_with_recovery_for_uri(
+            "func same_root() -> i32 {\n    1\n}",
+            Some("file:///same-root.mimi"),
+        )
+        .expect("parse same-root source");
+    assert!(!old_file.sources.records().is_empty());
+
+    let persisted_key = crate::lsp::verification_cache_key("file:///same-root.mimi", "same_root");
+    server.cache_put_verification(
+        persisted_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            11,
+            crate::verifier::VerifStatus::Proven,
+            "persisted same-root proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+    server.cache_put_verification(
+        "session-only-same-root".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            12,
+            crate::verifier::VerifStatus::Proven,
+            "session-only proof".to_string(),
+            None,
+        ),
+    );
+
+    initialize(&mut server, 2);
+    assert!(
+        server.documents.is_empty(),
+        "same-root initialize starts a new session"
+    );
+    assert_eq!(server.total_doc_bytes, 0);
+    assert!(server.document_versions.is_empty());
+    assert!(
+        server.source_registry.borrow().records().is_empty(),
+        "source identities from the prior session must not survive"
+    );
+    assert!(server.verification_cache.contains_key(&persisted_key));
+    assert!(
+        !server
+            .verification_cache
+            .contains_key("session-only-same-root"),
+        "cache reload must discard session-only entries"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_reinitialize_without_root_resets_unscoped_session_and_disables_persistence() {
+    let mut server = LspServer::new();
+    let initialize = |server: &mut LspServer, id| {
+        let _ = server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {}
+        }));
+    };
+    initialize(&mut server, 1);
+    server.cache_put(
+        "untitled://session.mimi".to_string(),
+        "old text".to_string(),
+    );
+    server.set_document_version("untitled://session.mimi", 3);
+    server
+        .parse_with_recovery_for_uri(
+            "func no_root() -> i32 {\n    1\n}",
+            Some("untitled://session.mimi"),
+        )
+        .expect("parse unscoped source");
+    server.cache_put_verification(
+        "untitled-session-proof".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            13,
+            crate::verifier::VerifStatus::Proven,
+            "unscoped proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+
+    initialize(&mut server, 2);
+    assert!(server.documents.is_empty());
+    assert_eq!(server.total_doc_bytes, 0);
+    assert!(server.document_versions.is_empty());
+    assert!(server.verification_cache.is_empty());
+    assert!(server.source_registry.borrow().records().is_empty());
+}
+
+#[test]
 fn lsp_document_close_reclaims_byte_budget() {
     let mut server = LspServer::new();
     server.cache_put("untitled://closed.mimi".to_string(), "12345".to_string());

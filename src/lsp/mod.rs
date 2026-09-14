@@ -493,12 +493,12 @@ impl LspServer {
             .map(|root| root.join(".mimi").join("verify_cache.json"))
     }
 
-    /// Reset state whose identity is scoped to the active workspace.
+    /// Reset state whose identity is scoped to the active workspace/session.
     ///
-    /// A second `initialize` may select a different workspace while reusing
-    /// this server process. Keeping buffers or source snapshots from the old
-    /// root would expose stale text and SourceIds; keeping its cache path could
-    /// write new verification results into the previous workspace.
+    /// Every `initialize` starts a fresh LSP session, including a repeated
+    /// initialize for the same root. Keeping buffers or source snapshots from
+    /// the previous session would expose stale text and SourceIds; keeping its
+    /// cache path could write new verification results into the wrong workspace.
     pub(crate) fn reset_workspace_state(&mut self) {
         self.documents.clear();
         self.total_doc_bytes = 0;

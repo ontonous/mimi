@@ -199,13 +199,12 @@ fn initialize(
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     });
-    // Normalize the workspace root before installing it. Comparing the
-    // normalized value makes a symlink/relative spelling of the same root
-    // behave as one workspace identity.
+    // Normalize the workspace root before installing it. A new initialize
+    // request starts a fresh LSP session even when it names the same root;
+    // normalization keeps the workspace identity deterministic across
+    // symlink spellings.
     let workspace_root = requested_root.map(|root| root.canonicalize().unwrap_or(root));
-    if server.workspace_root != workspace_root {
-        server.reset_workspace_state();
-    }
+    server.reset_workspace_state();
     server.workspace_root = workspace_root;
     server.load_cache();
     let result = serde_json::json!({
