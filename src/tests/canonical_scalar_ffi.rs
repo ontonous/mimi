@@ -18921,6 +18921,156 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_argument_window_and_arity_preflight_order() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_window_first(int64_t left, int64_t right) { return left + right; }
+int64_t generated_window_second(int64_t left, int64_t right) { return left + right; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_window_first(left: i64, right: i64) -> i64;
+    func generated_window_second(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(6 as i64);
+    println(generated_window_first(1 as i32, 2 as i32));
+    println(generated_window_second(20 as i32, 22 as i32));
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width argument window fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width argument window fixture MIR");
+    let bytecode = compile_mir_program(&mir).expect("mixed-width argument window bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("initial mixed-width argument window run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "6\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_binding = vm.program().canonical_ffi_bindings[1].clone();
+    let original_descriptor = vm.program().canonical_ffi.clone();
+    let forged_argc = original_binding.argc.saturating_add(1);
+    assert_ne!(forged_argc, original_binding.argc);
+    let forged_args_base =
+        vm.program().functions[original_binding.function as usize].register_count;
+    let mut forged_binding = original_binding.clone();
+    forged_binding.args_base = forged_args_base;
+    forged_binding.argc = forged_argc;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        forged_args_base,
+        forged_argc,
+    );
+
+    let combined_error = vm
+        .run_value()
+        .expect_err("run_value must reject forged mixed-width argument window before arity");
+    assert_eq!(combined_error.code(), "E0800");
+    assert!(
+        combined_error
+            .to_string()
+            .contains("argument register window")
+            && combined_error
+                .to_string()
+                .contains("exceeds function frame"),
+        "{combined_error}"
+    );
+    assert!(
+        !combined_error.to_string().contains("descriptor arity"),
+        "window validation must precede descriptor arity: {combined_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped_combined_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve mixed-width window precedence");
+    assert_eq!(
+        wrapped_combined_error.to_string(),
+        combined_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let direct_combined_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must preserve mixed-width window precedence");
+    assert_eq!(
+        direct_combined_error.to_string(),
+        combined_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_binding.clone());
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_binding.function,
+        original_binding.pc,
+        original_binding.args_base,
+        original_binding.argc,
+    );
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("mixed-width argument window restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "6\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut forged_arity_binding = original_binding.clone();
+    forged_arity_binding.argc = forged_argc;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_arity_binding);
+    let arity_error = vm
+        .run_value()
+        .expect_err("run_value must reject a mixed-width binding arity forgery");
+    assert_eq!(arity_error.code(), "E0800");
+    assert!(
+        arity_error.to_string().contains("argument count")
+            && arity_error
+                .to_string()
+                .contains("disagrees with compiler binding count"),
+        "{arity_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let wrapped_arity_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve mixed-width arity rejection");
+    assert_eq!(wrapped_arity_error.to_string(), arity_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_binding.clone());
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("mixed-width arity restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "6\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, original_descriptor);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
