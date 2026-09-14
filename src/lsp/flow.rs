@@ -190,12 +190,14 @@ fn initialize(
         .and_then(|p| p.get("rootUri"))
         .and_then(|u| u.as_str())
         .and_then(|u| u.strip_prefix("file://"))
-        .map(|p| PathBuf::from(percent_decode(p)));
+        .map(|p| PathBuf::from(percent_decode(p)))
+        .filter(|path| path.is_absolute());
     let requested_root = requested_root.or_else(|| {
         msg.get("params")
             .and_then(|p| p.get("rootPath"))
             .and_then(|p| p.as_str())
             .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
     });
     // Normalize the workspace root before installing it. Comparing the
     // normalized value makes a symlink/relative spelling of the same root
@@ -938,10 +940,10 @@ fn code_lens(mut server: LspServer, msg: &Value, id: Option<&Value>) -> (LspServ
         None => return (server, None),
     };
     let text = match server.documents.get(uri) {
-        Some(t) => t,
+        Some(t) => t.clone(),
         None => return (server, None),
     };
-    let lenses = server.compute_code_lens(text, uri);
+    let lenses = server.compute_code_lens_with_cache_touch(&text, uri);
     (
         server,
         Some(serde_json::json!({

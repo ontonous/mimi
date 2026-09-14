@@ -1331,6 +1331,122 @@ fn lsp_document_close_reclaims_byte_budget() {
 }
 
 #[test]
+fn lsp_code_lens_cache_hit_refreshes_lru_position() {
+    let mut server = lsp_ready();
+    let uri = "untitled://code-lens-cache.mimi";
+    let text = "func hot(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    x\n}";
+    server.cache_put(uri.to_string(), text.to_string());
+    let hot_key = crate::lsp::verification_cache_key(uri, "hot");
+    server.cache_put_verification(
+        hot_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            1,
+            crate::verifier::VerifStatus::Proven,
+            "hot proof".to_string(),
+            None,
+        ),
+    );
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 1) {
+        server.cache_put_verification(
+            format!("cold-key-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+
+    let response = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "textDocument/codeLens",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    assert!(response.is_some(), "codeLens request should respond");
+    server.cache_put_verification(
+        "new-key".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "new proof".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        server.verification_cache.contains_key(&hot_key),
+        "code lens reads must keep a displayed verification entry hot"
+    );
+    assert!(
+        !server.verification_cache.contains_key("cold-key-0"),
+        "the oldest cold entry should be evicted after the code lens hit"
+    );
+}
+
+#[test]
+fn lsp_initialize_ignores_malformed_root_uri_and_uses_absolute_root_path() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_malformed_root_uri_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create workspace");
+    let uri = format!("file://{}", root.join("main.mimi").display());
+    let text = "func main() -> i32 {\n    1\n}";
+    std::fs::write(root.join("main.mimi"), text).expect("write source");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "rootUri": "file://",
+            "rootPath": root.to_string_lossy()
+        }
+    }));
+    assert!(
+        server
+            .parse_with_recovery_for_uri(text, Some(&uri))
+            .is_some(),
+        "an invalid file URI must not shadow a valid absolute rootPath"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_initialize_rejects_relative_root_path_without_binding_process_cwd() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_relative_root_path_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create workspace");
+    let path = root.join("main.mimi");
+    let uri = format!("file://{}", path.display());
+    let text = "func main() -> i32 {\n    1\n}";
+    std::fs::write(&path, text).expect("write source");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": "relative/workspace" }
+    }));
+    assert!(
+        server
+            .parse_with_recovery_for_uri(text, Some(&uri))
+            .is_some(),
+        "a relative rootPath must be ignored instead of restricting the session to cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",

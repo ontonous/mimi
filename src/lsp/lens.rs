@@ -7,10 +7,31 @@ use crate::verifier::VerifStatus;
 impl LspServer {
     /// Compute code lenses for a document: reference counts and verification status
     pub fn compute_code_lens(&self, text: &str, uri: &str) -> Vec<Value> {
+        self.compute_code_lens_inner(text, uri).0
+    }
+
+    /// Compute code lenses and record verification-cache entries displayed by
+    /// the request as recently used. The public direct helper stays immutable
+    /// for callers that only need a snapshot; protocol requests use this
+    /// mutable variant so UI reads share the verification LRU with proof hits.
+    pub(crate) fn compute_code_lens_with_cache_touch(
+        &mut self,
+        text: &str,
+        uri: &str,
+    ) -> Vec<Value> {
+        let (lenses, cache_hits) = self.compute_code_lens_inner(text, uri);
+        for key in cache_hits {
+            self.cache_touch_verification(&key);
+        }
+        lenses
+    }
+
+    fn compute_code_lens_inner(&self, text: &str, uri: &str) -> (Vec<Value>, Vec<String>) {
         let mut lenses = Vec::new();
+        let mut cache_hits = Vec::new();
         let file = match self.parse_with_recovery_for_uri(text, Some(uri)) {
             Some(f) => f,
-            None => return lenses,
+            None => return (lenses, cache_hits),
         };
         for item in &file.items {
             match item {
@@ -41,6 +62,7 @@ impl LspServer {
                         let cache_key = super::verification_cache_key(uri, &f.name);
                         let verify_title =
                             if let Some(entry) = self.verification_cache.get(&cache_key) {
+                                cache_hits.push(cache_key);
                                 match entry.status.clone() {
                                     VerifStatus::Proven => format!("✓ {}", entry.message),
                                     VerifStatus::Disproven => format!("✗ {}", entry.message),
@@ -117,7 +139,7 @@ impl LspServer {
                 _ => {}
             }
         }
-        lenses
+        (lenses, cache_hits)
     }
 }
 
