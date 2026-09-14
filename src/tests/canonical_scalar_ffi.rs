@@ -4332,6 +4332,10 @@ fn scalar_ffi_spawned_vm_inherits_parent_contract_mode() {
 #include <stdint.h>
 int64_t mir_ffi_spawn_contract(int64_t value) { return value + 1; }
 "#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_spawn_contract(int64_t value) { return value; }
+"#;
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_spawn_contract(value: i64) -> i64 ensures: result == value; }
 func worker() -> i64 {
@@ -4342,8 +4346,9 @@ func main() -> i64 { 0 }
 
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let fixture = library_fixture(counter, BAD_C_SOURCE);
-    guard.set_path(&fixture.dir.join("ffi.so"));
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
 
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("spawned canonical FFI contract fixture");
@@ -4396,7 +4401,7 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
-    let mut generic_unchecked_vm = BytecodeVM::new(checked_program);
+    let mut generic_unchecked_vm = BytecodeVM::new(checked_program.clone());
     generic_unchecked_vm.verify_contracts = false;
     let error = generic_unchecked_vm
         .run_value()
@@ -4409,6 +4414,27 @@ func main() -> i64 { 0 }
         generic_unchecked_vm.debug_canonical_ffi_loaded_library_count(),
         0
     );
+
+    let mut explicitly_bound_vm = BytecodeVM::new(checked_program);
+    explicitly_bound_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        explicitly_bound_vm
+            .run_value()
+            .expect("spawned VM must inherit explicit FFI library binding"),
+        Value::Int(5)
+    );
+    assert_eq!(explicitly_bound_vm.stdout(), "");
+    assert_eq!(explicitly_bound_vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        explicitly_bound_vm.debug_canonical_ffi_loaded_library_count(),
+        0
+    );
 }
 
 #[test]
@@ -4416,6 +4442,10 @@ fn scalar_ffi_actor_worker_inherits_contract_mode() {
     const BAD_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_actor_contract(int64_t value) { return value + 1; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_actor_contract(int64_t value) { return value; }
 "#;
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_actor_contract(value: i64) -> i64 ensures: result == value; }
@@ -4427,8 +4457,9 @@ func main() -> i64 { 0 }
 
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let fixture = library_fixture(counter, BAD_C_SOURCE);
-    guard.set_path(&fixture.dir.join("ffi.so"));
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
 
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("actor canonical FFI contract fixture");
@@ -4473,6 +4504,7 @@ func main() -> i64 { 0 }
         None,
         true,
         false,
+        None,
     );
     let response = disabled
         .try_enqueue("call".to_string(), Vec::new())
@@ -4484,11 +4516,12 @@ func main() -> i64 { 0 }
 
     let enabled = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
-        empty_ast,
-        program,
+        empty_ast.clone(),
+        program.clone(),
         None,
         true,
         true,
+        None,
     );
     let error = enabled
         .try_enqueue("call".to_string(), Vec::new())
@@ -4498,6 +4531,29 @@ func main() -> i64 { 0 }
         .expect_err("enabled actor worker must enforce FFI postcondition");
     assert_eq!(error.code(), "E0808");
     assert!(error.to_string().contains("FFI postcondition failed"));
+
+    let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast,
+        program,
+        None,
+        true,
+        true,
+        Some(
+            good_fixture
+                .dir
+                .join("ffi.so")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    let response = explicitly_bound
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue explicitly bound actor FFI call")
+        .recv()
+        .expect("explicitly bound actor worker response")
+        .expect("explicitly bound actor FFI contract check");
+    assert_eq!(response, Value::Int(5));
 }
 
 #[test]

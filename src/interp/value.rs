@@ -1091,6 +1091,7 @@ impl ActorHandle {
         stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
         verify_contracts: bool,
         verify_ffi: bool,
+        ffi_library_path: Option<String>,
     ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
@@ -1105,6 +1106,7 @@ impl ActorHandle {
         let worker_stdout = stdout_buf.clone();
         let worker_verify_contracts = verify_contracts;
         let worker_verify_ffi = verify_ffi;
+        let worker_ffi_library_path = ffi_library_path;
 
         let _ = std::thread::Builder::new()
             .name(format!("actor-{}", id))
@@ -1185,6 +1187,9 @@ impl ActorHandle {
                                 }
                                 vm.verify_contracts = worker_verify_contracts;
                                 vm.set_verify_ffi(worker_verify_ffi);
+                                if let Some(path) = worker_ffi_library_path.clone() {
+                                    vm.set_canonical_ffi_library_path(path);
+                                }
                                 // Use wrap_ok for fails transitions so Op::Ret
                                 // wraps the body value in Ok/Err Variant matching
                                 // tree-walker's eval_flow_transition convention.
@@ -1264,6 +1269,9 @@ impl ActorHandle {
                                 }
                                 vm.verify_contracts = worker_verify_contracts;
                                 vm.set_verify_ffi(worker_verify_ffi);
+                                if let Some(path) = worker_ffi_library_path.clone() {
+                                    vm.set_canonical_ffi_library_path(path);
+                                }
                                 vm.call_function(func_idx, &args)
                             }
                             None => Err(InterpError::new(format!(

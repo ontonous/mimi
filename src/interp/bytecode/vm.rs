@@ -7082,6 +7082,7 @@ impl BytecodeVM {
         let stdout = self.stdout_buf();
         let verify_contracts = self.verify_contracts;
         let verify_ffi = self.canonical_ffi_runtime.verify_contracts;
+        let ffi_library_path = self.canonical_ffi_runtime.library_path_for_child();
         std::thread::Builder::new()
             .name(format!("mimi-spawn-{}", func))
             .spawn(move || {
@@ -7097,6 +7098,9 @@ impl BytecodeVM {
                 // parent explicitly chose `set_verify_ffi(false)`.
                 vm.verify_contracts = verify_contracts;
                 vm.set_verify_ffi(verify_ffi);
+                if let Some(path) = ffi_library_path {
+                    vm.set_canonical_ffi_library_path(path);
+                }
                 let result = vm.call_function(func, &args);
                 let _ = tx.send(result);
             })
@@ -7274,6 +7278,7 @@ impl BytecodeVM {
             self.stdout_buf(),
             self.verify_contracts,
             self.canonical_ffi_runtime.verify_contracts,
+            self.canonical_ffi_runtime.library_path_for_child(),
         );
         self.spawn_count += 1;
         Ok(Value::Actor(handle))

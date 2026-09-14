@@ -98,6 +98,13 @@ impl CanonicalMirFfiRuntime {
         self.library_path = None;
     }
 
+    /// Return the VM-local host binding so child workers can inherit the same
+    /// checker-approved library instead of falling back to process environment
+    /// discovery. The path is cloned because the child may outlive its parent.
+    pub(crate) fn library_path_for_child(&self) -> Option<String> {
+        self.library_path.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn loaded_library_count_for_test(&self) -> usize {
         self.loaded_libs.len()
