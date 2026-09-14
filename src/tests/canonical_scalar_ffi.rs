@@ -4752,6 +4752,29 @@ func main() -> i64 { 0 }
         .expect("a neighboring failed actor must not poison the good binding");
     assert_eq!(recovered_response, Value::Int(5));
     assert!(!explicitly_bound.is_faulted());
+
+    let good_path = good_fixture.dir.join("ffi.so");
+    let good_backup = good_fixture.dir.join("ffi-good-backup.so");
+    std::fs::copy(&good_path, &good_backup).expect("backup explicitly bound actor library");
+    std::fs::copy(bad_fixture.dir.join("ffi.so"), &good_path)
+        .expect("replace explicitly bound actor library with bad implementation");
+    let rebound_error = explicitly_bound
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue actor call after library replacement")
+        .recv()
+        .expect("actor worker response after library replacement")
+        .expect_err("replaced actor library must trigger the FFI postcondition");
+    assert_eq!(rebound_error.code(), "E0808");
+    assert!(!explicitly_bound.is_faulted());
+    std::fs::copy(&good_backup, &good_path).expect("restore explicitly bound actor library");
+    let restored_response = explicitly_bound
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue actor call after library restoration")
+        .recv()
+        .expect("actor worker response after library restoration")
+        .expect("restored actor library must satisfy the FFI postcondition");
+    assert_eq!(restored_response, Value::Int(5));
+    assert!(!explicitly_bound.is_faulted());
 }
 
 #[test]
