@@ -528,7 +528,18 @@ fn canonical_mir_text(program: &MirProgram) -> String {
 
 fn canonical_ffi_text(program: &MirProgram) -> String {
     let mut text = String::new();
-    for (instruction, contract) in program.ffi_call_entries_in_source_order() {
+    // Receipt identity must not depend on diagnostic provenance.  Consumers
+    // still use `ffi_call_entries_in_source_order` when they need source-order
+    // output, but the semantic digest uses only stable call-site identities so
+    // a span remap cannot turn into a MIR identity change.
+    let mut entries = program.ffi_calls().iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_key, left), (right_key, right)| {
+        left.caller
+            .cmp(&right.caller)
+            .then_with(|| left.instruction.cmp(&right.instruction))
+            .then_with(|| left_key.cmp(right_key))
+    });
+    for (instruction, contract) in entries {
         text.push_str("mir.ffi ");
         // Valid canonical programs keep the table key and checker-owned
         // receipt identity equal, so this marker is absent and preserves the

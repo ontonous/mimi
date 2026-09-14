@@ -15561,6 +15561,58 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_digest_ignores_diagnostic_span_remapping() {
+    const SOURCE: &str = r#"
+extern "C" { func span_identity(value: i64) -> i64; }
+func main() -> i64 {
+    let first = span_identity(7 as i64);
+    let second = span_identity(8 as i64);
+    first + second
+}
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("FFI span fixture check");
+    let program =
+        MirProgram::from_checked_program(&checked).expect("FFI span fixture materialization");
+    let ordered = program.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    let baseline = program.route_receipt("scalar-ffi-span-identity-v1");
+
+    // Source spans are diagnostic provenance.  A registry remap may change
+    // their numeric order while the MIR call identities and semantics remain
+    // unchanged, so the semantic route identity must remain stable.
+    let first_span = ordered[0].1.span;
+    let second_span = ordered[1].1.span;
+    let first_id = ordered[0].0.clone();
+    let second_id = ordered[1].0.clone();
+    let mut remapped_receipts = program.ffi_calls().clone();
+    remapped_receipts
+        .get_mut(&first_id)
+        .expect("first span receipt")
+        .span = second_span;
+    remapped_receipts
+        .get_mut(&second_id)
+        .expect("second span receipt")
+        .span = first_span;
+    let mut remapped = program.clone();
+    remapped.replace_ffi_calls_for_test_only(remapped_receipts);
+
+    let remapped_order = remapped.ffi_call_entries_in_source_order();
+    assert_eq!(*remapped_order[0].0, second_id);
+    assert_eq!(*remapped_order[1].0, first_id);
+    let remapped_receipt = remapped.route_receipt("scalar-ffi-span-identity-v1");
+    assert_eq!(baseline.ffi_digest, remapped_receipt.ffi_digest);
+    assert_eq!(baseline.mir_digest, remapped_receipt.mir_digest);
+    assert_eq!(baseline.type_desc_digest, remapped_receipt.type_desc_digest);
+    assert_eq!(baseline.abi_digest, remapped_receipt.abi_digest);
+    assert_eq!(baseline.ownership_digest, remapped_receipt.ownership_digest);
+    assert_eq!(
+        baseline.flow_transition_digest,
+        remapped_receipt.flow_transition_digest
+    );
+}
+
+#[test]
 fn scalar_ffi_source_order_tie_break_uses_call_span_columns() {
     const SOURCE: &str = r#"
 extern "C" { func span_order(value: i64) -> i64; }
