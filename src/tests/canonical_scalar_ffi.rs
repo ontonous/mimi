@@ -19328,6 +19328,176 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_distinct_abi_descriptor_alias_fails_closed() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_alias_i64(int64_t left, int64_t right) { return left + right; }
+int32_t generated_alias_i32(int32_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_alias_i64(left: i64, right: i64) -> i64;
+    func generated_alias_i32(value: i32) -> i32;
+}
+func main() -> i64 {
+    println(generated_alias_i64(1 as i32, 2 as i32));
+    println(generated_alias_i32(41 as i32));
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width distinct ABI descriptor fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width distinct ABI descriptor fixture MIR");
+    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0].parameter_conversions.len(), 2);
+    assert_eq!(receipts[1].parameter_conversions.len(), 1);
+    assert_eq!(
+        receipts[0].result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
+    assert_eq!(
+        receipts[1].result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        })
+    );
+
+    let bytecode =
+        compile_mir_program(&mir).expect("mixed-width distinct ABI descriptor AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(
+        bytecode.canonical_ffi[0].arguments,
+        vec![CanonicalFfiScalarType::I64, CanonicalFfiScalarType::I64]
+    );
+    assert_eq!(
+        bytecode.canonical_ffi[1].arguments,
+        vec![CanonicalFfiScalarType::I32]
+    );
+    assert_eq!(
+        bytecode.canonical_ffi[0].result,
+        CanonicalFfiScalarType::I64
+    );
+    assert_eq!(
+        bytecode.canonical_ffi[1].result,
+        CanonicalFfiScalarType::I32
+    );
+    assert_eq!(bytecode.canonical_ffi[0].parameter_conversions.len(), 2);
+    assert_eq!(
+        bytecode.canonical_ffi[1].parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        }]
+    );
+
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("initial distinct ABI descriptor run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_descriptors = vm.program().canonical_ffi.clone();
+    let original_bindings = vm.program().canonical_ffi_bindings.clone();
+    let swapped_descriptors = vec![
+        original_descriptors[1].clone(),
+        original_descriptors[0].clone(),
+    ];
+    vm.replace_canonical_ffi_tables_for_test_only(swapped_descriptors, original_bindings.clone());
+
+    let order_error = vm
+        .run_value()
+        .expect_err("descriptor alias across distinct ABI shapes must fail closed");
+    assert!(
+        order_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{order_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    let wrapped_order_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject distinct ABI descriptor aliasing");
+    assert_eq!(wrapped_order_error.to_string(), order_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    let direct_order_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must reject distinct ABI descriptor aliasing");
+    assert_eq!(direct_order_error.to_string(), order_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_tables_for_test_only(original_descriptors.clone(), original_bindings);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("descriptor alias restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, original_descriptors);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_width_distinct_abi");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width distinct ABI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width distinct ABI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native mixed-width distinct ABI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "3\n42\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
