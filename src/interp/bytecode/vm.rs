@@ -286,6 +286,33 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_call_args_for_test_only(
+        &mut self,
+        function: FuncIdx,
+        pc: u32,
+        args_base: Reg,
+        argc: u16,
+    ) {
+        let program = std::sync::Arc::get_mut(&mut self.program)
+            .expect("test VM must uniquely own its bytecode program");
+        let op = program
+            .functions
+            .get_mut(function as usize)
+            .and_then(|proto| proto.code.get_mut(pc as usize))
+            .expect("canonical FFI call instruction");
+        let Op::CallCanonicalExtern {
+            args_base: current_base,
+            argc: current_argc,
+            ..
+        } = op
+        else {
+            panic!("canonical FFI binding must point at CallCanonicalExtern");
+        };
+        *current_base = args_base;
+        *current_argc = argc;
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_canonical_ffi_tables_for_test_only(
         &mut self,
         descriptors: Vec<CanonicalFfiDescriptor>,

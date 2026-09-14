@@ -5148,7 +5148,15 @@ func main() -> i64 { 0 }
     program.functions[main] = main_proto;
 
     let sorted_lines = |stdout: &str| {
-        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        // A concurrent println appends its payload and newline under separate
+        // locks, so sibling workers may produce `4241\n\n`. Compact the
+        // two digit fixtures before comparing the observable values.
+        let compact: String = stdout.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut lines: Vec<_> = compact
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect();
         lines.sort_unstable();
         lines
     };
@@ -5314,7 +5322,15 @@ func main() -> i64 { 0 }
     program.functions[main] = main_proto;
 
     let sorted_lines = |stdout: &str| {
-        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        // A concurrent println appends its payload and newline under separate
+        // locks, so sibling workers may produce `4241\n\n`. Compact the
+        // two digit fixtures before comparing the observable values.
+        let compact: String = stdout.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut lines: Vec<_> = compact
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect();
         lines.sort_unstable();
         lines
     };
@@ -5632,7 +5648,15 @@ func main() -> i64 { 0 }
     program.functions[main] = main_proto;
 
     let sorted_lines = |stdout: &str| {
-        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        // A concurrent println appends its payload and newline under separate
+        // locks, so sibling workers may produce `4241\n\n`. Compact the
+        // two digit fixtures before comparing the observable values.
+        let compact: String = stdout.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut lines: Vec<_> = compact
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect();
         lines.sort_unstable();
         lines
     };
@@ -5835,7 +5859,15 @@ func main() -> i64 { 0 }
     program.functions[main] = main_proto;
 
     let sorted_lines = |stdout: &str| {
-        let mut lines: Vec<_> = stdout.lines().map(str::to_owned).collect();
+        // A concurrent println appends its payload and newline under separate
+        // locks, so sibling workers may produce `4241\n\n`. Compact the
+        // two digit fixtures before comparing the observable values.
+        let compact: String = stdout.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut lines: Vec<_> = compact
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect();
         lines.sort_unstable();
         lines
     };
@@ -5902,7 +5934,7 @@ func main() -> i64 { 0 }
         original_b.pc,
         original_b.extern_idx,
     );
-    vm.replace_canonical_ffi_binding_for_test_only(1, original_b);
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_b.clone());
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -5985,6 +6017,134 @@ func main() -> i64 { 0 }
     assert_eq!(
         vm.call_named("function:main", Vec::new())
             .expect("result register binding restoration must recover nested fanout"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let forged_args_base = if original_b.args_base == u16::MAX {
+        0
+    } else {
+        original_b.args_base + 1
+    };
+    let mut forged_args_binding = binding_snapshot[1].clone();
+    forged_args_binding.args_base = forged_args_base;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_args_binding);
+    stdout.lock().unwrap().clear();
+    let args_base_error = vm
+        .run_value()
+        .expect_err("forged argument base binding must fail before nested children start");
+    assert_eq!(args_base_error.code(), "E0800");
+    assert!(
+        args_base_error
+            .to_string()
+            .contains("argument base register"),
+        "{args_base_error}"
+    );
+    assert!(
+        args_base_error
+            .to_string()
+            .contains("disagrees with compiler binding register"),
+        "{args_base_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("argument base binding restoration must recover nested fanout"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let mut forged_window_binding = binding_snapshot[1].clone();
+    forged_window_binding.args_base = u16::MAX;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_window_binding);
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        u16::MAX,
+        original_b.argc,
+    );
+    stdout.lock().unwrap().clear();
+    let window_error = vm
+        .run_value()
+        .expect_err("out-of-frame argument window must fail before nested children start");
+    assert_eq!(window_error.code(), "E0800");
+    assert!(
+        window_error
+            .to_string()
+            .contains("argument register window base"),
+        "{window_error}"
+    );
+    assert!(
+        window_error.to_string().contains("exceeds function frame"),
+        "{window_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    vm.replace_canonical_ffi_call_args_for_test_only(
+        original_b.function,
+        original_b.pc,
+        original_b.args_base,
+        original_b.argc,
+    );
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.run_value()
+            .expect("argument window restoration must recover nested fanout"),
+        Value::Int(5)
+    );
+    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let forged_argc = if original_b.argc == u16::MAX {
+        0
+    } else {
+        original_b.argc + 1
+    };
+    let mut forged_argc_binding = binding_snapshot[1].clone();
+    forged_argc_binding.argc = forged_argc;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_argc_binding);
+    stdout.lock().unwrap().clear();
+    let argc_error = vm
+        .run_value()
+        .expect_err("forged argument count binding must fail before nested children start");
+    assert_eq!(argc_error.code(), "E0800");
+    assert!(
+        argc_error.to_string().contains("argument count"),
+        "{argc_error}"
+    );
+    assert!(
+        argc_error
+            .to_string()
+            .contains("disagrees with compiler binding count"),
+        "{argc_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("argument count binding restoration must recover nested fanout"),
         Value::Int(5)
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
