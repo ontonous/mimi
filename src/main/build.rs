@@ -628,7 +628,10 @@ pub(crate) fn build(
 
     if verify_ffi {
         let ffi_verification = if let Some(canonical) = canonical_for_build.as_ref() {
-            verifier::verify_ffi_mir(canonical)
+            verifier::verify_ffi_mir_with_source_hash(
+                canonical,
+                blake3::hash(source.as_bytes()).to_hex().to_string(),
+            )
         } else {
             verifier::verify_ffi_checked(&checked_program)
         };

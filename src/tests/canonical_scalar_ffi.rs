@@ -16413,6 +16413,17 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
                     && artifact.mir_hash == route.program.canonical_digest()
             })
         }));
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let mir_ffi_with_source =
+            crate::verifier::verify_ffi_mir_with_source_hash(&route.program, source_hash.clone())
+                .expect("source-provenance canonical FFI verifier");
+        assert!(mir_ffi_with_source.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.source_hash == source_hash
+                    && artifact.mir_hash == route.program.canonical_digest()
+            })
+        }));
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
         generator

@@ -184,7 +184,14 @@ pub fn verify_ffi_mir(
     verify_ffi_mir_with_source_hash(program, String::new())
 }
 
-fn verify_ffi_mir_with_source_hash(
+/// Verify an already-materialized canonical FFI MIR program while preserving
+/// the caller's source provenance in each proof artifact.
+///
+/// `source_hash` should be the BLAKE3 hash of the source text that produced
+/// the checked program. The MIR identity remains independent of this value;
+/// callers can therefore compare one canonical route across entry points
+/// while still detecting which source snapshot requested the proof.
+pub fn verify_ffi_mir_with_source_hash(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
