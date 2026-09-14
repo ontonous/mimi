@@ -16742,7 +16742,15 @@ func relay(value: i64) -> i64 {
 }
 func main() -> i64 {
     let value = generated_add(20 as i64, 22 as i64);
-    if generated_all(true, true, true) { relay(value) } else { 0 }
+    println(value);
+    if generated_all(true, true, true) {
+        let result = relay(value);
+        println(result);
+        result
+    } else {
+        println(0 as i64);
+        0
+    }
 }
 "#;
 
@@ -16760,13 +16768,12 @@ func main() -> i64 {
     assert_eq!(route.program.ffi_calls().len(), 4);
     let mir = route.program;
     let oracle = MultiArgumentOracle;
-    assert_eq!(
-        MirReferenceInterpreter::new(&mir)
-            .with_ffi_resolver(&oracle)
-            .execute(&crate::core::NodeId("function:main".into()), &[])
-            .expect("multi-argument reference"),
-        MirRuntimeValue::Int(42)
-    );
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("multi-argument reference output");
+    assert_eq!(reference.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference.output, "42\n42\n");
 
     let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("multi-argument bytecode"));
     assert!(vm.program().ast.is_none());
@@ -16774,6 +16781,7 @@ func main() -> i64 {
         vm.run_value().expect("multi-argument VM"),
         Value::Int(42)
     ));
+    assert_eq!(vm.stdout(), "42\n42\n");
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verified = crate::verifier::verify_checked(&checked, "multi-argument".into())
@@ -16812,7 +16820,7 @@ func main() -> i64 {
     let native = super::link_and_observe_module(&generator, &config, native_counter)
         .expect("multi-argument native link");
     assert_eq!(native.exit_code, Some(42));
-    assert_eq!(native.stdout, "");
+    assert_eq!(native.stdout, "42\n42\n");
     assert_eq!(native.stderr, "");
 }
 
