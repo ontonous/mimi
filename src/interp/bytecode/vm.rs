@@ -215,8 +215,11 @@ impl BytecodeVM {
         index: usize,
         descriptor: crate::interp::bytecode::CanonicalFfiDescriptor,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        // A completed spawn/await may still have a child VM holding the
+        // shared program Arc for a short time.  Copy-on-write keeps this
+        // test-only mutation isolated from that child snapshot instead of
+        // making the assertion depend on scheduler timing.
+        let program = std::sync::Arc::make_mut(&mut self.program);
         *program
             .canonical_ffi
             .get_mut(index)
@@ -229,8 +232,7 @@ impl BytecodeVM {
         index: usize,
         binding: CanonicalFfiBinding,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        let program = std::sync::Arc::make_mut(&mut self.program);
         *program
             .canonical_ffi_bindings
             .get_mut(index)
@@ -244,8 +246,7 @@ impl BytecodeVM {
         pc: u32,
         extern_idx: u16,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        let program = std::sync::Arc::make_mut(&mut self.program);
         let op = program
             .functions
             .get_mut(function as usize)
@@ -268,8 +269,7 @@ impl BytecodeVM {
         pc: u32,
         instruction: ConstIdx,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        let program = std::sync::Arc::make_mut(&mut self.program);
         let op = program
             .functions
             .get_mut(function as usize)
@@ -293,8 +293,7 @@ impl BytecodeVM {
         args_base: Reg,
         argc: u16,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        let program = std::sync::Arc::make_mut(&mut self.program);
         let op = program
             .functions
             .get_mut(function as usize)
@@ -318,8 +317,7 @@ impl BytecodeVM {
         descriptors: Vec<CanonicalFfiDescriptor>,
         bindings: Vec<CanonicalFfiBinding>,
     ) {
-        let program = std::sync::Arc::get_mut(&mut self.program)
-            .expect("test VM must uniquely own its bytecode program");
+        let program = std::sync::Arc::make_mut(&mut self.program);
         program.canonical_ffi = descriptors;
         program.canonical_ffi_bindings = bindings;
     }
