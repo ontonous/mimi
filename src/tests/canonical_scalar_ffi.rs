@@ -19071,6 +19071,135 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_contract_metadata_forgery_isolated_and_recoverable() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_contract_first(int64_t left, int64_t right) { return left + right; }
+int64_t generated_contract_second(int64_t left, int64_t right) { return left + right; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_contract_first(left: i64, right: i64) -> i64 requires: left >= 0 ensures: result == left + right;
+    func generated_contract_second(left: i64, right: i64) -> i64 requires: left >= 0 ensures: result == left + right;
+}
+func main() -> i64 {
+    println(7 as i64);
+    println(generated_contract_first(1 as i32, 2 as i32));
+    println(generated_contract_second(20 as i32, 22 as i32));
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width contract metadata fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width contract metadata fixture MIR");
+    let bytecode = compile_mir_program(&mir).expect("mixed-width contract metadata bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert!(bytecode
+        .canonical_ffi
+        .iter()
+        .all(|descriptor| { descriptor.requires.is_some() && descriptor.ensures.is_some() }));
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("initial mixed-width contract metadata run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_descriptors = vm.program().canonical_ffi.clone();
+    let original_bindings = vm.program().canonical_ffi_bindings.clone();
+    let run_public_entries = |vm: &mut BytecodeVM| {
+        let first = vm
+            .run_value()
+            .expect_err("run_value must reject forged contract metadata")
+            .to_string();
+        assert_eq!(vm.stdout(), "");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+        let wrapped = vm
+            .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+            .expect_err("wrapped entry must reject forged contract metadata")
+            .to_string();
+        assert_eq!(wrapped, first);
+        assert_eq!(vm.stdout(), "");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        let direct = vm
+            .call_function(vm.program().entry, &[])
+            .expect_err("direct entry must reject forged contract metadata")
+            .to_string();
+        assert_eq!(direct, first);
+        assert_eq!(vm.stdout(), "");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+        first
+    };
+
+    let mut forged_requires = original_descriptors[1].clone();
+    forged_requires.requires = Some(crate::core::mir::MirContractExpr::Bool(false));
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, forged_requires);
+    let requires_error = run_public_entries(&mut vm);
+    assert!(
+        requires_error.contains("differs from its compiler binding"),
+        "{requires_error}"
+    );
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, original_descriptors[1].clone());
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("requires metadata restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut forged_ensures = original_descriptors[1].clone();
+    forged_ensures.ensures = Some(crate::core::mir::MirContractExpr::Bool(true));
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, forged_ensures);
+    let ensures_error = run_public_entries(&mut vm);
+    assert!(
+        ensures_error.contains("differs from its compiler binding"),
+        "{ensures_error}"
+    );
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, original_descriptors[1].clone());
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("ensures metadata restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut forged_binding = original_bindings[1].clone();
+    forged_binding.has_requires = !forged_binding.has_requires;
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    let binding_error = run_public_entries(&mut vm);
+    assert!(
+        binding_error.contains("inconsistent requires contract metadata"),
+        "{binding_error}"
+    );
+    vm.replace_canonical_ffi_binding_for_test_only(1, original_bindings[1].clone());
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("binding contract metadata restoration must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, original_descriptors);
+    assert_eq!(vm.program().canonical_ffi_bindings, original_bindings);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
