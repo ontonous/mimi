@@ -6689,6 +6689,20 @@ fn mir_proof_cache_key_binds_route_identity_without_profile() {
         "a pre-receipt MIR artifact must never share a cache key with a bound proof"
     );
     assert!(!mir.is_compatible(&missing));
+
+    let mut source_changed = mir.clone();
+    source_changed.source_hash = "other-source".to_string();
+    assert!(
+        !mir.is_compatible(&source_changed),
+        "two source-bound proofs must not cross-reuse even when MIR identity matches"
+    );
+
+    let mut source_unbound = mir.clone();
+    source_unbound.source_hash.clear();
+    assert!(
+        mir.is_compatible(&source_unbound),
+        "an unbound direct API remains compatible when semantic MIR identity is unchanged"
+    );
 }
 
 #[test]

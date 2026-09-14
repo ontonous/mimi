@@ -201,6 +201,14 @@ fn same_mir_route_identity(
         && left.root_owners == right.root_owners
 }
 
+/// Compare optional source provenance without making old direct APIs
+/// incompatible solely because they did not receive source text.  Once both
+/// artifacts carry a source hash, a proof from one source must never be reused
+/// for another source even when their semantic MIR happens to be identical.
+fn same_optional_source_provenance(left: &str, right: &str) -> bool {
+    left.is_empty() || right.is_empty() || left == right
+}
+
 /// Return the cache identity of a MIR route witness.
 ///
 /// The route profile is provenance for a consumer invocation, so it is
@@ -290,6 +298,7 @@ impl ProofArtifact {
             && self.engine == current.engine
             && self_identity == current_identity
             && self.mir_hash == current.mir_hash
+            && same_optional_source_provenance(&self.source_hash, &current.source_hash)
             && match (&self.mir_route_receipt, &current.mir_route_receipt) {
                 (Some(left), Some(right)) => same_mir_route_identity(left, right),
                 (None, None) => true,
