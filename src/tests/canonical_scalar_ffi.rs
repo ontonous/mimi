@@ -4702,8 +4702,8 @@ func main() -> i64 { 0 }
 
     let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
-        empty_ast,
-        program,
+        empty_ast.clone(),
+        program.clone(),
         None,
         true,
         true,
@@ -4722,6 +4722,36 @@ func main() -> i64 { 0 }
         .expect("explicitly bound actor worker response")
         .expect("explicitly bound actor FFI contract check");
     assert_eq!(response, Value::Int(5));
+
+    let failing_actor = crate::interp::ActorHandle::new_bytecode(
+        actor_instance(),
+        empty_ast,
+        program,
+        None,
+        true,
+        true,
+        None,
+    );
+    let failing_response = failing_actor
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue environment-bound failing actor FFI call")
+        .recv()
+        .expect("environment-bound failing actor worker response")
+        .expect_err("environment-bound actor must enforce the bad FFI postcondition");
+    assert_eq!(failing_response.code(), "E0808");
+    assert!(failing_response
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert!(!failing_actor.is_faulted());
+
+    let recovered_response = explicitly_bound
+        .try_enqueue("call".to_string(), Vec::new())
+        .expect("enqueue repeated explicitly bound actor FFI call")
+        .recv()
+        .expect("repeated explicitly bound actor worker response")
+        .expect("a neighboring failed actor must not poison the good binding");
+    assert_eq!(recovered_response, Value::Int(5));
+    assert!(!explicitly_bound.is_faulted());
 }
 
 #[test]
