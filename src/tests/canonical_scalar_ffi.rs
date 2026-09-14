@@ -5389,6 +5389,127 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_child_rejects_forged_call_index_before_execution() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_forged_index(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_forged_index(value: i64) -> i64; }
+func leaf() -> i64 {
+    println(41)
+    mir_ffi_nested_forged_index(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("nested forged-index fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize nested forged-index MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile nested forged-index bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+    let leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf")
+        .expect("canonical forged-index leaf function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical forged-index main function");
+    let (ffi_pc, original_extern_idx) = bytecode.functions[leaf as usize]
+        .code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, op)| match op {
+            crate::interp::bytecode::instr::Op::CallCanonicalExtern { extern_idx, .. } => {
+                Some((pc as u32, *extern_idx))
+            }
+            _ => None,
+        })
+        .expect("canonical forged-index call site");
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut middle_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle".into(), 0);
+    let task = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task,
+        func: leaf,
+        args_base: task,
+        argc: 0,
+    });
+    let result = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result,
+        ra: task,
+    });
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
+    let middle = program.functions.len() as u32;
+    program.functions.push(middle_proto);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let outer_task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_task,
+        func: middle,
+        args_base: outer_task,
+        argc: 0,
+    });
+    let outer_result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: outer_result,
+        ra: outer_task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
+    program.functions[main] = main_proto;
+
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_stdout_buf(stdout.clone());
+    vm.set_canonical_ffi_library_path(fixture.dir.join("ffi.so").to_string_lossy().into_owned());
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(leaf, ffi_pc, 17);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let error = vm
+        .run_value()
+        .expect_err("nested forged descriptor index must fail before spawning the child");
+    assert_eq!(error.code(), "E0800");
+    assert!(
+        error
+            .to_string()
+            .contains("descriptor index 17 disagrees with compiler binding index 0"),
+        "{error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(leaf, ffi_pc, original_extern_idx);
+    assert_eq!(
+        vm.run_value()
+            .expect("restored nested descriptor index must recover"),
+        Value::Int(5)
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "41\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
