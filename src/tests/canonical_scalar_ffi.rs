@@ -16596,38 +16596,38 @@ int64_t generated_foreign(int64_t x) { return x; }
         let condition = (seed & 1) == 0;
         let (helper, body, expected) = match shape {
             0 => (
-                "",
-                format!("generated_foreign({value} as i64)"),
+                "func observe(value: i64) -> i64 { println(value); value }",
+                format!("observe(generated_foreign({value} as i64))"),
                 value,
             ),
             1 => (
-                "",
-                format!("let x = generated_foreign({value} as i64); x"),
+                "func observe(value: i64) -> i64 { println(value); value }",
+                format!("let x = generated_foreign({value} as i64); observe(x)"),
                 value,
             ),
             2 => (
-                "",
+                "func observe(value: i64) -> i64 { println(value); value }",
                 format!(
-                    "if {condition} {{ generated_foreign({value} as i64) }} else {{ generated_foreign({alternate} as i64) }}"
+                    "let x = if {condition} {{ generated_foreign({value} as i64) }} else {{ generated_foreign({alternate} as i64) }}; observe(x)"
                 ),
                 if condition { value } else { alternate },
             ),
             3 => (
-                "func relay(x: i64) -> i64 { generated_foreign(x) }",
-                format!("relay({value} as i64)"),
+                "func relay(x: i64) -> i64 { generated_foreign(x) }\nfunc observe(value: i64) -> i64 { println(value); value }",
+                format!("observe(relay({value} as i64))"),
                 value,
             ),
             4 => (
-                "func relay(x: i64) -> i64 { generated_foreign(x) }",
+                "func relay(x: i64) -> i64 { generated_foreign(x) }\nfunc observe(value: i64) -> i64 { println(value); value }",
                 format!(
-                    "let x = relay({value} as i64); let y = generated_foreign(x); y"
+                    "let x = relay({value} as i64); let y = generated_foreign(x); observe(y)"
                 ),
                 value,
             ),
             _ => (
-                "func relay(x: i64) -> i64 { generated_foreign(x) }",
+                "func relay(x: i64) -> i64 { generated_foreign(x) }\nfunc observe(value: i64) -> i64 { println(value); value }",
                 format!(
-                    "if {condition} {{ let x = relay({value} as i64); generated_foreign(x) }} else {{ generated_foreign({alternate} as i64) }}"
+                    "let result = if {condition} {{ let x = relay({value} as i64); generated_foreign(x) }} else {{ generated_foreign({alternate} as i64) }}; observe(result)"
                 ),
                 if condition { value } else { alternate },
             ),
@@ -16657,9 +16657,10 @@ int64_t generated_foreign(int64_t x) { return x; }
         let oracle = GeneratedOracle;
         let reference = MirReferenceInterpreter::new(&mir)
             .with_ffi_resolver(&oracle)
-            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
             .unwrap_or_else(|error| panic!("seeded case {case_index} reference: {error}"));
-        assert_eq!(reference, MirRuntimeValue::Int(expected));
+        assert_eq!(reference.value, MirRuntimeValue::Int(expected));
+        assert_eq!(reference.output, format!("{expected}\n"));
 
         let bytecode = compile_mir_program(&mir)
             .unwrap_or_else(|error| panic!("seeded case {case_index} bytecode: {error:?}"));
@@ -16670,6 +16671,7 @@ int64_t generated_foreign(int64_t x) { return x; }
                 .unwrap_or_else(|error| panic!("seeded case {case_index} VM: {error}")),
             Value::Int(value) if value == expected
         ));
+        assert_eq!(vm.stdout(), format!("{expected}\n"));
 
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(
@@ -16687,7 +16689,7 @@ int64_t generated_foreign(int64_t x) { return x; }
         let native = super::link_and_observe_module(&generator, &config, native_counter)
             .unwrap_or_else(|error| panic!("seeded case {case_index} link: {error}"));
         assert_eq!(native.exit_code, Some(expected as i32));
-        assert_eq!(native.stdout, "");
+        assert_eq!(native.stdout, format!("{expected}\n"));
         assert_eq!(native.stderr, "");
         assert_eq!(mir.ffi_calls().len(), expected_ffi_calls);
     }
