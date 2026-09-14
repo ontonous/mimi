@@ -345,8 +345,16 @@ impl LspServer {
                 ));
             }
         }
-        *session = merged;
-        file.sources = session.clone();
+        // Keep the AST attached to the complete merged snapshot, but do not
+        // reinstall an oversized snapshot into the session-global pool. The
+        // snapshot is self-contained for this request; the global pool is a
+        // bounded interner and may safely reset after the handoff.
+        file.sources = merged.clone();
+        if merged.records().len() > super::MAX_SOURCE_RECORDS {
+            *session = crate::span::SourceRegistry::default();
+        } else {
+            *session = merged.clone();
+        }
         Ok(())
     }
 
@@ -459,8 +467,14 @@ impl LspServer {
             })
         };
         if let Err(error) = import_result {
-            file.sources = error.sources.clone();
-            *self.source_registry.borrow_mut() = error.sources;
+            let error_sources = error.sources.clone();
+            file.sources = error_sources.clone();
+            let mut session = self.source_registry.borrow_mut();
+            if error_sources.records().len() > super::MAX_SOURCE_RECORDS {
+                *session = crate::span::SourceRegistry::default();
+            } else {
+                *session = error_sources;
+            }
             raw_diagnostics.push(*error.diagnostic);
         }
 

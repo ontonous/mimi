@@ -1000,6 +1000,27 @@ fn lsp_verification_cache_hit_survives_source_registry_reset() {
 }
 
 #[test]
+fn lsp_diagnostic_batches_bound_registry_after_snapshot_reset() {
+    let server = LspServer::new();
+    for index in 0..crate::lsp::MAX_SOURCE_RECORDS {
+        let source = format!("func f_{index}() -> i32 {{\n    {index}\n}}");
+        server
+            .parse_with_recovery_for_uri(&source, None)
+            .expect("parse memory source");
+    }
+
+    let diagnostics = server.compute_diagnostics("func main() -> i32 {\n    0\n}", None);
+    assert!(
+        diagnostics.is_empty(),
+        "valid batch should remain diagnostic-free"
+    );
+    assert!(
+        server.source_registry.borrow().records().len() <= crate::lsp::MAX_SOURCE_RECORDS,
+        "adopting an oversized snapshot must not regrow the global source pool"
+    );
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",
