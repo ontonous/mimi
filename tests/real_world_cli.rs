@@ -3581,6 +3581,136 @@ func main() -> i32 {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_cross_call_missing_symbol_preserves_prefix() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cross_call_missing_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create cross-call missing-symbol CLI fixture directory");
+
+    let good_c_path = dir.join("good.c");
+    let good_library = dir.join("good.so");
+    fs::write(
+        &good_c_path,
+        "#include <stdint.h>\nint32_t generated_cli_rebind_first(double value) { return value == 1.0 ? 3 : -1; }\nint32_t generated_cli_rebind_second(int64_t value) { return (int32_t)(value + 22); }\n",
+    )
+    .expect("write complete cross-call host fixture");
+    let compile_good = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&good_c_path)
+        .arg("-o")
+        .arg(&good_library)
+        .output()
+        .expect("compile complete cross-call host fixture");
+    assert!(
+        compile_good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_good.stderr)
+    );
+
+    let bad_c_path = dir.join("bad.c");
+    let bad_library = dir.join("bad.so");
+    fs::write(
+        &bad_c_path,
+        "#include <stdint.h>\nint32_t generated_cli_rebind_first(double value) { return value == 1.0 ? 3 : -1; }\n",
+    )
+    .expect("write incomplete cross-call host fixture");
+    let compile_bad = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&bad_c_path)
+        .arg("-o")
+        .arg(&bad_library)
+        .output()
+        .expect("compile incomplete cross-call host fixture");
+    assert!(
+        compile_bad.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_bad.stderr)
+    );
+
+    let source = dir.join("cross_call_missing.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" {
+    func generated_cli_rebind_first(value: f64) -> i32;
+    func generated_cli_rebind_second(value: i64) -> i32;
+}
+func main() -> i32 {
+    println(8 as i64);
+    println(generated_cli_rebind_first(1 as i32));
+    println(generated_cli_rebind_second(20 as i32));
+    0
+}
+"#,
+    )
+    .expect("write cross-call missing-symbol Mimi source");
+
+    for explicit_mir in [false, true] {
+        let mut bad_run = Command::new(mimi_bin());
+        bad_run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            bad_run.arg("--mir");
+        }
+        let bad_run = bad_run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &bad_library)
+            .output()
+            .unwrap_or_else(|error| panic!("cross-call missing run {explicit_mir}: {error}"));
+        let bad_stdout = String::from_utf8_lossy(&bad_run.stdout);
+        let bad_stderr = String::from_utf8_lossy(&bad_run.stderr);
+        assert!(
+            !bad_run.status.success(),
+            "cross-call missing run {explicit_mir} must fail: stdout={bad_stdout} stderr={bad_stderr}"
+        );
+        assert_eq!(
+            bad_stdout, "8\n3\n",
+            "cross-call missing run {explicit_mir}"
+        );
+        assert!(bad_stderr.contains("E0800"), "{bad_stderr}");
+        assert!(
+            bad_stderr.contains("failed to find canonical MIR FFI symbol"),
+            "{bad_stderr}"
+        );
+        assert!(
+            bad_stderr.contains("generated_cli_rebind_second"),
+            "{bad_stderr}"
+        );
+        assert!(!bad_stderr.contains("canonical route disposition: legacy"));
+
+        let mut good_run = Command::new(mimi_bin());
+        good_run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            good_run.arg("--mir");
+        }
+        let good_run = good_run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &good_library)
+            .output()
+            .unwrap_or_else(|error| panic!("cross-call recovery run {explicit_mir}: {error}"));
+        let good_stdout = String::from_utf8_lossy(&good_run.stdout);
+        let good_stderr = String::from_utf8_lossy(&good_run.stderr);
+        assert!(
+            good_run.status.success(),
+            "cross-call recovery run {explicit_mir}: stdout={good_stdout} stderr={good_stderr}"
+        );
+        assert_eq!(good_stdout, "8\n3\n42\n");
+        assert!(good_stderr.is_empty(), "{good_stderr}");
+        assert!(!good_stderr.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_mixed_width_error_phases_match_default_and_mir() {
     if !can_link() {
         return;
