@@ -4605,6 +4605,138 @@ func main() -> i64 { 0 }
     assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_spawn_merges_leaf_stdout_and_recovers_after_failure() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_output(int64_t value) { return value + 1; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_nested_output(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_nested_output(value: i64) -> i64 ensures: result == value; }
+func leaf() -> i64 {
+    println(41)
+    mir_ffi_nested_output(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE)).expect("nested output fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize nested output MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile nested output bytecode");
+    assert!(bytecode.ast.is_none());
+    let leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf")
+        .expect("canonical leaf function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical main function");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut middle_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle".into(), 0);
+    let middle_task = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: middle_task,
+        func: leaf,
+        args_base: middle_task,
+        argc: 0,
+    });
+    let middle_result = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: middle_result,
+        ra: middle_task,
+    });
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: middle_result });
+    let middle = program.functions.len() as u32;
+    program.functions.push(middle_proto);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let outer_task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_task,
+        func: middle,
+        args_base: outer_task,
+        argc: 0,
+    });
+    let outer_result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: outer_result,
+        ra: outer_task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
+    program.functions[main] = main_proto;
+
+    let good_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut good_vm = BytecodeVM::new(bytecode.clone());
+    good_vm.set_stdout_buf(good_stdout.clone());
+    good_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        good_vm.run_value().expect("nested output success"),
+        Value::Int(5)
+    );
+    assert_eq!(&*good_stdout.lock().unwrap(), "41\n");
+    assert_eq!(good_vm.debug_stack_state(), (0, 0));
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let recovery_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut recovery_vm = BytecodeVM::new(bytecode);
+    recovery_vm.set_stdout_buf(recovery_stdout.clone());
+    recovery_vm.set_canonical_ffi_library_path(
+        bad_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let error = recovery_vm
+        .run_value()
+        .expect_err("nested leaf output must preserve a failing postcondition");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "41\n");
+    assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    recovery_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        recovery_vm
+            .run_value()
+            .expect("nested leaf output must recover after failure"),
+        Value::Int(5)
+    );
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "41\n41\n");
+    assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
