@@ -16825,6 +16825,103 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_ensures_failure_preserves_prefix_across_consumers() {
+    struct BadPairOracle;
+    impl MirReferenceFfiResolver for BadPairOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_pair" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)] = args else {
+                return Err(format!("unexpected generated_pair arguments {args:?}"));
+            };
+            if *left == 1 && *right == 2 {
+                Ok(MirRuntimeValue::Int(99))
+            } else {
+                Ok(MirRuntimeValue::Int(left + right))
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_pair(int64_t left, int64_t right) {
+    return (left == 1 && right == 2) ? 99 : left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_pair(left: i64, right: i64) -> i64
+        ensures: result == left + right;
+}
+func main() -> i64 {
+    let first = generated_pair(20 as i64, 22 as i64);
+    println(first);
+    let second = generated_pair(1 as i64, 2 as i64);
+    println(second);
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-argument ensures failure fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("multi-argument ensures failure MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+
+    let reference_interpreter =
+        MirReferenceInterpreter::new(&mir).with_ffi_resolver(&BadPairOracle);
+    let reference_error = reference_interpreter
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must fail the second multi-argument ensures call");
+    assert!(reference_error.message.contains("FFI postcondition failed"));
+    assert_eq!(reference_interpreter.captured_output(), "42\n");
+
+    let mut vm =
+        BytecodeVM::new(compile_mir_program(&mir).expect("multi-argument failure bytecode"));
+    let vm_error = vm
+        .run_value()
+        .expect_err("bytecode must fail the second multi-argument ensures call");
+    assert_eq!(vm_error.code(), "E0808");
+    assert!(vm_error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_argument_bad_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-argument ensures failure lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native multi-argument ensures failure module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native multi-argument ensures failure execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
