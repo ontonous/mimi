@@ -718,15 +718,14 @@ impl LspServer {
                     diagnostic.span,
                 );
             }
-            self.cache_put_verification(
-                cache_key.clone(),
-                VerificationCacheEntry::new(
-                    body_hash,
-                    result.status.clone(),
-                    result.message.clone(),
-                    structured_diagnostic.clone(),
-                ),
+            let mut cache_entry = VerificationCacheEntry::new(
+                body_hash,
+                result.status.clone(),
+                result.message.clone(),
+                structured_diagnostic.clone(),
             );
+            cache_entry.bind_diagnostic_source(&cache_registry);
+            self.cache_put_verification(cache_key.clone(), cache_entry);
 
             if matches!(result.status, VerifStatus::Failed) {
                 if let Some(structured_diagnostic) = structured_diagnostic {

@@ -1021,6 +1021,80 @@ fn lsp_diagnostic_batches_bound_registry_after_snapshot_reset() {
 }
 
 #[test]
+fn lsp_cache_save_rejects_reused_source_id_after_registry_reset() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_source_reuse_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create workspace");
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+
+    let foreign = server
+        .parse_with_recovery_for_uri("foreign", None)
+        .expect("register foreign source");
+    let foreign_id = foreign.sources.records()[0].id;
+    let foreign_key = foreign
+        .sources
+        .key(foreign_id)
+        .expect("foreign source key")
+        .as_str()
+        .to_string();
+    let cache_key = crate::lsp::verification_cache_key("untitled://workspace/foreign.mimi", "bad");
+    let span = crate::span::Span::new(1, 1, 1, 4).with_source(foreign_id);
+    let mut entry = crate::lsp::VerificationCacheEntry::new(
+        7,
+        crate::verifier::VerifStatus::Disproven,
+        "foreign failure".to_string(),
+        Some(
+            crate::diagnostic::Diagnostic::error_code("E0999", "foreign failure", span)
+                .with_origin(crate::diagnostic::DiagnosticOrigin::user()),
+        ),
+    );
+    entry.bind_diagnostic_source(&foreign.sources);
+    server.cache_put_verification(cache_key.clone(), entry);
+
+    let cap = crate::lsp::MAX_SOURCE_RECORDS;
+    for index in 0..(cap - 1) {
+        let source = format!("func fill_{index}() -> i32 {{\n    {index}\n}}");
+        server
+            .parse_with_recovery_for_uri(&source, None)
+            .expect("parse filling source");
+    }
+    // The next registration resets the shared pool. The following source
+    // reuses numeric ID 1, so an unbound save would mislabel the foreign
+    // diagnostic as this new source.
+    let _ = server
+        .parse_with_recovery_for_uri("func fresh_a() -> i32 {\n    1\n}", None)
+        .expect("trigger source reset");
+    let fresh_b = server
+        .parse_with_recovery_for_uri("func fresh_b() -> i32 {\n    2\n}", None)
+        .expect("register post-reset source");
+    server.save_cache_with_registry(&fresh_b.sources);
+
+    let cache_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json")).expect("read cache"),
+    )
+    .expect("parse cache JSON");
+    assert!(
+        cache_json["entries"][cache_key]["diagnostic"].is_null(),
+        "reused SourceId must not serialize a foreign diagnostic under the new source"
+    );
+    assert_eq!(
+        foreign_key,
+        foreign.sources.key(foreign_id).unwrap().as_str()
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_rejects_legacy_persistent_schema() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_legacy_verification_cache_{}",

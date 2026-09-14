@@ -186,6 +186,9 @@ pub(crate) struct VerificationCacheEntry {
     pub(crate) message: String,
     diagnostic: Option<Diagnostic>,
     persisted_diagnostic: Option<PersistedDiagnostic>,
+    /// Stable source identity captured when an in-memory diagnostic is
+    /// produced. Numeric SourceIds can be reused after a registry reset.
+    diagnostic_source_key: Option<String>,
 }
 
 /// 0.34.44 (ADR-008 §2): the ONLY cache-key shape for verification verdicts.
@@ -349,7 +352,16 @@ impl VerificationCacheEntry {
             message,
             diagnostic,
             persisted_diagnostic: None,
+            diagnostic_source_key: None,
         }
+    }
+
+    pub(crate) fn bind_diagnostic_source(&mut self, registry: &SourceRegistry) {
+        self.diagnostic_source_key = self
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| registry.key(diagnostic.span.source_id))
+            .map(|key| key.as_str().to_string());
     }
 
     pub(crate) fn diagnostic(&self, registry: &SourceRegistry) -> Option<Diagnostic> {
@@ -563,6 +575,7 @@ impl LspServer {
                     message: entry.message,
                     diagnostic: None,
                     persisted_diagnostic: entry.diagnostic,
+                    diagnostic_source_key: None,
                 },
             );
             if retained.len() > MAX_VERIFICATION_CACHE {
@@ -637,7 +650,19 @@ impl LspServer {
                             .diagnostic
                             .as_ref()
                             .and_then(|diagnostic| {
-                                PersistedDiagnostic::from_runtime(diagnostic, registry)
+                                let source_matches = entry.diagnostic_source_key.as_deref().map_or(
+                                    true,
+                                    |expected| {
+                                        registry
+                                            .key(diagnostic.span.source_id)
+                                            .is_some_and(|actual| actual.as_str() == expected)
+                                    },
+                                );
+                                source_matches
+                                    .then(|| {
+                                        PersistedDiagnostic::from_runtime(diagnostic, registry)
+                                    })
+                                    .flatten()
                             })
                             .or_else(|| entry.persisted_diagnostic.clone()),
                     },
