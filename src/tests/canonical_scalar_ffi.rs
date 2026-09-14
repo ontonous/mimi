@@ -18559,6 +18559,197 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_descriptor_and_index_forgery_stabilize_public_entries() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_descriptor_first(int64_t left, int64_t right) { return left + right; }
+int64_t generated_descriptor_second(int64_t left, int64_t right) { return left + right; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_descriptor_first(left: i64, right: i64) -> i64;
+    func generated_descriptor_second(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(3 as i64);
+    println(generated_descriptor_first(1 as i32, 2 as i32));
+    println(generated_descriptor_second(20 as i32, 22 as i32));
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width descriptor/index fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width descriptor/index fixture MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    for receipt in mir.ffi_calls().values() {
+        assert_eq!(
+            receipt.parameter_conversions,
+            vec![
+                crate::core::mir::MirFfiAbiConversion {
+                    from: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    to: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                },
+                crate::core::mir::MirFfiAbiConversion {
+                    from: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    to: crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                },
+            ]
+        );
+    }
+
+    let bytecode = compile_mir_program(&mir).expect("mixed-width descriptor/index bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("initial mixed-width descriptor/index run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "3\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let original_descriptor = vm.program().canonical_ffi[1].clone();
+    let mut forged_descriptor = original_descriptor.clone();
+    forged_descriptor.symbol = "forged_mixed_width_descriptor".into();
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, forged_descriptor);
+
+    let descriptor_error = vm
+        .run_value()
+        .expect_err("run_value must reject a forged mixed-width descriptor");
+    assert!(
+        descriptor_error
+            .to_string()
+            .contains("differs from its compiler binding"),
+        "{descriptor_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped_descriptor_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject the same forged mixed-width descriptor");
+    assert_eq!(
+        wrapped_descriptor_error.to_string(),
+        descriptor_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let direct_descriptor_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must reject the same forged mixed-width descriptor");
+    assert_eq!(
+        direct_descriptor_error.to_string(),
+        descriptor_error.to_string()
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_descriptor_for_test_only(1, original_descriptor);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("descriptor restoration must recover the canonical VM"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "3\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let second_binding = vm.program().canonical_ffi_bindings[1].clone();
+    let first_binding = vm.program().canonical_ffi_bindings[0].clone();
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        first_binding.extern_idx,
+    );
+    let index_error = vm
+        .run_value()
+        .expect_err("run_value must reject a mixed-width call index forgery");
+    assert!(
+        index_error
+            .to_string()
+            .contains("descriptor index 0 disagrees with compiler binding index 1"),
+        "{index_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped_index_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must reject the mixed-width call index forgery");
+    assert_eq!(wrapped_index_error.to_string(), index_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let direct_index_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must reject the mixed-width call index forgery");
+    assert_eq!(direct_index_error.to_string(), index_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        second_binding.extern_idx,
+    );
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("call index restoration must recover the canonical VM"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "3\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_width_descriptor_index");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width descriptor/index lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width descriptor/index module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native mixed-width descriptor/index execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "3\n3\n42\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
