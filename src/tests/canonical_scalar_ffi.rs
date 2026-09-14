@@ -5718,7 +5718,7 @@ int64_t mir_ffi_nested_pair_forge(int64_t value) { return value; }
 "#;
     const BAD_C_SOURCE: &str = r#"
 #include <stdint.h>
-int64_t mir_ffi_nested_pair_forge(int64_t value) { return value + 1; }
+int64_t mir_ffi_nested_pair_forge(int64_t value) { return value == 5 ? value : value + 1; }
 "#;
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_nested_pair_forge(value: i64) -> i64 ensures: result == value; }
@@ -5930,7 +5930,12 @@ func main() -> i64 { 0 }
             .contains("FFI postcondition failed"),
         "{direct_error}"
     );
-    assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
+    let direct_error_stdout = stdout.lock().unwrap().clone();
+    assert_eq!(
+        sorted_lines(&direct_error_stdout),
+        vec!["41", "42"],
+        "direct nested bad-library stdout: {direct_error_stdout:?}"
+    );
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -5939,6 +5944,47 @@ func main() -> i64 { 0 }
     assert_eq!(
         vm.call_function(vm.program().entry, &[])
             .expect("direct entry must recover after the nested bad-library call"),
+        Value::Int(5)
+    );
+    let direct_good_stdout = stdout.lock().unwrap().clone();
+    assert_eq!(
+        sorted_lines(&direct_good_stdout),
+        vec!["41", "42"],
+        "direct nested recovered stdout: {direct_good_stdout:?}"
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    let mut forged_result_binding = binding_snapshot[1].clone();
+    forged_result_binding.rd = forged_result_binding.rd.saturating_add(1);
+    vm.replace_canonical_ffi_binding_for_test_only(1, forged_result_binding);
+    stdout.lock().unwrap().clear();
+    let result_error = vm
+        .run_value()
+        .expect_err("forged result register binding must fail before nested children start");
+    assert_eq!(result_error.code(), "E0800");
+    assert!(
+        result_error.to_string().contains("result register"),
+        "{result_error}"
+    );
+    assert!(
+        result_error
+            .to_string()
+            .contains("disagrees with compiler binding register"),
+        "{result_error}"
+    );
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+
+    vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
+    stdout.lock().unwrap().clear();
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("result register binding restoration must recover nested fanout"),
         Value::Int(5)
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
