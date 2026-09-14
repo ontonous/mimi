@@ -19200,6 +19200,134 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_missing_symbol_rebind_preserves_effect_order() {
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_rebind_first(int64_t left, int64_t right) { return left + right; }
+int64_t generated_rebind_second(int64_t left, int64_t right) { return left + right; }
+"#;
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_rebind_first(int64_t left, int64_t right) { return left + right; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_rebind_first(left: i64, right: i64) -> i64;
+    func generated_rebind_second(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(8 as i64);
+    println(generated_rebind_first(1 as i32, 2 as i32));
+    println(generated_rebind_second(20 as i32, 22 as i32));
+    0
+}
+"#;
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let [MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)] = arguments else {
+                return Err(format!(
+                    "unexpected mixed-width rebind arguments {arguments:?}"
+                ));
+            };
+            if receipt.symbol != "generated_rebind_first"
+                && receipt.symbol != "generated_rebind_second"
+            {
+                return Err(format!(
+                    "unexpected mixed-width rebind symbol {}",
+                    receipt.symbol
+                ));
+            }
+            Ok(MirRuntimeValue::Int(left + right))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let good_fixture = library_fixture(counter, GOOD_C_SOURCE);
+    let bad_fixture = library_fixture(counter + 1, BAD_C_SOURCE);
+    let good_library = good_fixture.dir.join("ffi.so");
+    let bad_library = bad_fixture.dir.join("ffi.so");
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width missing-symbol rebind fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width missing-symbol rebind fixture MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference mixed-width missing-symbol rebind fixture");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "8\n3\n42\n");
+
+    let bytecode =
+        compile_mir_program(&mir).expect("mixed-width missing-symbol rebind AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let mut vm = BytecodeVM::new(bytecode);
+    guard.set_path(&bad_library);
+    let bad_error = vm
+        .run_value()
+        .expect_err("bad host must fail at the second mixed-width symbol");
+    assert_eq!(bad_error.code(), "E0800");
+    assert!(
+        bad_error
+            .to_string()
+            .contains("failed to find canonical MIR FFI symbol"),
+        "{bad_error}"
+    );
+    assert_eq!(vm.stdout(), "8\n3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let repeated_bad_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve bad-host effect prefix");
+    assert_eq!(repeated_bad_error.to_string(), bad_error.to_string());
+    assert_eq!(vm.stdout(), "8\n3\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_library);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("same VM must recover after switching to the complete host"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "8\n3\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_width_rebind");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width rebind lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width rebind module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(GOOD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native mixed-width rebind execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "8\n3\n42\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
