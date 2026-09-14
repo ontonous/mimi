@@ -4013,6 +4013,101 @@ fn canonical_mir_cli_receipt_manifest_imported_transparent_alias_matches_checker
 }
 
 #[test]
+fn canonical_mir_cli_receipt_manifest_imported_unit_ffi_matches_checker_route() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-import-unit-ffi-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported unit FFI receipt fixture directory");
+    let helper = dir.join("ffi_types.mimi");
+    fs::write(
+        &helper,
+        r#"extern "C" {
+    func mir_ffi_receipt_store(value: i32) ensures: true;
+    func mir_ffi_receipt_read() -> i64;
+}
+pub func write(value: i32) -> i64 {
+    mir_ffi_receipt_store(value)
+    0
+}
+pub func read() -> i64 { mir_ffi_receipt_read() }
+"#,
+    )
+    .expect("write imported unit FFI receipt helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use ffi_types;\nfunc main() -> i64 { write(4); read() }\n",
+    )
+    .expect("write imported unit FFI receipt entry");
+
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn imported unit FFI MIR receipt")
+    };
+    let first = run();
+    let second = run();
+    assert!(
+        first.status.success(),
+        "imported unit FFI MIR receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert!(
+        second.status.success(),
+        "repeated imported unit FFI MIR receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&second.stderr),
+        String::from_utf8_lossy(&second.stdout)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "imported unit FFI receipt manifest must be byte-deterministic"
+    );
+
+    let checked = checked_route_receipt(&main);
+    let manifest_text = String::from_utf8_lossy(&first.stdout);
+    let manifest = parse_route_receipt_manifest(&first.stdout);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest_text)
+        .expect("imported unit FFI receipt must round-trip through the public API");
+    assert_eq!(manifest_receipt, checked);
+    assert_eq!(manifest.get("ffi_digest"), Some(&checked.ffi_digest));
+    assert_eq!(manifest.get("mir_digest"), Some(&checked.mir_digest));
+    assert_eq!(manifest.get("abi_digest"), Some(&checked.abi_digest));
+    assert!(
+        manifest
+            .get("root_owners")
+            .is_some_and(|owners| owners.contains("function:main")
+                && owners.contains("function:write")
+                && owners.contains("function:read")),
+        "unit FFI receipt lost imported callable owners: {manifest:?}"
+    );
+    assert_eq!(
+        manifest.len(),
+        mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+    );
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        stderr.contains("lowered") && stderr.contains("canonical MIR"),
+        "imported unit FFI receipt lost lowering diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "imported unit FFI receipt must not report legacy: {stderr}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
