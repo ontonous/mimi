@@ -16475,6 +16475,79 @@ pub func call_foreign(value: i64) -> i64 { foreign(value) }
 }
 
 #[test]
+fn canonical_mir_cli_rejects_mixed_ffi_graph_before_effects() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_mixed_boundary_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create mixed FFI boundary directory");
+    let source = dir.join("mixed.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" { func good(value: i64) -> i64; }
+extern "Rust" { func bad(value: i64) -> i64; }
+func main() -> i64 {
+    println(7);
+    good(42 as i64);
+    bad(9 as i64)
+}
+"#,
+    )
+    .expect("write mixed FFI boundary fixture");
+
+    for command in ["run", "build", "verify"] {
+        let mut route_outputs = Vec::new();
+        for explicit_mir in [false, true] {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if explicit_mir {
+                invocation.arg("--mir");
+            }
+            let output = invocation
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("mixed {command} {explicit_mir}: {error}"));
+            route_outputs.push((
+                output.status,
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        assert_eq!(
+            route_outputs[0].0, route_outputs[1].0,
+            "mixed {command} default and --mir status diverged"
+        );
+        assert_eq!(
+            route_outputs[0].1, route_outputs[1].1,
+            "mixed {command} default and --mir stdout diverged"
+        );
+        assert!(
+            route_outputs[0].1.is_empty(),
+            "mixed {command} must reject before println effect: {}",
+            route_outputs[0].1
+        );
+        for (explicit_mir, (_, _, stderr)) in route_outputs.iter().enumerate() {
+            assert!(
+                stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
+                "mixed {command}: {stderr}"
+            );
+            if explicit_mir == 0 {
+                assert!(stderr.contains("canonical scalar FFI declaration boundary"));
+            } else {
+                assert!(stderr.contains("MIR validation failed"));
+            }
+            assert!(!stderr.contains("canonical route disposition: legacy"));
+            assert!(!stderr.contains("flow_ast"));
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove mixed FFI boundary directory");
+}
+
+#[test]
 fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
     let fixture = project_root()
         .join("tests")
