@@ -17335,6 +17335,233 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_mixed_width_ensures_failure_preserves_prefix_and_recovers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_checked(int64_t left, int64_t right) {
+    return (left == 20 && right == 22) ? 99 : left + right;
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_mixed_checked(int64_t left, int64_t right) {
+    return left + right;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_mixed_checked(left: i64, right: i64) -> i64
+        ensures: result == left + right;
+}
+func main() -> i64 {
+    println(7 as i64);
+    let result = generated_mixed_checked(20 as i32, 22 as i32);
+    println(result);
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let bad_path = bad_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    guard.set_path(&bad_path);
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("mixed-width ensures fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("mixed-width ensures MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("mixed-width ensures receipt");
+    assert_eq!(receipt.symbol, "generated_mixed_checked");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
+    assert!(
+        receipt.ensures.is_some(),
+        "ensures must remain in the receipt"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-ensures".into())
+        .expect("verify mixed-width ensures MIR");
+    assert_eq!(verification.len(), 1);
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+    assert!(verification[0]
+        .message
+        .contains("extern ensures contract disproven"));
+    assert!(verification[0].artifact.as_ref().is_some_and(|artifact| {
+        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            && artifact.mir_hash == mir.canonical_digest()
+    }));
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-mixed-ensures".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-mixed-ensures-dual".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public mixed-width ensures verifier");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    struct BadOracle;
+    impl MirReferenceFfiResolver for BadOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_checked"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err("unexpected mixed-width ensures call".into());
+            }
+            Ok(MirRuntimeValue::Int(99))
+        }
+    }
+    struct GoodOracle;
+    impl MirReferenceFfiResolver for GoodOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_checked"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err("unexpected mixed-width recovery call".into());
+            }
+            Ok(MirRuntimeValue::Int(42))
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&BadOracle);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the bad mixed-width ensures result");
+    assert!(reference_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(reference.captured_output(), "7\n");
+
+    let recovering_reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&GoodOracle);
+    let reference_result = recovering_reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover with the good mixed-width host");
+    assert_eq!(reference_result.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference_result.output, "7\n42\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width ensures bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let first = vm
+        .run_value()
+        .expect_err("run_value must reject the bad mixed-width ensures result");
+    assert_eq!(first.code(), "E0808");
+    assert!(first.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must repeat the bad mixed-width ensures diagnostic");
+    assert_eq!(wrapped.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let direct = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must repeat the bad mixed-width ensures diagnostic");
+    assert_eq!(direct.to_string(), first.to_string());
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("direct entry must recover with the good mixed-width host"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "multi_argument_mixed_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed-width ensures lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native mixed-width ensures module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native mixed-width ensures execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n");
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
