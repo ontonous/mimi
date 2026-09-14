@@ -4550,6 +4550,36 @@ func main() -> i64 { 0 }
     recovered_vm.set_canonical_ffi_library_path(
         good_fixture
             .dir
+            .join("missing-again.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let error = recovered_vm
+        .run_value()
+        .expect_err("a second nested child failure must remain recoverable");
+    assert_eq!(error.code(), "E0800", "{error}");
+    assert!(error.to_string().contains("failed to load"), "{error}");
+    assert_eq!(recovered_vm.stdout(), "");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    recovered_vm.set_canonical_ffi_library_path(
+        bad_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let error = recovered_vm
+        .run_value()
+        .expect_err("replacing the path with a bad library must preserve FFI contracts");
+    assert_eq!(error.code(), "E0808", "{error}");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(recovered_vm.stdout(), "");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    recovered_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
             .join("ffi.so")
             .to_string_lossy()
             .into_owned(),
