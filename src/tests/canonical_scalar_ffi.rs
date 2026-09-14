@@ -19498,6 +19498,256 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_cross_call_identity_and_digest_stability() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_cross_call_f64(double value) { return value == 7.0 ? 42 : -1; }
+int64_t generated_cross_call_i64(int64_t value) { return value + 42; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_cross_call_f64(value: f64) -> i64;
+    func generated_cross_call_i64(value: i64) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    println(generated_cross_call_f64(7 as i32));
+    println(generated_cross_call_i64(20 as i32));
+    0
+}
+"#;
+
+    struct MatrixOracle;
+    impl MirReferenceFfiResolver for MatrixOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("generated_cross_call_f64", [MirRuntimeValue::FloatBits(bits)])
+                    if *bits == 7.0_f64.to_bits() =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                ("generated_cross_call_i64", [MirRuntimeValue::Int(value)]) => {
+                    Ok(MirRuntimeValue::Int(*value + 42))
+                }
+                _ => Err("unexpected cross-call scalar FFI shape".into()),
+            }
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cross-call mixed-width identity fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("cross-call mixed-width identity fixture MIR");
+    let entries = canonical.ffi_call_entries_in_source_order();
+    assert_eq!(entries.len(), 2, "fixture must carry two FFI call receipts");
+    let first_receipt = entries[0].1.clone();
+    let second_id = entries[1].0.clone();
+    let second_receipt = entries[1].1.clone();
+    assert_eq!(first_receipt.symbol, "generated_cross_call_f64");
+    assert_eq!(second_receipt.symbol, "generated_cross_call_i64");
+    assert_eq!(
+        first_receipt.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        }]
+    );
+    assert_eq!(
+        second_receipt.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        }]
+    );
+    assert_ne!(
+        first_receipt.result, second_receipt.result,
+        "independent call sites must retain independent result identities"
+    );
+
+    let baseline_route = canonical.route_receipt("scalar-ffi-cross-call-identity-v1");
+    let reference = MirReferenceInterpreter::new(&canonical)
+        .with_ffi_resolver(&MatrixOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("cross-call mixed-width reference execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "7\n42\n62\n");
+
+    let bytecode = compile_mir_program(&canonical).expect("cross-call mixed-width bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("cross-call mixed-width VM"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n42\n62\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_cross_call_identity");
+    generator
+        .compile_mir_native(&canonical)
+        .expect("cross-call mixed-width native lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid cross-call mixed-width native module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("cross-call mixed-width native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n42\n62\n");
+    assert_eq!(native.stderr, "");
+
+    let widening_to_f64 = first_receipt.parameter_conversions[0].clone();
+    let mut forged_conversion_receipts = canonical.ffi_calls().clone();
+    forged_conversion_receipts
+        .get_mut(&second_id)
+        .expect("second cross-call receipt")
+        .parameter_conversions[0] = widening_to_f64;
+    let mut forged_conversion = canonical.clone();
+    forged_conversion.replace_ffi_calls_for_test_only(forged_conversion_receipts);
+    let forged_conversion_route =
+        forged_conversion.route_receipt("scalar-ffi-cross-call-identity-v1");
+    assert_ne!(
+        baseline_route.ffi_digest, forged_conversion_route.ffi_digest,
+        "FFI digest must distinguish conversion classes across call sites"
+    );
+    assert_ne!(
+        baseline_route.mir_digest, forged_conversion_route.mir_digest,
+        "MIR digest must include cross-call conversion identity"
+    );
+    assert!(
+        crate::core::mir::validate_ffi_receipt_table(
+            forged_conversion.functions(),
+            forged_conversion.ffi_calls(),
+        )
+        .is_empty(),
+        "conversion forgery keeps receipt topology intact"
+    );
+    let forged_reference =
+        MirReferenceInterpreter::new(&forged_conversion).with_ffi_resolver(&MatrixOracle);
+    let forged_reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject cross-call conversion forgery");
+    assert!(
+        forged_reference_error
+            .to_string()
+            .contains("ABI conversion receipt"),
+        "{forged_reference_error}"
+    );
+    assert_eq!(forged_reference.captured_output(), "7\n42\n");
+    let bytecode_error = compile_mir_program(&forged_conversion)
+        .expect_err("bytecode must reject cross-call conversion forgery");
+    assert!(
+        bytecode_error
+            .iter()
+            .any(|error| error.message.contains("conversion receipt")),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&forged_conversion)
+        .expect_err("native admission must reject cross-call conversion forgery");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains("conversion receipt")),
+        "{native_error:?}"
+    );
+    let verifier_error =
+        crate::verifier::verify_mir(&forged_conversion, "r6-676-conversion-forgery".into())
+            .expect_err("MIR verifier must reject cross-call conversion forgery");
+    assert!(
+        verifier_error.contains("conversion receipt"),
+        "{verifier_error}"
+    );
+
+    let first_result = first_receipt.result.clone().expect("first result identity");
+    let mut forged_result_receipts = canonical.ffi_calls().clone();
+    forged_result_receipts
+        .get_mut(&second_id)
+        .expect("second cross-call receipt")
+        .result = Some(first_result);
+    let mut forged_result = canonical;
+    forged_result.replace_ffi_calls_for_test_only(forged_result_receipts);
+    let forged_result_route = forged_result.route_receipt("scalar-ffi-cross-call-identity-v1");
+    assert_ne!(
+        baseline_route.ffi_digest, forged_result_route.ffi_digest,
+        "FFI digest must distinguish result identities across call sites"
+    );
+    assert_ne!(
+        baseline_route.mir_digest, forged_result_route.mir_digest,
+        "MIR digest must include cross-call result identity"
+    );
+    let forged_result_reference =
+        MirReferenceInterpreter::new(&forged_result).with_ffi_resolver(&MatrixOracle);
+    let forged_result_error = forged_result_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject cross-call result identity forgery");
+    assert!(
+        forged_result_error.to_string().contains("FFI receipt")
+            || forged_result_error.to_string().contains("result"),
+        "{forged_result_error}"
+    );
+    assert_eq!(
+        forged_result_reference.captured_output(),
+        "",
+        "global receipt identity validation must run before any effect"
+    );
+    let bytecode_error = compile_mir_program(&forged_result)
+        .expect_err("bytecode must reject cross-call result identity forgery");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error.message.contains("result") || error.message.contains("identity/ABI validation")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&forged_result)
+        .expect_err("native admission must reject cross-call result identity forgery");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains("result")),
+        "{native_error:?}"
+    );
+    let verifier_error =
+        crate::verifier::verify_mir(&forged_result, "r6-676-result-forgery".into())
+            .expect_err("MIR verifier must reject cross-call result identity forgery");
+    assert!(
+        verifier_error.contains("result") || verifier_error.contains("identity"),
+        "{verifier_error}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
