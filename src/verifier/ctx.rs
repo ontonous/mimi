@@ -201,6 +201,34 @@ fn same_mir_route_identity(
         && left.root_owners == right.root_owners
 }
 
+/// Return the cache identity of a MIR route witness.
+///
+/// The route profile is provenance for a consumer invocation, so it is
+/// intentionally excluded.  Every semantic receipt field, including the
+/// ordered root-owner list, is framed before hashing so delimiter characters
+/// in public owner identities cannot create cache-key collisions.  A separate
+/// digest also makes the MIR cache-key shape independent of the human-readable
+/// manifest format.
+fn mir_route_cache_identity(receipt: &crate::core::mir::CanonicalMirRouteReceipt) -> String {
+    let mut framed = String::from("mimi-proof-mir-route-cache-v1");
+    let mut frame = |value: &str| {
+        use std::fmt::Write as _;
+        write!(framed, "\n{}:", value.len()).expect("writing a String cannot fail");
+        framed.push_str(value);
+    };
+    frame(receipt.schema);
+    frame(&receipt.mir_digest);
+    frame(&receipt.type_desc_digest);
+    frame(&receipt.abi_digest);
+    frame(&receipt.ffi_digest);
+    frame(&receipt.ownership_digest);
+    frame(&receipt.flow_transition_digest);
+    for owner in &receipt.root_owners {
+        frame(&owner.0);
+    }
+    blake3::hash(framed.as_bytes()).to_hex().to_string()
+}
+
 impl ProofArtifact {
     /// Current semantics version. Bump when verification semantics change.
     pub const SEMANTICS_VERSION: u32 = 1;
@@ -271,7 +299,8 @@ impl ProofArtifact {
     }
 
     /// Proof cache key: `(semantics_version, solver_version, integer_model,
-    /// engine, program_identity)`.
+    /// engine, program_identity)` plus the MIR route identity when the proof
+    /// comes from the canonical MIR engine.
     ///
     /// 0.34.44 (ADR-008 §2): the key carries the ENGINE identity and a
     /// program hash. The resolved engine binds `resolved_ir_hash` (its
@@ -285,14 +314,23 @@ impl ProofArtifact {
             _ if self.vir_hash.is_empty() => &self.resolved_ir_hash,
             _ => &self.vir_hash,
         };
-        format!(
+        let base = format!(
             "v{}:{}:{}:{}:{}",
             self.semantics_version,
             self.solver_version,
             self.integer_model,
             self.engine,
             program_identity
-        )
+        );
+        if self.engine != Self::ENGINE_MIR {
+            return base;
+        }
+        let route_identity = self
+            .mir_route_receipt
+            .as_ref()
+            .map(mir_route_cache_identity)
+            .unwrap_or_else(|| "missing".to_string());
+        format!("{base}:mir-route-v1:{route_identity}")
     }
 }
 

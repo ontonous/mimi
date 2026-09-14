@@ -6641,6 +6641,57 @@ fn proof_artifact_cross_engine_is_incompatible() {
 }
 
 #[test]
+fn mir_proof_cache_key_binds_route_identity_without_profile() {
+    let mut mir = ProofArtifact::new("z3 4.13.0".to_string(), "src-hash".to_string());
+    mir.engine = ProofArtifact::ENGINE_MIR.to_string();
+    mir.mir_hash = "a".repeat(64);
+    mir.mir_route_receipt = Some(crate::core::mir::CanonicalMirRouteReceipt {
+        schema: crate::core::mir::MIR_ROUTE_RECEIPT_SCHEMA,
+        profile: "native-v1".to_string(),
+        mir_digest: "b".repeat(64),
+        type_desc_digest: "c".repeat(64),
+        abi_digest: "d".repeat(64),
+        ffi_digest: "e".repeat(64),
+        ownership_digest: "f".repeat(64),
+        flow_transition_digest: "0".repeat(64),
+        root_owners: vec![crate::core::NodeId("function:main".to_string())],
+    });
+
+    let mut profile_only = mir.clone();
+    profile_only
+        .mir_route_receipt
+        .as_mut()
+        .expect("route receipt")
+        .profile = "verifier-v1".to_string();
+    assert_eq!(
+        mir.cache_key(),
+        profile_only.cache_key(),
+        "consumer profile is provenance and must not split semantic cache identity"
+    );
+
+    let mut forged = mir.clone();
+    forged
+        .mir_route_receipt
+        .as_mut()
+        .expect("route receipt")
+        .ffi_digest = "1".repeat(64);
+    assert_ne!(
+        mir.cache_key(),
+        forged.cache_key(),
+        "MIR cache identity must include the FFI sub-digest"
+    );
+
+    let mut missing = mir.clone();
+    missing.mir_route_receipt = None;
+    assert_ne!(
+        mir.cache_key(),
+        missing.cache_key(),
+        "a pre-receipt MIR artifact must never share a cache key with a bound proof"
+    );
+    assert!(!mir.is_compatible(&missing));
+}
+
+#[test]
 fn lsp_verification_cache_key_is_engine_scoped() {
     let key = crate::lsp::verification_cache_key("file:///a.mimi", "double");
     // Engine identity + semantics version are mandatory segments.
