@@ -4218,6 +4218,139 @@ fn canonical_mir_cli_receipt_manifest_imported_unit_ffi_rejects_replay_after_sou
 }
 
 #[test]
+fn canonical_mir_cli_imported_unit_ffi_receipt_matches_default_and_explicit_verifier_routes() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-import-unit-route-modes-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported unit FFI route-mode fixture directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"extern "C" {
+    func mir_ffi_receipt_store(value: i32) ensures: true;
+    func mir_ffi_receipt_read() -> i64;
+}
+pub func write(value: i32) -> i64 {
+    mir_ffi_receipt_store(value)
+    0
+}
+pub func read() -> i64 { mir_ffi_receipt_read() }
+"#,
+    )
+    .expect("write imported unit FFI route-mode helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use ffi_types;\nfunc main() -> i64 { write(4); read() }\n",
+    )
+    .expect("write imported unit FFI route-mode entry");
+
+    let inspect = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn imported unit FFI route-mode receipt")
+    };
+    let all_first = inspect(false);
+    let receipt_first = inspect(true);
+    for (label, output) in [("all-first", &all_first), ("receipt-first", &receipt_first)] {
+        assert!(
+            output.status.success(),
+            "{label} imported unit FFI receipt failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr)
+                .contains("canonical route disposition: legacy"),
+            "{label} imported unit FFI receipt fell back to legacy"
+        );
+    }
+    assert_eq!(
+        all_first.stdout, receipt_first.stdout,
+        "receipt option order must not change imported unit FFI manifest"
+    );
+    assert_eq!(
+        all_first.stderr, receipt_first.stderr,
+        "receipt option order must not change imported unit FFI diagnostics"
+    );
+    let checked = checked_route_receipt(&main);
+    let parsed = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+        &String::from_utf8_lossy(&all_first.stdout),
+    )
+    .expect("imported unit FFI route-mode receipt must parse");
+    assert_eq!(parsed, checked);
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn imported unit FFI route-mode verifier")
+    };
+    let default_verify = verify(false);
+    let mir_verify = verify(true);
+    for (label, output) in [("default", &default_verify), ("mir", &mir_verify)] {
+        assert!(
+            output.status.success(),
+            "{label} imported unit FFI verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("canonical MIR extern ensures contract proven"),
+            "{label} verifier lost the imported unit ensures proof: {text}"
+        );
+        assert!(
+            !text.contains("canonical route disposition: legacy"),
+            "{label} imported unit FFI verifier fell back to legacy: {text}"
+        );
+    }
+    let semantic = |output: &std::process::Output| {
+        [
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ]
+        .into_iter()
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|line| line.contains("canonical MIR extern") || line.contains("verified in"))
+        .map(|line| {
+            let line = mimi::diagnostic::format::strip_ansi(&line);
+            let line = line
+                .rsplit_once(" (")
+                .map_or(line.as_str(), |(head, _)| head);
+            line.split(" in ").next().unwrap_or(line).to_owned()
+        })
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        semantic(&default_verify),
+        semantic(&mir_verify),
+        "default and explicit MIR verifier routes changed imported unit FFI semantics"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
