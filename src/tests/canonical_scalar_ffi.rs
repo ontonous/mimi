@@ -6283,6 +6283,26 @@ func main() -> i64 { 0 }
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
+    stdout.lock().unwrap().clear();
+    let wrapped_combo_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped entry must preserve combined argument validation");
+    assert_eq!(wrapped_combo_error.code(), "E0800");
+    assert_eq!(wrapped_combo_error.to_string(), combo_error.to_string());
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    stdout.lock().unwrap().clear();
+    let direct_combo_error = vm
+        .call_function(vm.program().entry, &[])
+        .expect_err("direct entry must preserve combined argument validation");
+    assert_eq!(direct_combo_error.code(), "E0800");
+    assert_eq!(direct_combo_error.to_string(), combo_error.to_string());
+    assert_eq!(&*stdout.lock().unwrap(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
     vm.replace_canonical_ffi_call_args_for_test_only(
         original_b.function,
@@ -6292,7 +6312,7 @@ func main() -> i64 { 0 }
     );
     stdout.lock().unwrap().clear();
     assert_eq!(
-        vm.call_named("function:main", Vec::new())
+        vm.call_function(vm.program().entry, &[])
             .expect("combined argument validation restoration must recover"),
         Value::Int(5)
     );
