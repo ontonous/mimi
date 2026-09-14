@@ -4827,6 +4827,16 @@ func main() -> i64 { 0 }
         .expect_err("enabled flow actor worker must enforce FFI postcondition");
     assert_eq!(error.code(), "E0808");
     assert!(error.to_string().contains("FFI postcondition failed"));
+    let repeated_error = enabled
+        .try_enqueue("advance".to_string(), Vec::new())
+        .expect("enqueue repeated enabled flow transition")
+        .recv()
+        .expect("repeated enabled flow actor worker response")
+        .expect_err("a failed flow transition must leave the actor dispatchable");
+    assert_eq!(repeated_error.code(), "E0808");
+    assert!(repeated_error
+        .to_string()
+        .contains("FFI postcondition failed"));
 
     let explicitly_bound = crate::interp::ActorHandle::new_bytecode(
         actor_instance(),
