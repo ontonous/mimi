@@ -4737,6 +4737,145 @@ func main() -> i64 { 0 }
     assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_parallel_nested_spawn_isolates_library_binding_and_stdout() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_parallel_nested(int64_t value) { return value + 1; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_parallel_nested(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_parallel_nested(value: i64) -> i64 ensures: result == value; }
+func leaf() -> i64 {
+    println(41)
+    mir_ffi_parallel_nested(5 as i64)
+}
+func main() -> i64 { 0 }
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    guard.set_path(&bad_fixture.dir.join("ffi.so"));
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("parallel nested binding fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize parallel nested binding MIR");
+    let mut bytecode = compile_mir_program(&mir).expect("compile parallel nested binding bytecode");
+    assert!(bytecode.ast.is_none());
+    let leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf")
+        .expect("canonical parallel leaf function") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical parallel main function");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("test bytecode must be unique");
+
+    let mut middle_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle".into(), 0);
+    let middle_task = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: middle_task,
+        func: leaf,
+        args_base: middle_task,
+        argc: 0,
+    });
+    let middle_result = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: middle_result,
+        ra: middle_task,
+    });
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: middle_result });
+    let middle = program.functions.len() as u32;
+    program.functions.push(middle_proto);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let outer_task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_task,
+        func: middle,
+        args_base: outer_task,
+        argc: 0,
+    });
+    let outer_result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: outer_result,
+        ra: outer_task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
+    program.functions[main] = main_proto;
+
+    let program = bytecode;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let run = |program: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+               library_path: String,
+               barrier: std::sync::Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let mut vm = BytecodeVM::new(program);
+            vm.set_stdout_buf(stdout.clone());
+            vm.set_canonical_ffi_library_path(library_path);
+            barrier.wait();
+            let outcome = match vm.run_value() {
+                Ok(value) => Ok(value),
+                Err(error) => Err((error.code().to_string(), error.to_string())),
+            };
+            let stdout_snapshot = stdout.lock().unwrap().clone();
+            (
+                outcome,
+                stdout_snapshot,
+                vm.debug_stack_state(),
+                vm.debug_canonical_ffi_loaded_library_count(),
+            )
+        })
+    };
+
+    let good_handle = run(
+        program.clone(),
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+        barrier.clone(),
+    );
+    let bad_handle = run(
+        program,
+        bad_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+        barrier,
+    );
+    let (good_outcome, good_stdout, good_stack, good_cache) =
+        good_handle.join().expect("good nested VM thread");
+    let (bad_outcome, bad_stdout, bad_stack, bad_cache) =
+        bad_handle.join().expect("bad nested VM thread");
+
+    assert_eq!(good_outcome.expect("good nested VM result"), Value::Int(5));
+    assert_eq!(good_stdout, "41\n");
+    assert_eq!(good_stack, (0, 0));
+    assert_eq!(good_cache, 0);
+    let (code, message) = bad_outcome.expect_err("bad nested VM must reject postcondition");
+    assert_eq!(code, "E0808");
+    assert!(message.contains("FFI postcondition failed"), "{message}");
+    assert_eq!(bad_stdout, "41\n");
+    assert_eq!(bad_stack, (0, 0));
+    assert_eq!(bad_cache, 0);
+}
+
 #[test]
 fn canonical_spawned_vm_inherits_ordinary_contract_mode() {
     const SOURCE: &str = r#"
