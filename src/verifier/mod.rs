@@ -45,7 +45,22 @@ pub fn verify_mir_with_route_receipt(
         .map_err(|message| {
             format!("MIR-RECEIPT-001: canonical route receipt rejected: {message}")
         })?;
-    verify_mir(program, source_hash)
+    let mut results = verify_mir(program, source_hash)?;
+    bind_route_receipt(&mut results, receipt);
+    Ok(results)
+}
+
+fn bind_route_receipt(
+    results: &mut [VerificationResult],
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) {
+    for result in results {
+        if let Some(artifact) = result.artifact.as_mut() {
+            if artifact.engine == ProofArtifact::ENGINE_MIR {
+                artifact.mir_route_receipt = Some(receipt.clone());
+            }
+        }
+    }
 }
 
 /// Replay a canonical MIR verification from the line-oriented receipt
@@ -244,7 +259,9 @@ pub fn verify_ffi_mir_with_route_receipt(
         .map_err(|message| {
             format!("MIR-FFI-RECEIPT-001: canonical route receipt rejected: {message}")
         })?;
-    verify_ffi_mir_with_source_hash(program, source_hash)
+    let mut results = verify_ffi_mir_with_source_hash(program, source_hash)?;
+    bind_route_receipt(&mut results, receipt);
+    Ok(results)
 }
 
 /// Replay the FFI-only canonical verifier from a CLI route receipt manifest.

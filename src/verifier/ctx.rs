@@ -174,6 +174,10 @@ pub struct ProofArtifact {
     /// verifier). It is separate from Resolved IR because proof reuse across
     /// frontend and canonicalization stages must be explicit.
     pub mir_hash: String,
+    /// Full canonical MIR route receipt for audit and replay. Non-MIR engines
+    /// leave this unset; MIR consumers expose the same ABI/FFI/ownership/Flow
+    /// sub-digests as the CLI evidence manifest.
+    pub mir_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
     /// BLAKE3 hash of the VIR (verification-ir identity, span-free).
     pub vir_hash: String,
     /// 0.34.44 (ADR-008 §2): engine identity. Proof cache entries are only
@@ -181,6 +185,20 @@ pub struct ProofArtifact {
     /// is a fail-loud error, never a silent downgrade. See the
     /// `ENGINE_FLOW_AST` / `ENGINE_RESOLVED` constants.
     pub engine: String,
+}
+
+fn same_mir_route_identity(
+    left: &crate::core::mir::CanonicalMirRouteReceipt,
+    right: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> bool {
+    left.schema == right.schema
+        && left.mir_digest == right.mir_digest
+        && left.type_desc_digest == right.type_desc_digest
+        && left.abi_digest == right.abi_digest
+        && left.ffi_digest == right.ffi_digest
+        && left.ownership_digest == right.ownership_digest
+        && left.flow_transition_digest == right.flow_transition_digest
+        && left.root_owners == right.root_owners
 }
 
 impl ProofArtifact {
@@ -212,6 +230,7 @@ impl ProofArtifact {
             source_hash,
             resolved_ir_hash: String::new(),
             mir_hash: String::new(),
+            mir_route_receipt: None,
             vir_hash: String::new(),
             // 0.34.44 (ADR-008 §2): this constructor serves the flow/VIR
             // paths (the resolved engine builds its artifact inline).
@@ -243,6 +262,11 @@ impl ProofArtifact {
             && self.engine == current.engine
             && self_identity == current_identity
             && self.mir_hash == current.mir_hash
+            && match (&self.mir_route_receipt, &current.mir_route_receipt) {
+                (Some(left), Some(right)) => same_mir_route_identity(left, right),
+                (None, None) => true,
+                _ => false,
+            }
             && self.vir_hash == current.vir_hash
     }
 
@@ -1846,6 +1870,7 @@ impl Verifier {
                 source_hash: self.ctx.source_hash.clone(),
                 resolved_ir_hash: self.ctx.resolved_ir_hash.clone(),
                 mir_hash: String::new(),
+                mir_route_receipt: None,
                 vir_hash: String::new(),
                 // 0.34.44 (ADR-008 §2): this is the resolved engine.
                 engine: ProofArtifact::ENGINE_RESOLVED.to_string(),

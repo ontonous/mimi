@@ -16468,6 +16468,55 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             projection(&ffi_with_manifest),
             "manifest replay must preserve the FFI verifier projection"
         );
+        for results in [
+            &mir_with_receipt,
+            &mir_with_manifest,
+            &mir_ffi_with_receipt,
+            &ffi_with_manifest,
+        ] {
+            for result in results.iter().filter_map(|result| result.artifact.as_ref()) {
+                assert_eq!(
+                    result.mir_route_receipt.as_ref(),
+                    Some(&verifier_receipt),
+                    "MIR proof artifact must expose the route receipt used by its verifier"
+                );
+                assert_eq!(result.mir_hash, verifier_receipt.mir_digest);
+                assert_eq!(
+                    result
+                        .mir_route_receipt
+                        .as_ref()
+                        .map(|receipt| receipt.ffi_digest.as_str()),
+                    Some(verifier_receipt.ffi_digest.as_str())
+                );
+                assert_eq!(
+                    result
+                        .mir_route_receipt
+                        .as_ref()
+                        .map(|receipt| receipt.abi_digest.as_str()),
+                    Some(verifier_receipt.abi_digest.as_str())
+                );
+                let mut profile_only = (*result).clone();
+                profile_only
+                    .mir_route_receipt
+                    .as_mut()
+                    .expect("MIR proof receipt")
+                    .profile = "another-consumer-v1".into();
+                assert!(
+                    result.is_compatible(&profile_only),
+                    "route profile is provenance, not semantic MIR identity"
+                );
+                let mut forged_identity = (*result).clone();
+                forged_identity
+                    .mir_route_receipt
+                    .as_mut()
+                    .expect("MIR proof receipt")
+                    .ffi_digest = "0".repeat(64);
+                assert!(
+                    !result.is_compatible(&forged_identity),
+                    "proof cache compatibility must include receipt sub-digests"
+                );
+            }
+        }
         let bytecode_receipt = route.program.route_receipt("r6-693-bytecode-v1");
         let bytecode = compile_mir_program_with_route_receipt(&route.program, &bytecode_receipt)
             .expect("receipt-bound canonical FFI bytecode");

@@ -145,6 +145,7 @@ pub(crate) fn verify_program(
 ) -> Result<Vec<VerificationResult>, String> {
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
+    let mir_route_receipt = program.route_receipt("verifier-mir-v1");
     let mut results = Vec::new();
 
     // `verify_mir` is also exercised as a public MIR-only API by callers that
@@ -248,6 +249,7 @@ pub(crate) fn verify_program(
                 source_hash: source_hash.clone(),
                 resolved_ir_hash: String::new(),
                 mir_hash: mir_hash.clone(),
+                mir_route_receipt: Some(mir_route_receipt.clone()),
                 vir_hash: String::new(),
                 engine: ProofArtifact::ENGINE_MIR.to_string(),
             })
@@ -373,6 +375,7 @@ pub(crate) fn verify_ffi_program(
     }
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
+    let mir_route_receipt = program.route_receipt("verifier-mir-v1");
     let mut checks_by_instruction =
         BTreeMap::<crate::core::mir::MirInstructionId, (crate::core::NodeId, Vec<FfiCheck>)>::new();
 
@@ -537,6 +540,7 @@ pub(crate) fn verify_ffi_program(
                 source_hash: source_hash.clone(),
                 resolved_ir_hash: String::new(),
                 mir_hash: mir_hash.clone(),
+                mir_route_receipt: Some(mir_route_receipt.clone()),
                 vir_hash: String::new(),
                 engine: ProofArtifact::ENGINE_MIR.to_string(),
             })
