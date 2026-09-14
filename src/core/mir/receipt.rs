@@ -706,6 +706,26 @@ mod tests {
     }
 
     #[test]
+    fn route_receipt_comparison_reports_joint_identity_drift_in_declared_order() {
+        let receipt = valid_receipt();
+        let mut drifted = receipt.clone();
+        drifted.profile = "other-v1".into();
+        drifted.mir_digest = "b".repeat(64);
+        drifted.abi_digest = "b".repeat(64);
+        drifted.ffi_digest = "b".repeat(64);
+        drifted.ownership_digest = "b".repeat(64);
+        drifted.root_owners = vec![NodeId("function:a".into()), NodeId("function:z".into())];
+
+        let error = receipt
+            .verify_against_receipt(&drifted)
+            .expect_err("joint receipt identity drift must fail closed");
+        assert_eq!(
+            error,
+            "route receipt does not match expected checker receipt: profile, mir_digest, abi_digest, ffi_digest, ownership_digest, root_owners"
+        );
+    }
+
+    #[test]
     fn route_receipt_manifest_uses_declared_field_order_and_values() {
         let receipt = valid_receipt();
         let text = receipt.manifest_text().expect("valid receipt manifest");
@@ -779,6 +799,20 @@ mod tests {
         assert_eq!(
             duplicate,
             "invalid MIR route manifest: duplicate field 'schema' at row 1"
+        );
+    }
+
+    #[test]
+    fn route_receipt_manifest_parser_rejects_reordered_rows_before_value_comparison() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+        let mut rows = manifest.lines().map(str::to_owned).collect::<Vec<_>>();
+        rows.swap(3, 4);
+        let error = CanonicalMirRouteReceipt::parse_manifest(&rows.join("\n"))
+            .expect_err("reordered manifest rows must fail closed");
+        assert_eq!(
+            error,
+            "invalid MIR route manifest: field 'type_desc_digest' at row 2, expected 'mir_digest'"
         );
     }
 
