@@ -18406,6 +18406,159 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_forged_receipts_fail_closed_across_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_forged_mixed(left: i64, right: i64) -> i64;
+}
+func main() -> i64 {
+    println(17 as i64);
+    generated_forged_mixed(20 as i32, 22 as i32)
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width forged receipt fixture");
+    let canonical =
+        MirProgram::from_checked_program(&checked).expect("mixed-width forged receipt MIR");
+    let instruction_id = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("mixed-width forged receipt instruction");
+    let receipt = canonical
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("mixed-width forged receipt");
+    let widening = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    assert_eq!(receipt.parameter_conversions, vec![widening, widening]);
+    assert_eq!(
+        receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        })
+    );
+
+    let mut forged_parameter_receipts = canonical.ffi_calls().clone();
+    forged_parameter_receipts
+        .get_mut(&instruction_id)
+        .expect("mixed-width forged parameter receipt")
+        .parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    };
+    let mut forged_parameter = canonical.clone();
+    forged_parameter.replace_ffi_calls_for_test_only(forged_parameter_receipts);
+
+    let mut forged_result_receipts = canonical.ffi_calls().clone();
+    forged_result_receipts
+        .get_mut(&instruction_id)
+        .expect("mixed-width forged result receipt")
+        .result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    });
+    let mut forged_result = canonical;
+    forged_result.replace_ffi_calls_for_test_only(forged_result_receipts);
+
+    for (label, forged) in [("parameter", forged_parameter), ("result", forged_result)] {
+        let table_errors =
+            crate::core::mir::validate_ffi_receipt_table(forged.functions(), forged.ffi_calls());
+        assert!(
+            table_errors.is_empty(),
+            "{label}: receipt topology must remain intact: {table_errors:?}"
+        );
+
+        let reference = MirReferenceInterpreter::new(&forged);
+        let reference_error = reference
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject a forged mixed-width receipt");
+        assert!(
+            reference_error
+                .to_string()
+                .contains("ABI conversion receipt")
+                || reference_error.to_string().contains("conversion from"),
+            "{label}: {reference_error}"
+        );
+        assert_eq!(
+            reference.captured_output(),
+            "17\n",
+            "{label}: reference output"
+        );
+
+        let bytecode_error = compile_mir_program(&forged)
+            .expect_err("bytecode must reject a forged mixed-width receipt");
+        assert!(
+            bytecode_error.iter().any(|error| {
+                error.message.contains("conversion receipt")
+                    || error.message.contains("identity/ABI validation")
+                    || error.message.contains("conversion from")
+            }),
+            "{label}: {bytecode_error:?}"
+        );
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native admission must reject a forged mixed-width receipt");
+        assert!(
+            native_error.iter().any(|error| {
+                error.message.contains("conversion receipt")
+                    || error.message.contains("conversion from")
+            }),
+            "{label}: {native_error:?}"
+        );
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject a forged mixed-width receipt");
+        assert!(
+            capability_error.iter().any(|error| {
+                error.contains("conversion receipt") || error.contains("conversion from")
+            }),
+            "{label}: {capability_error:?}"
+        );
+
+        let verifier_error = crate::verifier::verify_mir(&forged, format!("r6-669-{label}"))
+            .expect_err("MIR verifier must reject a forged mixed-width receipt");
+        assert!(
+            verifier_error.contains("conversion receipt")
+                || verifier_error.contains("conversion from"),
+            "{label}: {verifier_error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (
