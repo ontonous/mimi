@@ -4513,7 +4513,8 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
 
-    let mut vm = BytecodeVM::new(bytecode);
+    let program = bytecode;
+    let mut vm = BytecodeVM::new(program.clone());
     vm.set_canonical_ffi_library_path(
         good_fixture
             .dir
@@ -4529,6 +4530,37 @@ func main() -> i64 { 0 }
     assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let mut recovered_vm = BytecodeVM::new(program);
+    recovered_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("missing.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let error = recovered_vm
+        .run_value()
+        .expect_err("nested child must report a missing explicit FFI library");
+    assert_eq!(error.code(), "E0800", "{error}");
+    assert!(error.to_string().contains("failed to load"), "{error}");
+    assert_eq!(recovered_vm.stdout(), "");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    recovered_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        recovered_vm.run_value().expect("recovered nested FFI run"),
+        Value::Int(5)
+    );
+    assert_eq!(recovered_vm.stdout(), "");
+    assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
 }
 
 #[test]
