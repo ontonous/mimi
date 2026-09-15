@@ -1814,6 +1814,18 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
         .contains("outside target integer range"));
     assert_eq!(oracle.0.get(), 2);
 
+    let unchecked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_ffi_verification(false);
+    let unchecked_error = unchecked_reference
+        .execute_with_output(&owner, &[])
+        .expect_err("disabling FFI contracts must not bypass result range conversion");
+    assert!(unchecked_error
+        .to_string()
+        .contains("outside target integer range"));
+    assert_eq!(unchecked_reference.captured_output(), "0\n");
+    assert_eq!(oracle.0.get(), 4);
+
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-float-narrow-range".into())
         .expect("verify floating narrow result range MIR");
@@ -16476,6 +16488,117 @@ func main() -> i64 {
     assert_eq!(forged_interpreter.captured_output(), "");
     assert_eq!(forged_host.calls.get(), 0);
     assert!(forged_host.symbols.borrow().is_empty());
+}
+
+#[test]
+fn scalar_ffi_reference_contract_switch_keeps_host_and_result_guards() {
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_contract_switch(value: i64) -> i64 ensures: result == value;
+    func mir_ffi_narrow_argument(value: i32) -> i32;
+}
+func main() -> i64 {
+    println(1 as i64);
+    let result = mir_ffi_contract_switch(7 as i64);
+    println(result);
+    0
+}
+func narrow(value: i32) -> i32 {
+    println(2 as i64);
+    let result = mir_ffi_narrow_argument(value);
+    println(result);
+    result
+}
+"#;
+
+    struct Host {
+        mode: Cell<u8>,
+        calls: Cell<u8>,
+    }
+
+    impl MirReferenceFfiResolver for Host {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_contract_switch");
+            assert_eq!(arguments, [MirRuntimeValue::Int(7)]);
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            match self.mode.get() {
+                0 => Err("explicit contract-switch host failure".into()),
+                1 => Ok(MirRuntimeValue::Bool(true)),
+                _ => Ok(MirRuntimeValue::Int(8)),
+            }
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("reference contract-switch fixture check");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("reference contract-switch fixture MIR");
+    let host = Host {
+        mode: Cell::new(0),
+        calls: Cell::new(0),
+    };
+    let interpreter = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&host)
+        .with_ffi_verification(false);
+
+    let host_error = interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("unchecked reference execution must still surface host failures");
+    assert!(host_error
+        .to_string()
+        .contains("explicit contract-switch host failure"));
+    assert_eq!(interpreter.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 1);
+
+    host.mode.set(1);
+    let result_type_error = interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("unchecked reference execution must still validate result ABI");
+    assert!(result_type_error
+        .to_string()
+        .contains("FFI result does not match"));
+    assert_eq!(interpreter.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 2);
+
+    host.mode.set(2);
+    let unchecked = interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("unchecked reference execution must skip only the ensures predicate");
+    assert_eq!(unchecked.value, MirRuntimeValue::Int(0));
+    assert_eq!(unchecked.output, "1\n8\n");
+    assert_eq!(host.calls.get(), 3);
+
+    let checked_interpreter = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&host)
+        .with_ffi_verification(true);
+    let contract_error = checked_interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("checked reference execution must enforce the ensures predicate");
+    assert!(contract_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(checked_interpreter.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 4);
+
+    let narrow_interpreter = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&host)
+        .with_ffi_verification(false);
+    let argument_error = narrow_interpreter
+        .execute_with_output(
+            &crate::core::NodeId("function:narrow".into()),
+            &[MirRuntimeValue::Int(i64::MAX)],
+        )
+        .expect_err("an out-of-range direct argument must fail before host binding");
+    assert!(argument_error
+        .to_string()
+        .contains("FFI argument does not match"));
+    assert_eq!(narrow_interpreter.captured_output(), "2\n");
+    assert_eq!(host.calls.get(), 4);
 }
 
 #[test]
