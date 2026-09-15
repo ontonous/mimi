@@ -697,13 +697,11 @@ fn main() -> std::process::ExitCode {
 /// the historical compact formatter; only the four cross-adapter route codes
 /// are upgraded to the shared machine-first diagnostic shape.
 fn format_cli_error(message: &str) -> String {
-    let Some(code) = mimi::diagnostic::codes::canonical_mir_route_code_in_message(message) else {
+    let Some((offset, code)) =
+        mimi::diagnostic::codes::canonical_mir_route_code_location_in_message(message)
+    else {
         return format_simple_error(message);
     };
-
-    let offset = message
-        .find(code)
-        .expect("route code returned by classifier must occur in message");
     let context = message[..offset]
         .trim_end()
         .trim_end_matches(':')
@@ -756,6 +754,22 @@ mod tests {
         assert!(rendered.contains("error"));
         assert!(rendered.contains("ordinary command failure"));
         assert!(!rendered.contains("error["));
+    }
+
+    #[test]
+    fn cli_route_formatter_skips_invalid_prefix_before_valid_code() {
+        let message =
+            "wrapper: MIR-RECEIPT-001-extra: ignore; MIR-RECEIPT-001: use this occurrence";
+        let rendered = strip_ansi(&format_cli_error(message));
+        assert!(
+            rendered.starts_with("error[MIR-RECEIPT-001] "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("wrapper: MIR-RECEIPT-001-extra: ignore;"),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("use this occurrence\n"), "{rendered}");
     }
 }
 

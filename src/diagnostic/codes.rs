@@ -261,6 +261,13 @@ pub const MIR_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-RECEIPT-MANIFEST-001";
 pub const MIR_FFI_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-FFI-RECEIPT-001";
 pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-001";
 
+const MIR_ROUTE_CODES: [&str; 4] = [
+    MIR_ROUTE_RECEIPT_ERROR_CODE,
+    MIR_ROUTE_MANIFEST_ERROR_CODE,
+    MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+    MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+];
+
 // Lint warning codes (W0xxx)
 
 /// Recognize a canonical MIR route code carried at the beginning of an
@@ -268,14 +275,9 @@ pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-00
 /// prefixes for CLI compatibility, while structured consumers use this one
 /// registry-owned classifier instead of maintaining divergent lists.
 pub fn canonical_mir_route_code(message: &str) -> Option<&'static str> {
-    [
-        MIR_ROUTE_RECEIPT_ERROR_CODE,
-        MIR_ROUTE_MANIFEST_ERROR_CODE,
-        MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
-        MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
-    ]
-    .into_iter()
-    .find(|code| message.starts_with(code))
+    MIR_ROUTE_CODES
+        .into_iter()
+        .find(|code| message.starts_with(code))
 }
 
 /// Find a canonical MIR route code inside an adapter-wrapped error message.
@@ -285,20 +287,27 @@ pub fn canonical_mir_route_code(message: &str) -> Option<&'static str> {
 /// error (`"verify: {error}"`), so this companion performs a token-boundary
 /// aware search without treating a longer identifier as a route code.
 pub fn canonical_mir_route_code_in_message(message: &str) -> Option<&'static str> {
-    [
-        MIR_ROUTE_RECEIPT_ERROR_CODE,
-        MIR_ROUTE_MANIFEST_ERROR_CODE,
-        MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
-        MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
-    ]
-    .into_iter()
-    .find(|code| {
-        message.match_indices(code).any(|(offset, _)| {
-            let before = message[..offset].chars().next_back();
-            let after = message[offset + code.len()..].chars().next();
-            !before.is_some_and(is_route_code_char) && !after.is_some_and(is_route_code_char)
+    canonical_mir_route_code_location_in_message(message).map(|(_, code)| code)
+}
+
+/// Find the earliest token-boundary-valid route code and its byte offset in a
+/// wrapped adapter message.  The offset is returned so callers can normalize
+/// the surrounding context without accidentally slicing at an invalid longer
+/// identifier that merely contains a registered code as a prefix.
+pub fn canonical_mir_route_code_location_in_message(
+    message: &str,
+) -> Option<(usize, &'static str)> {
+    MIR_ROUTE_CODES
+        .into_iter()
+        .flat_map(|code| {
+            message.match_indices(code).filter_map(move |(offset, _)| {
+                let before = message[..offset].chars().next_back();
+                let after = message[offset + code.len()..].chars().next();
+                (!before.is_some_and(is_route_code_char) && !after.is_some_and(is_route_code_char))
+                    .then_some((offset, code))
+            })
         })
-    })
+        .min_by_key(|(offset, _)| *offset)
 }
 
 fn is_route_code_char(ch: char) -> bool {
@@ -529,7 +538,10 @@ pub fn describe(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_mir_route_code, canonical_mir_route_code_in_message, describe, W012};
+    use super::{
+        canonical_mir_route_code, canonical_mir_route_code_in_message,
+        canonical_mir_route_code_location_in_message, describe, W012,
+    };
 
     #[test]
     fn canonical_mir_route_code_classifier_covers_all_registered_routes() {
@@ -570,6 +582,19 @@ mod tests {
         assert_eq!(
             canonical_mir_route_code_in_message("ordinary verifier error"),
             None
+        );
+    }
+
+    #[test]
+    fn canonical_mir_route_code_in_message_prefers_earliest_valid_occurrence() {
+        let message = "wrapper: MIR-RECEIPT-MANIFEST-001: first; MIR-RECEIPT-001: later";
+        assert_eq!(
+            canonical_mir_route_code_in_message(message),
+            Some(super::MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(
+            canonical_mir_route_code_location_in_message(message),
+            Some((9, super::MIR_ROUTE_MANIFEST_ERROR_CODE))
         );
     }
 
