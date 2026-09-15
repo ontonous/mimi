@@ -783,6 +783,31 @@ fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
         reader.verification_cache.contains_key(&cache_key),
         "reader must load the engine-qualified cache entry"
     );
+    // Put the restored route entry behind a full LRU of session verdicts, then
+    // fill the source registry so didOpen crosses the reset boundary. The
+    // subsequent didChange cache hit must refresh the route entry after reset.
+    for index in 0..crate::lsp::MAX_SOURCE_RECORDS {
+        let seed = format!("func reset_seed_{index}() -> i32 {{\n    {index}\n}}\n");
+        reader
+            .parse_with_recovery_for_uri(&seed, None)
+            .expect("fill reader source registry");
+    }
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 1) {
+        reader.cache_put_verification(
+            format!("session-cold-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "session proof".to_string(),
+                None,
+            ),
+        );
+    }
+    assert_eq!(
+        reader.verification_cache.len(),
+        crate::lsp::MAX_VERIFICATION_CACHE,
+        "restored route and session verdicts must share one bounded LRU"
+    );
     // didChange verifies the function at the editor's most recent cursor. Use
     // the real hover request to set that 0-indexed cursor to `bad`, which starts
     // on the second source line after the import.
@@ -843,6 +868,23 @@ fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
                 .iter()
                 .any(|diagnostic| diagnostic["message"] == "undefined variable 'missing_dep'")
         }));
+    reader.cache_put_verification(
+        "post-pending-fresh".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "fresh proof".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        reader.verification_cache.contains_key(&cache_key),
+        "a cache hit before pending delivery must refresh the persisted route entry"
+    );
+    assert!(
+        !reader.verification_cache.contains_key("session-cold-0"),
+        "the oldest cold entry should be evicted after the touched route survives"
+    );
 
     let _ = fs::remove_dir_all(root);
 }
