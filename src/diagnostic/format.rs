@@ -210,7 +210,9 @@ fn display_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
     let Some(code) = diagnostic.code.as_deref() else {
         return Cow::Borrowed(&diagnostic.message);
     };
-    if crate::diagnostic::codes::canonical_mir_route_code(&diagnostic.message) != Some(code) {
+    if crate::diagnostic::codes::canonical_mir_route_code_location_in_message(&diagnostic.message)
+        != Some((0, code))
+    {
         return Cow::Borrowed(&diagnostic.message);
     }
     let rest = diagnostic.message[code.len()..].trim_start();
@@ -363,6 +365,23 @@ mod tests {
         assert_eq!(
             rendered,
             "error[MIR-RECEIPT-MANIFEST-001] canonical route manifest rejected: future field\n"
+        );
+        assert_eq!(diagnostic.message, message);
+    }
+
+    #[test]
+    fn formatter_keeps_long_route_code_prefix_in_message() {
+        let message =
+            format!("{MIR_ROUTE_MANIFEST_ERROR_CODE}-extra: this is not a registered route code");
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            message.clone(),
+            Span::UNKNOWN,
+        );
+        let rendered = strip_ansi(&format_diagnostic(&diagnostic, None, ""));
+        assert_eq!(
+            rendered,
+            format!("error[{MIR_ROUTE_MANIFEST_ERROR_CODE}] {message}\n")
         );
         assert_eq!(diagnostic.message, message);
     }
