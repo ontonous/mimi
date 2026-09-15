@@ -15694,6 +15694,12 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
             }),
             "{label}: native manifest error lost its stable code: {native_error:?}"
         );
+        assert!(
+            native_error.iter().any(|error| {
+                error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+            }),
+            "{label}: native manifest diagnostic lost its structured code: {native_error:?}"
+        );
 
         let verifier_error = crate::verifier::verify_mir_with_route_manifest(
             &program,

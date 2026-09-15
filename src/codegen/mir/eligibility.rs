@@ -9,6 +9,10 @@ pub(super) struct NativeMirError {
     pub(super) subject: String,
     pub(super) message: String,
     pub(super) span: Span,
+    /// Optional cross-layer diagnostic code.  Most native shape failures are
+    /// ordinary backend diagnostics; route receipt failures additionally
+    /// expose their stable code structurally instead of hiding it in text.
+    pub(super) code: Option<&'static str>,
 }
 
 impl NativeMirError {
@@ -17,6 +21,7 @@ impl NativeMirError {
             subject: subject.into(),
             message: message.into(),
             span: Span::UNKNOWN,
+            code: None,
         }
     }
 
@@ -25,14 +30,20 @@ impl NativeMirError {
         self
     }
 
+    pub(super) fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
     pub(super) fn diagnostic(self) -> Diagnostic {
-        Diagnostic::error(
-            format!(
-                "canonical MIR native backend rejected {}: {}",
-                self.subject, self.message
-            ),
-            self.span,
-        )
+        let message = format!(
+            "canonical MIR native backend rejected {}: {}",
+            self.subject, self.message
+        );
+        match self.code {
+            Some(code) => Diagnostic::error_code(code, message, self.span),
+            None => Diagnostic::error(message, self.span),
+        }
     }
 }
 
@@ -75,6 +86,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
                 ),
             )
+            .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
             .diagnostic()]);
         }
         self.compile_mir_native(program)
@@ -97,10 +109,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                         crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
                     ),
                 )
+                .with_code(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
                 .diagnostic()]
             },
         )?;
         self.compile_mir_native_with_route_receipt(program, &receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeMirError;
+    use crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE;
+
+    #[test]
+    fn route_errors_keep_structured_code_when_rendered() {
+        let diagnostic = NativeMirError::new("mir-program", "future field")
+            .with_code(MIR_ROUTE_MANIFEST_ERROR_CODE)
+            .diagnostic();
+
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(
+            diagnostic.to_string(),
+            format!(
+                "[{}] canonical MIR native backend rejected mir-program: future field",
+                MIR_ROUTE_MANIFEST_ERROR_CODE
+            )
+        );
     }
 }
 
