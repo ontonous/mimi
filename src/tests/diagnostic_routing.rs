@@ -3288,6 +3288,215 @@ fn lsp_alias_uri_restart_lru_touch_keeps_pending_transport_order() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_lru_eviction_recomputes_missing_route_fail_closed() {
+    let root = temp_workspace("lsp_alias_uri_lru_eviction");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n"
+    );
+    fs::write(&real_path, text).expect("write eviction source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create eviction alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let real_route_message = "eviction real stale route: MIR-RECEIPT-001";
+    let alias_route_message = "eviction alias stale route: MIR-RECEIPT-001";
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse eviction real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find eviction function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("eviction real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("eviction stable source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        real_route_message.to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            real_route_message.to_string(),
+            crate::span::Span::new(3, 5, 3, 12).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse eviction alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("eviction alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "eviction alias snapshot must retain the stable SourceKey"
+    );
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        alias_route_message.to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            alias_route_message.to_string(),
+            crate::span::Span::new(3, 5, 3, 13).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 2) {
+        reader.cache_put_verification(
+            format!("eviction-cold-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "eviction cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+    let alias_hit = reader.compute_verification_diagnostics(text, 0, &alias_uri);
+    assert_eq!(
+        alias_hit
+            .first()
+            .and_then(|diagnostic| diagnostic["message"].as_str()),
+        Some(alias_route_message),
+        "alias hit must provide the active route before eviction"
+    );
+    reader.cache_put_verification(
+        "eviction-fresh".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "eviction fresh proof".to_string(),
+            None,
+        ),
+    );
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    assert!(
+        !reader.verification_cache.contains_key(&real_key),
+        "the untouched real route must be removed by LRU eviction"
+    );
+    reader.save_cache();
+    let after_eviction: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read cache after real eviction"),
+    )
+    .expect("parse cache after real eviction");
+    assert_eq!(
+        after_eviction["entries"].get(real_key.as_str()),
+        None,
+        "evicted real route must not be persisted"
+    );
+    assert_eq!(
+        after_eviction["entries"][alias_key.as_str()]["diagnostic"]["message"],
+        alias_route_message,
+        "alias route must remain persisted after real eviction"
+    );
+
+    // Restart from the post-eviction file. The missing real key must execute
+    // the verifier and create a real diagnostic, never replaying the injected
+    // route message. The alias key remains a valid source-aware cache hit.
+    let mut restarted = crate::lsp::LspServer::new();
+    let _ = restarted.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    assert!(!restarted.verification_cache.contains_key(&real_key));
+    assert!(restarted.verification_cache.contains_key(&alias_key));
+    let restarted_alias = restarted.compute_verification_diagnostics(text, 0, &alias_uri);
+    assert_eq!(
+        restarted_alias
+            .first()
+            .and_then(|diagnostic| diagnostic["message"].as_str()),
+        Some(alias_route_message),
+        "restart must preserve the non-evicted alias route"
+    );
+    let restarted_real = restarted.compute_verification_diagnostics(text, 0, &real_uri);
+    assert!(
+        !restarted_real.is_empty(),
+        "missing real entry must rerun verification"
+    );
+    assert!(
+        restarted_real
+            .iter()
+            .all(|diagnostic| diagnostic["message"] != real_route_message),
+        "missing real entry must not resurrect the evicted route diagnostic"
+    );
+    assert!(matches!(
+        restarted
+            .verification_cache
+            .get(&real_key)
+            .map(|entry| &entry.status),
+        Some(crate::verifier::VerifStatus::Disproven)
+    ));
+    restarted.save_cache();
+    let recomputed: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read recomputed real cache"),
+    )
+    .expect("parse recomputed real cache");
+    assert_eq!(
+        recomputed["entries"][alias_key.as_str()]["diagnostic"]["message"],
+        alias_route_message,
+        "alias route must remain stable after real recomputation"
+    );
+    assert_ne!(
+        recomputed["entries"][real_key.as_str()]["diagnostic"]["message"],
+        real_route_message,
+        "recomputed real entry must persist the verifier diagnostic"
+    );
+    assert_eq!(
+        recomputed["entries"][real_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "recomputed real diagnostic must bind the shared SourceKey"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
