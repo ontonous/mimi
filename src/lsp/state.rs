@@ -209,6 +209,12 @@ impl LspServer {
         // no-proof result would make every subsequent request return an empty
         // diagnostic list without retrying verification.
         if matches!(value.status, VerifStatus::InfrastructureError) {
+            // A retryable infrastructure failure must also invalidate any
+            // older verdict already occupying this key. Otherwise the stale
+            // entry could be persisted and later replayed if the body returns
+            // to its previous hash, defeating the fail-closed retry boundary.
+            self.cache_access_order.retain(|cached| cached != &key);
+            self.verification_cache.remove(&key);
             return;
         }
         self.cache_access_order.retain(|k| *k != key);

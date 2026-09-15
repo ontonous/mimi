@@ -896,6 +896,89 @@ fn lsp_verification_cache_does_not_retain_infrastructure_errors() {
 }
 
 #[test]
+fn lsp_infrastructure_error_clears_existing_uri_key_without_touching_alias() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_infrastructure_alias_clear_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create infrastructure alias workspace");
+    let real_uri = "file:///workspace/real-retry.mimi";
+    let alias_uri = "file:///workspace/alias-retry.mimi";
+    let real_key = crate::lsp::verification_cache_key(real_uri, "retry");
+    let alias_key = crate::lsp::verification_cache_key(alias_uri, "retry");
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            7,
+            crate::verifier::VerifStatus::Disproven,
+            "old real verdict".to_string(),
+            None,
+        ),
+    );
+    server.cache_put_verification(
+        alias_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            7,
+            crate::verifier::VerifStatus::Disproven,
+            "old alias verdict".to_string(),
+            None,
+        ),
+    );
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            8,
+            crate::verifier::VerifStatus::InfrastructureError,
+            "solver unavailable".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        !server.verification_cache.contains_key(&real_key),
+        "infrastructure failure must clear a stale real verdict"
+    );
+    assert!(
+        server.verification_cache.contains_key(&alias_key),
+        "clearing real infrastructure failure must not touch alias verdict"
+    );
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read infrastructure alias cache"),
+    )
+    .expect("parse infrastructure alias cache");
+    assert_eq!(
+        persisted["entries"].get(real_key.as_str()),
+        None,
+        "cleared real key must not be persisted"
+    );
+    assert_eq!(
+        persisted["entries"][alias_key.as_str()]["message"],
+        "old alias verdict",
+        "independent alias key must remain persisted"
+    );
+
+    let mut restarted = LspServer::new();
+    let _ = restarted.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(!restarted.verification_cache.contains_key(&real_key));
+    assert!(restarted.verification_cache.contains_key(&alias_key));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_drops_persisted_infrastructure_errors() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_infrastructure_cache_{}",
