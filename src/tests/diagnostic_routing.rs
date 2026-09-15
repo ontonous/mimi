@@ -2214,6 +2214,258 @@ fn lsp_alias_uri_save_close_reopen_keeps_versions_and_lru_identity() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_save_body_change_invalidates_stale_verdicts() {
+    let root = temp_workspace("lsp_alias_uri_body_hash");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let old_text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n"
+    );
+    let new_text = old_text.replace("    0", "    1");
+    fs::write(&real_path, old_text).expect("write body-hash source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create body-hash alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(old_text, Some(&real_uri))
+        .expect("parse body-hash real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find body-hash function");
+    let old_hash = crate::lsp::util::hash_func_body(old_text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("body-hash real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("body-hash stable source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        old_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "body-hash real stale failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "body-hash real stale route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(4, 5, 4, 24).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(old_text, Some(&alias_uri))
+        .expect("parse body-hash alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("body-hash alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "alias body-hash snapshot must retain the stable SourceKey"
+    );
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        old_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "body-hash alias stale failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "body-hash alias stale route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(4, 5, 4, 25).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let open = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64, text: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": version, "text": text }
+            }
+        }))
+    };
+    let hover = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 0 }
+            }
+        }))
+    };
+    let change = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64, text: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+    let save = |reader: &mut crate::lsp::LspServer, uri: &str, text: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": { "textDocument": { "uri": uri }, "text": text }
+        }))
+    };
+
+    assert_eq!(
+        open(&mut reader, &alias_uri, 1, old_text).expect("body-hash alias open")["params"]["uri"],
+        alias_uri
+    );
+    let _ = hover(&mut reader, &alias_uri);
+    assert_eq!(
+        change(&mut reader, &alias_uri, 2, old_text).expect("body-hash alias old change")["params"]
+            ["diagnostics"][0]["message"],
+        "body-hash alias stale route: MIR-RECEIPT-001"
+    );
+    assert_eq!(reader.document_version(&alias_uri), Some(2));
+    let saved_alias = save(&mut reader, &alias_uri, &new_text).expect("body-hash alias save");
+    assert_eq!(saved_alias["params"]["uri"], alias_uri);
+    assert_eq!(reader.document_version(&alias_uri), Some(2));
+    assert_eq!(
+        reader.documents.get(&alias_uri).map(String::as_str),
+        Some(new_text.as_str())
+    );
+    let _ = hover(&mut reader, &alias_uri);
+    let changed_alias =
+        change(&mut reader, &alias_uri, 3, &new_text).expect("body-hash alias new change");
+    assert!(
+        changed_alias["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "body hash mismatch must invalidate the old disproven alias verdict"
+    );
+    assert_eq!(reader.document_version(&alias_uri), Some(3));
+    assert_eq!(
+        reader
+            .verification_cache
+            .get(&alias_key)
+            .map(|entry| entry.body_hash),
+        Some({
+            let file = reader
+                .parse_with_recovery_for_uri(&new_text, Some(&alias_uri))
+                .expect("parse new alias body");
+            let func = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+                    _ => None,
+                })
+                .expect("find new alias body");
+            crate::lsp::util::hash_func_body(&new_text, func)
+        })
+    );
+    assert!(matches!(
+        reader
+            .verification_cache
+            .get(&alias_key)
+            .map(|entry| &entry.status),
+        Some(crate::verifier::VerifStatus::Proven)
+    ));
+
+    assert_eq!(
+        open(&mut reader, &real_uri, 1, old_text).expect("body-hash real open")["params"]["uri"],
+        real_uri
+    );
+    let _ = hover(&mut reader, &real_uri);
+    assert_eq!(
+        change(&mut reader, &real_uri, 2, old_text).expect("body-hash real old change")["params"]
+            ["diagnostics"][0]["message"],
+        "body-hash real stale route: MIR-RECEIPT-001"
+    );
+    let _ = save(&mut reader, &real_uri, &new_text).expect("body-hash real save");
+    assert_eq!(reader.document_version(&real_uri), Some(2));
+    let _ = hover(&mut reader, &real_uri);
+    let changed_real =
+        change(&mut reader, &real_uri, 3, &new_text).expect("body-hash real new change");
+    assert!(
+        changed_real["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "body hash mismatch must invalidate the old disproven real verdict"
+    );
+    assert!(matches!(
+        reader
+            .verification_cache
+            .get(&real_key)
+            .map(|entry| &entry.status),
+        Some(crate::verifier::VerifStatus::Proven)
+    ));
+
+    reader.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json")).expect("read body-hash cache"),
+    )
+    .expect("parse body-hash cache");
+    for key in [&real_key, &alias_key] {
+        assert_eq!(
+            persisted["entries"][key.as_str()]["status"],
+            "Verified",
+            "body-hash recheck must persist the new proven verdict"
+        );
+        assert_eq!(
+            persisted["entries"][key.as_str()]["diagnostic"],
+            serde_json::Value::Null,
+            "a proven recheck must not persist the old disproven diagnostic"
+        );
+    }
+    let alias_source_after = reader
+        .parse_with_recovery_for_uri(&new_text, Some(&alias_uri))
+        .expect("parse final alias snapshot")
+        .sources;
+    assert_eq!(
+        alias_source_after
+            .key(
+                alias_source_after
+                    .id_for_uri(&alias_uri)
+                    .expect("final alias id")
+            )
+            .map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "body-hash recheck must keep the shared SourceKey"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
