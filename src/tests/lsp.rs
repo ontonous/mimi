@@ -1056,8 +1056,13 @@ fn lsp_verification_cache_hit_survives_source_registry_reset() {
         body_hash,
         crate::verifier::VerifStatus::Disproven,
         "reset-safe cached failure".to_string(),
-        crate::diagnostic::Diagnostic::error_code("E0999", "reset-safe cached failure", span)
-            .with_origin(crate::diagnostic::DiagnosticOrigin::user()),
+        crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "reset wrapper: {}: reset-safe cached failure",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            ),
+            span,
+        ),
     );
 
     let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
@@ -1066,7 +1071,10 @@ fn lsp_verification_cache_hit_survives_source_registry_reset() {
         1,
         "cache hit should survive registry reset"
     );
-    assert_eq!(diagnostics[0]["code"], "E0999");
+    assert_eq!(
+        diagnostics[0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+    );
 }
 
 #[test]
@@ -1122,10 +1130,13 @@ fn lsp_cache_save_rejects_reused_source_id_after_registry_reset() {
         7,
         crate::verifier::VerifStatus::Disproven,
         "foreign failure".to_string(),
-        Some(
-            crate::diagnostic::Diagnostic::error_code("E0999", "foreign failure", span)
-                .with_origin(crate::diagnostic::DiagnosticOrigin::user()),
-        ),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "foreign wrapper: {}: foreign failure",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+            span,
+        )),
     );
     entry.bind_diagnostic_source(&foreign.sources);
     server.cache_put_verification(cache_key.clone(), entry);
