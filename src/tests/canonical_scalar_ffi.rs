@@ -14802,6 +14802,19 @@ fn scalar_ffi_direct_entrypoints_reset_stdout_before_preflight() {
     assert_eq!(vm.stdout(), "13\n8\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
 
+    let missing = vm
+        .call_named("function:missing", Vec::new())
+        .expect_err("unknown direct target must fail before frame creation");
+    assert!(missing
+        .to_string()
+        .contains("function 'function:missing' not found"));
+    assert_eq!(
+        vm.stdout(),
+        "",
+        "unknown call_named targets must start a fresh stdout snapshot"
+    );
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
     let mut forged = vm.program().canonical_ffi[0].clone();
     forged.symbol = "forged_direct_entry_symbol".into();
     vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);

@@ -5653,14 +5653,26 @@ impl BytecodeVM {
         func_idx: FuncIdx,
         args: &[Value],
     ) -> Result<Value, InterpError> {
-        // Actor/spawn workers and embedders can enter the VM through this
-        // public API without going through `run`/`run_value`.  Validate once
-        // at that fresh entry boundary as well; nested calls inherit the
-        // already-validated program from their enclosing execution.
+        self.prepare_public_entry()?;
+        self.call_function_after_entry(func_idx, args)
+    }
+
+    /// Establish the fresh-entry snapshot and canonical manifest guard shared
+    /// by every public function entry. Nested calls retain the enclosing
+    /// stdout and validated program state.
+    fn prepare_public_entry(&mut self) -> Result<(), InterpError> {
         if self.stack.is_empty() {
             self.stdout.clear();
             self.validate_canonical_ffi_program()?;
         }
+        Ok(())
+    }
+
+    fn call_function_after_entry(
+        &mut self,
+        func_idx: FuncIdx,
+        args: &[Value],
+    ) -> Result<Value, InterpError> {
         // H-14: snapshot for residual-frame cleanup on failure.
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -5671,13 +5683,14 @@ impl BytecodeVM {
     /// Call a function by name (convenience wrapper for tests).
     /// Looks up the function index from the program's function table.
     pub fn call_named(&mut self, name: &str, args: Vec<Value>) -> Result<Value, InterpError> {
+        self.prepare_public_entry()?;
         let idx = self
             .program
             .functions
             .iter()
             .position(|f| f.name == name)
             .ok_or_else(|| InterpError::new(format!("function '{}' not found", name)))?;
-        self.call_function(idx as FuncIdx, &args)
+        self.call_function_after_entry(idx as FuncIdx, &args)
     }
 
     /// Call a function with wrap_ok semantics (for `fails` transitions).
@@ -5689,10 +5702,7 @@ impl BytecodeVM {
         args: &[Value],
         source_state: Value,
     ) -> Result<Value, InterpError> {
-        if self.stack.is_empty() {
-            self.stdout.clear();
-            self.validate_canonical_ffi_program()?;
-        }
+        self.prepare_public_entry()?;
         // Keep the wrapped public entry point on the same residual-frame
         // cleanup path as `call_function`. A runtime error can leave nested
         // frames (for example, a callee that traps before returning); without
