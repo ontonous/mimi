@@ -1139,6 +1139,94 @@ fn lsp_verification_cache_load_bounds_oversized_persistent_files() {
 }
 
 #[test]
+fn lsp_verification_cache_load_drops_malformed_key_before_lru_replay() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_malformed_lru_replay_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let valid_key = crate::lsp::verification_cache_key("untitled://a.mimi", "valid");
+    // Sorts after the valid key but cannot satisfy the framed payload length.
+    // If it were admitted, adding MAX-1 fresh entries would evict `valid`.
+    let malformed_key = "mimi-lsp-cache:v2:999:1:x:resolved:v1";
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                valid_key.clone(): {
+                    "body_hash": 1,
+                    "status": "Verified",
+                    "message": "valid persisted proof"
+                },
+                malformed_key: {
+                    "body_hash": 2,
+                    "status": "Verified",
+                    "message": "malformed persisted proof"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mixed cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(server.verification_cache.contains_key(&valid_key));
+    assert!(!server.verification_cache.contains_key(malformed_key));
+
+    for index in 0..crate::lsp::MAX_VERIFICATION_CACHE - 1 {
+        let key = crate::lsp::verification_cache_key(
+            &format!("untitled://workspace/fill-{index:04}.mimi"),
+            "fill",
+        );
+        server.cache_put_verification(
+            key,
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "fresh proof".to_string(),
+                None,
+            ),
+        );
+    }
+    assert_eq!(
+        server.verification_cache.len(),
+        crate::lsp::MAX_VERIFICATION_CACHE
+    );
+    assert!(
+        server.verification_cache.contains_key(&valid_key),
+        "a dropped malformed entry must not consume an LRU slot"
+    );
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json")).expect("read replay cache"),
+    )
+    .expect("parse replay cache");
+    assert!(persisted["entries"].get(valid_key.as_str()).is_some());
+    assert!(persisted["entries"].get(malformed_key).is_none());
+
+    let mut reader = LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(reader.verification_cache.contains_key(&valid_key));
+    assert!(!reader.verification_cache.contains_key(malformed_key));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_key_is_length_framed_and_validated() {
     let uri = "file:///workspace/cache:a.mimi?fragment=x:y";
     let key = crate::lsp::verification_cache_key(uri, "bad");
