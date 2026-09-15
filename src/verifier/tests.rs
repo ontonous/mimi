@@ -2,6 +2,30 @@ use super::helpers::*;
 use super::*;
 use crate::ast::*;
 
+#[test]
+fn mir_route_error_conversion_preserves_registered_code_and_display() {
+    let error = format!(
+        "{}: canonical route manifest rejected: future field",
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+    );
+    let diagnostic = mir_route_error_to_diagnostic(error.clone());
+
+    assert_eq!(
+        diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+    );
+    assert_eq!(
+        diagnostic.to_string(),
+        format!(
+            "[{}] {error}",
+            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+        )
+    );
+    assert!(mir_route_error_to_diagnostic("ordinary verifier failure")
+        .code
+        .is_none());
+}
+
 macro_rules! require_z3 {
     () => {
         if !crate::verifier::is_z3_available() {

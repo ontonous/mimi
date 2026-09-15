@@ -22,6 +22,20 @@ pub use flow::{
     VerifierState,
 };
 
+/// Convert a canonical route verifier error into the shared diagnostic
+/// representation without changing the public `Result<_, String>` API used by
+/// existing callers.  Registered MIR route codes are recognized from the
+/// stable message prefix; ordinary verifier failures remain generic.
+pub fn mir_route_error_to_diagnostic(message: impl Into<String>) -> crate::diagnostic::Diagnostic {
+    let message = message.into();
+    match crate::diagnostic::codes::canonical_mir_route_code(&message) {
+        Some(code) => {
+            crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
+        }
+        None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
+    }
+}
+
 /// Verify a previously validated canonical MIR program with the experimental
 /// MIR-only scalar contract engine.  The input boundary intentionally has no
 /// AST/ResolvedBody parameter and never falls back to another verifier.
