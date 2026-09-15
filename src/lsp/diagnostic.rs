@@ -82,6 +82,22 @@ mod tests {
     }
 
     #[test]
+    fn lsp_serialization_preserves_shared_route_factory_source_span() {
+        let diagnostic = crate::diagnostic::mir_route_error_diagnostic(
+            format!("native admission wrapper: {MIR_ROUTE_MANIFEST_ERROR_CODE}: future field"),
+            Span::new(2, 3, 2, 9),
+        );
+        let serialized = diagnostic_to_lsp(&diagnostic, Some("first\nprofile"));
+
+        assert_eq!(serialized["code"], MIR_ROUTE_MANIFEST_ERROR_CODE);
+        assert_eq!(serialized["range"]["start"]["line"], 1);
+        assert_eq!(serialized["range"]["start"]["character"], 2);
+        assert_eq!(serialized["range"]["end"]["character"], 7);
+        assert_eq!(serialized["data"]["origin"]["kind"], "runtime_system");
+        assert_eq!(serialized["data"]["origin"]["rule"], "mir.route");
+    }
+
+    #[test]
     fn lsp_serialization_preserves_source_less_route_provenance() {
         let diagnostic = Diagnostic::error_code(
             MIR_ROUTE_MANIFEST_ERROR_CODE,
