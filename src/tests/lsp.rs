@@ -614,6 +614,54 @@ fn lsp_verification_checked_origin_is_identical_before_and_after_cache_hit() {
 }
 
 #[test]
+fn lsp_verification_cache_route_replay_preserves_normalized_payload() {
+    let mut server = LspServer::new();
+    let uri = "file:///workspace/cache-route.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+    let file = server
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("contract function should parse");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    let source_id = file.sources.id_for_uri(uri).expect("URI source id");
+    let diagnostic = crate::diagnostic::mir_route_error_diagnostic(
+        format!(
+            "cache replay wrapper: {}: stale receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ),
+        crate::span::Span::new(3, 5, 3, 12).with_source(source_id),
+    );
+    server.insert_verification_cache_with_diagnostic(
+        crate::lsp::verification_cache_key(uri, "bad"),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        diagnostic.message.clone(),
+        diagnostic,
+    );
+
+    let first = server.compute_verification_diagnostics(text, 2, uri);
+    let second = server.compute_verification_diagnostics(text, 2, uri);
+    assert_eq!(
+        first, second,
+        "cache replay must preserve normalized payload"
+    );
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+    );
+    assert_eq!(first[0]["data"]["origin"]["kind"], "runtime_system");
+    assert_eq!(first[0]["data"]["origin"]["rule"], "mir.route");
+}
+
+#[test]
 fn lsp_verification_cache_invalidates_when_function_moves() {
     let mut server = LspServer::new();
     let uri = "file:///workspace/cache-moved-span.mimi";
