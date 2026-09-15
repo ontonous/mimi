@@ -1025,4 +1025,29 @@ mod m10_tests {
             "the refreshed snapshot should start at the new session boundary"
         );
     }
+
+    #[test]
+    fn cached_diagnostic_span_guard_rejects_reverse_and_cross_function_ranges() {
+        let function = Span::new(2, 3, 6, 4);
+        assert!(diagnostic_span_is_within_function(
+            Span::new(2, 3, 2, 3),
+            function,
+        ));
+        assert!(diagnostic_span_is_within_function(
+            Span::new(3, 1, 5, 2),
+            function,
+        ));
+        assert!(
+            !diagnostic_span_is_within_function(Span::new(4, 8, 4, 2), function),
+            "reverse spans must not replay"
+        );
+        assert!(
+            !diagnostic_span_is_within_function(Span::new(1, 1, 3, 1), function),
+            "spans crossing the function start must not replay"
+        );
+        assert!(
+            !diagnostic_span_is_within_function(Span::new(5, 1, 7, 1), function),
+            "spans crossing the function end must not replay"
+        );
+    }
 }
