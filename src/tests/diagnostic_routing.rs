@@ -685,3 +685,164 @@ fn lsp_source_reset_cache_hit_keeps_route_primary_and_global_pending() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
+    let root = temp_workspace("lsp_persisted_route_multi_uri");
+    let main_path = root.join("main.mimi");
+    let dep_path = root.join("dep.mimi");
+    let main_text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&main_path, main_text).expect("write persisted-route main");
+    fs::write(&dep_path, dep_text).expect("write persisted-route dependency");
+    let root_uri = file_uri(&root);
+    let main_uri = file_uri(&main_path);
+    let dep_uri = file_uri(&dep_path);
+
+    // Persist a sourceful route diagnostic in a separate server instance. The
+    // reader below must recover it by SourceKey, not by the writer's numeric
+    // SourceId, before it emits dependency notifications.
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let file = writer
+        .parse_with_recovery_for_uri(main_text, Some(&main_uri))
+        .expect("parse persisted-route main");
+    let bad = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find persisted-route function");
+    let body_hash = crate::lsp::util::hash_func_body(main_text, bad);
+    let source_id = file
+        .sources
+        .id_for_uri(&main_uri)
+        .expect("persisted-route source id");
+    let source_key = file
+        .sources
+        .key(source_id)
+        .expect("persisted-route source key")
+        .as_str()
+        .to_string();
+    let route = crate::diagnostic::mir_route_error_diagnostic(
+        format!(
+            "persisted multi-uri wrapper: {}: stale receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ),
+        crate::span::Span::new(3, 5, 3, 12).with_source(source_id),
+    );
+    let cache_key = crate::lsp::verification_cache_key(&main_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        cache_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        route.message.clone(),
+        route,
+    );
+    writer.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json")).expect("read persisted route"),
+    )
+    .expect("parse persisted route cache");
+    assert_eq!(
+        persisted["entries"][cache_key.as_str()]["diagnostic"]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+        "writer must persist the structured route code"
+    );
+    assert_eq!(
+        persisted["entries"][cache_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "writer must persist the stable source key alongside the route code"
+    );
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    assert!(
+        reader.verification_cache.contains_key(&cache_key),
+        "reader must load the engine-qualified cache entry"
+    );
+    // didChange verifies the function at the editor's most recent cursor. Use
+    // the real hover request to set that 0-indexed cursor to `bad`, which starts
+    // on the second source line after the import.
+    let opened = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "version": 1,
+                "text": main_text
+            }
+        }
+    }));
+    assert_eq!(
+        opened.expect("didOpen should publish the main document")["method"],
+        "textDocument/publishDiagnostics"
+    );
+    let _ = reader.drain_pending_notifications();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 1, "character": 0 }
+        }
+    }));
+    let response = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": main_uri, "version": 1 },
+            "contentChanges": [{ "text": main_text }]
+        }
+    }));
+    let response = response.expect("didChange should publish the main document");
+    assert_eq!(response["method"], "textDocument/publishDiagnostics");
+    assert_eq!(response["params"]["uri"], main_uri);
+    assert_eq!(
+        response["params"]["diagnostics"][0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+        "persisted SourceKey replay must remain the primary route diagnostic"
+    );
+
+    let pending = reader.drain_pending_notifications();
+    assert_eq!(
+        pending.len(),
+        1,
+        "dependency checker batch should be pending"
+    );
+    assert_eq!(pending[0]["method"], "textDocument/publishDiagnostics");
+    assert_eq!(pending[0]["params"]["uri"], dep_uri);
+    assert!(pending[0]["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|diagnostic| diagnostic["message"] == "undefined variable 'missing_dep'")
+        }));
+
+    let _ = fs::remove_dir_all(root);
+}
