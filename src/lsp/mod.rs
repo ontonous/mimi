@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
@@ -400,7 +400,11 @@ impl VerificationCacheEntry {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistentCache {
     version: u32,
-    entries: HashMap<String, CacheEntry>,
+    /// Keep the on-disk object ordered so identical cache state produces
+    /// identical bytes regardless of HashMap randomization or insertion
+    /// order.  The ordering is a persistence property; runtime LRU order is
+    /// reconstructed separately during load.
+    entries: BTreeMap<String, CacheEntry>,
 }
 
 /// L-H6: JSON-RPC / LSP session lifecycle.
@@ -662,7 +666,7 @@ impl LspServer {
         let Some(ref path) = self.cache_path else {
             return;
         };
-        let entries: HashMap<String, CacheEntry> = self
+        let entries: BTreeMap<String, CacheEntry> = self
             .verification_cache
             .iter()
             .filter(|(_, entry)| !matches!(&entry.status, VerifStatus::InfrastructureError))

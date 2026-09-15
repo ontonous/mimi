@@ -4436,6 +4436,77 @@ fn lsp_reinitialize_rebinds_alias_route_and_pending_after_workspace_switch() {
         pending
     };
 
+    // Reinitialize starts with no verifier session. Exercise the retry
+    // sequence on the real URI before serving transport traffic: a
+    // retryable InfrastructureError removes only that URI's stale verdict,
+    // a Proven result remains diagnostic-free, and the subsequent Disproven
+    // result rebinds its route to the stable SourceKey visible in this
+    // post-reinitialize snapshot.
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::InfrastructureError,
+            "solver unavailable after reinitialize".to_string(),
+            None,
+        ),
+    );
+    assert!(!server.verification_cache.contains_key(&real_key));
+    assert!(server.verification_cache.contains_key(&alias_key));
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::Proven,
+            "recovered real proof".to_string(),
+            None,
+        ),
+    );
+    assert_eq!(
+        server
+            .verification_cache
+            .get(&real_key)
+            .map(|entry| &entry.status),
+        Some(&crate::verifier::VerifStatus::Proven)
+    );
+    let mut recovered_real = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "recovered real route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "recovered real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(rebound_source),
+        )),
+    );
+    recovered_real.bind_diagnostic_source(&alias_snapshot.sources);
+    server.cache_put_verification(real_key.clone(), recovered_real);
+    let recovered_source = server
+        .verification_cache
+        .get(&real_key)
+        .and_then(|entry| entry.diagnostic(&alias_snapshot.sources))
+        .and_then(|diagnostic| alias_snapshot.sources.key(diagnostic.span.source_id))
+        .map(|key| key.as_str().to_string());
+    assert_eq!(
+        recovered_source.as_deref(),
+        Some(source_key.as_str()),
+        "recovered real route must bind the post-reinitialize SourceKey"
+    );
+    server.save_cache();
+
+    let opened_real = open(&mut server, &real_uri, 1).expect("recovered real didOpen");
+    assert_eq!(opened_real["params"]["uri"], real_uri);
+    assert!(opened_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let real_pending = assert_pending(&mut server);
+    let _ = hover(&mut server, &real_uri);
+    let changed_real = change(&mut server, &real_uri, 2).expect("recovered real didChange");
+    assert_eq!(
+        changed_real["params"]["diagnostics"][0]["message"],
+        "recovered real route: MIR-RECEIPT-001"
+    );
+    assert_eq!(assert_pending(&mut server), real_pending);
+
     let opened_alias = open(&mut server, &alias_uri, 1).expect("rebound alias didOpen");
     assert_eq!(opened_alias["params"]["uri"], alias_uri);
     assert!(opened_alias["params"]["diagnostics"]

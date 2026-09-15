@@ -1631,6 +1631,80 @@ fn lsp_reinitialize_resets_workspace_state_and_rebinds_cache_path() {
 }
 
 #[test]
+fn lsp_verification_cache_writeback_is_byte_deterministic() {
+    let roots = [
+        std::env::temp_dir().join(format!(
+            "mimi_lsp_cache_deterministic_a_{}",
+            std::process::id()
+        )),
+        std::env::temp_dir().join(format!(
+            "mimi_lsp_cache_deterministic_b_{}",
+            std::process::id()
+        )),
+    ];
+    let entries = [
+        (
+            crate::lsp::verification_cache_key(
+                "untitled://workspace/deterministic-a.mimi",
+                "first",
+            ),
+            11_u64,
+            "first proof",
+        ),
+        (
+            crate::lsp::verification_cache_key(
+                "untitled://workspace/deterministic-b.mimi",
+                "second",
+            ),
+            22_u64,
+            "second proof",
+        ),
+    ];
+    let mut persisted = Vec::new();
+
+    for (root_index, root) in roots.iter().enumerate() {
+        let _ = std::fs::remove_dir_all(root);
+        std::fs::create_dir_all(root).expect("create deterministic cache workspace");
+        let mut server = LspServer::new();
+        let _ = server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": root_index + 1,
+            "method": "initialize",
+            "params": { "rootPath": root.to_string_lossy() }
+        }));
+
+        // Deliberately use opposite insertion orders. Persistence must be
+        // independent of the runtime HashMap's randomized iteration order.
+        let order = if root_index == 0 { [1, 0] } else { [0, 1] };
+        for index in order {
+            let (key, body_hash, message) = &entries[index];
+            server.cache_put_verification(
+                key.clone(),
+                crate::lsp::VerificationCacheEntry::new(
+                    *body_hash,
+                    crate::verifier::VerifStatus::Proven,
+                    (*message).to_string(),
+                    None,
+                ),
+            );
+        }
+        server.save_cache();
+        persisted.push(
+            std::fs::read(root.join(".mimi/verify_cache.json"))
+                .expect("read deterministic cache bytes"),
+        );
+    }
+
+    assert_eq!(
+        persisted[0], persisted[1],
+        "identical cache state must have byte-identical persistence"
+    );
+    for root in roots {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
 fn lsp_reinitialize_drops_verifier_session_state() {
     if !crate::verifier::is_z3_available() {
         return;
