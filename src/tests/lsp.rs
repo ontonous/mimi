@@ -1464,6 +1464,89 @@ fn lsp_verification_cache_rejects_cross_uri_diagnostic_replay() {
 }
 
 #[test]
+fn lsp_verification_cache_rejects_out_of_function_diagnostic_replay() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_out_of_function_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let uri = "untitled://workspace/out-of-function.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let source_id = file.sources.id_for_uri(uri).expect("source id");
+    let source_key = file
+        .sources
+        .key(source_id)
+        .expect("source key")
+        .as_str()
+        .to_string();
+    let cache_key = crate::lsp::verification_cache_key(uri, "bad");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                cache_key: {
+                    "body_hash": body_hash,
+                    "status": "Failed",
+                    "message": "forged out-of-function diagnostic",
+                    "diagnostic": {
+                        "source_key": source_key,
+                        "start_line": 99,
+                        "start_col": 1,
+                        "end_line": 99,
+                        "end_col": 4,
+                        "severity": 1,
+                        "code": "E0999",
+                        "message": "forged out-of-function diagnostic",
+                        "notes": [],
+                        "help": null,
+                        "origin": {
+                            "kind": "user",
+                            "rule": null,
+                            "parent_node_id": "forged"
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write forged diagnostic cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["message"] != "forged out-of-function diagnostic"),
+        "a cached diagnostic outside the current function must not replay: {diagnostics:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_hit_survives_source_registry_reset() {
     let uri = "untitled://workspace/cache-after-reset.mimi";
     let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";

@@ -96,6 +96,38 @@ fn verification_diagnostic_origin(
         .then_some(first)
 }
 
+fn position_is_before_or_equal(
+    left_line: usize,
+    left_col: usize,
+    right_line: usize,
+    right_col: usize,
+) -> bool {
+    (left_line, left_col) <= (right_line, right_col)
+}
+
+/// A cached primary diagnostic is replayable only when its span is an
+/// ordered subrange of the function whose body hash was verified. The
+/// persisted file is workspace input, so a matching SourceKey alone is not
+/// enough to trust an arbitrary line/column payload.
+fn diagnostic_span_is_within_function(diagnostic: Span, function: Span) -> bool {
+    position_is_before_or_equal(
+        diagnostic.start_line,
+        diagnostic.start_col,
+        diagnostic.end_line,
+        diagnostic.end_col,
+    ) && position_is_before_or_equal(
+        function.start_line,
+        function.start_col,
+        diagnostic.start_line,
+        diagnostic.start_col,
+    ) && position_is_before_or_equal(
+        diagnostic.end_line,
+        diagnostic.end_col,
+        function.end_line,
+        function.end_col,
+    )
+}
+
 impl LspServer {
     fn register_uri_source(&self, uri: &str) -> Result<(SourceId, SourceRegistry), String> {
         // M10 (0.35.37): was uri_to_path (unsandboxed) — the active document's
@@ -739,16 +771,23 @@ impl LspServer {
                         if let Some(cached_diagnostic) =
                             cached.diagnostic_for_source(&cache_registry, source_id)
                         {
-                            diagnostics.push(diagnostic::diagnostic_to_lsp(
-                                &cached_diagnostic,
-                                Some(text),
-                            ));
-                            return diagnostics;
+                            if diagnostic_span_is_within_function(
+                                cached_diagnostic.span,
+                                func.meta.span,
+                            ) {
+                                diagnostics.push(diagnostic::diagnostic_to_lsp(
+                                    &cached_diagnostic,
+                                    Some(text),
+                                ));
+                                return diagnostics;
+                            }
                         }
                         // A persisted entry whose SourceKey cannot be remapped
-                        // in this snapshot is not a safe location cache hit.
+                        // in this snapshot, or whose primary span escapes the
+                        // current function, is not a safe location cache hit.
                         // Re-run verification instead of fabricating the
-                        // function declaration range.
+                        // function declaration range or trusting a forged
+                        // workspace diagnostic.
                     }
                     _ => return diagnostics,
                 }
