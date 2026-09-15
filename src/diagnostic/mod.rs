@@ -33,6 +33,16 @@ impl DiagnosticOrigin {
             parent_node_id: None,
         }
     }
+
+    /// Mark a diagnostic emitted by a compiler/runtime admission boundary.
+    /// The rule is owned text so the provenance survives serde/cache hops.
+    pub fn runtime_system(rule: impl Into<String>) -> Self {
+        Self {
+            kind: DiagnosticOriginKind::RuntimeSystem,
+            rule: Some(rule.into()),
+            parent_node_id: None,
+        }
+    }
 }
 
 /// Severity level for diagnostics.

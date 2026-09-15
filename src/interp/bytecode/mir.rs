@@ -72,6 +72,9 @@ impl MirBytecodeError {
         match self.diagnostic_code() {
             Some(code) => {
                 crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
+                    .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
+                        "mir.route",
+                    ))
             }
             None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
         }
@@ -5266,6 +5269,12 @@ mod tests {
                 error
             )
         );
+        let origin = diagnostic.origin.expect("route error has provenance");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

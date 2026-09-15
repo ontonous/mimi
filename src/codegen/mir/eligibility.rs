@@ -41,7 +41,9 @@ impl NativeMirError {
             self.subject, self.message
         );
         match self.code {
-            Some(code) => Diagnostic::error_code(code, message, self.span),
+            Some(code) => Diagnostic::error_code(code, message, self.span).with_origin(
+                crate::diagnostic::DiagnosticOrigin::runtime_system("mir.route"),
+            ),
             None => Diagnostic::error(message, self.span),
         }
     }
@@ -139,6 +141,12 @@ mod tests {
                 MIR_ROUTE_MANIFEST_ERROR_CODE
             )
         );
+        let origin = diagnostic.origin.expect("route error has provenance");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
     }
 }
 

@@ -718,7 +718,9 @@ fn format_cli_error(message: &str) -> String {
         (context, detail) => format!("{context}: {detail}"),
     };
     format_diagnostic(
-        &Diagnostic::error_code(code, normalized, Span::UNKNOWN),
+        &Diagnostic::error_code(code, normalized, Span::UNKNOWN).with_origin(
+            mimi::diagnostic::DiagnosticOrigin::runtime_system("mir.route"),
+        ),
         None,
         "",
     )

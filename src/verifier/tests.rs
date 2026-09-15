@@ -21,6 +21,12 @@ fn mir_route_error_conversion_preserves_registered_code_and_display() {
             crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
         )
     );
+    let origin = diagnostic.origin.expect("route error has provenance");
+    assert_eq!(
+        origin.kind,
+        crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+    );
+    assert_eq!(origin.rule.as_deref(), Some("mir.route"));
     assert!(mir_route_error_to_diagnostic("ordinary verifier failure")
         .code
         .is_none());
