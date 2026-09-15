@@ -4,6 +4,15 @@ use std::path::Path;
 use std::process;
 
 use mimi::diagnostic::format::{colors_enabled, format_diagnostic, strip_ansi};
+use mimi::interp::bytecode::mir::MirBytecodeError;
+
+fn render_mir_bytecode_error(error: &MirBytecodeError) -> String {
+    if error.diagnostic_code().is_some() {
+        crate::format_cli_error(&error.to_string())
+    } else {
+        format!("  {error}")
+    }
+}
 
 pub fn disasm_file(path: &Path) -> ! {
     // Full audit 2026-08-05 §13: route through the 100 MiB capped read used
@@ -91,14 +100,24 @@ pub fn disasm_file(path: &Path) -> ! {
                     Err(errors) => {
                         eprintln!("error: canonical MIR bytecode is not eligible:");
                         for error in errors {
-                            eprintln!("  {}", error);
+                            // Route receipt/manifest failures must keep their
+                            // registered code even though disasm exits
+                            // directly instead of returning through the
+                            // top-level CLI error boundary.
+                            eprintln!("{}", render_mir_bytecode_error(&error));
                         }
                         process::exit(1);
                     }
                 }
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
-                eprintln!("error: default Canonical MIR route rejected: {}", reason);
+                let message = format!("default Canonical MIR route rejected: {reason}");
+                if mimi::diagnostic::codes::canonical_mir_route_code_in_message(&message).is_some()
+                {
+                    eprintln!("{}", crate::format_cli_error(&message));
+                } else {
+                    eprintln!("error: {}", message);
+                }
                 process::exit(1);
             }
             crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
@@ -120,4 +139,41 @@ pub fn disasm_file(path: &Path) -> ! {
         mimi::interp::bytecode::disasm::disassemble_program(&program)
     );
     process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_mir_bytecode_error;
+    use mimi::diagnostic::format::strip_ansi;
+    use mimi::interp::bytecode::mir::MirBytecodeError;
+
+    #[test]
+    fn disasm_route_error_renderer_keeps_registered_code() {
+        let error = MirBytecodeError {
+            function: mimi::core::NodeId("mir-program".into()),
+            message: "MIR-RECEIPT-MANIFEST-001: future field".into(),
+        };
+        let rendered = strip_ansi(&render_mir_bytecode_error(&error));
+        assert!(
+            rendered.starts_with("error[MIR-RECEIPT-MANIFEST-001] "),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("MIR-RECEIPT-MANIFEST-001").count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn disasm_plain_error_renderer_keeps_indented_legacy_shape() {
+        let error = MirBytecodeError {
+            function: mimi::core::NodeId("bad".into()),
+            message: "unsupported MIR instruction".into(),
+        };
+        assert_eq!(
+            render_mir_bytecode_error(&error),
+            "  MIR bytecode 'bad': unsupported MIR instruction"
+        );
+    }
 }
