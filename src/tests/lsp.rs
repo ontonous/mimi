@@ -1804,6 +1804,76 @@ fn lsp_verification_body_change_invalidates_only_target_function_key() {
 }
 
 #[test]
+fn lsp_verification_without_contracts_clears_only_target_disk_key() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_no_contracts_sibling_disk_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let uri = "untitled://workspace/no-contracts-sibling.mimi";
+    let old_text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}\n\nfunc good(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    1\n}";
+    // Keep line anchors stable while removing only `bad`'s contracts.
+    let new_text = old_text
+        .replacen("    requires: x > 0", "    // removed", 1)
+        .replacen("    ensures: result > 0", "    // removed", 1);
+    let probe = LspServer::new();
+    let old_file = probe
+        .parse_with_recovery_for_uri(old_text, Some(uri))
+        .expect("parse old source");
+    let funcs = old_file.items.iter().filter_map(|item| match item {
+        crate::ast::Item::Func(func) if func.name == "bad" || func.name == "good" => Some(func),
+        _ => None,
+    });
+    let funcs = funcs.collect::<Vec<_>>();
+    assert_eq!(funcs.len(), 2);
+    let bad_key = crate::lsp::verification_cache_key(uri, "bad");
+    let good_key = crate::lsp::verification_cache_key(uri, "good");
+    let good_hash = crate::lsp::util::hash_func_body(old_text, funcs[1]);
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                bad_key.clone(): {
+                    "body_hash": crate::lsp::util::hash_func_body(old_text, funcs[0]),
+                    "status": "Verified",
+                    "message": "stale bad proof"
+                },
+                good_key.clone(): {
+                    "body_hash": good_hash,
+                    "status": "Verified",
+                    "message": "sibling good proof"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write sibling cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let _ = server.compute_verification_diagnostics(new_text.as_str(), 0, uri);
+    assert!(!server.verification_cache.contains_key(&bad_key));
+    assert!(server.verification_cache.contains_key(&good_key));
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json"))
+            .expect("read refreshed sibling cache"),
+    )
+    .expect("parse refreshed sibling cache");
+    assert!(persisted["entries"].get(bad_key.as_str()).is_none());
+    assert!(persisted["entries"].get(good_key.as_str()).is_some());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_hit_survives_source_registry_reset() {
     let uri = "untitled://workspace/cache-after-reset.mimi";
     let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
