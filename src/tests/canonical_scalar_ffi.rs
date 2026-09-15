@@ -16381,6 +16381,104 @@ func main() -> i64 { println(5); mir_ffi_bad(41 as i64); 0 }
 }
 
 #[test]
+fn scalar_ffi_reference_host_failure_preserves_prefix_and_rejects_forged_symbol() {
+    use std::cell::RefCell;
+
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_host_failure(value: i64) -> i64; }
+func main() -> i64 {
+    println(1 as i64);
+    let result = mir_ffi_host_failure(7 as i64);
+    println(result);
+    0
+}
+"#;
+
+    struct FailingThenRecoveringHost {
+        calls: Cell<u8>,
+        symbols: RefCell<Vec<String>>,
+    }
+
+    impl MirReferenceFfiResolver for FailingThenRecoveringHost {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.symbols.borrow_mut().push(receipt.symbol.clone());
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if receipt.symbol != "mir_ffi_host_failure" {
+                return Err(format!("unexpected host symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected host arguments {arguments:?}"));
+            };
+            if call == 0 {
+                return Err("explicit reference host binding failed".into());
+            }
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("reference host-failure fixture check");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("reference host-failure fixture MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+
+    let host = FailingThenRecoveringHost {
+        calls: Cell::new(0),
+        symbols: RefCell::new(Vec::new()),
+    };
+    let interpreter = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&host);
+    let first = interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference host failure must stop at the explicit binding");
+    assert!(first
+        .to_string()
+        .contains("explicit reference host binding failed"));
+    assert_eq!(interpreter.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 1);
+    assert_eq!(host.symbols.borrow().as_slice(), ["mir_ffi_host_failure"]);
+
+    let recovered = interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("the same reference host binding must recover on reentry");
+    assert_eq!(recovered.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered.output, "1\n8\n");
+    assert_eq!(interpreter.captured_output(), "1\n8\n");
+    assert_eq!(host.calls.get(), 2);
+    assert_eq!(
+        host.symbols.borrow().as_slice(),
+        ["mir_ffi_host_failure", "mir_ffi_host_failure"]
+    );
+
+    let mut forged_receipts = mir.ffi_calls().clone();
+    forged_receipts
+        .values_mut()
+        .next()
+        .expect("reference host-failure receipt")
+        .symbol = "mir_ffi_forged_symbol".into();
+    let mut forged = mir.clone();
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+    let forged_host = FailingThenRecoveringHost {
+        calls: Cell::new(0),
+        symbols: RefCell::new(Vec::new()),
+    };
+    let forged_interpreter = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&forged_host);
+    let forged_error = forged_interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("forged symbol must fail before the host binding executes");
+    assert!(forged_error
+        .to_string()
+        .contains("symbol disagrees with canonical extern callee"));
+    assert_eq!(forged_interpreter.captured_output(), "");
+    assert_eq!(forged_host.calls.get(), 0);
+    assert!(forged_host.symbols.borrow().is_empty());
+}
+
+#[test]
 fn scalar_ffi_traps_preserve_external_effect_prefix_across_three_consumers() {
     use std::cell::RefCell;
     struct TraceOracle(RefCell<Vec<i64>>);
