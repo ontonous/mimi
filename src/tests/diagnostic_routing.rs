@@ -2788,6 +2788,288 @@ fn lsp_alias_uri_save_body_change_after_source_reset_keeps_pending_order() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_proven_cache_restart_after_reset_keeps_source_key() {
+    let root = temp_workspace("lsp_alias_uri_proven_restart");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let dep_path = root.join("dep.mimi");
+    let old_text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let new_text = old_text.replace("    0\n}\nfunc main", "    1\n}\nfunc main");
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&real_path, old_text).expect("write proven-restart source");
+    fs::write(&dep_path, dep_text).expect("write proven-restart dependency");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create proven-restart alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let dep_uri = file_uri(&dep_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(old_text, Some(&real_uri))
+        .expect("parse proven-restart real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find proven-restart function");
+    let old_hash = crate::lsp::util::hash_func_body(old_text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("proven-restart real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("proven-restart stable source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        old_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "proven-restart real stale failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "proven-restart real stale route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(old_text, Some(&alias_uri))
+        .expect("parse proven-restart alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("proven-restart alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        old_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "proven-restart alias stale failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "proven-restart alias stale route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 13).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let fill_registry = |reader: &mut crate::lsp::LspServer, prefix: &str| {
+        let current = reader.source_registry.borrow().records().len();
+        for index in current..crate::lsp::MAX_SOURCE_RECORDS {
+            let seed = format!("func {prefix}_{index}() -> i32 {{\n    {index}\n}}\n");
+            reader
+                .parse_with_recovery_for_uri(&seed, None)
+                .expect("fill proven-restart source registry");
+        }
+        assert_eq!(
+            reader.source_registry.borrow().records().len(),
+            crate::lsp::MAX_SOURCE_RECORDS,
+            "proven-restart test must fill source registry before reset"
+        );
+    };
+    let open = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64, text: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": version, "text": text }
+            }
+        }))
+    };
+    let hover = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }))
+    };
+    let change = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64, text: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+
+    fill_registry(&mut reader, "proven_first_reset");
+    let opened_alias = open(&mut reader, &alias_uri, 1, &new_text).expect("proven alias open");
+    assert_eq!(opened_alias["params"]["uri"], alias_uri);
+    assert!(opened_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let pending = reader.drain_pending_notifications();
+    assert_eq!(
+        pending.len(),
+        1,
+        "proven alias open should queue one dependency"
+    );
+    assert_eq!(pending[0]["params"]["uri"], dep_uri);
+    let _ = hover(&mut reader, &alias_uri);
+    let changed_alias = change(&mut reader, &alias_uri, 2, &new_text).expect("proven alias change");
+    assert!(changed_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(reader.drain_pending_notifications(), pending);
+    assert!(matches!(
+        reader
+            .verification_cache
+            .get(&alias_key)
+            .map(|entry| &entry.status),
+        Some(crate::verifier::VerifStatus::Proven)
+    ));
+
+    fill_registry(&mut reader, "proven_real_reset");
+    let opened_real = open(&mut reader, &real_uri, 1, &new_text).expect("proven real open");
+    assert_eq!(opened_real["params"]["uri"], real_uri);
+    assert!(opened_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(reader.drain_pending_notifications(), pending);
+    let _ = hover(&mut reader, &real_uri);
+    let changed_real = change(&mut reader, &real_uri, 2, &new_text).expect("proven real change");
+    assert!(changed_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(reader.drain_pending_notifications(), pending);
+    assert!(matches!(
+        reader
+            .verification_cache
+            .get(&real_key)
+            .map(|entry| &entry.status),
+        Some(crate::verifier::VerifStatus::Proven)
+    ));
+
+    reader.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read proven-restart cache"),
+    )
+    .expect("parse proven-restart cache");
+    for key in [&real_key, &alias_key] {
+        assert_eq!(persisted["entries"][key.as_str()]["status"], "Verified");
+        assert_eq!(
+            persisted["entries"][key.as_str()]["diagnostic"],
+            serde_json::Value::Null
+        );
+    }
+
+    // A fresh server must load both Proven entries after the reset writeback.
+    // Cache hits are diagnostic-free but the checker still emits the same
+    // dependency batch, proving replay does not reorder transport output.
+    let mut restarted = crate::lsp::LspServer::new();
+    let _ = restarted.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    for key in [&real_key, &alias_key] {
+        assert!(matches!(
+            restarted
+                .verification_cache
+                .get(key)
+                .map(|entry| &entry.status),
+            Some(crate::verifier::VerifStatus::Proven)
+        ));
+    }
+    fill_registry(&mut restarted, "proven_restart_alias_reset");
+    let restarted_open =
+        open(&mut restarted, &alias_uri, 1, &new_text).expect("restarted proven alias open");
+    assert_eq!(restarted_open["params"]["uri"], alias_uri);
+    assert!(restarted_open["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(restarted.drain_pending_notifications(), pending);
+    let _ = hover(&mut restarted, &alias_uri);
+    let restarted_change =
+        change(&mut restarted, &alias_uri, 2, &new_text).expect("restarted proven alias change");
+    assert!(restarted_change["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(restarted.drain_pending_notifications(), pending);
+
+    fill_registry(&mut restarted, "proven_restart_real_reset");
+    let _ = open(&mut restarted, &real_uri, 1, &new_text).expect("restarted proven real open");
+    assert_eq!(restarted.drain_pending_notifications(), pending);
+    let _ = hover(&mut restarted, &real_uri);
+    let restarted_real_change =
+        change(&mut restarted, &real_uri, 2, &new_text).expect("restarted proven real change");
+    assert!(restarted_real_change["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(restarted.drain_pending_notifications(), pending);
+    let final_alias = restarted
+        .parse_with_recovery_for_uri(&new_text, Some(&alias_uri))
+        .expect("parse restarted alias snapshot");
+    let final_real = restarted
+        .parse_with_recovery_for_uri(&new_text, Some(&real_uri))
+        .expect("parse restarted real snapshot");
+    assert_eq!(
+        final_alias
+            .sources
+            .key(
+                final_alias
+                    .sources
+                    .id_for_uri(&alias_uri)
+                    .expect("restarted alias id")
+            )
+            .map(|key| key.as_str()),
+        Some(source_key.as_str())
+    );
+    assert_eq!(
+        final_real
+            .sources
+            .key(
+                final_real
+                    .sources
+                    .id_for_uri(&real_uri)
+                    .expect("restarted real id")
+            )
+            .map(|key| key.as_str()),
+        Some(source_key.as_str())
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
