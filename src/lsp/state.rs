@@ -250,6 +250,25 @@ impl LspServer {
         self.verification_cache.remove(key);
     }
 
+    /// Invalidate every verification key belonging to one URI when the
+    /// current snapshot cannot identify a safe function boundary. Other URI
+    /// entries remain usable; the malformed document must not poison the
+    /// session-wide cache.
+    pub(crate) fn cache_invalidate_uri(&mut self, uri: &str) {
+        let keys = self
+            .verification_cache
+            .keys()
+            .filter_map(|key| {
+                super::parse_verification_cache_key(key)
+                    .filter(|(cached_uri, _)| *cached_uri == uri)
+                    .map(|_| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.cache_invalidate_verification(&key);
+        }
+    }
+
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
         if let Some(removed) = self.documents.remove(uri) {
@@ -640,12 +659,18 @@ impl LspServer {
         // Parse
         let tokens = match lexer::Lexer::new(text).tokenize() {
             Ok(t) => t,
-            Err(_) => return diagnostics,
+            Err(_) => {
+                self.cache_invalidate_uri(uri);
+                self.save_cache();
+                return diagnostics;
+            }
         };
         let (source_id, source_registry) = match self.register_uri_source(uri) {
             Ok(registration) => registration,
             Err(error) => {
                 eprintln!("[mimi lsp] verification source registration failed: {error}");
+                self.cache_invalidate_uri(uri);
+                self.save_cache();
                 return diagnostics;
             }
         };
@@ -662,7 +687,11 @@ impl LspServer {
         // 0.35.15 DX backlog #3 — no more text brace counting).
         let func = match find_enclosing_func_in_items(&file.items, cursor_line) {
             Some(f) => f,
-            None => return diagnostics,
+            None => {
+                self.cache_invalidate_uri(uri);
+                self.save_cache_with_registry(&cache_registry);
+                return diagnostics;
+            }
         };
 
         // Compute the function identity before checking whether contracts

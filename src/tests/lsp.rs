@@ -1896,6 +1896,106 @@ fn lsp_verification_without_contracts_drops_stale_verdict() {
 }
 
 #[test]
+fn lsp_verification_lexer_failure_clears_only_target_uri_cache() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_lexer_failure_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create lexer-failure workspace");
+    let uri = "untitled://workspace/lexer-failure.mimi";
+    let other_uri = "untitled://workspace/other.mimi";
+    let keys = [
+        crate::lsp::verification_cache_key(uri, "first"),
+        crate::lsp::verification_cache_key(uri, "second"),
+        crate::lsp::verification_cache_key(other_uri, "survivor"),
+    ];
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    for (index, key) in keys.iter().enumerate() {
+        server.insert_verification_cache(
+            key.clone(),
+            index as u64,
+            crate::verifier::VerifStatus::Proven,
+            "cached proof".to_string(),
+        );
+    }
+    server.save_cache();
+
+    // An unterminated string fails in the lexer before a function/source
+    // snapshot exists. Drop every key for this URI, while preserving the
+    // independent URI's cache entry.
+    let diagnostics = server.compute_verification_diagnostics("func broken() -> i32 { \"", 0, uri);
+    assert!(diagnostics.is_empty());
+    assert!(!server.verification_cache.contains_key(&keys[0]));
+    assert!(!server.verification_cache.contains_key(&keys[1]));
+    assert!(server.verification_cache.contains_key(&keys[2]));
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read lexer-failure cache"),
+    )
+    .expect("parse lexer-failure cache");
+    assert_eq!(persisted["entries"].get(keys[0].as_str()), None);
+    assert_eq!(persisted["entries"].get(keys[1].as_str()), None);
+    assert!(persisted["entries"].get(keys[2].as_str()).is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_verification_without_function_clears_only_target_uri_cache() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_without_function_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create no-function workspace");
+    let uri = "untitled://workspace/no-function.mimi";
+    let other_uri = "untitled://workspace/other-no-function.mimi";
+    let target = crate::lsp::verification_cache_key(uri, "removed");
+    let survivor = crate::lsp::verification_cache_key(other_uri, "survivor");
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    server.insert_verification_cache(
+        target.clone(),
+        1,
+        crate::verifier::VerifStatus::Proven,
+        "stale removed-function proof".to_string(),
+    );
+    server.insert_verification_cache(
+        survivor.clone(),
+        2,
+        crate::verifier::VerifStatus::Proven,
+        "survivor proof".to_string(),
+    );
+    server.save_cache();
+
+    let diagnostics = server.compute_verification_diagnostics("const VALUE: i32 = 1\n", 0, uri);
+    assert!(diagnostics.is_empty());
+    assert!(!server.verification_cache.contains_key(&target));
+    assert!(server.verification_cache.contains_key(&survivor));
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read no-function cache"),
+    )
+    .expect("parse no-function cache");
+    assert_eq!(persisted["entries"].get(target.as_str()), None);
+    assert!(persisted["entries"].get(survivor.as_str()).is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_reinitialize_drops_verifier_session_state() {
     if !crate::verifier::is_z3_available() {
         return;
