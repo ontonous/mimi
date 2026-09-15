@@ -253,6 +253,14 @@ pub const E0841: &str = "E0841";
 /// Codegen error code not yet defined as constant (used inline)
 pub const E0712: &str = "E0712"; // codegen internal error (json builtin)
 
+/// Cross-layer Canonical MIR route diagnostics. These codes are not surface
+/// language E/W diagnostics, but they are registered here so CLI and LSP
+/// serializers can recognize stable backend admission failures.
+pub const MIR_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-RECEIPT-001";
+pub const MIR_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-RECEIPT-MANIFEST-001";
+pub const MIR_FFI_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-FFI-RECEIPT-001";
+pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-001";
+
 // Lint warning codes (W0xxx)
 
 /// Get a human-readable description for an error code.
@@ -449,6 +457,11 @@ pub fn describe(code: &str) -> &'static str {
         E0840 => "branch expression consumes distinct linear resources (XOR leak)",
         E0841 => "`linear T` parameter body must whole-transfer T (transfer-only): projection / discard / drop(T) is rejected at definition time (T may instantiate to Session)",
         E0712 => "codegen internal error (json builtin)",
+
+        MIR_ROUTE_RECEIPT_ERROR_CODE => "canonical MIR route receipt rejected",
+        MIR_ROUTE_MANIFEST_ERROR_CODE => "canonical MIR route manifest rejected",
+        MIR_FFI_ROUTE_RECEIPT_ERROR_CODE => "canonical MIR FFI route receipt rejected",
+        MIR_FFI_ROUTE_MANIFEST_ERROR_CODE => "canonical MIR FFI route manifest rejected",
 
         W001 => "standalone desc/rule has no implementation",
         W002 => "locked fragment ($/$$) with no implementation body",
@@ -653,6 +666,11 @@ mod tests {
             super::E0709,
             super::E0710,
             super::E0712,
+            // Canonical MIR route diagnostics (cross-layer, non-E/W).
+            super::MIR_ROUTE_RECEIPT_ERROR_CODE,
+            super::MIR_ROUTE_MANIFEST_ERROR_CODE,
+            super::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+            super::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
             super::E0713,
             super::E0721,
             super::E0722,

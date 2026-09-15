@@ -54,3 +54,30 @@ pub(crate) fn lexer_error_to_lsp(err: &LexerError, text: Option<&str>) -> Value 
         "message": err.to_string()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostic::codes::{describe, MIR_ROUTE_MANIFEST_ERROR_CODE};
+    use crate::span::Span;
+
+    #[test]
+    fn lsp_serialization_preserves_registered_mir_code_and_source_span() {
+        assert_eq!(
+            describe(MIR_ROUTE_MANIFEST_ERROR_CODE),
+            "canonical MIR route manifest rejected"
+        );
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            "invalid MIR route manifest: future field",
+            Span::new(2, 3, 2, 9),
+        );
+        let serialized = diagnostic_to_lsp(&diagnostic, Some("first\nprofile"));
+        assert_eq!(serialized["source"], "mimi");
+        assert_eq!(serialized["code"], MIR_ROUTE_MANIFEST_ERROR_CODE);
+        assert_eq!(serialized["range"]["start"]["line"], 1);
+        assert_eq!(serialized["range"]["start"]["character"], 2);
+        assert_eq!(serialized["range"]["end"]["line"], 1);
+        assert_eq!(serialized["range"]["end"]["character"], 7);
+    }
+}
