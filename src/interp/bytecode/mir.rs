@@ -6034,7 +6034,9 @@ mod tests {
         assert!(report.mir_text.contains("construct"));
         assert!(report.mir_text.contains("drop"));
         assert_eq!(report.ownership_text, "function:main\n");
-        assert!(report.type_desc_text.contains("OwnedString"));
+        assert!(report
+            .type_desc_text
+            .contains("glue=move_out=owned_string clone=owned_string drop=owned_string"));
         assert!(report.type_desc_text.contains("drop=true"));
     }
 
@@ -6082,7 +6084,7 @@ mod tests {
         )
         .expect("Copy-scalar List differential");
         assert!(report.mir_text.contains("construct_list"));
-        assert!(report.type_desc_text.contains("layout=List"));
+        assert!(report.type_desc_text.contains("layout=list element="));
         assert_eq!(
             report.reference.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::List(vec![
@@ -6098,7 +6100,7 @@ mod tests {
             "func main() -> List<bool> { if false { [true] } else { [false, true] } }",
         )
         .expect("Copy-scalar bool List differential");
-        assert!(report.type_desc_text.contains("layout=List"));
+        assert!(report.type_desc_text.contains("layout=list element="));
         assert_eq!(
             report.reference.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::List(vec![
@@ -6127,7 +6129,7 @@ mod tests {
         let report =
             run_canonical_differential(source).expect("canonical List.reverse differential");
         assert!(report.mir_text.contains("= Reverse"));
-        assert!(report.type_desc_text.contains("layout=List"));
+        assert!(report.type_desc_text.contains("layout=list element="));
         let expected = DifferentialOutcome::Return(MirRuntimeValue::List(vec![
             MirRuntimeValue::Int(3),
             MirRuntimeValue::Int(2),
@@ -6333,8 +6335,8 @@ mod tests {
         .expect("Copy-scalar Set handle differential");
         assert!(report.mir_text.contains("construct_set"));
         assert!(report.mir_text.contains("set_op"));
-        assert!(report.type_desc_text.contains("layout=Set"));
-        assert!(report.type_desc_text.contains("SetHandle"));
+        assert!(report.type_desc_text.contains("layout=set element="));
+        assert!(report.type_desc_text.contains("abi=set_handle"));
         assert_eq!(
             report.reference.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::Int(2))
@@ -6430,7 +6432,7 @@ mod tests {
         .expect("List drop differential");
         assert!(report.mir_text.contains("construct_list"));
         assert!(report.mir_text.contains("drop"));
-        assert!(report.type_desc_text.contains("move_out: List"));
+        assert!(report.type_desc_text.contains("move_out=list"));
         assert_eq!(
             report.reference.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::Int(42))

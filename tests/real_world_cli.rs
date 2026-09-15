@@ -16064,7 +16064,7 @@ fn canonical_f64_flow_cli_uses_mir_execution_and_reports_float_verifier_boundary
     );
     let mir_stdout = String::from_utf8_lossy(&mir.stdout);
     assert!(mir_stdout.contains("recoverable_boundary"));
-    assert!(mir_stdout.contains("Float { bits: 64 }"));
+    assert!(mir_stdout.contains("abi=f64"));
 }
 
 #[test]

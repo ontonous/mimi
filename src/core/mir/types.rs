@@ -613,6 +613,17 @@ pub struct MirGlueContract {
     pub drop: MirGlueKind,
 }
 
+impl MirGlueContract {
+    fn canonical_text(self) -> String {
+        format!(
+            "move_out={} clone={} drop={}",
+            self.move_out.canonical_text(),
+            self.clone.canonical_text(),
+            self.drop.canonical_text()
+        )
+    }
+}
+
 /// Canonical field-level drop schedule for an aggregate product.
 ///
 /// The schedule is stored in destruction order (reverse declaration order),
@@ -632,6 +643,27 @@ pub struct MirDropGlueField {
     pub glue: MirGlueKind,
 }
 
+impl MirDropGlueField {
+    fn canonical_text(&self) -> String {
+        format!(
+            "index={} ty={} glue={}",
+            self.index,
+            self.ty.as_str(),
+            self.glue.canonical_text()
+        )
+    }
+}
+
+impl MirDropGluePlan {
+    fn canonical_text(&self) -> String {
+        self.fields
+            .iter()
+            .map(MirDropGlueField::canonical_text)
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+}
+
 /// Canonical drop schedule for one tagged-variant payload.  Unlike a
 /// product drop plan, a variant has a runtime-selected payload shape, so the
 /// active variant identity is part of the schedule key.
@@ -639,6 +671,20 @@ pub struct MirDropGlueField {
 pub struct MirVariantDropGluePlan {
     pub variant: NodeId,
     pub fields: Vec<MirDropGlueField>,
+}
+
+impl MirVariantDropGluePlan {
+    fn canonical_text(&self) -> String {
+        format!(
+            "variant={} fields=[{}]",
+            self.variant.0,
+            self.fields
+                .iter()
+                .map(MirDropGlueField::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
 }
 
 impl MirGlueContract {
@@ -796,6 +842,82 @@ pub enum MirTypeKind {
     DynamicAny,
 }
 
+impl MirTypeKind {
+    /// Stable, backend-independent spelling used by TypeDesc receipts.  The
+    /// catalog is part of the canonical MIR identity, so it must not inherit
+    /// Rust's derived enum names or field punctuation.
+    pub fn canonical_text(&self) -> String {
+        match self {
+            Self::Primitive(primitive) => {
+                format!("primitive({})", primitive_canonical_text(*primitive))
+            }
+            Self::GenericParameter => "generic_parameter".into(),
+            Self::Nominal => "nominal".into(),
+            Self::List => "list".into(),
+            Self::Set => "set".into(),
+            Self::FlowStateSet => "flow_state_set".into(),
+            Self::Reference { mutable } => format!("reference mutable={mutable}"),
+            Self::Option => "option".into(),
+            Self::Result => "result".into(),
+            Self::Tuple { arity } => format!("tuple arity={arity}"),
+            Self::Function { abi, arity } => {
+                format!(
+                    "function abi={} arity={arity}",
+                    function_abi_canonical_text(*abi)
+                )
+            }
+            Self::CBuffer => "cbuffer".into(),
+            Self::Capability => "capability".into(),
+            Self::Ownership(kind) => {
+                format!("ownership kind={}", ownership_type_canonical_text(*kind))
+            }
+            Self::Newtype => "newtype".into(),
+            Self::Array { length } => format!("array length={length}"),
+            Self::Slice => "slice".into(),
+            Self::Trait => "trait".into(),
+            Self::RawPointer { mutable } => format!("raw_pointer mutable={mutable}"),
+            Self::DynamicAny => "dynamic_any".into(),
+        }
+    }
+}
+
+fn primitive_canonical_text(primitive: PrimitiveType) -> &'static str {
+    match primitive {
+        PrimitiveType::I8 => "i8",
+        PrimitiveType::I16 => "i16",
+        PrimitiveType::I32 => "i32",
+        PrimitiveType::I64 => "i64",
+        PrimitiveType::I128 => "i128",
+        PrimitiveType::U8 => "u8",
+        PrimitiveType::U16 => "u16",
+        PrimitiveType::U32 => "u32",
+        PrimitiveType::U64 => "u64",
+        PrimitiveType::U128 => "u128",
+        PrimitiveType::Isize => "isize",
+        PrimitiveType::Usize => "usize",
+        PrimitiveType::F32 => "f32",
+        PrimitiveType::F64 => "f64",
+        PrimitiveType::Bool => "bool",
+        PrimitiveType::Char => "char",
+        PrimitiveType::String => "string",
+        PrimitiveType::Unit => "unit",
+    }
+}
+
+fn function_abi_canonical_text(abi: FunctionTypeAbi) -> &'static str {
+    match abi {
+        FunctionTypeAbi::Mimi => "mimi",
+        FunctionTypeAbi::C => "c",
+    }
+}
+
+fn ownership_type_canonical_text(kind: OwnershipTypeKind) -> &'static str {
+    match kind {
+        OwnershipTypeKind::Shared => "shared",
+        OwnershipTypeKind::Weak => "weak",
+    }
+}
+
 /// Backend-independent semantic layout.  This is deliberately not a byte
 /// offset/size description: target ABI lowering owns those physical details,
 /// while every consumer must agree on the aggregate shape and its canonical
@@ -858,6 +980,85 @@ pub enum MirLayout {
     Opaque,
 }
 
+impl MirLayout {
+    /// Stable spelling for the semantic layout portion of a TypeDesc.  Field
+    /// and variant vectors retain checker declaration order; their members
+    /// are rendered recursively through the same explicit vocabulary.
+    pub fn canonical_text(&self) -> String {
+        match self {
+            Self::Unit => "unit".into(),
+            Self::Scalar => "scalar".into(),
+            Self::Handle => "handle".into(),
+            Self::Pointer { target } => format!(
+                "pointer target={}",
+                target.as_ref().map(ResolvedTypeId::as_str).unwrap_or("-")
+            ),
+            Self::Tuple(elements) => format!(
+                "tuple elements=[{}]",
+                elements
+                    .iter()
+                    .map(ResolvedTypeId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Option { inner, variants } => format!(
+                "option inner={} variants=[{}]",
+                inner.as_str(),
+                variants
+                    .iter()
+                    .map(MirVariantDesc::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            Self::Result {
+                ok,
+                error,
+                variants,
+            } => format!(
+                "result ok={} error={} variants=[{}]",
+                ok.as_str(),
+                error.as_str(),
+                variants
+                    .iter()
+                    .map(MirVariantDesc::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            Self::Enum { nominal, variants } => format!(
+                "enum nominal={} variants=[{}]",
+                nominal.as_str(),
+                variants
+                    .iter()
+                    .map(MirVariantDesc::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            Self::Array { element, length } => {
+                format!("array element={} length={length}", element.as_str())
+            }
+            Self::Newtype { nominal, inner } => {
+                format!(
+                    "newtype nominal={} inner={}",
+                    nominal.as_str(),
+                    inner.as_str()
+                )
+            }
+            Self::Record { nominal, fields } => format!(
+                "record nominal={} fields=[{}]",
+                nominal.as_str(),
+                fields
+                    .iter()
+                    .map(MirFieldDesc::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            Self::List { element } => format!("list element={}", element.as_str()),
+            Self::Set { element } => format!("set element={}", element.as_str()),
+            Self::Opaque => "opaque".into(),
+        }
+    }
+}
+
 /// Canonical field contract used by aggregate lowering.  The declaration
 /// order is preserved, while the field identity and type are checker-owned
 /// values; no backend may recover either from a surface AST or a native struct.
@@ -866,6 +1067,17 @@ pub struct MirFieldDesc {
     pub id: NodeId,
     pub name: String,
     pub ty: ResolvedTypeId,
+}
+
+impl MirFieldDesc {
+    fn canonical_text(&self) -> String {
+        format!(
+            "id={} name={} ty={}",
+            self.id.0,
+            self.name,
+            self.ty.as_str()
+        )
+    }
 }
 
 /// Canonical discriminant/payload contract for one variant. The discriminant
@@ -877,6 +1089,22 @@ pub struct MirVariantDesc {
     pub name: String,
     pub discriminant: u16,
     pub fields: Vec<MirFieldDesc>,
+}
+
+impl MirVariantDesc {
+    fn canonical_text(&self) -> String {
+        format!(
+            "id={} name={} discriminant={} fields=[{}]",
+            self.id.0,
+            self.name,
+            self.discriminant,
+            self.fields
+                .iter()
+                .map(MirFieldDesc::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
 }
 
 /// Backend-independent receipt for one canonical variant payload projection.
@@ -1262,6 +1490,63 @@ pub struct MirTypeDesc {
 }
 
 impl MirTypeDesc {
+    /// Stable, backend-independent TypeDesc spelling used by route receipts
+    /// and identity digests. Every nested descriptor is rendered explicitly;
+    /// Rust's derived `Debug` output is intentionally not part of the schema.
+    pub fn canonical_text(&self) -> String {
+        format!(
+            "{} kind={} layout={} session_protocol={} ownership={} abi={} glue={} drop_plan={} variant_drop_plan={} drop={} clone={}\n",
+            self.id.as_str(),
+            self.kind.canonical_text(),
+            self.layout.canonical_text(),
+            self.session_protocol
+                .as_ref()
+                .map(ResolvedTypeId::as_str)
+                .unwrap_or("-"),
+            mir_ownership_canonical_text(self.ownership),
+            self.abi.canonical_text(),
+            self.glue.canonical_text(),
+            self.drop_plan
+                .as_ref()
+                .map(|plan| format!("[{}]", plan.canonical_text()))
+                .unwrap_or_else(|| "-".into()),
+            self.variant_drop_plan
+                .as_ref()
+                .map(|plans| {
+                    format!(
+                        "[{}]",
+                        plans
+                            .iter()
+                            .map(MirVariantDropGluePlan::canonical_text)
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    )
+                })
+                .unwrap_or_else(|| "-".into()),
+            self.needs_drop_glue,
+            self.needs_clone_glue,
+        )
+    }
+
+    /// Stable ABI-focused TypeDesc spelling. This projection deliberately
+    /// excludes ownership-only drop schedules while retaining all layout,
+    /// protocol, ABI and glue facts consumed by backend admission.
+    pub fn abi_canonical_text(&self) -> String {
+        format!(
+            "{} layout={} session_protocol={} abi={} glue={} drop={} clone={}\n",
+            self.id.as_str(),
+            self.layout.canonical_text(),
+            self.session_protocol
+                .as_ref()
+                .map(ResolvedTypeId::as_str)
+                .unwrap_or("-"),
+            self.abi.canonical_text(),
+            self.glue.canonical_text(),
+            self.needs_drop_glue,
+            self.needs_clone_glue,
+        )
+    }
+
     /// Whether this descriptor carries the complete metadata required by a
     /// Copy aggregate/scalar contract.  Protocol identity and either drop
     /// plan are ownership-bearing facts even when the top-level flags/glue
@@ -1546,6 +1831,10 @@ impl MirTypeDesc {
             variant_drop_plan: None,
         }
     }
+}
+
+fn mir_ownership_canonical_text(ownership: MirOwnership) -> &'static str {
+    ownership.canonical_text()
 }
 
 fn option_variants(inner: &ResolvedTypeId) -> Vec<MirVariantDesc> {
@@ -10109,21 +10398,8 @@ impl MirTypeCatalog {
 
     pub fn canonical_text(&self) -> String {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
-        for (id, descriptor) in &self.entries {
-            output.push_str(&format!(
-                "{} kind={:?} layout={:?} session_protocol={:?} ownership={:?} abi={:?} glue={:?} drop_plan={:?} variant_drop_plan={:?} drop={} clone={}\n",
-                id.as_str(),
-                descriptor.kind,
-                descriptor.layout,
-                descriptor.session_protocol,
-                descriptor.ownership,
-                descriptor.abi,
-                descriptor.glue,
-                descriptor.drop_plan,
-                descriptor.variant_drop_plan,
-                descriptor.needs_drop_glue,
-                descriptor.needs_clone_glue,
-            ));
+        for descriptor in self.entries.values() {
+            output.push_str(&descriptor.canonical_text());
         }
         output
     }
@@ -10134,17 +10410,8 @@ impl MirTypeCatalog {
     /// without either backend reconstructing the contract.
     pub fn abi_canonical_text(&self) -> String {
         let mut output = format!("mir.abi-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
-        for (id, descriptor) in &self.entries {
-            output.push_str(&format!(
-                "{} layout={:?} session_protocol={:?} abi={:?} glue={:?} drop={} clone={}\n",
-                id.as_str(),
-                descriptor.layout,
-                descriptor.session_protocol,
-                descriptor.abi,
-                descriptor.glue,
-                descriptor.needs_drop_glue,
-                descriptor.needs_clone_glue,
-            ));
+        for descriptor in self.entries.values() {
+            output.push_str(&descriptor.abi_canonical_text());
         }
         output
     }
@@ -12452,6 +12719,32 @@ mod tests {
             .expect("catalog")
             .canonical_text();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn type_catalog_canonical_text_uses_explicit_descriptor_spelling() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex TypeDesc fixture");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse TypeDesc fixture");
+        let checked = crate::core::check_program(&file).expect("check TypeDesc fixture");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("materialize catalog");
+        let text = catalog.canonical_text();
+        let abi_text = catalog.abi_canonical_text();
+
+        assert!(text.contains("kind=primitive(i32)"));
+        assert!(text.contains("layout=list element="));
+        assert!(text.contains("glue=move_out=list clone=list drop=list"));
+        assert!(!text.contains("Primitive("));
+        assert!(!text.contains("List {"));
+        assert!(!text.contains("Scalar"));
+        assert!(abi_text.contains("mir.abi-catalog"));
+        assert!(abi_text.contains("layout=list element="));
+        assert!(!abi_text.contains("List {"));
+        assert!(!abi_text.contains("Opaque"));
     }
 
     #[test]
