@@ -105,12 +105,7 @@ impl CanonicalMirRouteReceipt {
                 self.schema, MIR_ROUTE_RECEIPT_SCHEMA
             ));
         }
-        if self.profile.trim().is_empty()
-            || self
-                .profile
-                .chars()
-                .any(|character| character.is_control() || character == '=')
-        {
+        if !manifest_atom_is_safe(&self.profile, false) {
             return Err("route receipt profile is empty or not manifest-safe".into());
         }
         for (name, value) in [
@@ -134,13 +129,11 @@ impl CanonicalMirRouteReceipt {
                 ));
             }
         }
-        if self.root_owners.iter().any(|owner| {
-            owner.0.is_empty()
-                || owner
-                    .0
-                    .chars()
-                    .any(|character| character.is_control() || matches!(character, '=' | ','))
-        }) {
+        if self
+            .root_owners
+            .iter()
+            .any(|owner| !manifest_atom_is_safe(&owner.0, true))
+        {
             return Err("route receipt root owner is empty or not manifest-safe".into());
         }
         if self
@@ -419,6 +412,21 @@ fn validate_manifest_field_schema() -> Result<(), String> {
     Ok(())
 }
 
+/// Validate one scalar value before it crosses the line-oriented manifest or
+/// canonical receipt boundary.  Profile values are standalone fields and may
+/// contain commas; root-owner values are joined with commas and therefore
+/// reject both delimiters.  Whitespace is rejected for both so a value cannot
+/// acquire a different tokenization in a consumer that splits canonical text.
+fn manifest_atom_is_safe(value: &str, reject_comma: bool) -> bool {
+    !value.trim().is_empty()
+        && !value.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || character == '='
+                || (reject_comma && character == ',')
+        })
+}
+
 fn validate_manifest_values(entries: &BTreeMap<String, String>) -> Result<(), String> {
     let schema = entries
         .get("schema")
@@ -431,11 +439,7 @@ fn validate_manifest_values(entries: &BTreeMap<String, String>) -> Result<(), St
     let profile = entries
         .get("profile")
         .ok_or_else(|| "invalid MIR route manifest: missing field 'profile'".to_string())?;
-    if profile.trim().is_empty()
-        || profile
-            .chars()
-            .any(|character| character.is_control() || character == '=')
-    {
+    if !manifest_atom_is_safe(profile, false) {
         return Err(
             "invalid MIR route manifest: field 'profile' is empty or not manifest-safe".into(),
         );
@@ -470,11 +474,7 @@ fn validate_manifest_values(entries: &BTreeMap<String, String>) -> Result<(), St
         owners
             .split(',')
             .map(|owner| {
-                if owner.is_empty()
-                    || owner
-                        .chars()
-                        .any(|character| character.is_control() || matches!(character, '=' | ','))
-                {
+                if !manifest_atom_is_safe(owner, true) {
                     return Err(
                         "invalid MIR route manifest: root owner is empty or not manifest-safe"
                             .to_string(),
@@ -765,8 +765,28 @@ mod tests {
         );
 
         let mut receipt = valid_receipt();
+        receipt.profile = "bad profile".into();
+        let error = receipt
+            .manifest_text()
+            .expect_err("whitespace in profile must be rejected");
+        assert_eq!(
+            error,
+            "invalid MIR route receipt: route receipt profile is empty or not manifest-safe"
+        );
+
+        let mut receipt = valid_receipt();
         receipt.root_owners[0] = NodeId("function:bad,owner".into());
         let error = receipt.manifest_text().expect_err("unsafe owner rejection");
+        assert_eq!(
+            error,
+            "invalid MIR route receipt: route receipt root owner is empty or not manifest-safe"
+        );
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners[0] = NodeId("function:bad owner".into());
+        let error = receipt
+            .manifest_text()
+            .expect_err("whitespace in root owner must be rejected");
         assert_eq!(
             error,
             "invalid MIR route receipt: route receipt root owner is empty or not manifest-safe"
@@ -833,6 +853,11 @@ mod tests {
                 "invalid MIR route manifest: field 'profile' is empty or not manifest-safe",
             ),
             (
+                "profile",
+                "bad profile",
+                "invalid MIR route manifest: field 'profile' is empty or not manifest-safe",
+            ),
+            (
                 "mir_digest",
                 "not-a-digest",
                 "invalid MIR route manifest: field 'mir_digest' must be a 64-character lowercase hex digest",
@@ -841,6 +866,11 @@ mod tests {
                 "root_owners",
                 "z-owner,a-owner",
                 "invalid MIR route manifest: root owners must be strictly sorted",
+            ),
+            (
+                "root_owners",
+                "bad owner,function:z",
+                "invalid MIR route manifest: root owner is empty or not manifest-safe",
             ),
         ] {
             let mutated = manifest
