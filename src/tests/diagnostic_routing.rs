@@ -3070,6 +3070,224 @@ fn lsp_alias_uri_proven_cache_restart_after_reset_keeps_source_key() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_restart_lru_touch_keeps_pending_transport_order() {
+    let root = temp_workspace("lsp_alias_uri_restart_lru_pending");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let dep_path = root.join("dep.mimi");
+    let text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&real_path, text).expect("write restart-lru source");
+    fs::write(&dep_path, dep_text).expect("write restart-lru dependency");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create restart-lru alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let dep_uri = file_uri(&dep_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse restart-lru real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find restart-lru function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("restart-lru real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("restart-lru source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "restart-lru real failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "restart-lru real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse restart-lru alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("restart-lru alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "restart-lru alias snapshot must retain the stable SourceKey"
+    );
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "restart-lru alias failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "restart-lru alias route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 13).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut readers = [crate::lsp::LspServer::new(), crate::lsp::LspServer::new()];
+    let open = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": 1, "text": text }
+            }
+        }))
+    };
+    let hover = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }))
+    };
+    let change = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+
+    for (reader_index, reader) in readers.iter_mut().enumerate() {
+        let _ = reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": reader_index + 1,
+            "method": "initialize",
+            "params": { "rootUri": root_uri }
+        }));
+        assert!(reader.verification_cache.contains_key(&real_key));
+        assert!(reader.verification_cache.contains_key(&alias_key));
+        for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 2) {
+            reader.cache_put_verification(
+                format!("restart-lru-cold-{reader_index}-{index}"),
+                crate::lsp::VerificationCacheEntry::new(
+                    index as u64,
+                    crate::verifier::VerifStatus::Proven,
+                    "restart-lru cold proof".to_string(),
+                    None,
+                ),
+            );
+        }
+        let current_records = reader.source_registry.borrow().records().len();
+        for index in current_records..crate::lsp::MAX_SOURCE_RECORDS {
+            let seed = format!(
+                "func restart_lru_reset_{reader_index}_{index}() -> i32 {{\n    {index}\n}}\n"
+            );
+            reader
+                .parse_with_recovery_for_uri(&seed, None)
+                .expect("fill restart-lru source registry");
+        }
+        assert_eq!(
+            reader.source_registry.borrow().records().len(),
+            crate::lsp::MAX_SOURCE_RECORDS,
+            "restart-lru reader must fill source registry before didOpen"
+        );
+        let opened = open(reader, &alias_uri).expect("restart-lru alias open");
+        assert_eq!(opened["params"]["uri"], alias_uri);
+        assert!(opened["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        let pending = reader.drain_pending_notifications();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(pending[0]["params"]["uri"], dep_uri);
+        let _ = hover(reader, &alias_uri);
+        let changed = change(reader, &alias_uri).expect("restart-lru alias change");
+        assert_eq!(
+            changed["params"]["diagnostics"][0]["message"],
+            "restart-lru alias route: MIR-RECEIPT-001"
+        );
+        assert_eq!(reader.drain_pending_notifications(), pending);
+        reader.save_cache();
+        reader.cache_put_verification(
+            format!("restart-lru-fresh-{reader_index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                99,
+                crate::verifier::VerifStatus::Proven,
+                "restart-lru fresh proof".to_string(),
+                None,
+            ),
+        );
+        assert!(
+            reader.verification_cache.contains_key(&alias_key),
+            "alias hit must survive restart LRU eviction"
+        );
+        assert!(
+            !reader.verification_cache.contains_key(&real_key),
+            "independent real key must be the deterministic oldest victim"
+        );
+        assert!(
+            reader
+                .verification_cache
+                .contains_key(&format!("restart-lru-cold-{reader_index}-0")),
+            "session cold entries remain newer than the untouched real key"
+        );
+    }
+
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json")).expect("read restart-lru cache"),
+    )
+    .expect("parse restart-lru cache");
+    assert_eq!(
+        persisted["entries"][alias_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "alias LRU writeback must preserve SourceKey"
+    );
+    assert_eq!(
+        persisted["entries"][real_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "real LRU writeback must preserve SourceKey"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
