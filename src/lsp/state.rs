@@ -528,7 +528,10 @@ impl LspServer {
         }
         grouped
             .into_iter()
-            .map(|(uri, diagnostics)| DiagnosticBatch { uri, diagnostics })
+            .map(|(uri, diagnostics)| DiagnosticBatch {
+                uri,
+                diagnostics: diagnostic::normalize_diagnostics(diagnostics),
+            })
             .collect()
     }
 
@@ -755,7 +758,7 @@ impl LspServer {
         // Persist cache to disk
         self.save_cache_with_registry(&cache_registry);
 
-        diagnostics
+        diagnostic::normalize_diagnostics(diagnostics)
     }
 }
 

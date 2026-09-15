@@ -55,6 +55,38 @@ pub(crate) fn lexer_error_to_lsp(err: &LexerError, text: Option<&str>) -> Value 
     })
 }
 
+/// Normalize one LSP diagnostic batch for deterministic clients and cache
+/// snapshots.  The key keeps source position first, then severity/code/text
+/// and serialized provenance; exact duplicate payloads collapse only after
+/// sorting, so diagnostics at distinct spans or with distinct origins remain.
+pub(crate) fn normalize_diagnostics(mut diagnostics: Vec<Value>) -> Vec<Value> {
+    diagnostics.sort_by_key(lsp_diagnostic_sort_key);
+    diagnostics.dedup();
+    diagnostics
+}
+
+fn lsp_diagnostic_sort_key(
+    value: &Value,
+) -> (u64, u64, u64, u64, u64, String, String, String, String) {
+    let range = &value["range"];
+    let start = &range["start"];
+    let end = &range["end"];
+    (
+        start["line"].as_u64().unwrap_or(u64::MAX),
+        start["character"].as_u64().unwrap_or(u64::MAX),
+        end["line"].as_u64().unwrap_or(u64::MAX),
+        end["character"].as_u64().unwrap_or(u64::MAX),
+        value["severity"].as_u64().unwrap_or(u64::MAX),
+        value["code"].as_str().unwrap_or_default().to_owned(),
+        value["message"].as_str().unwrap_or_default().to_owned(),
+        value["source"].as_str().unwrap_or_default().to_owned(),
+        value
+            .get("data")
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +157,25 @@ mod tests {
         assert_eq!(serialized["code"], "MIR-FUTURE-999");
         assert_eq!(serialized["message"], "future route diagnostic");
         assert!(serialized.get("data").is_none());
+    }
+
+    #[test]
+    fn lsp_normalization_sorts_and_folds_exact_duplicates() {
+        let first = diagnostic_to_lsp(
+            &Diagnostic::error("ordinary failure", Span::new(1, 1, 1, 2)),
+            Some("a\nb"),
+        );
+        let route = diagnostic_to_lsp(
+            &crate::diagnostic::mir_route_error_diagnostic(
+                format!("wrapper: {MIR_ROUTE_MANIFEST_ERROR_CODE}: stale receipt"),
+                Span::new(2, 1, 2, 4),
+            ),
+            Some("a\nb"),
+        );
+        let mut normalized = normalize_diagnostics(vec![route.clone(), first, route]);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized.remove(0)["message"], "ordinary failure");
+        assert_eq!(normalized.remove(0)["code"], MIR_ROUTE_MANIFEST_ERROR_CODE);
     }
 }
