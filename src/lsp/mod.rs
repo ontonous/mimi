@@ -258,6 +258,11 @@ pub(crate) fn parse_verification_cache_key(key: &str) -> Option<(&str, &str)> {
 #[derive(Clone, Default)]
 struct ParseCacheEntry {
     source_key: String,
+    /// The URI spelling that owns the parsed snapshot. A single disk source
+    /// can be opened through several aliases (for example a symlink); those
+    /// requests share SourceKey/SourceId identity but must not reuse an AST
+    /// carrying another document's canonical URI.
+    uri: Option<String>,
     text: String,
     file: Option<crate::ast::File>,
 }
@@ -441,9 +446,10 @@ pub struct LspServer {
     should_exit: bool,
     /// L-H6: session lifecycle gate for method dispatch.
     pub(crate) lifecycle: LifecycleState,
-    /// Last parsed document, keyed by both stable source identity and text.
-    /// Text alone is insufficient because two documents may have identical
-    /// contents while requiring distinct SourceId/URI ownership.
+    /// Last parsed document, keyed by stable source identity, URI spelling,
+    /// and text. Text alone is insufficient because two documents may have
+    /// identical contents while requiring distinct SourceId/URI ownership;
+    /// URI is also significant when aliases share one disk SourceKey.
     parse_cache: std::cell::RefCell<ParseCacheEntry>,
     /// Session-local source interner shared by unsaved buffers and diagnostics.
     pub(crate) source_registry: std::cell::RefCell<crate::span::SourceRegistry>,

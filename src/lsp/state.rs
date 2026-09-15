@@ -258,7 +258,7 @@ impl LspServer {
         };
         let source_key = source_registry.key(source_id)?.as_str().to_string();
         let cache = self.parse_cache.borrow();
-        if cache.source_key == source_key && cache.text == text {
+        if cache.source_key == source_key && cache.uri.as_deref() == uri && cache.text == text {
             return cache.file.clone();
         }
         drop(cache);
@@ -275,6 +275,7 @@ impl LspServer {
         let result = Some(file);
         *self.parse_cache.borrow_mut() = super::ParseCacheEntry {
             source_key,
+            uri: uri.map(str::to_string),
             text: text.to_string(),
             file: result.clone(),
         };

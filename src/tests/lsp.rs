@@ -618,6 +618,79 @@ fn lsp_parse_cache_keeps_identical_text_bound_to_each_uri() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_parse_cache_rebinds_same_disk_alias_uri_snapshot() {
+    let root =
+        std::env::temp_dir().join(format!("mimi_lsp_parse_cache_alias_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create alias workspace");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = "func main() -> i32 { 42 }";
+    std::fs::write(&real_path, text).expect("write alias source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create alias source");
+    let root_uri = format!("file://{}", root.display());
+    let real_uri = format!("file://{}", real_path.display());
+    let alias_uri = format!("file://{}", alias_path.display());
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+
+    let real = server
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse real URI");
+    let alias = server
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse alias URI");
+    let real_again = server
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("reparse real URI");
+
+    let source = |file: &crate::ast::File| {
+        file.items
+            .iter()
+            .find_map(|item| match item {
+                crate::ast::Item::Func(func) => Some(func.meta.span.source_id),
+                _ => None,
+            })
+            .expect("function source")
+    };
+    let real_source = source(&real);
+    let alias_source = source(&alias);
+    let real_again_source = source(&real_again);
+    assert_eq!(
+        real.sources.key(real_source),
+        alias.sources.key(alias_source),
+        "real and alias URI snapshots must share the stable SourceKey"
+    );
+    assert_eq!(
+        alias
+            .sources
+            .record(alias_source)
+            .and_then(|record| record.canonical_uri.as_deref()),
+        Some(alias_uri.as_str()),
+        "alias request must receive an AST snapshot owned by the alias URI"
+    );
+    assert_eq!(
+        real_again
+            .sources
+            .record(real_again_source)
+            .and_then(|record| record.canonical_uri.as_deref()),
+        Some(real_uri.as_str()),
+        "switching back must rebind the snapshot to the real URI"
+    );
+    assert_eq!(real_source, alias_source);
+    assert_eq!(alias_source, real_again_source);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_verification_cache_hit_preserves_structured_span() {
     let mut server = LspServer::new();
