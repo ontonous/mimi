@@ -55,6 +55,36 @@ impl fmt::Display for MirBytecodeError {
 
 impl std::error::Error for MirBytecodeError {}
 
+impl MirBytecodeError {
+    /// Return a registered cross-layer route code when this adapter error
+    /// carries one. Ordinary bytecode eligibility failures intentionally
+    /// remain generic diagnostics; route errors are the only messages whose
+    /// stable code is part of the public provenance contract.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        [
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+            crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+            crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+        ]
+        .into_iter()
+        .find(|code| self.message.starts_with(code))
+    }
+
+    /// Convert the adapter error to the shared diagnostic representation.
+    /// Route codes stay in `Diagnostic.code` as well as in the historical
+    /// message text, so display and structured consumers observe one identity.
+    pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        let message = self.to_string();
+        match self.diagnostic_code() {
+            Some(code) => {
+                crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
+            }
+            None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
+        }
+    }
+}
+
 fn checked_function_index(index: usize, owner: &NodeId) -> Result<FuncIdx, MirBytecodeError> {
     FuncIdx::try_from(index).map_err(|_| MirBytecodeError {
         function: owner.clone(),
@@ -5201,7 +5231,7 @@ impl<'a> FunctionEmitter<'a> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{checked_function_index, compile_mir_program, FunctionEmitter};
+    use super::{checked_function_index, compile_mir_program, FunctionEmitter, MirBytecodeError};
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
@@ -5216,6 +5246,34 @@ mod tests {
     use crate::interp::value::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+
+    #[test]
+    fn route_errors_keep_structured_code_when_converted_to_diagnostic() {
+        let error = MirBytecodeError {
+            function: crate::core::NodeId("mir-program".into()),
+            message: format!(
+                "{}: canonical route manifest rejected: future field",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+        };
+        assert_eq!(
+            error.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(
+            diagnostic.to_string(),
+            format!(
+                "[{}] {}",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+                error
+            )
+        );
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum DifferentialOutcome {
