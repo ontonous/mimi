@@ -599,3 +599,89 @@ fn lsp_multi_uri_dependency_notifications_keep_batches_and_order() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn lsp_source_reset_cache_hit_keeps_route_primary_and_global_pending() {
+    let root = temp_workspace("lsp_reset_cache_global_pending");
+    let outside = std::env::temp_dir().join(format!(
+        "mimi_reset_cache_global_pending_{}_main.mimi",
+        std::process::id()
+    ));
+    let uri = file_uri(&outside);
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+
+    let probe = crate::lsp::LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(&uri))
+        .expect("parse route source");
+    let bad = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let route = crate::diagnostic::mir_route_error_diagnostic(
+        format!(
+            "reset transport wrapper: {}: stale receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ),
+        crate::span::Span::new(3, 5, 3, 12).with_source(crate::span::SourceId::new(1)),
+    );
+
+    let mut server = crate::lsp::LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": file_uri(&root) }
+    }));
+    for index in 0..crate::lsp::MAX_SOURCE_RECORDS {
+        let seed = format!("func seed_{index}() -> i32 {{\n    {index}\n}}\n");
+        server
+            .parse_with_recovery_for_uri(&seed, None)
+            .expect("fill source registry");
+    }
+    server.insert_verification_cache_with_diagnostic(
+        crate::lsp::verification_cache_key(&uri, "bad"),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        route.message.clone(),
+        route,
+    );
+
+    let response = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 1 },
+            "contentChanges": [{ "text": text }]
+        }
+    }));
+    let response = response.expect("didChange should publish the active document");
+    assert_eq!(response["method"], "textDocument/publishDiagnostics");
+    assert_eq!(
+        response["params"]["diagnostics"][0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+        "source reset must not turn a route cache hit into a fresh unstructured verifier error"
+    );
+    let pending = server.drain_pending_notifications();
+    assert_eq!(pending.len(), 1, "global loader failure should be pending");
+    assert_eq!(pending[0]["method"], "window/showMessage");
+    assert!(pending[0]["params"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("outside the workspace")));
+
+    let _ = fs::remove_dir_all(root);
+}
