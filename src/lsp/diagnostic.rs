@@ -99,4 +99,15 @@ mod tests {
         assert_eq!(serialized["data"]["origin"]["kind"], "runtime_system");
         assert_eq!(serialized["data"]["origin"]["rule"], "mir.route");
     }
+
+    #[test]
+    fn lsp_serialization_preserves_unknown_future_code() {
+        let diagnostic =
+            Diagnostic::error_code("MIR-FUTURE-999", "future route diagnostic", Span::UNKNOWN);
+        let serialized = diagnostic_to_lsp(&diagnostic, None);
+
+        assert_eq!(serialized["code"], "MIR-FUTURE-999");
+        assert_eq!(serialized["message"], "future route diagnostic");
+        assert!(serialized.get("data").is_none());
+    }
 }
