@@ -1227,6 +1227,63 @@ fn lsp_verification_cache_load_drops_malformed_key_before_lru_replay() {
 }
 
 #[test]
+fn lsp_verification_cache_load_rejects_unknown_status() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_unknown_status_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let valid_key = crate::lsp::verification_cache_key("untitled://workspace/known.mimi", "known");
+    let unknown_key =
+        crate::lsp::verification_cache_key("untitled://workspace/future.mimi", "future");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                valid_key.clone(): {
+                    "body_hash": 1,
+                    "status": "Verified",
+                    "message": "known proof"
+                },
+                unknown_key.clone(): {
+                    "body_hash": 2,
+                    "status": "FutureVerifierState",
+                    "message": "must not replay"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write unknown-status cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(server.verification_cache.contains_key(&valid_key));
+    assert!(
+        !server.verification_cache.contains_key(&unknown_key),
+        "unknown persisted statuses must be dropped instead of mapped to SolverUnknown"
+    );
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json"))
+            .expect("read normalized cache"),
+    )
+    .expect("parse normalized cache");
+    assert!(persisted["entries"].get(valid_key.as_str()).is_some());
+    assert!(persisted["entries"].get(unknown_key.as_str()).is_none());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_key_is_length_framed_and_validated() {
     let uri = "file:///workspace/cache:a.mimi?fragment=x:y";
     let key = crate::lsp::verification_cache_key(uri, "bad");

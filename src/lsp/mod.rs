@@ -607,7 +607,11 @@ impl LspServer {
                 "InfrastructureError" => VerifStatus::InfrastructureError,
                 "RuntimeOnlyContract" => VerifStatus::RuntimeOnlyContract,
                 "NoObligations" => VerifStatus::NoObligations,
-                _ => VerifStatus::SolverUnknown,
+                // Persisted status strings are workspace input. Do not
+                // silently reinterpret a future/forged value as
+                // `SolverUnknown`, because that would create a cache hit that
+                // suppresses verification until the next source edit.
+                _ => continue,
             };
             // Infrastructure failures are retryable environment state, not
             // a stable property of the function body.  Drop old persisted
