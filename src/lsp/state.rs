@@ -241,6 +241,15 @@ impl LspServer {
         self.cache_access_order.push_back(key.to_string());
     }
 
+    /// Remove a verdict that cannot be safely replayed for the current
+    /// source/body snapshot. A refresh may still produce no verifier result
+    /// (for example an invariant-only callable on the Resolved path), so
+    /// leaving the old entry around would persist a stale verdict forever.
+    pub(crate) fn cache_invalidate_verification(&mut self, key: &str) {
+        self.cache_access_order.retain(|cached| cached != key);
+        self.verification_cache.remove(key);
+    }
+
     pub(crate) fn cache_remove(&mut self, uri: &str) {
         self.access_order.retain(|k| k != uri);
         if let Some(removed) = self.documents.remove(uri) {
@@ -708,6 +717,11 @@ impl LspServer {
             }
         }
 
+        // The cached result was stale or could not be rebound to this
+        // snapshot. Invalidate it before refreshing so a verifier result
+        // omission cannot resurrect the old verdict during persistence.
+        self.cache_invalidate_verification(&cache_key);
+
         // Dynamic timeout based on function complexity.
         // X-4: complexity = the function's line span (end_line - start_line),
         // clamped inside `verification_timeout_ms`.
@@ -756,10 +770,22 @@ impl LspServer {
 
         // Run verification
         let results = verifier.verify_checked(&checked_program);
-        for result in &results {
-            if result.func_name != func.name {
-                continue;
-            }
+        let matching_results = results
+            .iter()
+            .filter(|result| result.func_name == func.name)
+            .collect::<Vec<_>>();
+        if matching_results.len() != 1 {
+            // A missing result is possible for a callable whose contract
+            // shape is outside the current Resolved verifier subset. More
+            // than one result is equally unsafe: choosing by iteration order
+            // would make one URI key depend on nondeterministic map order.
+            // The key was invalidated before verification, so persist the
+            // fail-closed state and wait for a future supported refresh.
+            self.cache_invalidate_verification(&cache_key);
+            self.save_cache_with_registry(&cache_registry);
+            return diagnostics;
+        }
+        for result in matching_results {
             // Update cache (with LRU eviction)
             let mut structured_diagnostic =
                 if matches!(result.status, VerifStatus::Failed) {

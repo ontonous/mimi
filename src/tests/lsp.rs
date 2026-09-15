@@ -1705,6 +1705,76 @@ fn lsp_verification_cache_writeback_is_byte_deterministic() {
 }
 
 #[test]
+fn lsp_verification_refresh_without_result_drops_stale_verdict() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_refresh_without_result_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create refresh workspace");
+    let uri = "untitled://workspace/invariant-only.mimi";
+    let text = concat!(
+        "func invariant_only(x: i32) -> i32 {\n",
+        "    invariant: x >= 0\n",
+        "    x\n",
+        "}\n"
+    );
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let file = server
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse invariant-only source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "invariant_only" => Some(func),
+            _ => None,
+        })
+        .expect("find invariant-only function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    let key = crate::lsp::verification_cache_key(uri, "invariant_only");
+    // A malformed/stale Disproven entry has no safely replayable diagnostic.
+    // The Resolved verifier currently emits no result for invariant-only
+    // callables, so a refresh must remove this entry instead of preserving it.
+    server.insert_verification_cache(
+        key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "stale verdict".to_string(),
+    );
+    server.save_cache();
+
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert!(diagnostics.is_empty());
+    assert!(
+        !server.verification_cache.contains_key(&key),
+        "a refresh with no verifier result must remove the stale in-memory verdict"
+    );
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read refreshed cache"),
+    )
+    .expect("parse refreshed cache");
+    assert_eq!(
+        persisted["entries"].get(key.as_str()),
+        None,
+        "a refresh with no verifier result must not persist the stale verdict"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_reinitialize_drops_verifier_session_state() {
     if !crate::verifier::is_z3_available() {
         return;
