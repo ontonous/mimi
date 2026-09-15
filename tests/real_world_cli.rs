@@ -4096,6 +4096,14 @@ fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_route
             &String::from_utf8_lossy(&manifest_output.stdout),
         )
         .unwrap_or_else(|error| panic!("{fixture_name}: receipt round-trip failed: {error}"));
+        let expected_manifest = checked.manifest_text().unwrap_or_else(|error| {
+            panic!("{fixture_name}: checked manifest render failed: {error}")
+        });
+        assert_eq!(
+            manifest_output.stdout,
+            expected_manifest.as_bytes(),
+            "{fixture_name}: CLI receipt bytes must equal checker-owned manifest rendering"
+        );
         assert_eq!(
             manifest_receipt, checked,
             "{fixture_name}: manifest round-trip changed the checked receipt"
@@ -4172,6 +4180,41 @@ fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_route
         manifests[0].get("ffi_digest"),
         manifests[1].get("ffi_digest"),
         "different declaration/call graphs must never collapse to one FFI digest"
+    );
+}
+
+#[test]
+fn canonical_mir_cli_receipt_manifest_empty_ffi_is_byte_exact() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar.mimi");
+    let checked = checked_route_receipt(&fixture);
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--receipt")
+        .output()
+        .expect("spawn empty-FFI receipt manifest");
+    assert!(
+        output.status.success(),
+        "empty-FFI receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        checked.ffi_digest,
+        blake3::hash("".as_bytes()).to_hex().to_string(),
+        "empty FFI table must have the canonical empty-table digest"
+    );
+    assert_eq!(
+        output.stdout,
+        checked
+            .manifest_text()
+            .expect("render empty-FFI checked manifest")
+            .as_bytes(),
+        "empty-FFI CLI output must be byte-identical to checker-owned rendering"
     );
 }
 
