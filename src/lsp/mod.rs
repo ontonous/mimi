@@ -1054,6 +1054,41 @@ mod tests {
     }
 
     #[test]
+    fn persisted_shared_route_factory_roundtrip_preserves_runtime_provenance() {
+        let mut registry = crate::span::SourceRegistry::default();
+        let source_id = registry
+            .register_key("workspace:shared-route.mimi", SourceTextOrigin::Memory)
+            .expect("register source");
+        let span = Span::new(4, 5, 4, 16).with_source(source_id);
+        let diagnostic = crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "cache wrapper: {}: stale route receipt",
+                MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+            span,
+        );
+
+        let persisted =
+            PersistedDiagnostic::from_runtime(&diagnostic, &registry).expect("persist diagnostic");
+        let json = serde_json::to_string(&persisted).expect("serialize diagnostic");
+        let decoded: PersistedDiagnostic =
+            serde_json::from_str(&json).expect("deserialize diagnostic");
+        let restored = decoded.to_runtime(&registry).expect("restore diagnostic");
+
+        assert_eq!(
+            restored.code.as_deref(),
+            Some(MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(restored.message, diagnostic.message);
+        assert_eq!(restored.span, span);
+        assert_eq!(restored.origin, diagnostic.origin);
+        assert_eq!(
+            registry.key(restored.span.source_id),
+            registry.key(source_id)
+        );
+    }
+
+    #[test]
     fn persisted_cache_rejects_source_less_route_diagnostic() {
         let registry = crate::span::SourceRegistry::default();
         let diagnostic = Diagnostic::error_code(
