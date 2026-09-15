@@ -3497,6 +3497,240 @@ fn lsp_alias_uri_lru_eviction_recomputes_missing_route_fail_closed() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_close_reopen_with_pending_keeps_diagnostic_ownership() {
+    let root = temp_workspace("lsp_alias_uri_close_reopen_pending");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let dep_path = root.join("dep.mimi");
+    let text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&real_path, text).expect("write close/reopen pending source");
+    fs::write(&dep_path, dep_text).expect("write close/reopen pending dependency");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create close/reopen pending alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let dep_uri = file_uri(&dep_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse close/reopen pending real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find close/reopen pending function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("close/reopen pending real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("close/reopen pending stable SourceKey")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "close/reopen pending real failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "close/reopen pending real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse close/reopen pending alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("close/reopen pending alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "close/reopen pending alias must retain the stable SourceKey"
+    );
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "close/reopen pending alias failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "close/reopen pending alias route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 13).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let open = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": version, "text": text }
+            }
+        }))
+    };
+    let hover = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }))
+    };
+    let change = |reader: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+    let close = |reader: &mut crate::lsp::LspServer, uri: &str| {
+        reader.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        }))
+    };
+    let assert_pending = |reader: &mut crate::lsp::LspServer, expected_uri: &str| {
+        let pending = reader.drain_pending_notifications();
+        assert_eq!(pending.len(), 1, "one dependency batch must be pending");
+        assert_eq!(pending[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(pending[0]["params"]["uri"], expected_uri);
+        assert!(pending[0]["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|diagnostic| diagnostic["message"] == "undefined variable 'missing_dep'")
+            }));
+    };
+
+    let opened_alias = open(&mut reader, &alias_uri, 1).expect("pending alias didOpen");
+    assert_eq!(opened_alias["params"]["uri"], alias_uri);
+    assert!(opened_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_pending(&mut reader, &dep_uri);
+    let _ = hover(&mut reader, &alias_uri);
+    let changed_alias = change(&mut reader, &alias_uri, 2).expect("pending alias didChange");
+    assert_eq!(
+        changed_alias["params"]["diagnostics"][0]["message"],
+        "close/reopen pending alias route: MIR-RECEIPT-001"
+    );
+    assert_pending(&mut reader, &dep_uri);
+
+    let closed_alias = close(&mut reader, &alias_uri).expect("pending alias didClose");
+    assert_eq!(closed_alias["params"]["uri"], alias_uri);
+    assert!(closed_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!reader.documents.contains_key(&alias_uri));
+    assert_eq!(reader.document_version(&alias_uri), None);
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(
+        reader.drain_pending_notifications().is_empty(),
+        "didClose must not enqueue a duplicate dependency batch"
+    );
+
+    let opened_real = open(&mut reader, &real_uri, 1).expect("pending real didOpen");
+    assert_eq!(opened_real["params"]["uri"], real_uri);
+    assert!(opened_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_pending(&mut reader, &dep_uri);
+    let _ = hover(&mut reader, &real_uri);
+    let changed_real = change(&mut reader, &real_uri, 2).expect("pending real didChange");
+    assert_eq!(
+        changed_real["params"]["diagnostics"][0]["message"],
+        "close/reopen pending real route: MIR-RECEIPT-001"
+    );
+    assert_pending(&mut reader, &dep_uri);
+    let closed_real = close(&mut reader, &real_uri).expect("pending real didClose");
+    assert_eq!(closed_real["params"]["uri"], real_uri);
+    assert!(closed_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    assert!(reader.drain_pending_notifications().is_empty());
+
+    let reopened_alias = open(&mut reader, &alias_uri, 3).expect("pending alias reopen");
+    assert_eq!(reopened_alias["params"]["uri"], alias_uri);
+    assert_pending(&mut reader, &dep_uri);
+    let _ = hover(&mut reader, &alias_uri);
+    let changed_reopened = change(&mut reader, &alias_uri, 4).expect("pending alias reopen change");
+    assert_eq!(
+        changed_reopened["params"]["diagnostics"][0]["message"],
+        "close/reopen pending alias route: MIR-RECEIPT-001"
+    );
+    assert_pending(&mut reader, &dep_uri);
+    assert_eq!(reader.document_version(&alias_uri), Some(4));
+    assert_eq!(
+        reader.documents.get(&alias_uri).map(String::as_str),
+        Some(text)
+    );
+
+    reader.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read close/reopen pending cache"),
+    )
+    .expect("parse close/reopen pending cache");
+    for key in [&real_key, &alias_key] {
+        assert_eq!(
+            persisted["entries"][key.as_str()]["diagnostic"]["source_key"],
+            source_key,
+            "close/reopen pending writeback must preserve SourceKey"
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
