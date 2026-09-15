@@ -1505,7 +1505,7 @@ fn lsp_verification_cache_rejects_out_of_function_diagnostic_replay() {
                     "status": "Failed",
                     "message": "forged out-of-function diagnostic",
                     "diagnostic": {
-                        "source_key": source_key,
+                        "source_key": source_key.clone(),
                         "start_line": 99,
                         "start_col": 1,
                         "end_line": 99,
@@ -1542,6 +1542,201 @@ fn lsp_verification_cache_rejects_out_of_function_diagnostic_replay() {
             .all(|diagnostic| diagnostic["message"] != "forged out-of-function diagnostic"),
         "a cached diagnostic outside the current function must not replay: {diagnostics:?}"
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_verification_cache_replays_zero_point_diagnostic_in_function() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_zero_point_diagnostic_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let uri = "untitled://workspace/zero-point.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let source_id = file.sources.id_for_uri(uri).expect("source id");
+    let source_key = file
+        .sources
+        .key(source_id)
+        .expect("source key")
+        .as_str()
+        .to_string();
+    let cache_key = crate::lsp::verification_cache_key(uri, "bad");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                cache_key: {
+                    "body_hash": body_hash,
+                    "status": "Failed",
+                    "message": "zero-point cached failure",
+                    "diagnostic": {
+                        "source_key": source_key,
+                        "start_line": 1,
+                        "start_col": 1,
+                        "end_line": 1,
+                        "end_col": 1,
+                        "severity": 1,
+                        "code": "E0998",
+                        "message": "zero-point cached failure",
+                        "notes": [],
+                        "help": null,
+                        "origin": {
+                            "kind": "user",
+                            "rule": null,
+                            "parent_node_id": null
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write zero-point cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["code"], "E0998");
+    assert_eq!(diagnostics[0]["message"], "zero-point cached failure");
+    assert_eq!(diagnostics[0]["range"]["start"]["line"], 0);
+    assert_eq!(diagnostics[0]["range"]["end"]["character"], 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_verification_cache_replays_multiple_functions_after_restart() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_multi_function_restart_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let uri = "untitled://workspace/multi-function.mimi";
+    let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}\n\nfunc worse(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    1\n}";
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse source");
+    let source_id = file.sources.id_for_uri(uri).expect("source id");
+    let source_key = file
+        .sources
+        .key(source_id)
+        .expect("source key")
+        .as_str()
+        .to_string();
+    let mut functions = file.items.iter().filter_map(|item| match item {
+        crate::ast::Item::Func(func) if func.name == "bad" || func.name == "worse" => Some(func),
+        _ => None,
+    });
+    let bad = functions.next().expect("find bad function");
+    let worse = functions.next().expect("find worse function");
+    let bad_key = crate::lsp::verification_cache_key(uri, "bad");
+    let worse_key = crate::lsp::verification_cache_key(uri, "worse");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                bad_key.clone(): {
+                    "body_hash": crate::lsp::util::hash_func_body(text, bad),
+                    "status": "Failed",
+                    "message": "bad cached failure",
+                    "diagnostic": {
+                        "source_key": source_key.clone(),
+                        "start_line": bad.meta.span.start_line,
+                        "start_col": bad.meta.span.start_col,
+                        "end_line": bad.meta.span.start_line,
+                        "end_col": bad.meta.span.start_col + 1,
+                        "severity": 1,
+                        "code": "E0997",
+                        "message": "bad cached failure",
+                        "notes": [],
+                        "help": null,
+                        "origin": {
+                            "kind": "user",
+                            "rule": null,
+                            "parent_node_id": null
+                        }
+                    }
+                },
+                worse_key.clone(): {
+                    "body_hash": crate::lsp::util::hash_func_body(text, worse),
+                    "status": "Failed",
+                    "message": "worse cached failure",
+                    "diagnostic": {
+                        "source_key": source_key,
+                        "start_line": worse.meta.span.start_line,
+                        "start_col": worse.meta.span.start_col,
+                        "end_line": worse.meta.span.start_line,
+                        "end_col": worse.meta.span.start_col + 1,
+                        "severity": 1,
+                        "code": "E0996",
+                        "message": "worse cached failure",
+                        "notes": [],
+                        "help": null,
+                        "origin": {
+                            "kind": "user",
+                            "rule": null,
+                            "parent_node_id": null
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write multi-function cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let bad_diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert_eq!(bad_diagnostics[0]["message"], "bad cached failure");
+    let worse_diagnostics = server.compute_verification_diagnostics(text, 7, uri);
+    assert_eq!(worse_diagnostics[0]["message"], "worse cached failure");
+    server.save_cache();
+
+    let mut reader = LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let replayed_bad = reader.compute_verification_diagnostics(text, 0, uri);
+    let replayed_worse = reader.compute_verification_diagnostics(text, 7, uri);
+    assert_eq!(replayed_bad[0]["message"], "bad cached failure");
+    assert_eq!(replayed_worse[0]["message"], "worse cached failure");
 
     let _ = std::fs::remove_dir_all(root);
 }
