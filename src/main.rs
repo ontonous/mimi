@@ -4,7 +4,9 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use mimi::diagnostic::format::format_simple_error;
+use mimi::diagnostic::format::{format_diagnostic, format_simple_error};
+use mimi::diagnostic::Diagnostic;
+use mimi::span::Span;
 
 #[path = "main/abi.rs"]
 mod abi;
@@ -684,10 +686,77 @@ fn main() -> std::process::ExitCode {
         Command::Wire { action } => wire::run(action),
     };
     if let Err(e) = result {
-        eprintln!("{}", format_simple_error(&e));
+        eprintln!("{}", format_cli_error(&e));
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Preserve registered MIR route identity when a command returns a textual
+/// error through the top-level CLI boundary.  Most command errors remain on
+/// the historical compact formatter; only the four cross-adapter route codes
+/// are upgraded to the shared machine-first diagnostic shape.
+fn format_cli_error(message: &str) -> String {
+    let Some(code) = mimi::diagnostic::codes::canonical_mir_route_code_in_message(message) else {
+        return format_simple_error(message);
+    };
+
+    let offset = message
+        .find(code)
+        .expect("route code returned by classifier must occur in message");
+    let context = message[..offset]
+        .trim_end()
+        .trim_end_matches(':')
+        .trim_end();
+    let detail = message[offset + code.len()..]
+        .trim_start()
+        .strip_prefix(':')
+        .map(str::trim_start)
+        .unwrap_or_else(|| message[offset + code.len()..].trim_start());
+    let normalized = match (context, detail) {
+        ("", "") => code.to_string(),
+        ("", detail) => detail.to_string(),
+        (context, "") => context.to_string(),
+        (context, detail) => format!("{context}: {detail}"),
+    };
+    format_diagnostic(
+        &Diagnostic::error_code(code, normalized, Span::UNKNOWN),
+        None,
+        "",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_cli_error;
+    use mimi::diagnostic::format::strip_ansi;
+
+    #[test]
+    fn cli_route_errors_keep_structured_code_at_top_level() {
+        for code in [
+            "MIR-RECEIPT-001",
+            "MIR-RECEIPT-MANIFEST-001",
+            "MIR-FFI-RECEIPT-001",
+            "MIR-FFI-RECEIPT-MANIFEST-001",
+        ] {
+            let message = format!("canonical MIR verifier input rejected: {code}: stale receipt");
+            let rendered = strip_ansi(&format_cli_error(&message));
+            assert!(
+                rendered.starts_with(&format!("error[{code}] ")),
+                "{rendered}"
+            );
+            assert!(rendered.contains("canonical MIR verifier input rejected: stale receipt"));
+            assert_eq!(rendered.matches(code).count(), 1, "{rendered}");
+        }
+    }
+
+    #[test]
+    fn ordinary_cli_errors_keep_legacy_formatter() {
+        let rendered = format_cli_error("ordinary command failure");
+        assert!(rendered.contains("error"));
+        assert!(rendered.contains("ordinary command failure"));
+        assert!(!rendered.contains("error["));
+    }
 }
 
 /// Resolve the target path, either from argument or by finding mimi.toml

@@ -278,6 +278,33 @@ pub fn canonical_mir_route_code(message: &str) -> Option<&'static str> {
     .find(|code| message.starts_with(code))
 }
 
+/// Find a canonical MIR route code inside an adapter-wrapped error message.
+///
+/// The prefix-only classifier above remains intentionally strict for parser
+/// and receipt APIs.  CLI boundaries often add context before the original
+/// error (`"verify: {error}"`), so this companion performs a token-boundary
+/// aware search without treating a longer identifier as a route code.
+pub fn canonical_mir_route_code_in_message(message: &str) -> Option<&'static str> {
+    [
+        MIR_ROUTE_RECEIPT_ERROR_CODE,
+        MIR_ROUTE_MANIFEST_ERROR_CODE,
+        MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+        MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+    ]
+    .into_iter()
+    .find(|code| {
+        message.match_indices(code).any(|(offset, _)| {
+            let before = message[..offset].chars().next_back();
+            let after = message[offset + code.len()..].chars().next();
+            !before.is_some_and(is_route_code_char) && !after.is_some_and(is_route_code_char)
+        })
+    })
+}
+
+fn is_route_code_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '-'
+}
+
 /// Get a human-readable description for an error code.
 pub fn describe(code: &str) -> &'static str {
     match code {
@@ -502,7 +529,7 @@ pub fn describe(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_mir_route_code, describe, W012};
+    use super::{canonical_mir_route_code, canonical_mir_route_code_in_message, describe, W012};
 
     #[test]
     fn canonical_mir_route_code_classifier_covers_all_registered_routes() {
@@ -520,6 +547,30 @@ mod tests {
         }
         assert_eq!(canonical_mir_route_code("MIR-UNKNOWN-001: rejected"), None);
         assert_eq!(canonical_mir_route_code("prefix MIR-RECEIPT-001"), None);
+    }
+
+    #[test]
+    fn canonical_mir_route_code_in_message_handles_cli_wrappers() {
+        assert_eq!(
+            canonical_mir_route_code_in_message(
+                "canonical MIR verifier input rejected: MIR-RECEIPT-001: stale receipt"
+            ),
+            Some(super::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(
+            canonical_mir_route_code_in_message("MIR-RECEIPT-001-extra: not a route code"),
+            None
+        );
+        assert_eq!(
+            canonical_mir_route_code_in_message(
+                "MIR-RECEIPT-001-extra: ignore; MIR-RECEIPT-001: use this one"
+            ),
+            Some(super::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(
+            canonical_mir_route_code_in_message("ordinary verifier error"),
+            None
+        );
     }
 
     #[test]
