@@ -743,6 +743,174 @@ fn lsp_alias_uri_for_same_disk_source_keeps_active_diagnostic_owner() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_verification_cache_roundtrip_keeps_uri_keys_and_source_key() {
+    let root = temp_workspace("lsp_alias_uri_cache_roundtrip");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n"
+    );
+    fs::write(&real_path, text).expect("write cache source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create cache source alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse real cache source");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find cache function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("real source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        "real URI cached failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "real cache wrapper: {}: real URI cached failure",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            ),
+            crate::span::Span::new(3, 5, 3, 24).with_source(real_source),
+        ),
+    );
+
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse alias cache source");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("alias source id");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "alias cache snapshot must retain the stable SourceKey"
+    );
+    assert_eq!(real_source, alias_source, "alias must reuse the SourceId");
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        "alias URI cached failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "alias cache wrapper: {}: alias URI cached failure",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            ),
+            crate::span::Span::new(3, 5, 3, 25).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json")).expect("read alias cache"),
+    )
+    .expect("parse alias cache");
+    for key in [&real_key, &alias_key] {
+        assert_eq!(
+            persisted["entries"][key.as_str()]["diagnostic"]["source_key"],
+            source_key,
+            "each URI cache entry must persist the same stable SourceKey"
+        );
+    }
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let alias_snapshot = reader
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("reader alias snapshot");
+    let alias_diagnostics = reader.compute_verification_diagnostics(text, 0, &alias_uri);
+    assert_eq!(
+        alias_diagnostics.len(),
+        1,
+        "alias URI should replay its own persisted route diagnostic"
+    );
+    assert_eq!(
+        alias_diagnostics[0]["message"],
+        "alias cache wrapper: MIR-RECEIPT-001: alias URI cached failure"
+    );
+    assert_eq!(
+        alias_snapshot
+            .sources
+            .record(
+                alias_snapshot
+                    .sources
+                    .id_for_uri(&alias_uri)
+                    .expect("alias id")
+            )
+            .and_then(|record| record.canonical_uri.as_deref()),
+        Some(alias_uri.as_str()),
+        "alias replay must keep the alias URI as the active snapshot target"
+    );
+
+    let real_snapshot = reader
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("reader real snapshot");
+    let real_diagnostics = reader.compute_verification_diagnostics(text, 0, &real_uri);
+    assert_eq!(
+        real_diagnostics.len(),
+        1,
+        "real URI should replay its independent persisted route diagnostic"
+    );
+    assert_eq!(
+        real_diagnostics[0]["message"],
+        "real cache wrapper: MIR-RECEIPT-001: real URI cached failure"
+    );
+    assert_eq!(
+        real_snapshot
+            .sources
+            .record(
+                real_snapshot
+                    .sources
+                    .id_for_uri(&real_uri)
+                    .expect("real id")
+            )
+            .and_then(|record| record.canonical_uri.as_deref()),
+        Some(real_uri.as_str()),
+        "switching back must restore the real URI snapshot target"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
