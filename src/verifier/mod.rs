@@ -24,11 +24,12 @@ pub use flow::{
 
 /// Convert a canonical route verifier error into the shared diagnostic
 /// representation without changing the public `Result<_, String>` API used by
-/// existing callers.  Registered MIR route codes are recognized from the
-/// stable message prefix; ordinary verifier failures remain generic.
+/// existing callers.  Registered MIR route codes are recognized anywhere in
+/// an adapter-wrapped message using the shared token-boundary classifier;
+/// ordinary verifier failures remain generic.
 pub fn mir_route_error_to_diagnostic(message: impl Into<String>) -> crate::diagnostic::Diagnostic {
     let message = message.into();
-    match crate::diagnostic::codes::canonical_mir_route_code(&message) {
+    match crate::diagnostic::codes::canonical_mir_route_code_in_message(&message) {
         Some(code) => {
             crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
         }

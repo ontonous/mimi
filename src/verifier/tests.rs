@@ -26,6 +26,23 @@ fn mir_route_error_conversion_preserves_registered_code_and_display() {
         .is_none());
 }
 
+#[test]
+fn verifier_route_error_conversion_handles_wrapped_and_invalid_prefixes() {
+    let wrapped = "verifier context: MIR-RECEIPT-MANIFEST-001: future field".to_string();
+    assert_eq!(
+        mir_route_error_to_diagnostic(wrapped).code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+    );
+
+    let invalid_then_valid = "MIR-RECEIPT-001-extra: ignore; MIR-RECEIPT-001: use this occurrence";
+    let diagnostic = mir_route_error_to_diagnostic(invalid_then_valid);
+    assert_eq!(
+        diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert_eq!(diagnostic.message, invalid_then_valid);
+}
+
 macro_rules! require_z3 {
     () => {
         if !crate::verifier::is_z3_available() {
