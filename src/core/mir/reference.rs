@@ -60,6 +60,29 @@ impl std::fmt::Display for MirExecutionError {
 
 impl std::error::Error for MirExecutionError {}
 
+impl MirExecutionError {
+    /// Return a registered route code carried by the reference executor's
+    /// stable message prefix.  Ordinary execution failures remain generic.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        crate::diagnostic::codes::canonical_mir_route_code_in_message(&self.message)
+    }
+
+    /// Convert a reference execution failure to the shared diagnostic shape,
+    /// preserving the AST-free message and runtime-system provenance.
+    pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        let message = self.to_string();
+        match self.diagnostic_code() {
+            Some(code) => {
+                crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
+                    .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
+                        "mir.route",
+                    ))
+            }
+            None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirExecutionObservation {
     pub value: MirRuntimeValue,
@@ -9149,11 +9172,12 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::{
-        MirProgram, MirProgramBuildError, MirReferenceFfiResolver, MirReferenceInterpreter,
-        MirRuntimeValue,
+        MirExecutionError, MirProgram, MirProgramBuildError, MirReferenceFfiResolver,
+        MirReferenceInterpreter, MirRuntimeValue,
     };
     use crate::core::mir::lower::{lower_body, lower_program};
     use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
+    use crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE;
     use crate::core::mir::{
         MirAggregateKind, MirFfiAbiConversion, MirGenericInstanceContract, MirInstruction,
         MirInstructionKind,
@@ -9161,6 +9185,30 @@ mod tests {
     use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+
+    #[test]
+    fn route_execution_error_keeps_structured_code_and_provenance() {
+        let error = MirExecutionError {
+            function: NodeId("mir-program".into()),
+            message: format!(
+                "{}: canonical route receipt rejected: stale digest",
+                MIR_ROUTE_RECEIPT_ERROR_CODE
+            ),
+        };
+        assert_eq!(error.diagnostic_code(), Some(MIR_ROUTE_RECEIPT_ERROR_CODE));
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(diagnostic.span, crate::span::Span::UNKNOWN);
+        let origin = diagnostic.origin.expect("route error has provenance");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+    }
 
     fn lower_main(source: &str) -> (crate::core::NodeId, MirProgram) {
         let tokens = Lexer::new(source).tokenize().expect("lex");
