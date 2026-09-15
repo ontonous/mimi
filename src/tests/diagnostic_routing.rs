@@ -1464,6 +1464,257 @@ fn lsp_alias_uri_transport_replay_keeps_primary_and_pending_order() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_switch_rejects_stale_changes_without_cache_drift() {
+    let root = temp_workspace("lsp_alias_uri_versions");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n"
+    );
+    let stale_text = text.replace("    0", "    missing_after_stale_change");
+    fs::write(&real_path, text).expect("write version source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create version source alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse version real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find version function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("version real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("version stable source key")
+        .as_str()
+        .to_string();
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    writer.insert_verification_cache_with_diagnostic(
+        real_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "version real failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "version real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(4, 5, 4, 24).with_source(real_source),
+        ),
+    );
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse version alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("version alias source id");
+    assert_eq!(real_source, alias_source, "aliases must share the SourceId");
+    assert_eq!(
+        alias_file.sources.key(alias_source).map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "alias version snapshot must retain the stable SourceKey"
+    );
+    writer.insert_verification_cache_with_diagnostic(
+        alias_key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "version alias failure".to_string(),
+        crate::diagnostic::mir_route_error_diagnostic(
+            "version alias route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(4, 5, 4, 25).with_source(alias_source),
+        ),
+    );
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 2) {
+        reader.cache_put_verification(
+            format!("version-cold-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "version cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+
+    let opened_alias = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": alias_uri, "version": 2, "text": text }
+        }
+    }));
+    assert_eq!(
+        opened_alias.expect("alias didOpen response")["params"]["uri"],
+        alias_uri
+    );
+    assert_eq!(reader.document_version(&alias_uri), Some(2));
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": alias_uri },
+            "position": { "line": 1, "character": 0 }
+        }
+    }));
+    let changed_alias = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": alias_uri, "version": 3 },
+            "contentChanges": [{ "text": text }]
+        }
+    }));
+    assert_eq!(
+        changed_alias.expect("alias didChange response")["params"]["diagnostics"][0]["message"],
+        "version alias route: MIR-RECEIPT-001",
+        "alias version hit must replay the alias route"
+    );
+    assert_eq!(reader.document_version(&alias_uri), Some(3));
+    let alias_lru_after_hit = reader.verification_cache.contains_key(&alias_key);
+    assert!(alias_lru_after_hit);
+
+    // This lower version carries deliberately invalid text. It must be
+    // rejected before applying contentChanges, so neither the open document
+    // nor its version/cache state can drift from the accepted v3 snapshot.
+    let stale = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": alias_uri, "version": 2 },
+            "contentChanges": [{ "text": stale_text }]
+        }
+    }));
+    assert!(stale.is_none(), "stale alias didChange must be ignored");
+    assert_eq!(reader.document_version(&alias_uri), Some(3));
+    assert_eq!(
+        reader.documents.get(&alias_uri).map(String::as_str),
+        Some(text)
+    );
+    assert!(
+        reader.verification_cache.contains_key(&alias_key),
+        "stale alias didChange must not evict the active cache key"
+    );
+
+    // Switch URI spelling while keeping the same disk source. Version state is
+    // per URI, but SourceKey and route provenance remain shared.
+    let opened_real = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": real_uri, "version": 1, "text": text }
+        }
+    }));
+    assert_eq!(
+        opened_real.expect("real didOpen response")["params"]["uri"],
+        real_uri
+    );
+    assert_eq!(reader.document_version(&real_uri), Some(1));
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": real_uri },
+            "position": { "line": 1, "character": 0 }
+        }
+    }));
+    let changed_real = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": real_uri, "version": 2 },
+            "contentChanges": [{ "text": text }]
+        }
+    }));
+    assert_eq!(
+        changed_real.expect("real didChange response")["params"]["diagnostics"][0]["message"],
+        "version real route: MIR-RECEIPT-001",
+        "real version hit must replay the independent real route"
+    );
+    assert_eq!(reader.document_version(&real_uri), Some(2));
+    let stale_real = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": real_uri, "version": 1 },
+            "contentChanges": [{ "text": stale_text }]
+        }
+    }));
+    assert!(stale_real.is_none(), "stale real didChange must be ignored");
+    assert_eq!(reader.document_version(&real_uri), Some(2));
+    assert_eq!(
+        reader.documents.get(&real_uri).map(String::as_str),
+        Some(text)
+    );
+
+    reader.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read version cache after URI switch"),
+    )
+    .expect("parse version cache after URI switch");
+    for key in [&real_key, &alias_key] {
+        assert_eq!(
+            persisted["entries"][key.as_str()]["diagnostic"]["source_key"],
+            source_key,
+            "URI switch writeback must preserve the shared SourceKey"
+        );
+    }
+    reader.cache_put_verification(
+        "version-fresh".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "version fresh proof".to_string(),
+            None,
+        ),
+    );
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(
+        !reader.verification_cache.contains_key("version-cold-0"),
+        "both accepted URI hits should move behind the cold entries"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
