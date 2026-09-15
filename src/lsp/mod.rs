@@ -233,6 +233,13 @@ pub(crate) fn parse_verification_cache_key(key: &str) -> Option<(&str, &str)> {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
+        // `verification_cache_key` emits canonical decimal lengths. Reject
+        // alternate spellings such as `04` so one URI/function identity
+        // cannot occupy multiple persistent keys and perturb deterministic
+        // LRU replay.
+        if digits.len() > 1 && digits.starts_with('0') {
+            return None;
+        }
         *cursor = start.checked_add(separator + 1)?;
         digits.parse().ok()
     }
@@ -669,7 +676,14 @@ impl LspServer {
         let entries: BTreeMap<String, CacheEntry> = self
             .verification_cache
             .iter()
-            .filter(|(_, entry)| !matches!(&entry.status, VerifStatus::InfrastructureError))
+            .filter(|(key, entry)| {
+                // Runtime test hooks and future callers share this writer;
+                // never persist a key that cannot be tied to one framed
+                // URI/function identity. Loading already applies the same
+                // gate, so malformed entries cannot survive a restart.
+                parse_verification_cache_key(key).is_some()
+                    && !matches!(&entry.status, VerifStatus::InfrastructureError)
+            })
             .map(|(key, entry)| {
                 let status_str = match entry.status.clone() {
                     VerifStatus::Proven => "Verified",

@@ -1157,6 +1157,72 @@ fn lsp_verification_cache_key_is_length_framed_and_validated() {
             .is_none(),
         "a key for another engine must fail closed"
     );
+
+    let noncanonical_uri_len = format!(":{}:", uri.len());
+    let canonical_uri_len = format!(":0{}:", uri.len());
+    assert!(
+        crate::lsp::parse_verification_cache_key(&key.replacen(
+            &noncanonical_uri_len,
+            &canonical_uri_len,
+            1
+        ))
+        .is_none(),
+        "leading-zero length frames must fail closed"
+    );
+
+    let unicode_uri = "untitled://工作区/🦀:cache.mimi";
+    let unicode_key = crate::lsp::verification_cache_key(unicode_uri, "函数");
+    assert_eq!(
+        crate::lsp::parse_verification_cache_key(&unicode_key),
+        Some((unicode_uri, "函数")),
+        "length framing counts UTF-8 bytes while preserving Unicode boundaries"
+    );
+}
+
+#[test]
+fn lsp_verification_cache_save_drops_malformed_keys() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_save_malformed_key_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create cache directory");
+    let valid_key =
+        crate::lsp::verification_cache_key("untitled://workspace/valid-cache.mimi", "valid");
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    server.insert_verification_cache(
+        "mimi-lsp-cache:v2:04:5:bad!!valid:resolved:v1".to_string(),
+        1,
+        crate::verifier::VerifStatus::Proven,
+        "malformed key".to_string(),
+    );
+    server.insert_verification_cache(
+        valid_key.clone(),
+        2,
+        crate::verifier::VerifStatus::Proven,
+        "valid key".to_string(),
+    );
+    server.save_cache();
+
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json"))
+            .expect("read persisted cache"),
+    )
+    .expect("parse persisted cache");
+    assert_eq!(persisted["entries"].as_object().unwrap().len(), 1);
+    assert!(persisted["entries"].get(valid_key.as_str()).is_some());
+    assert!(persisted["entries"]
+        .get("mimi-lsp-cache:v2:04:5:bad!!valid:resolved:v1")
+        .is_none());
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
