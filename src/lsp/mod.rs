@@ -1052,4 +1052,17 @@ mod tests {
             registry.key(source_id)
         );
     }
+
+    #[test]
+    fn persisted_cache_rejects_source_less_route_diagnostic() {
+        let registry = crate::span::SourceRegistry::default();
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            "canonical route manifest rejected",
+            Span::UNKNOWN,
+        )
+        .with_origin(DiagnosticOrigin::runtime_system("mir.route"));
+
+        assert!(PersistedDiagnostic::from_runtime(&diagnostic, &registry).is_none());
+    }
 }

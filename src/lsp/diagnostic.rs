@@ -80,4 +80,23 @@ mod tests {
         assert_eq!(serialized["range"]["end"]["line"], 1);
         assert_eq!(serialized["range"]["end"]["character"], 7);
     }
+
+    #[test]
+    fn lsp_serialization_preserves_source_less_route_provenance() {
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            "canonical route manifest rejected",
+            Span::UNKNOWN,
+        )
+        .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
+            "mir.route",
+        ));
+        let serialized = diagnostic_to_lsp(&diagnostic, None);
+
+        assert_eq!(serialized["code"], MIR_ROUTE_MANIFEST_ERROR_CODE);
+        assert_eq!(serialized["range"]["start"]["line"], 0);
+        assert_eq!(serialized["range"]["end"]["character"], 1);
+        assert_eq!(serialized["data"]["origin"]["kind"], "runtime_system");
+        assert_eq!(serialized["data"]["origin"]["rule"], "mir.route");
+    }
 }
