@@ -911,6 +911,127 @@ fn lsp_alias_uri_verification_cache_roundtrip_keeps_uri_keys_and_source_key() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_cache_hit_touches_active_key_before_eviction() {
+    let root = temp_workspace("lsp_alias_uri_cache_lru");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n"
+    );
+    fs::write(&real_path, text).expect("write LRU source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create LRU source alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+
+    let mut server = crate::lsp::LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = server
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse LRU real URI");
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find LRU function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("LRU real source id");
+    let alias_file = server
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse LRU alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("LRU alias source id");
+    assert_eq!(real_source, alias_source, "alias must share the SourceId");
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::Disproven,
+            "real LRU failure".to_string(),
+            Some(crate::diagnostic::mir_route_error_diagnostic(
+                "real LRU route: MIR-RECEIPT-001".to_string(),
+                crate::span::Span::new(3, 5, 3, 24).with_source(real_source),
+            )),
+        ),
+    );
+    server.cache_put_verification(
+        alias_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::Disproven,
+            "alias LRU failure".to_string(),
+            Some(crate::diagnostic::mir_route_error_diagnostic(
+                "alias LRU route: MIR-RECEIPT-001".to_string(),
+                crate::span::Span::new(3, 5, 3, 24).with_source(alias_source),
+            )),
+        ),
+    );
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 2) {
+        server.cache_put_verification(
+            format!("alias-lru-cold-{index}"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+
+    let diagnostics = server.compute_verification_diagnostics(text, 0, &alias_uri);
+    assert_eq!(
+        diagnostics
+            .first()
+            .and_then(|diagnostic| diagnostic["message"].as_str()),
+        Some("alias LRU route: MIR-RECEIPT-001"),
+        "the active alias key must replay its own cached diagnostic"
+    );
+    server.cache_put_verification(
+        "alias-lru-new".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "new proof".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        server.verification_cache.contains_key(&alias_key),
+        "the alias key touched by the active request must survive eviction"
+    );
+    assert!(
+        !server.verification_cache.contains_key(&real_key),
+        "the real URI key must remain an independent older LRU entry"
+    );
+    assert!(
+        server.verification_cache.contains_key("alias-lru-cold-0"),
+        "the oldest cold entry remains newer than the independent real key"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");
