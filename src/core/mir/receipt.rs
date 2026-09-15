@@ -858,6 +858,11 @@ mod tests {
                 "invalid MIR route manifest: field 'profile' is empty or not manifest-safe",
             ),
             (
+                "profile",
+                "bad\u{00a0}profile",
+                "invalid MIR route manifest: field 'profile' is empty or not manifest-safe",
+            ),
+            (
                 "mir_digest",
                 "not-a-digest",
                 "invalid MIR route manifest: field 'mir_digest' must be a 64-character lowercase hex digest",
@@ -870,6 +875,11 @@ mod tests {
             (
                 "root_owners",
                 "bad owner,function:z",
+                "invalid MIR route manifest: root owner is empty or not manifest-safe",
+            ),
+            (
+                "root_owners",
+                "bad\u{2003}owner,function:z",
                 "invalid MIR route manifest: root owner is empty or not manifest-safe",
             ),
         ] {
@@ -885,6 +895,21 @@ mod tests {
                 .expect_err("manifest value drift must fail closed");
             assert_eq!(error, expected, "unexpected diagnostic for {field}");
         }
+    }
+
+    #[test]
+    fn route_receipt_manifest_parser_normalizes_crlf_to_canonical_lf() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+        let crlf = manifest.replace('\n', "\r\n");
+        let parsed = CanonicalMirRouteReceipt::from_manifest(&crlf)
+            .expect("CRLF manifest must preserve receipt semantics");
+        assert_eq!(parsed, receipt);
+        assert_eq!(
+            parsed.manifest_text().expect("render parsed receipt"),
+            manifest,
+            "manifest rendering must use the canonical LF byte form"
+        );
     }
 
     #[test]
