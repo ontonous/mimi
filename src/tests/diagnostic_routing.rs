@@ -686,6 +686,63 @@ fn lsp_source_reset_cache_hit_keeps_route_primary_and_global_pending() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn lsp_alias_uri_for_same_disk_source_keeps_active_diagnostic_owner() {
+    let root = temp_workspace("lsp_alias_uri_owner");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let text = "func broken(value: i32 -> i32 { value }\n";
+    fs::write(&real_path, text).expect("write aliased source");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create source alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+
+    let mut server = crate::lsp::LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_notifications = server.compute_diagnostic_notifications(text, &real_uri);
+    assert!(
+        real_notifications.iter().any(|notification| {
+            notification["method"] == "textDocument/publishDiagnostics"
+                && notification["params"]["uri"] == real_uri
+                && !notification["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+        }),
+        "the real URI should own its parse diagnostic before the alias is opened"
+    );
+
+    let alias_notifications = server.compute_diagnostic_notifications(text, &alias_uri);
+    let alias_batch = alias_notifications
+        .iter()
+        .find(|notification| {
+            notification["method"] == "textDocument/publishDiagnostics"
+                && notification["params"]["uri"] == alias_uri
+        })
+        .expect("alias URI should receive a publishDiagnostics batch");
+    assert!(
+        !alias_batch["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "an aliased active document must retain its own parse diagnostic"
+    );
+    assert!(
+        alias_notifications.iter().all(|notification| {
+            notification["method"] != "textDocument/publishDiagnostics"
+                || notification["params"]["uri"] != real_uri
+        }),
+        "diagnostics for the alias must not be redirected to the first URI"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
     let root = temp_workspace("lsp_persisted_route_multi_uri");

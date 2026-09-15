@@ -332,6 +332,13 @@ impl SourceRegistry {
             }
             if existing.canonical_uri.is_none() {
                 existing.canonical_uri = record.canonical_uri;
+            } else if same_disk_source && record.canonical_uri.is_some() {
+                // A single on-disk source may be opened through more than one
+                // URI spelling (for example a workspace symlink). Keep the
+                // stable SourceKey/SourceId identity, but let the newest
+                // source-aware snapshot carry the URI that requested it so
+                // LSP diagnostics stay owned by the active document.
+                existing.canonical_uri = record.canonical_uri;
             }
             if existing.disk_path.is_none() {
                 existing.disk_path = record.disk_path;
@@ -746,6 +753,36 @@ mod tests {
         assert_eq!(
             record.canonical_uri.as_deref(),
             Some("file:///tmp/mimi_registry_union_source.mimi")
+        );
+    }
+
+    #[test]
+    fn registry_updates_uri_for_same_disk_source_alias() {
+        let path = std::env::temp_dir().join("mimi_registry_uri_alias.mimi");
+        let key = SourceKey::new("workspace:alias.mimi").expect("alias key");
+        let mut registry = SourceRegistry::default();
+        let first = registry
+            .register(
+                SourceRecord::new(key.clone(), SourceTextOrigin::Disk)
+                    .with_uri("file:///workspace/real.mimi")
+                    .with_disk_path(path.clone()),
+            )
+            .expect("register real URI");
+        let second = registry
+            .register(
+                SourceRecord::new(key, SourceTextOrigin::Memory)
+                    .with_uri("file:///workspace/alias.mimi")
+                    .with_disk_path(path),
+            )
+            .expect("register alias URI");
+
+        assert_eq!(first, second, "stable SourceKey must retain one SourceId");
+        assert_eq!(
+            registry
+                .record(first)
+                .and_then(|record| record.canonical_uri.as_deref()),
+            Some("file:///workspace/alias.mimi"),
+            "the latest source-aware snapshot must own the active URI"
         );
     }
 
