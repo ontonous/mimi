@@ -183,6 +183,20 @@ impl std::fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
+/// Build a diagnostic for a Canonical MIR route failure while preserving the
+/// shared machine-readable code and runtime provenance.  Adapter-specific
+/// wrappers may prepend context to the historical message; classification is
+/// therefore token-boundary aware and deliberately leaves ordinary errors
+/// without a code.
+pub fn mir_route_error_diagnostic(message: impl Into<String>, span: Span) -> Diagnostic {
+    let message = message.into();
+    match codes::canonical_mir_route_code_in_message(&message) {
+        Some(code) => Diagnostic::error_code(code, message, span)
+            .with_origin(DiagnosticOrigin::runtime_system("mir.route")),
+        None => Diagnostic::error(message, span),
+    }
+}
+
 /// Legacy bridge for genuinely global diagnostics.  `Span::UNKNOWN` is an
 /// explicit lack of location; it must not be presented as a real `(0, 0)`
 /// source coordinate by diagnostic consumers.
@@ -195,5 +209,37 @@ impl From<&str> for Diagnostic {
 impl From<String> for Diagnostic {
     fn from(msg: String) -> Self {
         Self::error(msg, Span::UNKNOWN)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mir_route_error_diagnostic, DiagnosticOriginKind};
+    use crate::diagnostic::codes::{MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
+    use crate::span::{SourceId, Span};
+
+    #[test]
+    fn mir_route_error_diagnostic_has_stable_code_origin_and_span() {
+        let span = Span::new(3, 11, 3, 11).with_source(SourceId::new(7));
+        let diagnostic = mir_route_error_diagnostic(
+            format!("adapter context: {MIR_ROUTE_RECEIPT_ERROR_CODE}: stale receipt"),
+            span,
+        );
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(diagnostic.span, span);
+        let origin = diagnostic.origin.expect("route diagnostic provenance");
+        assert_eq!(origin.kind, DiagnosticOriginKind::RuntimeSystem);
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+
+        let ordinary = mir_route_error_diagnostic(
+            format!("{MIR_ROUTE_MANIFEST_ERROR_CODE}-extra: ordinary failure"),
+            span,
+        );
+        assert!(ordinary.code.is_none());
+        assert!(ordinary.origin.is_none());
+        assert_eq!(ordinary.span, span);
     }
 }

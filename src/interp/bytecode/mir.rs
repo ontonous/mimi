@@ -61,23 +61,14 @@ impl MirBytecodeError {
     /// remain generic diagnostics; route errors are the only messages whose
     /// stable code is part of the public provenance contract.
     pub fn diagnostic_code(&self) -> Option<&'static str> {
-        crate::diagnostic::codes::canonical_mir_route_code(&self.message)
+        crate::diagnostic::codes::canonical_mir_route_code_in_message(&self.message)
     }
 
     /// Convert the adapter error to the shared diagnostic representation.
     /// Route codes stay in `Diagnostic.code` as well as in the historical
     /// message text, so display and structured consumers observe one identity.
     pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
-        let message = self.to_string();
-        match self.diagnostic_code() {
-            Some(code) => {
-                crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
-                    .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
-                        "mir.route",
-                    ))
-            }
-            None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
-        }
+        crate::diagnostic::mir_route_error_diagnostic(self.to_string(), crate::span::Span::UNKNOWN)
     }
 }
 
@@ -5248,7 +5239,7 @@ mod tests {
         let error = MirBytecodeError {
             function: crate::core::NodeId("mir-program".into()),
             message: format!(
-                "{}: canonical route manifest rejected: future field",
+                "bytecode wrapper: {}: canonical route manifest rejected: future field",
                 crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
             ),
         };

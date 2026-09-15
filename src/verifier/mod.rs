@@ -28,16 +28,7 @@ pub use flow::{
 /// an adapter-wrapped message using the shared token-boundary classifier;
 /// ordinary verifier failures remain generic.
 pub fn mir_route_error_to_diagnostic(message: impl Into<String>) -> crate::diagnostic::Diagnostic {
-    let message = message.into();
-    match crate::diagnostic::codes::canonical_mir_route_code_in_message(&message) {
-        Some(code) => {
-            crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
-                .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
-                    "mir.route",
-                ))
-        }
-        None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
-    }
+    crate::diagnostic::mir_route_error_diagnostic(message, crate::span::Span::UNKNOWN)
 }
 
 /// Verify a previously validated canonical MIR program with the experimental

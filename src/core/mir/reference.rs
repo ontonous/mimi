@@ -70,16 +70,7 @@ impl MirExecutionError {
     /// Convert a reference execution failure to the shared diagnostic shape,
     /// preserving the AST-free message and runtime-system provenance.
     pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
-        let message = self.to_string();
-        match self.diagnostic_code() {
-            Some(code) => {
-                crate::diagnostic::Diagnostic::error_code(code, message, crate::span::Span::UNKNOWN)
-                    .with_origin(crate::diagnostic::DiagnosticOrigin::runtime_system(
-                        "mir.route",
-                    ))
-            }
-            None => crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN),
-        }
+        crate::diagnostic::mir_route_error_diagnostic(self.to_string(), crate::span::Span::UNKNOWN)
     }
 }
 
@@ -9191,7 +9182,7 @@ mod tests {
         let error = MirExecutionError {
             function: NodeId("mir-program".into()),
             message: format!(
-                "{}: canonical route receipt rejected: stale digest",
+                "reference wrapper: {}: canonical route receipt rejected: stale digest",
                 MIR_ROUTE_RECEIPT_ERROR_CODE
             ),
         };
