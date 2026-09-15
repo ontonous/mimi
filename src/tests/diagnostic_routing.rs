@@ -525,3 +525,77 @@ fn lsp_direct_notifications_match_pending_global_transport_order() {
     let _ = fs::remove_file(outside);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn lsp_multi_uri_dependency_notifications_keep_batches_and_order() {
+    let root = temp_workspace("lsp_multi_uri_transport_order");
+    let main_path = root.join("main.mimi");
+    let left_path = root.join("left.mimi");
+    let right_path = root.join("right.mimi");
+    let main_text = "use left\nuse right\nfunc main() -> i32 { 0 }\n";
+    let left_text = "pub func left_value() -> i32 {\n    missing_value\n}\n";
+    let right_text = "pub func right_value() -> i32 {\n    missing_value\n}\n";
+    fs::write(&main_path, main_text).expect("write main source");
+    fs::write(&left_path, left_text).expect("write left dependency");
+    fs::write(&right_path, right_text).expect("write right dependency");
+    let root_uri = file_uri(&root);
+    let main_uri = file_uri(&main_path);
+    let left_uri = file_uri(&left_path);
+    let right_uri = file_uri(&right_path);
+
+    let mut server = crate::lsp::LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+
+    let direct = server.compute_diagnostic_notifications(main_text, &main_uri);
+    let publish_uris = direct
+        .iter()
+        .filter(|notification| notification["method"] == "textDocument/publishDiagnostics")
+        .filter_map(|notification| notification["params"]["uri"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        publish_uris,
+        vec![main_uri.as_str(), left_uri.as_str(), right_uri.as_str()],
+        "active document must lead, while dependency batches remain deterministically ordered"
+    );
+    for dependency_uri in [&left_uri, &right_uri] {
+        let dependency = direct
+            .iter()
+            .find(|notification| notification["params"]["uri"] == *dependency_uri)
+            .expect("dependency publishDiagnostics batch");
+        let diagnostics = dependency["params"]["diagnostics"]
+            .as_array()
+            .expect("dependency diagnostics");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic["message"] == "undefined variable 'missing_value'")
+                .count(),
+            1,
+            "each dependency keeps its own identical checker diagnostic"
+        );
+    }
+
+    let response = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": main_uri,
+                "version": 1,
+                "text": main_text
+            }
+        }
+    }));
+    let response = response.expect("didOpen should publish the active document");
+    assert_eq!(response["method"], "textDocument/publishDiagnostics");
+    assert_eq!(response["params"]["uri"], main_uri);
+    let pending = server.drain_pending_notifications();
+    assert_eq!(pending, direct[1..].to_vec());
+
+    let _ = fs::remove_dir_all(root);
+}
