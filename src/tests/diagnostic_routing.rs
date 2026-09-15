@@ -4217,3 +4217,273 @@ fn lsp_infrastructure_retry_rebinds_real_route_and_pending_lru() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[cfg(unix)]
+#[test]
+fn lsp_reinitialize_rebinds_alias_route_and_pending_after_workspace_switch() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let root_a = temp_workspace("lsp_reinitialize_alias_route_a");
+    let root_b = temp_workspace("lsp_reinitialize_alias_route_b");
+    let real_path = root_a.join("real.mimi");
+    let alias_path = root_a.join("alias.mimi");
+    let dep_path = root_a.join("dep.mimi");
+    let text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&real_path, text).expect("write reinitialize route source");
+    fs::write(&dep_path, dep_text).expect("write reinitialize route dependency");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create reinitialize route alias");
+    let root_uri_a = file_uri(&root_a);
+    let root_uri_b = file_uri(&root_b);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let dep_uri = file_uri(&dep_path);
+
+    let initialize = |server: &mut crate::lsp::LspServer, root_uri: &str, id: i64| {
+        let _ = server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": { "rootUri": root_uri }
+        }));
+    };
+
+    let mut server = crate::lsp::LspServer::new();
+    initialize(&mut server, &root_uri_a, 1);
+    let real_file = server
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse reinitialize route real URI");
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("reinitialize route real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("reinitialize route SourceKey")
+        .as_str()
+        .to_string();
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find reinitialize route function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let alias_file = server
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse reinitialize route alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("reinitialize route alias source id");
+    assert_eq!(
+        real_file.sources.key(real_source),
+        alias_file.sources.key(alias_source),
+        "A workspace aliases must share one stable SourceKey"
+    );
+
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    let mut real_entry = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "A real route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "A real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(real_source),
+        )),
+    );
+    real_entry.bind_diagnostic_source(&real_file.sources);
+    server.cache_put_verification(real_key.clone(), real_entry);
+    let mut alias_entry = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "A alias route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "A alias route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 13).with_source(alias_source),
+        )),
+    );
+    alias_entry.bind_diagnostic_source(&alias_file.sources);
+    server.cache_put_verification(alias_key.clone(), alias_entry);
+    server.save_cache();
+
+    // A verifier is created in workspace A, then must be dropped by the next
+    // initialize even though the cache path and SourceKey are unrelated.
+    let fresh_a = concat!(
+        "func fresh_a(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    x\n",
+        "}\n"
+    );
+    let _ = server.compute_verification_diagnostics(
+        fresh_a,
+        0,
+        "untitled://workspace/reinitialize-a-fresh.mimi",
+    );
+    assert!(server.verifier_initialized_for_test());
+
+    initialize(&mut server, &root_uri_b, 2);
+    assert!(
+        server.verification_cache.is_empty(),
+        "workspace B must not inherit A route entries"
+    );
+    assert!(!server.verifier_initialized_for_test());
+    assert!(server.source_registry.borrow().records().is_empty());
+    let b_key = crate::lsp::verification_cache_key(
+        "untitled://workspace/reinitialize-b-fresh.mimi",
+        "fresh_b",
+    );
+    server.cache_put_verification(
+        b_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            2,
+            crate::verifier::VerifStatus::Proven,
+            "B proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+    let b_cache: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root_b.join(".mimi/verify_cache.json"))
+            .expect("read workspace B cache"),
+    )
+    .expect("parse workspace B cache");
+    assert_eq!(b_cache["entries"][b_key.as_str()]["message"], "B proof");
+
+    initialize(&mut server, &root_uri_a, 3);
+    assert!(!server.verifier_initialized_for_test());
+    assert!(
+        !server.verification_cache.contains_key(&b_key),
+        "returning to A must not load workspace B entries"
+    );
+    assert!(server.verification_cache.contains_key(&real_key));
+    assert!(server.verification_cache.contains_key(&alias_key));
+
+    let alias_snapshot = server
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("rebind alias snapshot after workspace switch");
+    let rebound_source = alias_snapshot
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("rebind alias source id");
+    assert_eq!(
+        alias_snapshot
+            .sources
+            .key(rebound_source)
+            .map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "A route replay must remap the persisted diagnostic by SourceKey"
+    );
+
+    let open = |server: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": version, "text": text }
+            }
+        }))
+    };
+    let hover = |server: &mut crate::lsp::LspServer, uri: &str| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }))
+    };
+    let change = |server: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+    let assert_pending = |server: &mut crate::lsp::LspServer| {
+        let pending = server.drain_pending_notifications();
+        assert_eq!(pending.len(), 1, "one dependency batch must be pending");
+        assert_eq!(pending[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(pending[0]["params"]["uri"], dep_uri);
+        assert!(pending[0]["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|diagnostic| diagnostic["message"] == "undefined variable 'missing_dep'")
+            }));
+        pending
+    };
+
+    let opened_alias = open(&mut server, &alias_uri, 1).expect("rebound alias didOpen");
+    assert_eq!(opened_alias["params"]["uri"], alias_uri);
+    assert!(opened_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let pending = assert_pending(&mut server);
+    let _ = hover(&mut server, &alias_uri);
+    let changed_alias = change(&mut server, &alias_uri, 2).expect("rebound alias didChange");
+    assert_eq!(
+        changed_alias["params"]["diagnostics"][0]["message"],
+        "A alias route: MIR-RECEIPT-001"
+    );
+    assert_eq!(assert_pending(&mut server), pending);
+
+    let fresh_after_reinit = concat!(
+        "func fresh_after_reinit(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    x\n",
+        "}\n"
+    );
+    let _ = server.compute_verification_diagnostics(
+        fresh_after_reinit,
+        0,
+        "untitled://workspace/reinitialize-a-after-switch.mimi",
+    );
+    assert!(
+        server.verifier_initialized_for_test(),
+        "workspace A must create a fresh verifier after reinitialize"
+    );
+    server.save_cache();
+    let a_cache: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root_a.join(".mimi/verify_cache.json"))
+            .expect("read workspace A cache after replay"),
+    )
+    .expect("parse workspace A cache after replay");
+    assert_eq!(
+        a_cache["entries"][alias_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "A alias writeback must retain the original SourceKey"
+    );
+    assert_eq!(
+        a_cache["entries"][real_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "A real writeback must retain the original SourceKey"
+    );
+    assert_eq!(a_cache["entries"].get(b_key.as_str()), None);
+
+    let _ = fs::remove_dir_all(root_a);
+    let _ = fs::remove_dir_all(root_b);
+}
