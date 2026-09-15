@@ -665,6 +665,13 @@ impl LspServer {
             None => return diagnostics,
         };
 
+        // Compute the function identity before checking whether contracts
+        // remain. A source edit can remove every contract while retaining
+        // the function name; that must invalidate the old verdict instead of
+        // returning with stale cache/lens state.
+        let body_hash = hash_func_body(text, func);
+        let cache_key = super::verification_cache_key(uri, &func.name);
+
         // Only verify if function has contracts
         let has_contracts = func.body.iter().any(|s| {
             matches!(
@@ -673,24 +680,26 @@ impl LspServer {
             )
         });
         if !has_contracts {
+            self.cache_invalidate_verification(&cache_key);
+            self.save_cache_with_registry(&cache_registry);
             return diagnostics;
         }
 
+        // Checker validation is part of the same checked-program boundary as
+        // verification and provenance. A source edit that now fails checking
+        // must clear the old key before returning, rather than persisting a
+        // verdict produced for an earlier valid snapshot.
         // Verification and provenance must consume the same checked program;
         // re-checking after verification could observe a different lowering
         // catalog and attach a plausible but false Origin.
         let checked_program = match core::check_program(&file) {
             Ok(program) => program,
-            Err(_) => return diagnostics,
+            Err(_) => {
+                self.cache_invalidate_verification(&cache_key);
+                self.save_cache_with_registry(&cache_registry);
+                return diagnostics;
+            }
         };
-
-        // Compute body hash for caching
-        let body_hash = hash_func_body(text, func);
-        // 0.34.44 (ADR-008 §2): engine-scoped key (uri + func + resolved
-        // engine + semantics version). Prevents collisions between
-        // identically named functions in different files AND cross-engine
-        // cache pollution; pre-0.34.44 entries auto-invalidate.
-        let cache_key = super::verification_cache_key(uri, &func.name);
 
         // Check cache
         if let Some(cached) = self.verification_cache.get(&cache_key).cloned() {

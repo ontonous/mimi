@@ -1775,6 +1775,127 @@ fn lsp_verification_refresh_without_result_drops_stale_verdict() {
 }
 
 #[test]
+fn lsp_verification_checker_failure_drops_stale_verdict() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_checker_failure_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create checker-failure workspace");
+    let uri = "untitled://workspace/checker-failure.mimi";
+    let text = concat!(
+        "func checker_failure(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    missing_value\n",
+        "}\n"
+    );
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let file = server
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse checker-failure source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "checker_failure" => Some(func),
+            _ => None,
+        })
+        .expect("find checker-failure function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    let key = crate::lsp::verification_cache_key(uri, "checker_failure");
+    server.insert_verification_cache(
+        key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "stale checker verdict".to_string(),
+    );
+    server.save_cache();
+
+    // The body is parseable but checker-invalid. The old cache must be
+    // removed before the checker returns, otherwise it survives forever in
+    // memory and on disk even though this source cannot be verified.
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert!(diagnostics.is_empty());
+    assert!(!server.verification_cache.contains_key(&key));
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read checker-failure cache"),
+    )
+    .expect("parse checker-failure cache");
+    assert_eq!(
+        persisted["entries"].get(key.as_str()),
+        None,
+        "checker failure must not persist the stale verdict"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_verification_without_contracts_drops_stale_verdict() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_cache_without_contracts_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create no-contract workspace");
+    let uri = "untitled://workspace/without-contracts.mimi";
+    let text = "func without_contracts(x: i32) -> i32 {\n    x\n}\n";
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    let file = server
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("parse no-contract source");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "without_contracts" => Some(func),
+            _ => None,
+        })
+        .expect("find no-contract function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    let key = crate::lsp::verification_cache_key(uri, "without_contracts");
+    server.insert_verification_cache(
+        key.clone(),
+        body_hash,
+        crate::verifier::VerifStatus::Proven,
+        "stale proof after contract removal".to_string(),
+    );
+    server.save_cache();
+
+    let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
+    assert!(diagnostics.is_empty());
+    assert!(!server.verification_cache.contains_key(&key));
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read no-contract cache"),
+    )
+    .expect("parse no-contract cache");
+    assert_eq!(
+        persisted["entries"].get(key.as_str()),
+        None,
+        "removing contracts must not leave a stale persisted proof"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_reinitialize_drops_verifier_session_state() {
     if !crate::verifier::is_z3_available() {
         return;
