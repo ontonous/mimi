@@ -15,6 +15,14 @@ use crate::core::NodeId;
 /// Schema version for the cross-consumer route receipt.
 pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 
+/// Stable diagnostic identifiers for route receipt admission failures.  Keep
+/// these beside the receipt schema so CLI, native, bytecode, and verifier
+/// consumers do not drift while wrapping the same parser/validator errors.
+pub const MIR_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-RECEIPT-001";
+pub const MIR_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-RECEIPT-MANIFEST-001";
+pub const MIR_FFI_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-FFI-RECEIPT-001";
+pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-001";
+
 /// Stable header for the line-oriented CLI evidence manifest.
 pub const MIR_ROUTE_RECEIPT_MANIFEST_HEADER: &str = "mimi-mir-route-manifest-v1";
 

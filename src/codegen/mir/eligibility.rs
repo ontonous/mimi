@@ -70,7 +70,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Err(message) = receipt.validate_against_program(program) {
             return Err(vec![NativeMirError::new(
                 "mir-program",
-                format!("canonical route receipt rejected: {message}"),
+                format!(
+                    "{}: canonical route receipt rejected: {message}",
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ),
             )
             .diagnostic()]);
         }
@@ -89,7 +92,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             |message| {
                 vec![NativeMirError::new(
                     "mir-program",
-                    format!("canonical route manifest rejected: {message}"),
+                    format!(
+                        "{}: canonical route manifest rejected: {message}",
+                        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+                    ),
                 )
                 .diagnostic()]
             },

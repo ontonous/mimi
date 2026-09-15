@@ -84,7 +84,10 @@ pub fn compile_mir_program_with_route_receipt(
     if let Err(message) = receipt.validate_against_program(program) {
         return Err(vec![MirBytecodeError {
             function: NodeId("mir-program".into()),
-            message: format!("canonical route receipt rejected: {message}"),
+            message: format!(
+                "{}: canonical route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            ),
         }]);
     }
     compile_mir_program_inner(program)
@@ -100,7 +103,10 @@ pub fn compile_mir_program_with_route_manifest(
     let receipt = CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
         vec![MirBytecodeError {
             function: NodeId("mir-program".into()),
-            message: format!("canonical route manifest rejected: {message}"),
+            message: format!(
+                "{}: canonical route manifest rejected: {message}",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
         }]
     })?;
     compile_mir_program_with_route_receipt(program, &receipt)

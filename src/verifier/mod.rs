@@ -46,7 +46,10 @@ pub fn verify_mir_with_route_receipt(
     receipt
         .validate_against_program(program)
         .map_err(|message| {
-            format!("MIR-RECEIPT-001: canonical route receipt rejected: {message}")
+            format!(
+                "{}: canonical route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            )
         })?;
     let mut results = verify_mir(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
@@ -125,8 +128,13 @@ pub fn verify_mir_with_route_manifest(
     manifest: &str,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest)
-        .map_err(|message| format!("MIR-RECEIPT-MANIFEST-001: {message}"))?;
+    let receipt =
+        crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
+            format!(
+                "{}: {message}",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            )
+        })?;
     verify_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
@@ -313,7 +321,10 @@ pub fn verify_ffi_mir_with_route_receipt(
     receipt
         .validate_against_program(program)
         .map_err(|message| {
-            format!("MIR-FFI-RECEIPT-001: canonical route receipt rejected: {message}")
+            format!(
+                "{}: canonical route receipt rejected: {message}",
+                crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE
+            )
         })?;
     let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
@@ -332,8 +343,13 @@ pub fn verify_ffi_mir_with_route_manifest(
     manifest: &str,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest)
-        .map_err(|message| format!("MIR-FFI-RECEIPT-MANIFEST-001: {message}"))?;
+    let receipt =
+        crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
+            format!(
+                "{}: {message}",
+                crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE
+            )
+        })?;
     verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)
 }
 

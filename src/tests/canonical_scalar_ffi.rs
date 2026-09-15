@@ -15668,6 +15668,12 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
             bytecode_error[0].message.contains(expected),
             "{label}: {bytecode_error:?}"
         );
+        assert!(
+            bytecode_error[0]
+                .message
+                .starts_with(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE),
+            "{label}: bytecode manifest error lost its stable code: {bytecode_error:?}"
+        );
 
         let context = inkwell::context::Context::create();
         let mut native = crate::codegen::CodeGenerator::new(&context, "forged_manifest_native");
@@ -15680,6 +15686,14 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
                 .any(|error| error.message.contains(expected)),
             "{label}: {native_error:?}"
         );
+        assert!(
+            native_error.iter().any(|error| {
+                error
+                    .message
+                    .contains(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+            }),
+            "{label}: native manifest error lost its stable code: {native_error:?}"
+        );
 
         let verifier_error = crate::verifier::verify_mir_with_route_manifest(
             &program,
@@ -15691,6 +15705,10 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
             verifier_error.contains(expected),
             "{label}: {verifier_error}"
         );
+        assert!(
+            verifier_error.starts_with(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE),
+            "{label}: verifier manifest error lost its stable code: {verifier_error}"
+        );
         let ffi_verifier_error = crate::verifier::verify_ffi_mir_with_route_manifest(
             &program,
             &mutated,
@@ -15700,6 +15718,10 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
         assert!(
             ffi_verifier_error.contains(expected),
             "{label}: {ffi_verifier_error}"
+        );
+        assert!(
+            ffi_verifier_error.starts_with(crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE),
+            "{label}: FFI verifier manifest error lost its stable code: {ffi_verifier_error}"
         );
     }
 }

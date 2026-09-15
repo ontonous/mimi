@@ -5344,7 +5344,10 @@ impl<'a> MirReferenceInterpreter<'a> {
                 .map_err(|message| {
                     self.error(
                         owner,
-                        format!("canonical route receipt rejected: {message}"),
+                        format!(
+                            "{}: canonical route receipt rejected: {message}",
+                            super::MIR_ROUTE_RECEIPT_ERROR_CODE
+                        ),
                     )
                 })?;
         }
