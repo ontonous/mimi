@@ -1020,6 +1020,138 @@ fn lsp_verification_cache_drops_persisted_infrastructure_errors() {
 }
 
 #[test]
+fn lsp_verification_cache_writeback_drops_infrastructure_and_preserves_siblings() {
+    let root = std::env::temp_dir().join(format!(
+        "mimi_lsp_infrastructure_writeback_{}",
+        std::process::id()
+    ));
+    let cache_dir = root.join(".mimi");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cache_dir).expect("create writeback cache directory");
+    let real_key =
+        crate::lsp::verification_cache_key("file:///workspace/retry-writeback.mimi", "retry");
+    let alias_key =
+        crate::lsp::verification_cache_key("file:///workspace/retry-writeback-alias.mimi", "retry");
+    let cold_key =
+        crate::lsp::verification_cache_key("file:///workspace/retry-writeback-cold.mimi", "cold");
+    std::fs::write(
+        cache_dir.join("verify_cache.json"),
+        serde_json::json!({
+            "version": 4,
+            "entries": {
+                real_key.clone(): {
+                    "body_hash": 7,
+                    "status": "InfrastructureError",
+                    "message": "solver unavailable"
+                },
+                alias_key.clone(): {
+                    "body_hash": 7,
+                    "status": "Failed",
+                    "message": "alias verdict"
+                },
+                cold_key.clone(): {
+                    "body_hash": 8,
+                    "status": "Verified",
+                    "message": "cold proof"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mixed infrastructure cache");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert!(
+        !server.verification_cache.contains_key(&real_key),
+        "InfrastructureError must be absent after load"
+    );
+    assert!(server.verification_cache.contains_key(&alias_key));
+    assert!(server.verification_cache.contains_key(&cold_key));
+
+    // A writeback without recovery must scrub the stale disk entry while
+    // retaining independent sibling keys.
+    server.save_cache();
+    let sanitized: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json"))
+            .expect("read sanitized infrastructure cache"),
+    )
+    .expect("parse sanitized infrastructure cache");
+    assert_eq!(
+        sanitized["entries"].get(real_key.as_str()),
+        None,
+        "the dropped InfrastructureError must not be written back"
+    );
+    assert_eq!(
+        sanitized["entries"][alias_key.as_str()]["message"],
+        "alias verdict"
+    );
+    assert_eq!(
+        sanitized["entries"][cold_key.as_str()]["message"],
+        "cold proof"
+    );
+
+    // A recovered verdict may then be written in the same session. The next
+    // writeback must retain the independent siblings and the new route.
+    server.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            9,
+            crate::verifier::VerifStatus::Proven,
+            "recovered proof".to_string(),
+            None,
+        ),
+    );
+    server.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cache_dir.join("verify_cache.json"))
+            .expect("read sanitized infrastructure cache"),
+    )
+    .expect("parse sanitized infrastructure cache");
+    assert_eq!(
+        persisted["entries"][real_key.as_str()]["message"],
+        "recovered proof",
+        "the recovered route should replace the stale infrastructure entry"
+    );
+    assert_eq!(
+        persisted["entries"][alias_key.as_str()]["message"],
+        "alias verdict",
+        "the independent alias sibling must survive writeback"
+    );
+    assert_eq!(
+        persisted["entries"][cold_key.as_str()]["message"],
+        "cold proof",
+        "the unrelated cold sibling must survive writeback"
+    );
+
+    let mut restarted = LspServer::new();
+    let _ = restarted.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root.to_string_lossy() }
+    }));
+    assert_eq!(
+        restarted.verification_cache[&real_key].message,
+        "recovered proof"
+    );
+    assert_eq!(
+        restarted.verification_cache[&alias_key].message,
+        "alias verdict"
+    );
+    assert_eq!(
+        restarted.verification_cache[&cold_key].message,
+        "cold proof"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn lsp_verification_cache_load_hydrates_lru_capacity() {
     let root = std::env::temp_dir().join(format!(
         "mimi_lsp_cache_lru_hydration_{}",
