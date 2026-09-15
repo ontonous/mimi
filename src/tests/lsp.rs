@@ -1742,6 +1742,68 @@ fn lsp_verification_cache_replays_multiple_functions_after_restart() {
 }
 
 #[test]
+fn lsp_verification_body_change_invalidates_only_target_function_key() {
+    let uri = "untitled://workspace/function-body-change.mimi";
+    let old_text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}\n\nfunc good(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    1\n}";
+    let new_text = old_text.replacen("    0", "    2", 1);
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(old_text, Some(uri))
+        .expect("parse old source");
+    let funcs = file.items.iter().filter_map(|item| match item {
+        crate::ast::Item::Func(func) if func.name == "bad" || func.name == "good" => Some(func),
+        _ => None,
+    });
+    let funcs = funcs.collect::<Vec<_>>();
+    assert_eq!(funcs.len(), 2);
+    let bad_old_hash = crate::lsp::util::hash_func_body(old_text, funcs[0]);
+    let good_hash = crate::lsp::util::hash_func_body(old_text, funcs[1]);
+    let bad_key = crate::lsp::verification_cache_key(uri, "bad");
+    let good_key = crate::lsp::verification_cache_key(uri, "good");
+    let mut server = LspServer::new();
+    server.cache_put_verification(
+        bad_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            bad_old_hash,
+            crate::verifier::VerifStatus::Proven,
+            "old bad proof".to_string(),
+            None,
+        ),
+    );
+    server.cache_put_verification(
+        good_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            good_hash,
+            crate::verifier::VerifStatus::Proven,
+            "unchanged good proof".to_string(),
+            None,
+        ),
+    );
+
+    // The changed body must invalidate only `bad`; the unchanged `good`
+    // function still has the same body hash and should retain its verdict.
+    let _ = server.compute_verification_diagnostics(&new_text, 0, uri);
+    let bad_after = server
+        .verification_cache
+        .get(&bad_key)
+        .map(|entry| entry.body_hash);
+    assert_ne!(
+        bad_after,
+        Some(bad_old_hash),
+        "a changed function must not retain its old body-hash verdict"
+    );
+    let _ = server.compute_verification_diagnostics(&new_text, 6, uri);
+    assert_eq!(
+        server
+            .verification_cache
+            .get(&good_key)
+            .map(|entry| entry.body_hash),
+        Some(good_hash),
+        "an unchanged sibling function must retain its cache verdict"
+    );
+}
+
+#[test]
 fn lsp_verification_cache_hit_survives_source_registry_reset() {
     let uri = "untitled://workspace/cache-after-reset.mimi";
     let text = "func bad(x: i32) -> i32 {\n    requires: x > 0\n    ensures: result > 0\n    0\n}";
