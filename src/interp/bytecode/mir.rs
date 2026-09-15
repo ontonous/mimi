@@ -61,14 +61,7 @@ impl MirBytecodeError {
     /// remain generic diagnostics; route errors are the only messages whose
     /// stable code is part of the public provenance contract.
     pub fn diagnostic_code(&self) -> Option<&'static str> {
-        [
-            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
-            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
-            crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
-            crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
-        ]
-        .into_iter()
-        .find(|code| self.message.starts_with(code))
+        crate::diagnostic::codes::canonical_mir_route_code(&self.message)
     }
 
     /// Convert the adapter error to the shared diagnostic representation.

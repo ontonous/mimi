@@ -263,6 +263,21 @@ pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-00
 
 // Lint warning codes (W0xxx)
 
+/// Recognize a canonical MIR route code carried at the beginning of an
+/// adapter error message.  Route adapters retain their historical textual
+/// prefixes for CLI compatibility, while structured consumers use this one
+/// registry-owned classifier instead of maintaining divergent lists.
+pub fn canonical_mir_route_code(message: &str) -> Option<&'static str> {
+    [
+        MIR_ROUTE_RECEIPT_ERROR_CODE,
+        MIR_ROUTE_MANIFEST_ERROR_CODE,
+        MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+        MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+    ]
+    .into_iter()
+    .find(|code| message.starts_with(code))
+}
+
 /// Get a human-readable description for an error code.
 pub fn describe(code: &str) -> &'static str {
     match code {
@@ -487,7 +502,25 @@ pub fn describe(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe, W012};
+    use super::{canonical_mir_route_code, describe, W012};
+
+    #[test]
+    fn canonical_mir_route_code_classifier_covers_all_registered_routes() {
+        let cases = [
+            super::MIR_ROUTE_RECEIPT_ERROR_CODE,
+            super::MIR_ROUTE_MANIFEST_ERROR_CODE,
+            super::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+            super::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+        ];
+        for code in cases {
+            assert_eq!(
+                canonical_mir_route_code(&format!("{code}: rejected")),
+                Some(code)
+            );
+        }
+        assert_eq!(canonical_mir_route_code("MIR-UNKNOWN-001: rejected"), None);
+        assert_eq!(canonical_mir_route_code("prefix MIR-RECEIPT-001"), None);
+    }
 
     #[test]
     fn w012_has_a_diagnostic_description() {
