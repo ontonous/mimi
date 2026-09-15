@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::fmt;
 use crate::lsp::util::percent_decode;
-use crate::lsp::LspServer;
+use crate::lsp::{diagnostic, LspServer};
 
 /// Extract the `method` string from a JSON-RPC message.
 fn get_method(msg: &Value) -> Option<&str> {
@@ -296,6 +296,8 @@ fn publish_diagnostic_notifications(
         });
     if let Some(diagnostics) = primary["params"]["diagnostics"].as_array_mut() {
         diagnostics.extend(additional_primary);
+        let normalized = diagnostic::normalize_diagnostics(std::mem::take(diagnostics));
+        *diagnostics = normalized;
     }
     server.pending_notifications.extend(notifications);
     (server, Some(primary))

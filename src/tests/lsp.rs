@@ -287,6 +287,82 @@ fn lsp_direct_and_publish_diagnostics_share_normalized_order() {
 }
 
 #[test]
+fn lsp_did_change_normalizes_verification_and_checker_diagnostics_together() {
+    let uri = "file:///combined-normalized.mimi";
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    let observed = 7\n",
+        "    0\n",
+        "}\n",
+        "}"
+    );
+    let probe = LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(uri))
+        .expect("contract fixture should parse");
+    let func = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let body_hash = crate::lsp::util::hash_func_body(text, func);
+    // URI registration is idempotent across the checker and verification
+    // passes, so both snapshots use SourceId(1) for this document.
+    let source_id = crate::span::SourceId::new(1);
+    let route = crate::diagnostic::mir_route_error_diagnostic(
+        format!(
+            "verification wrapper: {}: stale receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ),
+        crate::span::Span::new(3, 5, 3, 12).with_source(source_id),
+    );
+    let mut server = lsp_ready();
+    server.insert_verification_cache_with_diagnostic(
+        crate::lsp::verification_cache_key(uri, "bad"),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        route.message.clone(),
+        route,
+    );
+
+    let response = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 1 },
+            "contentChanges": [{ "text": text }]
+        }
+    }));
+    let response = response.expect("didChange should publish diagnostics");
+    let diagnostics = response["params"]["diagnostics"]
+        .as_array()
+        .expect("primary diagnostic array");
+    assert!(
+        diagnostics.len() >= 2,
+        "checker and verification diagnostics: {diagnostics:#?}"
+    );
+    assert_eq!(
+        diagnostics[0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+        "verification route span precedes later checker span: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["message"] == "unexpected token } at top level"),
+        "checker diagnostic must remain in the combined batch"
+    );
+}
+
+#[test]
 fn lsp_completion_no_file() {
     let mut server = lsp_ready();
     let msg = serde_json::json!({
