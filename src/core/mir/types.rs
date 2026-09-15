@@ -476,6 +476,24 @@ impl MirBuiltinContract {
     }
 }
 
+impl MirBuiltinKind {
+    /// Stable spelling used by MIR instruction identity text.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            // Preserve the established MIR dump spelling while keeping the
+            // mapping explicit and independent from Rust's `Debug` derive.
+            Self::Abs => "Abs",
+            Self::Min => "Min",
+            Self::Max => "Max",
+            Self::PrintlnBool => "PrintlnBool",
+            Self::PrintlnInt => "PrintlnInt",
+            Self::PrintlnString => "PrintlnString",
+            Self::SessionOpen => "SessionOpen",
+            Self::SessionPair => "SessionPair",
+        }
+    }
+}
+
 /// The closed set of conversion shapes currently materialized in canonical
 /// MIR.  A surface cast remains a `Convert` node, but it cannot reach a
 /// backend until its source/target TypeDesc pair resolves to one of these
@@ -755,6 +773,16 @@ pub enum MirSessionOperation {
     Recv,
 }
 
+impl MirSessionOperation {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Send => "send",
+            Self::Recv => "recv",
+        }
+    }
+}
+
 /// Checker-owned residual, TypeDesc and ABI receipt for one SessionChan
 /// operation. The endpoint/result identities are resolved MIR values; the
 /// residual transition is never reconstructed from a source session name or
@@ -793,6 +821,14 @@ pub struct MirSessionPairBindContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirCallEffectKind {
     TransferSession,
+}
+
+impl MirCallEffectKind {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::TransferSession => "transfer_session",
+        }
+    }
 }
 
 /// TypeDesc/argument identity receipt for one ordinary-call effect.  The
@@ -1318,6 +1354,15 @@ pub enum MirListIndexProjectionMode {
     CloneNestedList,
 }
 
+impl MirListIndexProjectionMode {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::CopyScalar => "copy_scalar",
+            Self::CloneNestedList => "clone_nested_list",
+        }
+    }
+}
+
 /// Backend-independent receipt for one canonical read-only List index
 /// projection. The source List, element, index operand, result identity and
 /// ownership mode are checker-owned facts; consumers must not recover them
@@ -1340,6 +1385,15 @@ pub enum MirListOperationMode {
     Scalar,
     /// One-level nested List operation using the recursive child-handle ABI.
     Nested,
+}
+
+impl MirListOperationMode {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Nested => "nested",
+        }
+    }
 }
 
 /// Backend-independent receipt for one canonical read-only List operation.
@@ -1400,6 +1454,16 @@ pub enum MirVariantCallAbiMode {
     RecoverableAggregate,
 }
 
+impl MirVariantCallAbiMode {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::FlatCopy => "flat_copy",
+            Self::MoveOwned => "move_owned",
+            Self::RecoverableAggregate => "recoverable_aggregate",
+        }
+    }
+}
+
 /// The return-path merge proof attached to a direct variant-call receipt.
 ///
 /// This is intentionally separate from [`MirVariantCallAbiMode`]: ABI and
@@ -1413,6 +1477,16 @@ pub enum MirVariantCallReturnMode {
     FlatCopyMerge,
     OwnershipPathExclusiveMerge,
     AggregateEnvelopeMerge,
+}
+
+impl MirVariantCallReturnMode {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::FlatCopyMerge => "flat_copy_merge",
+            Self::OwnershipPathExclusiveMerge => "ownership_path_exclusive_merge",
+            Self::AggregateEnvelopeMerge => "aggregate_envelope_merge",
+        }
+    }
 }
 
 /// Backend-independent ABI receipt for a direct call whose result is an
@@ -1469,6 +1543,377 @@ pub struct MirRecordMoveProjectionDropContract {
     pub result_ty: ResolvedTypeId,
     pub projection: MirRecordProjectionContract,
     pub residual: Vec<MirRecordResidualDrop>,
+}
+
+fn canonical_type_ids(types: &[ResolvedTypeId]) -> String {
+    types
+        .iter()
+        .map(ResolvedTypeId::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn canonical_optional_type_id(ty: Option<&ResolvedTypeId>) -> &str {
+    ty.map(ResolvedTypeId::as_str).unwrap_or("-")
+}
+
+impl MirSessionCallContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "operation={} endpoint_ty={} result_ty={} payload_ty={} before={} after={} terminal={}",
+            self.operation.canonical_text(),
+            self.endpoint_ty.as_str(),
+            self.result_ty.as_str(),
+            canonical_optional_type_id(self.payload_ty.as_ref()),
+            self.before.as_str(),
+            self.after.as_str(),
+            self.terminal
+        )
+    }
+}
+
+impl MirSessionPairBindContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "pair_ty={} lo_ty={} hi_ty={} lo_protocol={} hi_protocol={}",
+            self.pair_ty.as_str(),
+            self.lo_ty.as_str(),
+            self.hi_ty.as_str(),
+            self.lo_protocol.as_str(),
+            self.hi_protocol.as_str()
+        )
+    }
+}
+
+impl MirCallEffectContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "kind={} argument_index={} argument_ty={}",
+            self.kind.canonical_text(),
+            self.argument_index,
+            self.argument_ty.as_str()
+        )
+    }
+}
+
+impl MirRecordProjectionContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "nominal={} field={} name={} index={} arity={} field_ty={}",
+            self.nominal.as_str(),
+            self.field.0,
+            self.name,
+            self.field_index,
+            self.arity,
+            self.field_ty.as_str()
+        )
+    }
+}
+
+impl MirVariantProjectionContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "nominal={} variant={} field={} index={} arity={} field_ty={} ownership={} move_out_glue={}",
+            self.nominal.as_str(),
+            self.variant.0,
+            self.field.0,
+            self.field_index,
+            self.arity,
+            self.field_ty.as_str(),
+            self.ownership.canonical_text(),
+            self.move_out_glue.canonical_text()
+        )
+    }
+}
+
+impl MirVariantProjectionTrapContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} projection=({}) variant_name={} discriminant={} trap_code={}",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.projection.canonical_text(),
+            self.variant_name,
+            self.discriminant,
+            self.trap_code
+        )
+    }
+}
+
+impl MirVariantProjectionFallbackContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} fallback_ty={} projection=({}) variant_name={} discriminant={} fallback_variant={} fallback_variant_name={} fallback_discriminant={} fallback_arity={}",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.fallback_ty.as_str(),
+            self.projection.canonical_text(),
+            self.variant_name,
+            self.discriminant,
+            self.fallback_variant.0,
+            self.fallback_variant_name,
+            self.fallback_discriminant,
+            self.fallback_arity
+        )
+    }
+}
+
+impl MirStringFieldBorrowContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} projection=({})",
+            self.source_ty.as_str(),
+            self.projection.canonical_text()
+        )
+    }
+}
+
+impl MirFlowEffectReceipt {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "transition={} source={} parameters=[{}] result={} target={}",
+            self.transition.0,
+            self.source.as_str(),
+            canonical_type_ids(&self.parameters),
+            self.result.as_str(),
+            self.target.as_str()
+        )
+    }
+}
+
+impl MirRecordUpdateContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} nominal={} arity={} fields=[{}]",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.nominal.as_str(),
+            self.arity,
+            self.fields
+                .iter()
+                .map(MirRecordProjectionContract::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
+}
+
+impl MirRecordUpdateMoveField {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "projection=({}) old_drop={} new_move={}",
+            self.projection.canonical_text(),
+            self.old_drop.canonical_text(),
+            self.new_move.canonical_text()
+        )
+    }
+}
+
+impl MirRecordUpdateMoveContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} nominal={} arity={} updates=[{}] residual=[{}]",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.nominal.as_str(),
+            self.arity,
+            self.updates
+                .iter()
+                .map(MirRecordUpdateMoveField::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";"),
+            self.residual
+                .iter()
+                .map(MirRecordResidualMove::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
+}
+
+impl MirRecordResidualMove {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "id={} name={} index={} ty={} glue={}",
+            self.id.0,
+            self.name,
+            self.index,
+            self.ty.as_str(),
+            self.glue.canonical_text()
+        )
+    }
+}
+
+impl MirTupleProjectionContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "tuple_ty={} field_index={} arity={} field_ty={}",
+            self.tuple_ty.as_str(),
+            self.field_index,
+            self.arity,
+            self.field_ty.as_str()
+        )
+    }
+}
+
+impl MirReadProjectionKind {
+    pub(crate) fn canonical_text(&self) -> String {
+        match self {
+            Self::Field(field) => format!("field({})", field.0),
+            Self::Tuple(index) => format!("tuple({index})"),
+        }
+    }
+}
+
+impl MirReadProjectionStep {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "base_ty={} result_ty={} projection={}",
+            self.base_ty.as_str(),
+            self.result_ty.as_str(),
+            self.projection.canonical_text()
+        )
+    }
+}
+
+impl MirReadProjectionContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} steps=[{}]",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.steps
+                .iter()
+                .map(MirReadProjectionStep::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
+}
+
+impl MirListIndexProjectionContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "list_ty={} element_ty={} index_ty={} result_ty={} mode={}",
+            self.list_ty.as_str(),
+            self.element_ty.as_str(),
+            self.index_ty.as_str(),
+            self.result_ty.as_str(),
+            self.mode.canonical_text()
+        )
+    }
+}
+
+impl MirListOperationContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "list_ty={} element_ty={} result_ty={} argument_ty={} operation={} mode={}",
+            self.list_ty.as_str(),
+            self.element_ty.as_str(),
+            self.result_ty.as_str(),
+            canonical_optional_type_id(self.argument_ty.as_ref()),
+            self.operation.canonical_text(),
+            self.mode.canonical_text()
+        )
+    }
+}
+
+impl MirListConstructContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "list_ty={} element_ty={} result_ty={} element_count={}",
+            self.list_ty.as_str(),
+            self.element_ty.as_str(),
+            self.result_ty.as_str(),
+            self.element_count
+        )
+    }
+}
+
+impl MirVariantPredicateContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "variant_ty={} result_ty={} nominal={} variant={} variant_name={} alternate_variant={} alternate_variant_name={} predicate={} discriminant={}",
+            self.variant_ty.as_str(),
+            self.result_ty.as_str(),
+            self.nominal.as_str(),
+            self.variant.0,
+            self.variant_name,
+            self.alternate_variant.0,
+            self.alternate_variant_name,
+            self.predicate.canonical_text(),
+            self.discriminant
+        )
+    }
+}
+
+impl MirVariantCallAbiContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        let variants = self
+            .variants
+            .iter()
+            .map(MirVariantCallVariant::canonical_text)
+            .collect::<Vec<_>>()
+            .join(";");
+        format!(
+            "callee={} type_arguments=[{}] parameter_types=[{}] result_ty={} mode={} return_mode={} payload_ty={} payload_types=[{}] nominal={} variants=[{}]",
+            self.callee.0,
+            canonical_type_ids(&self.type_arguments),
+            canonical_type_ids(&self.parameter_types),
+            self.result_ty.as_str(),
+            self.mode.canonical_text(),
+            self.return_mode.canonical_text(),
+            self.payload_ty.as_str(),
+            canonical_type_ids(&self.payload_types),
+            self.nominal.as_str(),
+            variants
+        )
+    }
+}
+
+impl MirVariantCallVariant {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "id={} name={} discriminant={} payload_field={} payload_arity={}",
+            self.id.0,
+            self.name,
+            self.discriminant,
+            self.payload_field
+                .as_ref()
+                .map(|field| field.0.as_str())
+                .unwrap_or("-"),
+            self.payload_arity
+        )
+    }
+}
+
+impl MirRecordResidualDrop {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "id={} name={} index={} ty={} glue={}",
+            self.id.0,
+            self.name,
+            self.index,
+            self.ty.as_str(),
+            self.glue.canonical_text()
+        )
+    }
+}
+
+impl MirRecordMoveProjectionDropContract {
+    pub(crate) fn canonical_text(&self) -> String {
+        format!(
+            "source_ty={} result_ty={} projection=({}) residual=[{}]",
+            self.source_ty.as_str(),
+            self.result_ty.as_str(),
+            self.projection.canonical_text(),
+            self.residual
+                .iter()
+                .map(MirRecordResidualDrop::canonical_text)
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

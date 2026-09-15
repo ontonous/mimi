@@ -3963,9 +3963,159 @@ fn format_params(parameters: &[MirBlockParameter]) -> String {
         .join(", ")
 }
 
+fn format_mir_literal(literal: &ResolvedLiteral) -> String {
+    match literal {
+        ResolvedLiteral::Int(value) => format!("Int({value})"),
+        ResolvedLiteral::FloatBits(bits) => format!("FloatBits({bits})"),
+        ResolvedLiteral::Bool(value) => format!("Bool({value})"),
+        ResolvedLiteral::String(value) => {
+            let mut escaped = String::with_capacity(value.len());
+            for character in value.chars() {
+                match character {
+                    '\\' => escaped.push_str("\\\\"),
+                    '"' => escaped.push_str("\\\""),
+                    '\n' => escaped.push_str("\\n"),
+                    '\r' => escaped.push_str("\\r"),
+                    '\t' => escaped.push_str("\\t"),
+                    character if character.is_control() => {
+                        use std::fmt::Write as _;
+                        let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+                    }
+                    character => escaped.push(character),
+                }
+            }
+            format!("String(\"{escaped}\")")
+        }
+        ResolvedLiteral::Unit => "Unit".into(),
+    }
+}
+
+fn format_mir_projection(projection: &MirProjection) -> String {
+    match projection {
+        MirProjection::Field(field) => format!("Field({})", field.0),
+        MirProjection::Tuple(index) => format!("Tuple({index})"),
+        MirProjection::Index(value) => format!("Index({})", value.as_str()),
+        MirProjection::Dereference => "Dereference".into(),
+        MirProjection::ReadPath(receipt) => format!("ReadPath({})", receipt.canonical_text()),
+    }
+}
+
+fn format_mir_aggregate_kind(kind: &MirAggregateKind) -> String {
+    match kind {
+        MirAggregateKind::Tuple => "Tuple".into(),
+        MirAggregateKind::Record { nominal, fields } => format!(
+            "Record {{ nominal: {}, fields: [{}] }}",
+            nominal.as_str(),
+            fields
+                .iter()
+                .map(|field| field.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn format_mir_list_operation(operation: MirListOperation) -> &'static str {
+    match operation {
+        MirListOperation::Len => "Len",
+        MirListOperation::Reverse => "Reverse",
+        MirListOperation::Concat => "Concat",
+    }
+}
+
+fn format_mir_set_operation(operation: MirSetOperation) -> &'static str {
+    match operation {
+        MirSetOperation::Size => "Size",
+        MirSetOperation::IsEmpty => "IsEmpty",
+        MirSetOperation::Contains => "Contains",
+        MirSetOperation::Insert => "Insert",
+        MirSetOperation::Remove => "Remove",
+        MirSetOperation::ToList => "ToList",
+    }
+}
+
+fn format_mir_variant_predicate(predicate: MirVariantPredicate) -> &'static str {
+    match predicate {
+        MirVariantPredicate::IsSome => "IsSome",
+        MirVariantPredicate::IsNone => "IsNone",
+        MirVariantPredicate::IsOk => "IsOk",
+        MirVariantPredicate::IsErr => "IsErr",
+    }
+}
+
+fn format_mir_binary_op(op: ResolvedBinaryOp) -> &'static str {
+    match op {
+        ResolvedBinaryOp::Add => "Add",
+        ResolvedBinaryOp::Subtract => "Subtract",
+        ResolvedBinaryOp::Multiply => "Multiply",
+        ResolvedBinaryOp::Divide => "Divide",
+        ResolvedBinaryOp::Remainder => "Remainder",
+        ResolvedBinaryOp::Power => "Power",
+        ResolvedBinaryOp::Equal => "Equal",
+        ResolvedBinaryOp::NotEqual => "NotEqual",
+        ResolvedBinaryOp::Less => "Less",
+        ResolvedBinaryOp::Greater => "Greater",
+        ResolvedBinaryOp::LessEqual => "LessEqual",
+        ResolvedBinaryOp::GreaterEqual => "GreaterEqual",
+        ResolvedBinaryOp::LogicalAnd => "LogicalAnd",
+        ResolvedBinaryOp::LogicalOr => "LogicalOr",
+        ResolvedBinaryOp::BitAnd => "BitAnd",
+        ResolvedBinaryOp::BitOr => "BitOr",
+        ResolvedBinaryOp::BitXor => "BitXor",
+        ResolvedBinaryOp::ShiftLeft => "ShiftLeft",
+        ResolvedBinaryOp::ShiftRight => "ShiftRight",
+    }
+}
+
+fn format_mir_unary_op(op: ResolvedUnaryOp) -> &'static str {
+    match op {
+        ResolvedUnaryOp::Negate => "Negate",
+        ResolvedUnaryOp::Not => "Not",
+        ResolvedUnaryOp::BorrowShared => "BorrowShared",
+        ResolvedUnaryOp::BorrowMutable => "BorrowMutable",
+        ResolvedUnaryOp::Dereference => "Dereference",
+    }
+}
+
+fn format_mir_callee(callee: &ResolvedCallee) -> String {
+    match callee {
+        ResolvedCallee::Function(id) => format!("Function({})", id.0),
+        ResolvedCallee::Constructor(id) => format!("Constructor({})", id.0),
+        ResolvedCallee::Extern(id) => format!("Extern({})", id.0),
+        ResolvedCallee::Builtin(id) => format!("Builtin({})", id.as_str()),
+        ResolvedCallee::LocalClosure(id) => format!("LocalClosure({})", id.0 .0),
+        ResolvedCallee::ActorMethod { actor, method } => {
+            format!(
+                "ActorMethod {{ actor: {}, method: {} }}",
+                actor.0,
+                method.as_str()
+            )
+        }
+        ResolvedCallee::ProtocolMethod { protocol, method } => format!(
+            "ProtocolMethod {{ protocol: {}, method: {} }}",
+            protocol.0,
+            method.as_str()
+        ),
+        ResolvedCallee::Transition(id) => format!(
+            "Transition {{ flow: {}, event: {}, source: {}::{} }}",
+            id.flow.0, id.event, id.source.flow.0, id.source.name
+        ),
+    }
+}
+
+fn format_mir_switch_case(case: &MirSwitchCase) -> String {
+    match case {
+        MirSwitchCase::Literal(literal) => format!("Literal({})", format_mir_literal(literal)),
+        MirSwitchCase::Variant(variant) => format!("Variant({})", variant.0),
+        MirSwitchCase::Default => "Default".into(),
+    }
+}
+
 fn format_instruction(kind: &MirInstructionKind) -> String {
     match kind {
-        MirInstructionKind::Const { result, literal } => format!("const {result} = {literal:?}"),
+        MirInstructionKind::Const { result, literal } => {
+            format!("const {result} = {}", format_mir_literal(literal))
+        }
         MirInstructionKind::Load { result, .. } => format!("load {result}"),
         MirInstructionKind::Copy { result, source } => format!("copy {result} <- {source}"),
         MirInstructionKind::Move { result, source } => format!("move {result} <- {source}"),
@@ -3986,27 +4136,42 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             projection,
             list_index_contract,
         } => format!(
-            "project {result} <- {base}.{projection:?}{}",
+            "project {result} <- {base}.{}{}",
+            format_mir_projection(projection),
             list_index_contract
                 .as_ref()
-                .map(|contract| format!(" [list_index={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [list_index=MirListIndexProjectionContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::MoveProject {
             result,
             base,
             projection,
-        } => format!("move_project {result} <- {base}.{projection:?}"),
+        } => format!(
+            "move_project {result} <- {base}.{}",
+            format_mir_projection(projection)
+        ),
         MirInstructionKind::MoveProjectDrop {
             result,
             base,
             projection,
             contract,
         } => format!(
-            "move_project_drop {result} <- {base}.{projection:?}{}",
+            "move_project_drop {result} <- {base}.{}{}",
+            format_mir_projection(projection),
             contract
                 .as_ref()
-                .map(|contract| format!(" [record_move_drop={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [record_move_drop=MirRecordMoveProjectionDropContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::VariantProject {
@@ -4017,7 +4182,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             "variant_project {result} <- {base}{}",
             contract
                 .as_ref()
-                .map(|contract| format!(" [variant_projection={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [variant_projection=MirVariantProjectionTrapContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::VariantProjectOr {
@@ -4029,7 +4199,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             "variant_project_or {result} <- {base} else {fallback}{}",
             contract
                 .as_ref()
-                .map(|contract| format!(" [variant_projection_fallback={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [variant_projection_fallback=MirVariantProjectionFallbackContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::VariantProjectMove {
@@ -4040,14 +4215,23 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             "variant_project_move {result} <- {base}{}",
             contract
                 .as_ref()
-                .map(|contract| format!(" [variant_move_projection={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [variant_move_projection=MirVariantProjectionTrapContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::Construct {
             result,
             kind,
             fields,
-        } => format!("construct {result} = {kind:?}({})", format_values(fields)),
+        } => format!(
+            "construct {result} = {}({})",
+            format_mir_aggregate_kind(kind),
+            format_values(fields)
+        ),
         MirInstructionKind::ConstructList {
             result,
             elements,
@@ -4058,7 +4242,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 format_values(elements),
                 list_construct_contract
                     .as_ref()
-                    .map(|contract| format!(" [list_construct_contract={contract:?}]"))
+                    .map(|contract| {
+                        format!(
+                            " [list_construct_contract=MirListConstructContract{{{}}}]",
+                            contract.canonical_text()
+                        )
+                    })
                     .unwrap_or_default()
             )
         }
@@ -4069,14 +4258,20 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             argument,
             list_operation_contract,
         } => format!(
-            "list_op {result} = {operation:?} {list}{}{}",
+            "list_op {result} = {} {list}{}{}",
+            format_mir_list_operation(*operation),
             argument
                 .as_ref()
                 .map(|value| format!(", {value}"))
                 .unwrap_or_default(),
             list_operation_contract
                 .as_ref()
-                .map(|contract| format!(" [list_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [list_contract=MirListOperationContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::VariantPredicate {
@@ -4085,10 +4280,16 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             variant,
             contract,
         } => format!(
-            "variant_predicate {result} = {predicate:?} {variant}{}",
+            "variant_predicate {result} = {} {variant}{}",
+            format_mir_variant_predicate(*predicate),
             contract
                 .as_ref()
-                .map(|contract| format!(" [variant_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [variant_contract=MirVariantPredicateContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::ConstructSet { result, elements } => {
@@ -4100,7 +4301,8 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             set,
             argument,
         } => format!(
-            "set_op {result} = {operation:?} {set}{}",
+            "set_op {result} = {} {set}{}",
+            format_mir_set_operation(*operation),
             argument
                 .as_ref()
                 .map(|value| format!(", {value}"))
@@ -4112,10 +4314,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             variant,
             fields,
         } => format!(
-            "construct_variant {result} = {nominal:?}::{variant:?}({})",
+            "construct_variant {result} = {}::{}({})",
+            nominal.as_str(),
+            variant.0,
             fields
                 .iter()
-                .map(|(field, value)| format!("{field:?}:{value}"))
+                .map(|(field, value)| format!("{}:{value}", field.0))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -4125,10 +4329,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             variant,
             fields,
         } => format!(
-            "construct_variant_move {result} = {nominal:?}::{variant:?}({})",
+            "construct_variant_move {result} = {}::{}({})",
+            nominal.as_str(),
+            variant.0,
             fields
                 .iter()
-                .map(|(field, value)| format!("{field:?}:{value}"))
+                .map(|(field, value)| format!("{}:{value}", field.0))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -4142,15 +4348,24 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         } => {
             let receipt = record_update_contract
                 .as_ref()
-                .map(|contract| format!(" receipt={contract:?}"))
+                .map(|contract| {
+                    format!(
+                        " receipt=MirRecordUpdateContract{{{}}}",
+                        contract.canonical_text()
+                    )
+                })
                 .or_else(|| {
-                    record_update_move_contract
-                        .as_ref()
-                        .map(|contract| format!(" move_receipt={contract:?}"))
+                    record_update_move_contract.as_ref().map(|contract| {
+                        format!(
+                            " move_receipt=MirRecordUpdateMoveContract{{{}}}",
+                            contract.canonical_text()
+                        )
+                    })
                 })
                 .unwrap_or_default();
             format!(
-                "update_record {result} = {base} {kind:?}({}){receipt}",
+                "update_record {result} = {base} {}({}){receipt}",
+                format_mir_aggregate_kind(kind),
                 format_values(fields)
             )
         }
@@ -4159,12 +4374,15 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             op,
             left,
             right,
-        } => format!("binary {result} = {op:?} {left}, {right}"),
+        } => format!(
+            "binary {result} = {} {left}, {right}",
+            format_mir_binary_op(*op)
+        ),
         MirInstructionKind::Unary {
             result,
             op,
             operand,
-        } => format!("unary {result} = {op:?} {operand}"),
+        } => format!("unary {result} = {} {operand}", format_mir_unary_op(*op)),
         MirInstructionKind::Call {
             result,
             callee,
@@ -4175,18 +4393,34 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         } => {
             let variant_suffix = variant_call_contract
                 .as_ref()
-                .map(|contract| format!(" [variant_call_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [variant_call_contract=MirVariantCallAbiContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default();
             let effect_suffix = (!effect_receipts.is_empty())
-                .then(|| format!(" [effect_receipts={effect_receipts:?}]"))
+                .then(|| {
+                    format!(
+                        " [effect_receipts=[{}]]",
+                        effect_receipts
+                            .iter()
+                            .map(|receipt| {
+                                format!("MirCallEffectContract{{{}}}", receipt.canonical_text())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    )
+                })
                 .unwrap_or_default();
             format!(
-                "call {} {:?}{}({}){}{}",
+                "call {} {}{}({}){}{}",
                 result
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| "_".into()),
-                callee,
+                format_mir_callee(callee),
                 if type_arguments.is_empty() {
                     String::new()
                 } else {
@@ -4223,7 +4457,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .join(", "),
             effect_receipt
                 .as_ref()
-                .map(|receipt| format!(" [effect_receipt={receipt:?}]"))
+                .map(|receipt| {
+                    format!(
+                        " [effect_receipt=MirFlowEffectReceipt{{{}}}]",
+                        receipt.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::BuiltinCall {
@@ -4232,7 +4471,8 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             arguments,
             string_field_contract,
         } => format!(
-            "builtin_call {result} {kind:?}({}){}",
+            "builtin_call {result} {}({}){}",
+            kind.canonical_text(),
             arguments
                 .iter()
                 .map(ToString::to_string)
@@ -4240,7 +4480,12 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .join(", "),
             string_field_contract
                 .as_ref()
-                .map(|contract| format!(" [string_field_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [string_field_contract=MirStringFieldBorrowContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::SessionCall {
@@ -4250,21 +4495,32 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             payload,
             contract,
         } => format!(
-            "session_call {result} {operation:?} {endpoint}{}{}",
+            "session_call {result} {} {endpoint}{}{}",
+            operation.canonical_text(),
             payload
                 .as_ref()
                 .map(|payload| format!(" payload={payload}"))
                 .unwrap_or_default(),
             contract
                 .as_ref()
-                .map(|contract| format!(" [session_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [session_contract=MirSessionCallContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::SessionPairBind { lo, hi, contract } => format!(
             "session_pair_bind {lo}, {hi}{}",
             contract
                 .as_ref()
-                .map(|contract| format!(" [session_pair_contract={contract:?}]"))
+                .map(|contract| {
+                    format!(
+                        " [session_pair_contract=MirSessionPairBindContract{{{}}}]",
+                        contract.canonical_text()
+                    )
+                })
                 .unwrap_or_default()
         ),
         MirInstructionKind::Convert { result, source } => {
@@ -4325,25 +4581,36 @@ fn format_switch_terminator(name: &str, scrutinee: &MirValueId, arms: &[MirSwitc
         arms.iter()
             .map(|arm| {
                 format!(
-                    "{:?}:{:?}:{}({}; bind={:?})",
-                    arm.case,
+                    "{}:{}:{}({}; bind={})",
+                    format_mir_switch_case(&arm.case),
                     arm.edge,
                     arm.target,
                     format_values(&arm.arguments),
                     arm.bindings
                         .iter()
                         .map(|binding| {
+                            let nested = binding
+                                .nested_tuple
+                                .as_ref()
+                                .map(|contract| {
+                                    format!(
+                                        "MirTupleProjectionContract{{{}}}",
+                                        contract.canonical_text()
+                                    )
+                                })
+                                .unwrap_or_else(|| "-".into());
                             format!(
-                                "{}<-{:?}[index={},arity={},ty={},nested={:?}]",
+                                "{}<-{}[index={},arity={},ty={},nested={}]",
                                 binding.parameter,
-                                binding.projection.field,
+                                binding.projection.field.0,
                                 binding.projection.field_index,
                                 binding.projection.arity,
                                 binding.projection.field_ty.as_str(),
-                                binding.nested_tuple
+                                nested
                             )
                         })
                         .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })
             .collect::<Vec<_>>()

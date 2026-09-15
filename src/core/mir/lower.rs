@@ -11158,7 +11158,7 @@ mod tests {
         let text = mir.canonical_text();
         assert!(text.contains("construct"));
         assert!(text.contains("update_record"));
-        assert!(text.contains("Field(NodeId"));
+        assert!(text.contains("Field("));
     }
 
     #[test]
