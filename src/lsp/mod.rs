@@ -514,6 +514,10 @@ impl LspServer {
         self.verification_cache.clear();
         self.cache_access_order.clear();
         self.cache_path = None;
+        // A verifier owns long-lived solver/session state.  Reinitializing
+        // the LSP server starts a new workspace session, so do not carry the
+        // old verifier across the SourceRegistry/cache boundary.
+        self.verifier = None;
         self.clear_parse_cache();
         *self.source_registry.borrow_mut() = crate::span::SourceRegistry::default();
         self.pending_notifications.clear();
@@ -997,6 +1001,11 @@ impl LspServer {
     #[cfg(test)]
     pub(crate) fn set_workspace_root_for_test(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verifier_initialized_for_test(&self) -> bool {
+        self.verifier.is_some()
     }
 }
 

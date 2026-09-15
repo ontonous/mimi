@@ -1631,6 +1631,57 @@ fn lsp_reinitialize_resets_workspace_state_and_rebinds_cache_path() {
 }
 
 #[test]
+fn lsp_reinitialize_drops_verifier_session_state() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let root_a =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_verifier_a_{}", std::process::id()));
+    let root_b =
+        std::env::temp_dir().join(format!("mimi_lsp_reinit_verifier_b_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_a);
+    let _ = std::fs::remove_dir_all(&root_b);
+    std::fs::create_dir_all(&root_a).expect("create verifier workspace A");
+    std::fs::create_dir_all(&root_b).expect("create verifier workspace B");
+
+    let mut server = LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootPath": root_a.to_string_lossy() }
+    }));
+    let uri = "untitled://workspace/reinit-verifier.mimi";
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    x\n",
+        "}\n"
+    );
+    let _ = server.compute_verification_diagnostics(text, 0, uri);
+    assert!(
+        server.verifier_initialized_for_test(),
+        "contract verification must initialize the session before reinitialize"
+    );
+
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": { "rootPath": root_b.to_string_lossy() }
+    }));
+    assert!(
+        !server.verifier_initialized_for_test(),
+        "workspace reinitialize must drop the previous verifier session"
+    );
+    assert!(server.source_registry.borrow().records().is_empty());
+
+    let _ = std::fs::remove_dir_all(root_a);
+    let _ = std::fs::remove_dir_all(root_b);
+}
+
+#[test]
 fn lsp_reinitialize_same_root_resets_session_before_cache_reload() {
     let root =
         std::env::temp_dir().join(format!("mimi_lsp_reinit_same_root_{}", std::process::id()));
