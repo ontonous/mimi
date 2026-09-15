@@ -265,6 +265,28 @@ fn lsp_compute_diagnostics_direct() {
 }
 
 #[test]
+fn lsp_direct_and_publish_diagnostics_share_normalized_order() {
+    let server = LspServer::new();
+    let uri = "file:///normalized-order.mimi";
+    let text = "func main() -> i32 {\n    missing_b\n    missing_a\n}";
+
+    let direct = server.compute_diagnostics(text, Some(uri));
+    let notifications = server.compute_diagnostic_notifications(text, uri);
+    let published = notifications
+        .iter()
+        .find(|notification| notification["method"] == "textDocument/publishDiagnostics")
+        .and_then(|notification| notification["params"]["diagnostics"].as_array())
+        .expect("publish diagnostics notification");
+
+    assert!(direct.len() >= 2, "fixture should produce two diagnostics");
+    assert_eq!(
+        direct.as_slice(),
+        published,
+        "direct and publish paths must agree"
+    );
+}
+
+#[test]
 fn lsp_completion_no_file() {
     let mut server = lsp_ready();
     let msg = serde_json::json!({
