@@ -1504,6 +1504,67 @@ pub struct MirFfiCallContract {
     pub span: crate::span::Span,
 }
 
+impl MirFfiCallContract {
+    /// Render the semantic FFI receipt body with a backend-independent
+    /// spelling.  Diagnostic provenance (`span`) is intentionally omitted:
+    /// source remaps must not change the MIR identity digest.
+    pub(crate) fn canonical_text(&self) -> String {
+        let mut text = String::new();
+        text.push_str(self.caller.0.as_str());
+        text.push(' ');
+        text.push_str(self.instruction.as_str());
+        text.push(' ');
+        text.push_str(self.callee.0.as_str());
+        text.push_str(" symbol=");
+        text.push_str(&self.symbol);
+        text.push_str(" abi=");
+        text.push_str(&self.abi);
+        text.push_str(" args=");
+        for argument in &self.arguments {
+            text.push_str(argument.as_str());
+            text.push(',');
+        }
+        text.push_str(" parameter_types=");
+        for parameter_type in &self.parameter_types {
+            text.push_str(parameter_type.as_str());
+            text.push(',');
+        }
+        text.push_str(" parameter_conversions=");
+        for conversion in &self.parameter_conversions {
+            text.push_str(&conversion.canonical_text());
+            text.push(';');
+        }
+        text.push_str(" result=");
+        text.push_str(
+            self.result
+                .as_ref()
+                .map(MirValueId::as_str)
+                .unwrap_or("unit"),
+        );
+        text.push_str(" result_type=");
+        text.push_str(self.result_type.as_str());
+        text.push_str(" result_conversion=");
+        if let Some(conversion) = self.result_conversion {
+            text.push_str(&conversion.canonical_text());
+        } else {
+            text.push_str("none");
+        }
+        text.push_str(" requires=");
+        if let Some(condition) = &self.requires {
+            text.push_str(&condition.canonical_text());
+        } else {
+            text.push_str("none");
+        }
+        text.push_str(" ensures=");
+        if let Some(condition) = &self.ensures {
+            text.push_str(&condition.canonical_text());
+        } else {
+            text.push_str("none");
+        }
+        text
+    }
+}
+
 /// One physical scalar ABI conversion at a canonical FFI boundary.
 ///
 /// The checker-owned MIR receipt records the source and target ABI classes so
@@ -1514,6 +1575,17 @@ pub struct MirFfiCallContract {
 pub struct MirFfiAbiConversion {
     pub from: types::MirAbiClass,
     pub to: types::MirAbiClass,
+}
+
+impl MirFfiAbiConversion {
+    /// Stable spelling shared by every MIR receipt consumer.
+    pub(crate) fn canonical_text(self) -> String {
+        format!(
+            "{}->{}",
+            self.from.canonical_text(),
+            self.to.canonical_text()
+        )
+    }
 }
 
 /// Backend-independent classification of one admitted scalar FFI conversion.

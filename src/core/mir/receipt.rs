@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::MirValueId;
 use crate::core::NodeId;
 
 /// Schema version for the cross-consumer route receipt.
@@ -554,73 +553,7 @@ fn canonical_ffi_text(program: &MirProgram) -> String {
             text.push_str(instruction.as_str());
             text.push(' ');
         }
-        text.push_str(contract.caller.0.as_str());
-        text.push(' ');
-        text.push_str(contract.instruction.as_str());
-        text.push(' ');
-        text.push_str(contract.callee.0.as_str());
-        text.push_str(" symbol=");
-        text.push_str(&contract.symbol);
-        text.push_str(" abi=");
-        text.push_str(&contract.abi);
-        text.push_str(" args=");
-        for argument in &contract.arguments {
-            text.push_str(argument.as_str());
-            text.push(',');
-        }
-        text.push_str(" parameter_types=");
-        for parameter_type in &contract.parameter_types {
-            text.push_str(parameter_type.as_str());
-            text.push(',');
-        }
-        text.push_str(" parameter_conversions=");
-        for conversion in &contract.parameter_conversions {
-            let _ = write!(
-                text,
-                "{}->{};",
-                conversion.from.canonical_text(),
-                conversion.to.canonical_text()
-            );
-        }
-        text.push_str(" result=");
-        text.push_str(
-            contract
-                .result
-                .as_ref()
-                .map(MirValueId::as_str)
-                .unwrap_or("unit"),
-        );
-        text.push_str(" result_type=");
-        text.push_str(contract.result_type.as_str());
-        text.push_str(" result_conversion=");
-        if let Some(conversion) = contract.result_conversion {
-            let _ = write!(
-                text,
-                "{}->{}",
-                conversion.from.canonical_text(),
-                conversion.to.canonical_text()
-            );
-        } else {
-            text.push_str("none");
-        }
-        text.push_str(" requires=");
-        text.push_str(
-            contract
-                .requires
-                .as_ref()
-                .map(|condition| condition.canonical_text())
-                .as_deref()
-                .unwrap_or("none"),
-        );
-        text.push_str(" ensures=");
-        text.push_str(
-            contract
-                .ensures
-                .as_ref()
-                .map(|condition| condition.canonical_text())
-                .as_deref()
-                .unwrap_or("none"),
-        );
+        text.push_str(&contract.canonical_text());
         text.push('\n');
     }
     text

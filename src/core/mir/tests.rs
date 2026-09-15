@@ -189,6 +189,31 @@ fn canonical_copy_scalar_requires_complete_shape() {
 }
 
 #[test]
+fn canonical_ffi_identity_ignores_diagnostic_span() {
+    let checked = checked_program(
+        r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(1 as i64) }
+"#,
+    );
+    let mut program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("scalar FFI MIR");
+    let before = program.route_receipt("test-v1");
+
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .values_mut()
+        .next()
+        .expect("scalar FFI receipt")
+        .span = crate::span::Span::new(91, 17, 93, 29).with_source(crate::span::SourceId::new(99));
+    program.replace_ffi_calls_for_test_only(receipts);
+    let after = program.route_receipt("test-v1");
+
+    assert_eq!(before.mir_digest, after.mir_digest);
+    assert_eq!(before.ffi_digest, after.ffi_digest);
+}
+
+#[test]
 fn canonical_ffi_endpoint_predicate_rejects_forged_metadata() {
     let checked = checked_program("func main() -> i64 { 0 }");
     let catalog = types::MirTypeCatalog::from_checked_program(&checked)
