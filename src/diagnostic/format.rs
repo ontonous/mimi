@@ -1,5 +1,6 @@
 use super::{Diagnostic, Severity};
 use crate::span::{SourceRegistry, Span};
+use std::borrow::Cow;
 use std::path::Path;
 
 /// ANSI color codes for terminal output.
@@ -152,7 +153,7 @@ fn format_diagnostic_with_note_filenames(
             span_columns(&diagnostic.span)
         ));
     }
-    out.push_str(&diagnostic.message);
+    out.push_str(&display_message(diagnostic));
 
     // Source-line context: information, not decoration — one trimmed line.
     if diagnostic.span.start_line > 0 {
@@ -199,6 +200,22 @@ fn format_diagnostic_with_note_filenames(
 
     out.push('\n');
     out
+}
+
+/// Route adapters keep their stable code at the beginning of the historical
+/// message for string/API compatibility while also storing it in
+/// `Diagnostic.code`.  Render the code once in the machine-first prefix, but
+/// leave the diagnostic object untouched for LSP/serde and library callers.
+fn display_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
+    let Some(code) = diagnostic.code.as_deref() else {
+        return Cow::Borrowed(&diagnostic.message);
+    };
+    if crate::diagnostic::codes::canonical_mir_route_code(&diagnostic.message) != Some(code) {
+        return Cow::Borrowed(&diagnostic.message);
+    }
+    let rest = diagnostic.message[code.len()..].trim_start();
+    let rest = rest.strip_prefix(':').map(str::trim_start).unwrap_or(rest);
+    Cow::Owned(rest.to_string())
 }
 
 /// Column part of a span location: `:5-14` for a single-line range,
@@ -261,7 +278,8 @@ pub fn strip_ansi(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_diagnostic_with_registry, strip_ansi};
+    use super::{format_diagnostic, format_diagnostic_with_registry, strip_ansi};
+    use crate::diagnostic::codes::MIR_ROUTE_MANIFEST_ERROR_CODE;
     use crate::diagnostic::Diagnostic;
     use crate::span::{SourceKey, SourceRecord, SourceRegistry, SourceTextOrigin, Span};
     use std::fs;
@@ -329,6 +347,24 @@ mod tests {
         assert!(!rendered.contains("main.mimi"));
 
         fs::remove_dir_all(root).expect("remove formatter test directory");
+    }
+
+    #[test]
+    fn formatter_renders_structured_route_code_once_without_mutating_message() {
+        let message = format!(
+            "{MIR_ROUTE_MANIFEST_ERROR_CODE}: canonical route manifest rejected: future field"
+        );
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            message.clone(),
+            Span::UNKNOWN,
+        );
+        let rendered = strip_ansi(&format_diagnostic(&diagnostic, None, ""));
+        assert_eq!(
+            rendered,
+            "error[MIR-RECEIPT-MANIFEST-001] canonical route manifest rejected: future field\n"
+        );
+        assert_eq!(diagnostic.message, message);
     }
 
     #[test]
