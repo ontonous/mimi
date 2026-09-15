@@ -3933,3 +3933,287 @@ fn lsp_persisted_route_cache_replay_precedes_multi_uri_pending_dependency() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[cfg(unix)]
+#[test]
+fn lsp_infrastructure_retry_rebinds_real_route_and_pending_lru() {
+    let root = temp_workspace("lsp_infrastructure_retry_route");
+    let real_path = root.join("real.mimi");
+    let alias_path = root.join("alias.mimi");
+    let dep_path = root.join("dep.mimi");
+    let text = concat!(
+        "use dep\n",
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    let dep_text = "pub func broken() -> i32 {\n    missing_dep\n}\n";
+    fs::write(&real_path, text).expect("write infrastructure retry source");
+    fs::write(&dep_path, dep_text).expect("write infrastructure retry dependency");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("create infrastructure retry alias");
+    let root_uri = file_uri(&root);
+    let real_uri = file_uri(&real_path);
+    let alias_uri = file_uri(&alias_path);
+    let dep_uri = file_uri(&dep_path);
+
+    let mut writer = crate::lsp::LspServer::new();
+    let _ = writer.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    let real_file = writer
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse infrastructure retry real URI");
+    let real_source = real_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("infrastructure retry real source id");
+    let source_key = real_file
+        .sources
+        .key(real_source)
+        .expect("infrastructure retry stable SourceKey")
+        .as_str()
+        .to_string();
+    let bad = real_file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find infrastructure retry function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let alias_file = writer
+        .parse_with_recovery_for_uri(text, Some(&alias_uri))
+        .expect("parse infrastructure retry alias URI");
+    let alias_source = alias_file
+        .sources
+        .id_for_uri(&alias_uri)
+        .expect("infrastructure retry alias source id");
+    assert_eq!(
+        real_file.sources.key(real_source),
+        alias_file.sources.key(alias_source),
+        "real and alias retry snapshots must share the stable SourceKey"
+    );
+
+    let real_key = crate::lsp::verification_cache_key(&real_uri, "bad");
+    let alias_key = crate::lsp::verification_cache_key(&alias_uri, "bad");
+    let mut real_entry = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "old real route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "old real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 12).with_source(real_source),
+        )),
+    );
+    real_entry.bind_diagnostic_source(&real_file.sources);
+    writer.cache_put_verification(real_key.clone(), real_entry);
+    let mut alias_entry = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "old alias route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "old alias route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 13).with_source(alias_source),
+        )),
+    );
+    alias_entry.bind_diagnostic_source(&alias_file.sources);
+    writer.cache_put_verification(alias_key.clone(), alias_entry);
+    writer.save_cache();
+
+    let mut reader = crate::lsp::LspServer::new();
+    let _ = reader.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    assert!(reader.verification_cache.contains_key(&real_key));
+    assert!(reader.verification_cache.contains_key(&alias_key));
+
+    let open = |server: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "version": version, "text": text }
+            }
+        }))
+    };
+    let hover = |server: &mut crate::lsp::LspServer, uri: &str| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }))
+    };
+    let change = |server: &mut crate::lsp::LspServer, uri: &str, version: i64| {
+        server.handle_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        }))
+    };
+    let assert_pending = |server: &mut crate::lsp::LspServer| {
+        let pending = server.drain_pending_notifications();
+        assert_eq!(pending.len(), 1, "one dependency batch must be pending");
+        assert_eq!(pending[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(pending[0]["params"]["uri"], dep_uri);
+        assert!(pending[0]["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|diagnostic| diagnostic["message"] == "undefined variable 'missing_dep'")
+            }));
+        pending
+    };
+
+    // First touch the alias through the actual transport path. This both
+    // proves the persisted route is source-aware and leaves the alias as the
+    // only hot entry after the real key is cleared below.
+    let opened_alias = open(&mut reader, &alias_uri, 1).expect("retry alias didOpen");
+    assert_eq!(opened_alias["params"]["uri"], alias_uri);
+    assert!(opened_alias["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let pending = assert_pending(&mut reader);
+    let _ = hover(&mut reader, &alias_uri);
+    let changed_alias = change(&mut reader, &alias_uri, 2).expect("retry alias didChange");
+    assert_eq!(
+        changed_alias["params"]["diagnostics"][0]["message"],
+        "old alias route: MIR-RECEIPT-001"
+    );
+    assert_eq!(assert_pending(&mut reader), pending);
+
+    // Simulate a retryable infrastructure failure for only the real key. The
+    // alias verdict must survive, while the real key is removed immediately.
+    reader.cache_put_verification(
+        real_key.clone(),
+        crate::lsp::VerificationCacheEntry::new(
+            body_hash,
+            crate::verifier::VerifStatus::InfrastructureError,
+            "solver unavailable".to_string(),
+            None,
+        ),
+    );
+    assert!(!reader.verification_cache.contains_key(&real_key));
+    assert!(reader.verification_cache.contains_key(&alias_key));
+    reader.save_cache();
+
+    // A recovered verifier writes a fresh real verdict. It must be appended
+    // after the alias touch, carry the same SourceKey, and remain the newest
+    // entry when the bounded cache is pressured.
+    let recovered_file = reader
+        .parse_with_recovery_for_uri(text, Some(&real_uri))
+        .expect("parse recovered real URI");
+    let recovered_source = recovered_file
+        .sources
+        .id_for_uri(&real_uri)
+        .expect("recovered real source id");
+    assert_eq!(
+        recovered_file
+            .sources
+            .key(recovered_source)
+            .map(|key| key.as_str()),
+        Some(source_key.as_str()),
+        "recovered real verdict must use the original SourceKey"
+    );
+    let mut recovered_entry = crate::lsp::VerificationCacheEntry::new(
+        body_hash,
+        crate::verifier::VerifStatus::Disproven,
+        "recovered real route".to_string(),
+        Some(crate::diagnostic::mir_route_error_diagnostic(
+            "recovered real route: MIR-RECEIPT-001".to_string(),
+            crate::span::Span::new(5, 5, 5, 14).with_source(recovered_source),
+        )),
+    );
+    recovered_entry.bind_diagnostic_source(&recovered_file.sources);
+    reader.cache_put_verification(real_key.clone(), recovered_entry);
+
+    // Alias was touched before recovery, so a full cache leaves recovered
+    // real at the tail. Evicting one more entry must remove alias first.
+    for index in 0..(crate::lsp::MAX_VERIFICATION_CACHE - 2) {
+        let cold_uri = format!("untitled://retry-cold-{index}.mimi");
+        reader.cache_put_verification(
+            crate::lsp::verification_cache_key(&cold_uri, "cold"),
+            crate::lsp::VerificationCacheEntry::new(
+                index as u64,
+                crate::verifier::VerifStatus::Proven,
+                "cold proof".to_string(),
+                None,
+            ),
+        );
+    }
+    reader.cache_put_verification(
+        "retry-fresh-after-recovery".to_string(),
+        crate::lsp::VerificationCacheEntry::new(
+            99,
+            crate::verifier::VerifStatus::Proven,
+            "fresh proof".to_string(),
+            None,
+        ),
+    );
+    assert!(
+        !reader.verification_cache.contains_key(&alias_key),
+        "the older alias entry should be evicted before recovered real"
+    );
+    assert!(
+        reader.verification_cache.contains_key(&real_key),
+        "recovered real entry must survive as the newest route"
+    );
+
+    // The recovered route still replays through real transport and does not
+    // disturb the dependency batch ordering established by the alias path.
+    let opened_real = open(&mut reader, &real_uri, 1).expect("retry real didOpen");
+    assert_eq!(opened_real["params"]["uri"], real_uri);
+    assert!(opened_real["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(assert_pending(&mut reader), pending);
+    let _ = hover(&mut reader, &real_uri);
+    let changed_real = change(&mut reader, &real_uri, 2).expect("retry real didChange");
+    assert_eq!(
+        changed_real["params"]["diagnostics"][0]["message"],
+        "recovered real route: MIR-RECEIPT-001"
+    );
+    assert_eq!(assert_pending(&mut reader), pending);
+
+    reader.save_cache();
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".mimi/verify_cache.json"))
+            .expect("read recovered retry cache"),
+    )
+    .expect("parse recovered retry cache");
+    assert_eq!(
+        persisted["entries"][real_key.as_str()]["diagnostic"]["source_key"],
+        source_key,
+        "recovered real diagnostic must persist the stable SourceKey"
+    );
+    assert_eq!(
+        persisted["entries"][real_key.as_str()]["diagnostic"]["message"],
+        "recovered real route: MIR-RECEIPT-001"
+    );
+    assert_eq!(
+        persisted["entries"].get(alias_key.as_str()),
+        None,
+        "evicted alias route must not reappear during writeback"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}

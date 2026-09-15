@@ -725,13 +725,32 @@ impl LspServer {
         if self.verifier.as_ref().is_some_and(|v| v.is_poisoned()) {
             self.verifier = None;
         }
-        // Lazily initialize the Z3 verifier with dynamic timeout
+        // Lazily initialize the Z3 verifier with dynamic timeout.  A failed
+        // initialization is a retryable infrastructure error, but it must
+        // still invalidate any stale verdict for this body before returning.
+        // Otherwise the old entry can be persisted and replayed after a
+        // solver restart, bypassing the fail-closed retry boundary.
+        if self.verifier.is_none() {
+            let verifier = match Verifier::with_timeout(dynamic_timeout) {
+                Ok(v) => v,
+                Err(error) => {
+                    let cache_entry = VerificationCacheEntry::new(
+                        body_hash,
+                        VerifStatus::InfrastructureError,
+                        error,
+                        None,
+                    );
+                    self.cache_put_verification(cache_key.clone(), cache_entry);
+                    self.save_cache_with_registry(&cache_registry);
+                    return diagnostics;
+                }
+            };
+            self.verifier = Some(verifier);
+        }
         let verifier = self
             .verifier
-            .get_or_insert(match Verifier::with_timeout(dynamic_timeout) {
-                Ok(v) => v,
-                Err(_) => return diagnostics, // Z3 not available
-            });
+            .as_mut()
+            .expect("verifier initialized before verification");
         // Update timeout for this invocation (reuses existing verifier)
         verifier.set_timeout(dynamic_timeout);
 
