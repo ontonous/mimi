@@ -433,3 +433,95 @@ fn lsp_reports_unknown_source_loader_failures_as_global_messages() {
     let _ = fs::remove_file(outside);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn lsp_direct_notifications_match_pending_global_transport_order() {
+    let root = temp_workspace("lsp_global_transport_order");
+    let outside = std::env::temp_dir().join(format!(
+        "mimi_global_transport_order_{}_main.mimi",
+        std::process::id()
+    ));
+    let text = concat!(
+        "func bad(x: i32) -> i32 {\n",
+        "    requires: x > 0\n",
+        "    ensures: result > 0\n",
+        "    0\n",
+        "}\n",
+        "func main() -> i32 {\n",
+        "    0\n",
+        "}\n"
+    );
+    fs::write(&outside, text).expect("write outside source");
+    let root_uri = file_uri(&root);
+    let outside_uri = file_uri(&outside);
+
+    let probe = crate::lsp::LspServer::new();
+    let file = probe
+        .parse_with_recovery_for_uri(text, Some(&outside_uri))
+        .expect("parse outside source");
+    let bad = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Func(func) if func.name == "bad" => Some(func),
+            _ => None,
+        })
+        .expect("find bad function");
+    let body_hash = crate::lsp::util::hash_func_body(text, bad);
+    let route = crate::diagnostic::mir_route_error_diagnostic(
+        format!(
+            "transport wrapper: {}: stale receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ),
+        crate::span::Span::new(3, 5, 3, 12).with_source(crate::span::SourceId::new(1)),
+    );
+
+    let mut server = crate::lsp::LspServer::new();
+    let _ = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "rootUri": root_uri }
+    }));
+    server.insert_verification_cache_with_diagnostic(
+        crate::lsp::verification_cache_key(&outside_uri, "bad"),
+        body_hash,
+        crate::verifier::VerifStatus::Failed,
+        route.message.clone(),
+        route,
+    );
+
+    let direct = server.compute_diagnostic_notifications(text, &outside_uri);
+    assert_eq!(
+        direct[0]["method"], "textDocument/publishDiagnostics",
+        "direct notifications must lead with the active document"
+    );
+    assert_eq!(direct[0]["params"]["uri"], outside_uri);
+    assert!(direct[0]["params"]["diagnostics"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert_eq!(direct[1]["method"], "window/showMessage");
+    assert!(direct[1]["params"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("outside the workspace")));
+
+    let response = server.handle_message(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": outside_uri, "version": 1 },
+            "contentChanges": [{ "text": text }]
+        }
+    }));
+    let response = response.expect("didChange should publish primary diagnostics");
+    assert_eq!(response["method"], "textDocument/publishDiagnostics");
+    assert_eq!(
+        response["params"]["diagnostics"][0]["code"],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+    );
+    let pending = server.drain_pending_notifications();
+    assert_eq!(pending, vec![direct[1].clone()]);
+
+    let _ = fs::remove_file(outside);
+    let _ = fs::remove_dir_all(root);
+}

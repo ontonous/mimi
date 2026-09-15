@@ -536,7 +536,8 @@ impl LspServer {
     }
 
     pub(crate) fn compute_diagnostic_notifications(&self, text: &str, uri: &str) -> Vec<Value> {
-        self.compute_diagnostic_batches(text, Some(uri))
+        let mut notifications = self
+            .compute_diagnostic_batches(text, Some(uri))
             .into_iter()
             .flat_map(|batch| {
                 if let Some(uri) = batch.uri {
@@ -563,7 +564,21 @@ impl LspServer {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // Keep the direct notification API in the same order as the real LSP
+        // run loop: the active document's publishDiagnostics response is
+        // emitted first, while URI-less/global messages are queued after it.
+        // `compute_diagnostic_batches` uses a BTreeMap whose `None` key sorts
+        // before `Some(uri)`, so without this boundary normalization direct
+        // callers would observe the reverse order from actual transport.
+        if let Some(primary_index) = notifications.iter().position(|notification| {
+            notification["method"] == "textDocument/publishDiagnostics"
+                && notification["params"]["uri"].as_str() == Some(uri)
+        }) {
+            let primary = notifications.remove(primary_index);
+            notifications.insert(0, primary);
+        }
+        notifications
     }
 
     pub fn compute_diagnostics(&self, text: &str, uri: Option<&str>) -> Vec<Value> {
