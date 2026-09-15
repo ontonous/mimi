@@ -76,6 +76,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.compile_mir_native(program)
     }
+
+    /// Compile canonical MIR after parsing and checking a CLI route manifest.
+    /// Keep this manifest boundary beside the typed receipt entry point so
+    /// native emission cannot accept an unvalidated field extension.
+    pub fn compile_mir_native_with_route_manifest(
+        &mut self,
+        program: &MirProgram,
+        manifest: &str,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(
+            |message| {
+                vec![NativeMirError::new(
+                    "mir-program",
+                    format!("canonical route manifest rejected: {message}"),
+                )
+                .diagnostic()]
+            },
+        )?;
+        self.compile_mir_native_with_route_receipt(program, &receipt)
+    }
 }
 
 pub(super) fn instruction_kind(

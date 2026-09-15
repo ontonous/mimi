@@ -11,8 +11,9 @@ use crate::core::mir::reference::{
 };
 use crate::core::mir::MirFfiCallContract;
 use crate::interp::bytecode::{
-    compile_mir_program, compile_mir_program_with_route_receipt, BytecodeVM,
-    CanonicalFfiDescriptor, CanonicalFfiScalarType,
+    compile_mir_program, compile_mir_program_with_route_manifest,
+    compile_mir_program_with_route_receipt, BytecodeVM, CanonicalFfiDescriptor,
+    CanonicalFfiScalarType,
 };
 use crate::interp::Value;
 
@@ -15610,6 +15611,97 @@ func main() -> i64 {
         baseline.flow_transition_digest,
         remapped_receipt.flow_transition_digest
     );
+}
+
+#[test]
+fn scalar_ffi_route_manifest_version_and_extensions_are_rejected_by_all_adapters() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_manifest_i64(value: i64) -> i64; }
+func main() -> i64 { mir_manifest_i64(7 as i64) }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("manifest adapter fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("manifest adapter fixture materialization");
+    let receipt = program.route_receipt("scalar-ffi-manifest-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("render manifest adapter fixture");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let bytecode = compile_mir_program_with_route_manifest(&program, &manifest)
+        .expect("current manifest must admit bytecode");
+    assert!(bytecode.ast.is_none());
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "manifest_adapter_native");
+    native
+        .compile_mir_native_with_route_manifest(&program, &manifest)
+        .expect("current manifest must admit native emission");
+    native
+        .module
+        .verify()
+        .expect("current manifest native module must verify");
+    crate::verifier::verify_mir_with_route_manifest(&program, &manifest, source_hash.clone())
+        .expect("current manifest must admit general verifier");
+    crate::verifier::verify_ffi_mir_with_route_manifest(&program, &manifest, source_hash)
+        .expect("current manifest must admit FFI verifier");
+
+    for (label, mutated, expected) in [
+        (
+            "future header",
+            manifest.replacen(
+                crate::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER,
+                "mimi-mir-route-manifest-v2",
+                1,
+            ),
+            "expected header",
+        ),
+        (
+            "future field",
+            format!("{manifest}future_field=reserved\n"),
+            "unknown field 'future_field'",
+        ),
+    ] {
+        let bytecode_error = compile_mir_program_with_route_manifest(&program, &mutated)
+            .expect_err("bytecode must reject unsupported manifest schema");
+        assert!(
+            bytecode_error[0].message.contains(expected),
+            "{label}: {bytecode_error:?}"
+        );
+
+        let context = inkwell::context::Context::create();
+        let mut native = crate::codegen::CodeGenerator::new(&context, "forged_manifest_native");
+        let native_error = native
+            .compile_mir_native_with_route_manifest(&program, &mutated)
+            .expect_err("native must reject unsupported manifest schema");
+        assert!(
+            native_error
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label}: {native_error:?}"
+        );
+
+        let verifier_error = crate::verifier::verify_mir_with_route_manifest(
+            &program,
+            &mutated,
+            "manifest-source-hash".into(),
+        )
+        .expect_err("general verifier must reject unsupported manifest schema");
+        assert!(
+            verifier_error.contains(expected),
+            "{label}: {verifier_error}"
+        );
+        let ffi_verifier_error = crate::verifier::verify_ffi_mir_with_route_manifest(
+            &program,
+            &mutated,
+            "manifest-source-hash".into(),
+        )
+        .expect_err("FFI verifier must reject unsupported manifest schema");
+        assert!(
+            ffi_verifier_error.contains(expected),
+            "{label}: {ffi_verifier_error}"
+        );
+    }
 }
 
 #[test]

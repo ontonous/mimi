@@ -90,6 +90,22 @@ pub fn compile_mir_program_with_route_receipt(
     compile_mir_program_inner(program)
 }
 
+/// Compile canonical MIR after parsing and checking a CLI route manifest.
+/// Manifest parsing is kept at this adapter boundary so evidence consumers
+/// cannot bypass the versioned field schema by constructing a partial receipt.
+pub fn compile_mir_program_with_route_manifest(
+    program: &MirProgram,
+    manifest: &str,
+) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
+    let receipt = CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
+        vec![MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message: format!("canonical route manifest rejected: {message}"),
+        }]
+    })?;
+    compile_mir_program_with_route_receipt(program, &receipt)
+}
+
 fn compile_mir_program_inner(
     program: &MirProgram,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
