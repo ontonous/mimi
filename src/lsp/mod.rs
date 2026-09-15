@@ -997,6 +997,9 @@ impl LspServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic::codes::MIR_ROUTE_MANIFEST_ERROR_CODE;
+    use crate::diagnostic::DiagnosticOrigin;
+    use crate::span::{SourceTextOrigin, Span};
     use std::io::Cursor;
 
     #[test]
@@ -1016,5 +1019,37 @@ mod tests {
             .unwrap()
             .is_some());
         assert_eq!(line, "Content-Length: 42\r\n");
+    }
+
+    #[test]
+    fn persisted_route_diagnostic_roundtrip_preserves_code_and_source_span() {
+        let mut registry = crate::span::SourceRegistry::default();
+        let source_id = registry
+            .register_key("workspace:route.mimi", SourceTextOrigin::Memory)
+            .expect("register source");
+        let diagnostic = Diagnostic::error_code(
+            MIR_ROUTE_MANIFEST_ERROR_CODE,
+            "invalid MIR route manifest",
+            Span::new(3, 4, 3, 12).with_source(source_id),
+        )
+        .with_origin(DiagnosticOrigin::user());
+
+        let persisted =
+            PersistedDiagnostic::from_runtime(&diagnostic, &registry).expect("persist diagnostic");
+        let json = serde_json::to_string(&persisted).expect("serialize diagnostic");
+        let decoded: PersistedDiagnostic =
+            serde_json::from_str(&json).expect("deserialize diagnostic");
+        let restored = decoded.to_runtime(&registry).expect("restore diagnostic");
+
+        assert_eq!(
+            restored.code.as_deref(),
+            Some(MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(restored.span, diagnostic.span);
+        assert_eq!(restored.origin, diagnostic.origin);
+        assert_eq!(
+            registry.key(restored.span.source_id),
+            registry.key(source_id)
+        );
     }
 }
