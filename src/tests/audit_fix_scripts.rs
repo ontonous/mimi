@@ -359,6 +359,20 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         "tampered owner evidence omitted marker failure:\n{stderr}"
     );
     std::fs::remove_dir_all(&temp_root).expect("remove audit temp root");
+    let restored = std::process::Command::new("bash")
+        .arg(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .current_dir(&root)
+        .output()
+        .expect("rerun restored legacy owner audit");
+    assert!(
+        restored.status.success(),
+        "restored owner audit failed after negative probe:\n{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&restored.stdout).contains("audit_status=ok"),
+        "restored owner audit omitted its success marker"
+    );
 }
 
 #[test]
