@@ -775,6 +775,57 @@ fn legacy_owner_scalar_marker_sequence_injection_fails_closed() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_sequence_missing_duplicate_or_reordered_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-marker-drift");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create marker drift temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into marker drift temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into marker drift temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    let matrix_call = "            emit_closed_scalar_marker 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'\n";
+    let abi_call = "            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'\n";
+    let run_drift = |tampered_script: String, label: &str| {
+        std::fs::write(&script_path, tampered_script).expect("write marker drift script");
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&temp_root)
+            .output()
+            .expect("run marker drift audit");
+        assert!(
+            !output.status.success(),
+            "{label} marker drift must fail closed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift"),
+            "{label} marker drift omitted sequence diagnostic:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_drift(source_script.replacen(matrix_call, "", 1), "missing");
+    run_drift(
+        source_script.replacen(matrix_call, &format!("{matrix_call}{matrix_call}"), 1),
+        "duplicate",
+    );
+    run_drift(
+        source_script.replacen(
+            &format!("{matrix_call}{abi_call}"),
+            &format!("{abi_call}{matrix_call}"),
+            1,
+        ),
+        "reordered",
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove marker drift temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
