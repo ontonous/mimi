@@ -957,6 +957,57 @@ fn legacy_owner_audit_snapshot_handles_encoded_names_and_repeated_reads() {
 }
 
 #[test]
+fn legacy_owner_audit_permission_recovery_preserves_snapshot_order() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let prefix = format!(
+        "mimi-legacy-owner-permission-recovery-{}",
+        std::process::id()
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let root = unique_legacy_owner_audit_temp_root(&prefix);
+    let child = root.join("nested").join("residue");
+    std::fs::create_dir_all(child.parent().expect("nested residue parent"))
+        .expect("create permission recovery directory");
+    std::fs::write(&child, b"permission recovery residue")
+        .expect("create permission recovery child");
+    let mut permissions = std::fs::metadata(&root)
+        .expect("read permission recovery permissions")
+        .permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(&root, permissions).expect("make permission recovery root unreadable");
+
+    let cleanup_error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&root)
+        .expect_err("unreadable owner audit root must fail closed");
+    assert!(
+        cleanup_error.contains(&root.display().to_string()),
+        "permission failure must identify the root path: {cleanup_error}"
+    );
+    let expected = vec![root.clone()];
+    let snapshots = (0..3)
+        .map(|_| legacy_owner_temp_root_residues(&prefix))
+        .collect::<Vec<_>>();
+    assert!(
+        snapshots.iter().all(|snapshot| snapshot == &expected),
+        "permission failure snapshots must remain stable: {snapshots:?}"
+    );
+
+    let mut permissions = std::fs::metadata(&root)
+        .expect("restore permission recovery permissions")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&root, permissions)
+        .expect("restore permission recovery root permissions");
+    LegacyOwnerAuditTempRootCleanup::cleanup_path(&root)
+        .expect("permission recovery retry must remove the complete root");
+    assert!(
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&root).is_ok(),
+        "permission recovery cleanup must be idempotent after removal"
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
