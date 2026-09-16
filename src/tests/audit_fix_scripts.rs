@@ -1146,6 +1146,148 @@ fn legacy_owner_scalar_marker_mixed_success_failure_batches_are_isolated() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_repeated_roots_keep_paths_isolated() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "expected_closed_scalar_marker_sequence=(",
+        "emit_closed_scalar_marker 'closed_scalar_forged_marker=1'\n\nexpected_closed_scalar_marker_sequence=(",
+        1,
+    );
+    let mut cases = Vec::new();
+    let mut cleanups = Vec::new();
+    for (index, expected_success) in [true, false, true, false].into_iter().enumerate() {
+        let temp_root =
+            unique_legacy_owner_audit_temp_root(&format!("mimi-legacy-owner-marker-root-{index}"));
+        std::fs::create_dir_all(temp_root.join("scripts")).expect("create isolated marker root");
+        std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+            .expect("link source tree into isolated marker root");
+        std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+            .expect("link integration tests into isolated marker root");
+        let script_path = temp_root.join("scripts/audit.sh");
+        std::fs::write(
+            &script_path,
+            if expected_success {
+                &source_script
+            } else {
+                &tampered_script
+            },
+        )
+        .expect("write isolated marker audit script");
+        cleanups.push(LegacyOwnerAuditTempRootCleanup(temp_root.clone()));
+        cases.push((expected_success, temp_root, script_path));
+    }
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(cases.len() + 1));
+    let runs = std::thread::scope(|scope| {
+        let handles = cases
+            .iter()
+            .map(|(expected_success, temp_root, script_path)| {
+                let expected_success = *expected_success;
+                let temp_root = temp_root.clone();
+                let script_path = script_path.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let output = std::process::Command::new("bash")
+                        .arg(&script_path)
+                        .current_dir(&temp_root)
+                        .output()
+                        .expect("run isolated marker audit");
+                    (expected_success, temp_root, output)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("isolated marker audit thread panicked")
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let normalize =
+        |expected_success: bool, temp_root: &std::path::Path, output: &std::process::Output| {
+            let root_marker = format!("root={}", temp_root.display());
+            let stdout = String::from_utf8_lossy(&output.stdout)
+                .replace(&root_marker, "root=<isolated>")
+                .replace(&temp_root.display().to_string(), "<isolated>");
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .replace(&temp_root.display().to_string(), "<isolated>");
+            (expected_success, output.status.code(), stdout, stderr)
+        };
+    let normalized = runs
+        .iter()
+        .map(|(expected_success, temp_root, output)| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(&temp_root.display().to_string()),
+                "audit output omitted its own isolated root {}",
+                temp_root.display()
+            );
+            for (_, other_root, _) in &runs {
+                if other_root != temp_root {
+                    assert!(
+                        !stdout.contains(&other_root.display().to_string()),
+                        "audit output for {} leaked another root {}",
+                        temp_root.display(),
+                        other_root.display()
+                    );
+                }
+            }
+            normalize(*expected_success, temp_root, output)
+        })
+        .collect::<Vec<_>>();
+    let successful = normalized
+        .iter()
+        .filter(|(expected_success, _, _, _)| *expected_success)
+        .collect::<Vec<_>>();
+    let failed = normalized
+        .iter()
+        .filter(|(expected_success, _, _, _)| !*expected_success)
+        .collect::<Vec<_>>();
+    assert_eq!(successful.len(), 2, "isolated root success runs missing");
+    assert_eq!(failed.len(), 2, "isolated root failure runs missing");
+    for (label, group) in [("success", successful), ("failure", failed)] {
+        let first = group[0];
+        for (index, current) in group.iter().enumerate().skip(1) {
+            assert_eq!(
+                current.1, first.1,
+                "isolated {label} run {index} exit code drifted"
+            );
+            assert_eq!(
+                current.2, first.2,
+                "isolated {label} run {index} stdout drifted"
+            );
+            assert_eq!(
+                current.3, first.3,
+                "isolated {label} run {index} stderr drifted"
+            );
+        }
+    }
+    assert!(normalized
+        .iter()
+        .any(|(expected_success, _, _, _)| !expected_success));
+    for (expected_success, _, stdout, stderr) in &normalized {
+        if *expected_success {
+            assert!(stdout.contains("scalar_evidence_marker_sequence_status=ok"));
+        } else {
+            assert!(
+                stderr.contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift")
+            );
+        }
+    }
+    for cleanup in &cleanups {
+        let _ = LegacyOwnerAuditTempRootCleanup::cleanup_path(&cleanup.0);
+    }
+    drop(cleanups);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
