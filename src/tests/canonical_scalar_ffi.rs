@@ -19489,6 +19489,126 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_combined_conversion_corruption_has_stable_precedence() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const SOURCE: &str = r#"
+extern "C" { func generated_combined_corruption(value: i64) -> i64; }
+func main() -> i64 {
+    println(7 as i64);
+    generated_combined_corruption(20 as i32)
+}
+"#;
+
+    struct CountingOracle {
+        calls: Cell<usize>,
+    }
+    impl MirReferenceFfiResolver for CountingOracle {
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            _args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(MirRuntimeValue::Int(20))
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("combined corruption fixture check");
+    let canonical =
+        MirProgram::from_checked_program(&checked).expect("combined corruption fixture MIR");
+    let instruction_id = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("combined corruption instruction");
+
+    let mut forged_receipts = canonical.ffi_calls().clone();
+    let forged_receipt = forged_receipts
+        .get_mut(&instruction_id)
+        .expect("combined corruption receipt");
+    forged_receipt.parameter_conversions.clear();
+    forged_receipt.result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        to: MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    });
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let oracle = CountingOracle {
+        calls: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
+    let reference_first = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject combined conversion corruption");
+    let reference_second = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must repeat combined conversion corruption");
+    assert_eq!(reference_first.to_string(), reference_second.to_string());
+    assert!(reference_first
+        .to_string()
+        .contains("parameter ABI conversion receipt count"));
+    assert_eq!(
+        reference.captured_output(),
+        "7\n",
+        "reference preserves the prefix before the malformed FFI call"
+    );
+    assert_eq!(
+        oracle.calls.get(),
+        0,
+        "conversion validation must precede host binding"
+    );
+
+    let bytecode_first = compile_mir_program(&forged)
+        .expect_err("bytecode must reject combined conversion corruption");
+    let bytecode_second = compile_mir_program(&forged)
+        .expect_err("bytecode must repeat combined conversion corruption");
+    assert_eq!(
+        format!("{bytecode_first:?}"),
+        format!("{bytecode_second:?}")
+    );
+    assert!(bytecode_first.iter().any(|error| {
+        error.message.contains("parameter conversion receipt")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let native_first = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native admission must reject combined conversion corruption");
+    let native_second = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native admission must repeat combined conversion corruption");
+    assert_eq!(format!("{native_first:?}"), format!("{native_second:?}"));
+    assert!(native_first.iter().any(|error| {
+        error.message.contains("parameter conversion receipt")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let capability_first = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject combined conversion corruption");
+    let capability_second = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must repeat combined conversion corruption");
+    assert_eq!(capability_first, capability_second);
+    assert!(capability_first.iter().any(|error| {
+        error.contains("parameter conversion receipt") || error.contains("conversion receipt")
+    }));
+
+    let verifier_first = crate::verifier::verify_mir(&forged, "combined-corruption".into())
+        .expect_err("MIR verifier must reject combined conversion corruption");
+    let verifier_second = crate::verifier::verify_mir(&forged, "combined-corruption".into())
+        .expect_err("MIR verifier must repeat combined conversion corruption");
+    assert_eq!(verifier_first, verifier_second);
+    assert!(verifier_first.contains("conversion receipt"));
+}
+
+#[test]
 fn scalar_ffi_mixed_width_descriptor_and_index_forgery_stabilize_public_entries() {
     const C_SOURCE: &str = r#"
 #include <stdint.h>
