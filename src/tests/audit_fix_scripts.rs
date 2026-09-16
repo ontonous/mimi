@@ -606,6 +606,95 @@ fn legacy_owner_scalar_cli_matrix_missing_or_forged_fails_closed() {
 }
 
 #[test]
+fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-cli-abi");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create CLI ABI temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into CLI ABI temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into CLI ABI temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replace(
+        "\"$ROOT_DIR/tests/real_world_cli.rs\"",
+        "\"$ROOT_DIR/fake_scalar_cli.rs\"",
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write CLI ABI audit script fixture");
+    let cli_fixture = temp_root.join("fake_scalar_cli.rs");
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\n",
+    )
+    .expect("write CLI fixture missing ABI symbol");
+    let missing_abi = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run missing ABI audit");
+    assert!(
+        !missing_abi.status.success(),
+        "missing ABI symbol must fail closed:\n{}",
+        String::from_utf8_lossy(&missing_abi.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_abi.stderr).contains(
+            "owner_audit_error=closed_scalar_cli_evidence_missing_abi_symbol symbol=mir_ffi_store"
+        ),
+        "missing ABI diagnostic drifted:\n{}",
+        String::from_utf8_lossy(&missing_abi.stderr)
+    );
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\nfn forged_abi_outside_cli_test() { let _ = \"mir_ffi_store\"; }\n",
+    )
+    .expect("write CLI fixture with forged ABI symbol outside test");
+    let forged_abi = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run forged ABI audit");
+    assert!(
+        !forged_abi.status.success(),
+        "forged ABI symbol outside test must fail closed:\n{}",
+        String::from_utf8_lossy(&forged_abi.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&forged_abi.stderr).contains(
+            "owner_audit_error=closed_scalar_cli_evidence_missing_abi_symbol symbol=mir_ffi_store"
+        ),
+        "forged ABI diagnostic drifted:\n{}",
+        String::from_utf8_lossy(&forged_abi.stderr)
+    );
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\", \"mir_ffi_store\"];\n}\n#[test]\n",
+    )
+    .expect("write CLI fixture missing route assertion");
+    let missing_route = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run missing route audit");
+    assert!(
+        !missing_route.status.success(),
+        "missing route assertion must fail closed:\n{}",
+        String::from_utf8_lossy(&missing_route.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_route.stderr).contains(
+            "owner_audit_error=closed_scalar_cli_evidence_missing_legacy_route_assertion"
+        ),
+        "missing route diagnostic drifted:\n{}",
+        String::from_utf8_lossy(&missing_route.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove CLI ABI temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
