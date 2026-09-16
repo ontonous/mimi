@@ -863,6 +863,60 @@ fn legacy_owner_audit_cleanup_concurrent_errors_and_missing_paths_are_stable() {
 }
 
 #[test]
+fn legacy_owner_audit_concurrent_failure_snapshot_is_path_ordered() {
+    use std::sync::{Arc, Mutex};
+
+    let prefix = format!("mimi-legacy-owner-failure-snapshot-{}", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let paths = (0..8)
+        .map(|_| {
+            let path = unique_legacy_owner_audit_temp_root(&prefix);
+            std::fs::write(&path, b"failure snapshot residue")
+                .expect("create failure snapshot file");
+            path
+        })
+        .collect::<Vec<_>>();
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let workers = paths
+        .iter()
+        .map(|path| {
+            let path = path.clone();
+            let errors = Arc::clone(&errors);
+            std::thread::spawn(move || {
+                let error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&path)
+                    .expect_err("regular-file cleanup must fail for snapshot worker");
+                errors
+                    .lock()
+                    .expect("lock failure snapshot errors")
+                    .push(error);
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("failure snapshot worker must finish");
+    }
+
+    let mut expected = paths.clone();
+    expected.sort();
+    let snapshot = legacy_owner_temp_root_residues(&prefix);
+    assert_eq!(snapshot, expected, "residue snapshot must be path ordered");
+    let mut observed_errors = errors.lock().expect("lock final snapshot errors").clone();
+    observed_errors.sort();
+    assert_eq!(observed_errors.len(), expected.len());
+    for (error, path) in observed_errors.iter().zip(&expected) {
+        assert!(
+            error.contains(&path.display().to_string()),
+            "ordered cleanup error must identify its matching path: {error}"
+        );
+    }
+
+    for path in paths {
+        std::fs::remove_file(path).expect("remove failure snapshot file");
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
