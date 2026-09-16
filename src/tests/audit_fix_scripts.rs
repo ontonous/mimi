@@ -917,6 +917,46 @@ fn legacy_owner_audit_concurrent_failure_snapshot_is_path_ordered() {
 }
 
 #[test]
+fn legacy_owner_audit_snapshot_handles_encoded_names_and_repeated_reads() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let prefix = format!("mimi-legacy-owner-encoding-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let unicode = std::env::temp_dir().join(format!("{prefix}路径-残留"));
+    let mut invalid_name = prefix.as_bytes().to_vec();
+    invalid_name.extend_from_slice(b"invalid-");
+    invalid_name.push(0xff);
+    let invalid = std::env::temp_dir().join(OsString::from_vec(invalid_name));
+    std::fs::write(&unicode, b"unicode residue").expect("create Unicode residue");
+    std::fs::write(&invalid, b"invalid UTF-8 residue").expect("create encoded residue");
+
+    let mut expected = vec![unicode.clone(), invalid.clone()];
+    expected.sort();
+    let snapshots = (0..5)
+        .map(|_| legacy_owner_temp_root_residues(&prefix))
+        .collect::<Vec<_>>();
+    assert!(
+        snapshots.iter().all(|snapshot| snapshot == &expected),
+        "repeated encoded-name snapshots must be stable: {snapshots:?}"
+    );
+
+    let cleanup_error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&invalid)
+        .expect_err("directory cleanup must reject the encoded regular file");
+    assert!(
+        cleanup_error.contains("remove owner audit temp root"),
+        "encoded cleanup failure must retain its diagnostic category: {cleanup_error}"
+    );
+    assert!(
+        invalid.is_file(),
+        "failed encoded cleanup must preserve the file"
+    );
+    std::fs::remove_file(&invalid).expect("remove encoded residue");
+    std::fs::remove_file(&unicode).expect("remove Unicode residue");
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
