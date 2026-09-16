@@ -215,6 +215,27 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
         "owner probes require LLVM 18 wrapper, got {}",
         String::from_utf8_lossy(&llvm_config.stdout).trim()
     );
+    let llvm_version = String::from_utf8_lossy(&llvm_config.stdout)
+        .trim()
+        .to_owned();
+    let cargo_version = std::process::Command::new(&cargo)
+        .arg("--version")
+        .output()
+        .expect("Cargo must be executable for dynamic owner probes");
+    assert!(
+        cargo_version.status.success(),
+        "Cargo version probe failed: {}",
+        String::from_utf8_lossy(&cargo_version.stderr)
+    );
+    let cargo_version = String::from_utf8_lossy(&cargo_version.stdout)
+        .trim()
+        .to_owned();
+    assert!(
+        cargo_version.starts_with("cargo "),
+        "unexpected Cargo version output: {cargo_version}"
+    );
+    println!("legacy_owner_probe_llvm_version={llvm_version}");
+    println!("legacy_owner_probe_cargo_version={cargo_version}");
     let mut first_round_results = Vec::new();
     for round in 1..=2 {
         for test_name in [
@@ -260,6 +281,9 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
                 .next()
                 .expect("result summary must include a stable prefix")
                 .to_owned();
+            println!(
+                "legacy_owner_probe_result round={round} test={test_name} summary={result_summary}"
+            );
             if round == 1 {
                 first_round_results.push((test_name, result_summary));
             } else {
