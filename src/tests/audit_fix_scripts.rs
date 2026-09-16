@@ -1338,6 +1338,109 @@ fn legacy_owner_scalar_marker_roots_cleanup_is_idempotent_and_residue_free() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_concurrent_cleanup_failure_snapshot_recovers_in_order() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let prefix = format!("mimi-legacy-owner-marker-recovery-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let mut roots = Vec::new();
+    let mut cleanups = Vec::new();
+    for index in 0..4 {
+        let root = unique_legacy_owner_audit_temp_root(&format!("{prefix}{index}"));
+        let nested = root.join("nested").join("evidence");
+        std::fs::create_dir_all(&nested).expect("create recovery marker root");
+        std::fs::write(nested.join("snapshot"), b"recovery marker snapshot")
+            .expect("write recovery marker snapshot");
+        cleanups.push(LegacyOwnerAuditTempRootCleanup(root.clone()));
+        roots.push(root);
+    }
+    let blocked = roots[1].clone();
+    let mut permissions = std::fs::metadata(&blocked)
+        .expect("read recovery marker permissions")
+        .permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(&blocked, permissions).expect("make recovery marker root unreadable");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(roots.len() + 1));
+    let results = std::thread::scope(|scope| {
+        let handles = roots
+            .iter()
+            .map(|root| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    let result = LegacyOwnerAuditTempRootCleanup::cleanup_path(&root);
+                    (root, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("recovery cleanup worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    let failures = results
+        .iter()
+        .filter(|(_, result)| result.is_err())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures.len(),
+        1,
+        "exactly one concurrent cleanup must fail"
+    );
+    assert_eq!(
+        failures[0].0.as_path(),
+        blocked.as_path(),
+        "wrong root reported as cleanup failure"
+    );
+    assert!(
+        failures[0]
+            .1
+            .as_ref()
+            .expect_err("blocked cleanup must carry an error")
+            .contains(&blocked.display().to_string()),
+        "blocked cleanup error omitted its root path"
+    );
+    for (root, result) in &results {
+        if result.is_ok() {
+            assert!(
+                !root.exists(),
+                "successful cleanup left root {}",
+                root.display()
+            );
+        }
+    }
+    let snapshots = (0..3)
+        .map(|_| legacy_owner_temp_root_residues(&prefix))
+        .collect::<Vec<_>>();
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| snapshot == &vec![blocked.clone()]),
+        "concurrent cleanup residue snapshots drifted: {snapshots:?}"
+    );
+
+    let mut permissions = std::fs::metadata(&blocked)
+        .expect("read blocked recovery marker permissions")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&blocked, permissions)
+        .expect("restore blocked recovery marker permissions");
+    LegacyOwnerAuditTempRootCleanup::cleanup_path(&blocked)
+        .expect("permission recovery cleanup must succeed");
+    LegacyOwnerAuditTempRootCleanup::cleanup_path(&blocked)
+        .expect("permission recovery cleanup must be idempotent");
+    assert!(
+        roots.iter().all(|root| !root.exists()),
+        "recovery cleanup left a root residue"
+    );
+    drop(cleanups);
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
