@@ -215,6 +215,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
         "owner probes require LLVM 18 wrapper, got {}",
         String::from_utf8_lossy(&llvm_config.stdout).trim()
     );
+    let mut first_round_results = Vec::new();
     for round in 1..=2 {
         for test_name in [
             "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
@@ -251,6 +252,26 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
                 }),
                 "owner evidence test {test_name} (round {round}) omitted a passing result:\n{stdout}"
             );
+            let result_summary = stdout
+                .lines()
+                .find(|line| line.starts_with("test result: ok."))
+                .expect("passing owner evidence test must emit a result summary")
+                .split("; finished")
+                .next()
+                .expect("result summary must include a stable prefix")
+                .to_owned();
+            if round == 1 {
+                first_round_results.push((test_name, result_summary));
+            } else {
+                let (_, expected_summary) = first_round_results
+                    .iter()
+                    .find(|(name, _)| *name == test_name)
+                    .expect("first-round owner evidence result must exist");
+                assert_eq!(
+                    &result_summary, expected_summary,
+                    "owner evidence result drifted between repeated probes for {test_name}"
+                );
+            }
         }
     }
 }
