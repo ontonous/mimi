@@ -41,17 +41,21 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{sequence}", std::process::id()))
 }
 
-fn assert_no_legacy_owner_temp_roots(prefix: &str) {
+fn legacy_owner_temp_root_residues(prefix: &str) -> Vec<std::path::PathBuf> {
     let entries = std::fs::read_dir(std::env::temp_dir())
         .expect("scan temporary directory for owner audit residues");
-    let residues = entries
+    entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             name.starts_with(prefix).then(|| entry.path())
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
+
+fn assert_no_legacy_owner_temp_roots(prefix: &str) {
+    let residues = legacy_owner_temp_root_residues(prefix);
     assert!(
         residues.is_empty(),
         "owner audit temp root residues found for {prefix}: {residues:?}"
@@ -561,6 +565,19 @@ fn legacy_owner_audit_temp_root_prefix_scan_is_clean_after_probe() {
         assert!(path.is_dir(), "prefix scan probe root must exist in scope");
     }
     assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
+fn legacy_owner_audit_prefix_scan_detects_foreign_process_residue() {
+    let prefix = "mimi-legacy-owner-cross-process-";
+    assert_no_legacy_owner_temp_roots(prefix);
+    let foreign =
+        std::env::temp_dir().join(format!("{prefix}42424242-stale-{}", std::process::id()));
+    std::fs::create_dir_all(&foreign).expect("create foreign-process residue probe");
+    let residues = legacy_owner_temp_root_residues(prefix);
+    assert_eq!(residues, vec![foreign.clone()]);
+    std::fs::remove_dir_all(&foreign).expect("remove foreign-process residue probe");
+    assert_no_legacy_owner_temp_roots(prefix);
 }
 
 #[test]
