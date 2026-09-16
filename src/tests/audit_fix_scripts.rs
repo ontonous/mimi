@@ -1288,6 +1288,56 @@ fn legacy_owner_scalar_marker_repeated_roots_keep_paths_isolated() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_roots_cleanup_is_idempotent_and_residue_free() {
+    let prefix = format!("mimi-legacy-owner-marker-cleanup-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let mut cleanups = Vec::new();
+    for _ in 0..6 {
+        let root = unique_legacy_owner_audit_temp_root(&prefix);
+        let nested = root.join("nested").join("evidence");
+        std::fs::create_dir_all(&nested).expect("create marker cleanup root");
+        std::fs::write(nested.join("snapshot"), b"marker cleanup snapshot")
+            .expect("write marker cleanup snapshot");
+        cleanups.push(LegacyOwnerAuditTempRootCleanup(root));
+    }
+    let paths = cleanups
+        .iter()
+        .map(|cleanup| cleanup.0.clone())
+        .collect::<Vec<_>>();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(paths.len() * 2 + 1));
+    let results = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for path in &paths {
+            for _ in 0..2 {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    LegacyOwnerAuditTempRootCleanup::cleanup_path(&path)
+                }));
+            }
+        }
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("marker cleanup worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    for result in results {
+        assert!(
+            result.is_ok(),
+            "concurrent marker cleanup must remain idempotent: {result:?}"
+        );
+    }
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "concurrent marker cleanup left a root residue"
+    );
+    drop(cleanups);
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
