@@ -78,18 +78,38 @@ where
 }
 
 fn assert_no_legacy_owner_temp_roots(prefix: &str) {
+    no_legacy_owner_temp_root_residues(prefix).unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn no_legacy_owner_temp_root_residues(prefix: &str) -> Result<(), String> {
     let residues = legacy_owner_temp_root_residues(prefix);
-    assert!(
-        residues.is_empty(),
-        "owner audit temp root residues found for {prefix}: {residues:?}"
-    );
+    if residues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "owner audit temp root residues found for {prefix}: {residues:?}"
+        ))
+    }
 }
 
 struct LegacyOwnerAuditTempRootCleanup(std::path::PathBuf);
 
+impl LegacyOwnerAuditTempRootCleanup {
+    fn cleanup_path(path: &std::path::Path) -> Result<(), String> {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove owner audit temp root {}: {error}",
+                path.display()
+            )),
+        }
+    }
+}
+
 impl Drop for LegacyOwnerAuditTempRootCleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = Self::cleanup_path(&self.0);
     }
 }
 
@@ -722,6 +742,45 @@ fn legacy_owner_audit_prefix_scan_observes_interleaved_workers_deterministically
             .join()
             .expect("interleaved owner audit worker must finish");
     }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
+fn legacy_owner_audit_residue_diagnostics_include_snapshot_context() {
+    let prefix = format!("mimi-legacy-owner-diagnostic-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let file = std::env::temp_dir().join(format!("{prefix}file"));
+    let directory = std::env::temp_dir().join(format!("{prefix}directory"));
+    std::fs::write(&file, b"stale owner audit diagnostic").expect("create diagnostic file");
+    std::fs::create_dir(&directory).expect("create diagnostic directory");
+
+    let error = no_legacy_owner_temp_root_residues(&prefix)
+        .expect_err("non-empty residue snapshot must return a diagnostic");
+    assert!(
+        error.contains(&prefix),
+        "diagnostic must include its prefix: {error}"
+    );
+    assert!(
+        error.contains(&file.display().to_string()),
+        "diagnostic must include the regular-file residue: {error}"
+    );
+    assert!(
+        error.contains(&directory.display().to_string()),
+        "diagnostic must include the directory residue: {error}"
+    );
+
+    let cleanup_error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&file)
+        .expect_err("directory cleanup must report regular-file failures");
+    assert!(
+        cleanup_error.contains(&file.display().to_string()),
+        "cleanup diagnostic must include the failing path: {cleanup_error}"
+    );
+    assert!(
+        file.is_file(),
+        "failed cleanup must preserve the file residue"
+    );
+    std::fs::remove_file(&file).expect("remove diagnostic file");
+    std::fs::remove_dir(&directory).expect("remove diagnostic directory");
     assert_no_legacy_owner_temp_roots(&prefix);
 }
 
