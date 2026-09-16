@@ -22349,6 +22349,78 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_native_descriptor_drift_rejects_before_profile_replay() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_route_descriptor_guard(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_route_descriptor_guard(7 as i64))
+    0
+}
+"#;
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("descriptor drift fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("descriptor drift fixture materialization");
+    let profile_a = mir.route_receipt("r6-811-native-descriptor-a-v1");
+    let profile_b = mir.route_receipt("r6-811-native-descriptor-b-v1");
+    assert_ne!(profile_a.profile, profile_b.profile);
+    assert_eq!(profile_a.mir_digest, profile_b.mir_digest);
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_811_descriptor_guard");
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect("baseline descriptor route admission");
+    native.module.verify().expect("baseline descriptor module");
+    let snapshot = native.module.print_to_string().to_string();
+
+    let mut forged = profile_b.clone();
+    forged.abi_digest = "0".repeat(64);
+    forged.ffi_digest = "f".repeat(64);
+    let forged_error = native
+        .compile_mir_native_with_route_receipt(&mir, &forged)
+        .expect_err("descriptor drift must reject before profile replay");
+    assert_eq!(
+        forged_error[0].code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert!(forged_error[0].message.contains("abi_digest"));
+    assert!(!forged_error[0]
+        .message
+        .contains("different canonical MIR program"));
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    native
+        .module
+        .verify()
+        .expect("descriptor rejection must preserve the baseline module");
+
+    let forged_manifest = forged
+        .manifest_text()
+        .expect("descriptor drift manifest rendering");
+    let manifest_error = native
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("manifest descriptor drift must reject before profile replay");
+    assert_eq!(
+        manifest_error[0].code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert!(manifest_error[0].message.contains("abi_digest"));
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    native
+        .module
+        .verify()
+        .expect("manifest rejection must preserve the baseline module");
+
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("valid profile replay must recover after descriptor rejection");
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    native.module.verify().expect("recovered profile module");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
