@@ -124,13 +124,26 @@ fn legacy_owner_reachability_report_stays_conservative() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (owner, dependency_class) in [
-        ("CodegenLegacyRemainder", "legacy-codegen-remainder"),
-        ("FlowVerifierCompatibility", "flow-body-compatibility"),
-        ("FfiVerifierCompatibility", "ffi-declaration-compatibility"),
+    for (owner, dependency_class, evidence_marker) in [
+        (
+            "CodegenLegacyRemainder",
+            "legacy-codegen-remainder",
+            "LegacyBodyConsumer::CodegenLegacyRemainder",
+        ),
+        (
+            "FlowVerifierCompatibility",
+            "flow-body-compatibility",
+            "LegacyBodyConsumer::FlowVerifierCompatibility",
+        ),
+        (
+            "FfiVerifierCompatibility",
+            "ffi-declaration-compatibility",
+            "LegacyBodyConsumer::FfiVerifierCompatibility",
+        ),
         (
             "DualVerifierCompatibility",
             "secondary-flow-vir-compatibility",
+            "LegacyBodyConsumer::DualVerifierCompatibility",
         ),
     ] {
         let evidence_prefix = format!("owner={owner} evidence_scope=");
@@ -141,6 +154,10 @@ fn legacy_owner_reachability_report_stays_conservative() {
         assert!(
             evidence.contains("closed scalar bypass"),
             "owner evidence for {owner} must document the closed scalar bypass"
+        );
+        assert!(
+            evidence.contains(&format!("evidence_marker={evidence_marker}")),
+            "owner evidence for {owner} must expose its legacy access marker"
         );
         let accessor = format!("owner={owner} production_accessor_call_sites=1");
         assert!(

@@ -41,6 +41,7 @@ owner_evidence() {
     local source_file="$2"
     local test_name="$3"
     local scope="$4"
+    local expected_marker="$5"
     local test_path="$ROOT_DIR/$source_file"
     if ! rg -q "^[[:space:]]*fn ${test_name}\\(" "$test_path"; then
         printf 'owner_audit_error=%s missing_evidence_test=%s::%s\n' \
@@ -48,30 +49,41 @@ owner_evidence() {
         audit_failed=1
         return
     fi
-    printf 'owner=%s evidence_scope=%s evidence_test=%s::%s\n' \
-        "$owner" "$scope" "$source_file" "$test_name"
+    if ! sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" "$test_path" \
+        | rg -q "${expected_marker}"; then
+        printf 'owner_audit_error=%s evidence_test_missing_marker=%s marker=%s\n' \
+            "$owner" "$test_name" "$expected_marker" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'owner=%s evidence_scope=%s evidence_test=%s::%s evidence_marker=%s\n' \
+        "$owner" "$scope" "$source_file" "$test_name" "$expected_marker"
 }
 
 owner_evidence \
     CodegenLegacyRemainder \
     src/codegen/tests.rs \
     compile_checked_tags_unmigrated_generic_body_with_legacy_owner \
-    'closed scalar bypass + generic compatibility reaches codegen remainder'
+    'closed scalar bypass + generic compatibility reaches codegen remainder' \
+    'LegacyBodyConsumer::CodegenLegacyRemainder'
 owner_evidence \
     FlowVerifierCompatibility \
     src/verifier/tests.rs \
     compatibility_verifier_access_is_explicitly_tagged \
-    'closed scalar bypass + non-closed contract reaches Flow/Z3 compatibility'
+    'closed scalar bypass + non-closed contract reaches Flow/Z3 compatibility' \
+    'LegacyBodyConsumer::FlowVerifierCompatibility'
 owner_evidence \
     FfiVerifierCompatibility \
     src/tests/canonical_scalar_ffi.rs \
     ffi_checked_preserves_legacy_for_unmigrated_string_contract \
-    'closed scalar bypass + string FFI contract reaches FFI compatibility'
+    'closed scalar bypass + string FFI contract reaches FFI compatibility' \
+    'LegacyBodyConsumer::FfiVerifierCompatibility'
 owner_evidence \
     DualVerifierCompatibility \
     src/verifier/tests.rs \
     compatibility_verifier_access_is_explicitly_tagged \
-    'closed scalar bypass + secondary Flow/VIR compatibility remains reachable'
+    'closed scalar bypass + secondary Flow/VIR compatibility remains reachable' \
+    'LegacyBodyConsumer::DualVerifierCompatibility'
 
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
