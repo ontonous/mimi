@@ -34,6 +34,13 @@ fn assert_bash_syntax(script_rel_path: &str) {
     );
 }
 
+fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{sequence}", std::process::id()))
+}
+
 #[test]
 fn script_syntax_test_ffi_contracts_sh() {
     // Fixed: `if [ $? -eq 0 ]` tested the *assignment* status (always 0),
@@ -303,14 +310,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
 #[test]
 fn legacy_owner_evidence_marker_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_root = std::env::temp_dir().join(format!(
-        "mimi-legacy-owner-audit-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock must be after the Unix epoch")
-            .as_nanos()
-    ));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-audit");
     std::fs::create_dir_all(temp_root.join("scripts")).expect("create audit temp root");
     std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
         .expect("link source tree into audit temp root");
@@ -378,14 +378,7 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
 #[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_root = std::env::temp_dir().join(format!(
-        "mimi-legacy-owner-digest-audit-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock must be after the Unix epoch")
-            .as_nanos()
-    ));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
     std::fs::create_dir_all(temp_root.join("scripts")).expect("create digest audit temp root");
     std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
         .expect("link source tree into digest audit temp root");
@@ -441,6 +434,37 @@ fn legacy_owner_condition_digest_drift_fails_closed() {
         "tampered condition digest omitted actual-value diagnostic:\n{stderr}"
     );
     std::fs::remove_dir_all(&temp_root).expect("remove digest audit temp root");
+}
+
+#[test]
+fn legacy_owner_audit_temp_roots_are_unique_under_concurrency() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+    let roots = Arc::new(Mutex::new(HashSet::new()));
+    let workers = (0..8)
+        .map(|_| {
+            let roots = Arc::clone(&roots);
+            std::thread::spawn(move || {
+                for _ in 0..32 {
+                    let root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-concurrent");
+                    assert!(
+                        roots.lock().expect("lock temp root set").insert(root),
+                        "concurrent owner audit temp root collided"
+                    );
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker
+            .join()
+            .expect("temp root uniqueness worker must finish");
+    }
+    assert_eq!(
+        roots.lock().expect("lock final temp root set").len(),
+        8 * 32,
+        "all concurrent owner audit temp roots must be unique"
+    );
 }
 
 #[test]
