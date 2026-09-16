@@ -3827,6 +3827,59 @@ func main() -> i64 {
         "{missing_verifier_error}"
     );
 
+    // Parameter conversion cardinality is part of the same receipt contract:
+    // dropping one entry must not let any direct consumer infer an implicit
+    // identity conversion or reach the host binding.
+    let mut missing_parameter_receipts = mir.ffi_calls().clone();
+    missing_parameter_receipts
+        .get_mut(&instruction_id)
+        .expect("missing-parameter-conversion receipt")
+        .parameter_conversions
+        .clear();
+    let mut missing_parameter_mir = mir.clone();
+    missing_parameter_mir.replace_ffi_calls_for_test_only(missing_parameter_receipts);
+
+    let missing_parameter_reference = MirReferenceInterpreter::new(&missing_parameter_mir);
+    let missing_parameter_reference_error = missing_parameter_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject missing parameter conversion receipt");
+    assert!(missing_parameter_reference_error
+        .to_string()
+        .contains("parameter ABI conversion receipt count"));
+    assert_eq!(missing_parameter_reference.captured_output(), "");
+
+    let missing_parameter_bytecode_error = compile_mir_program(&missing_parameter_mir)
+        .expect_err("bytecode adapter must reject missing parameter conversion receipt");
+    assert!(missing_parameter_bytecode_error.iter().any(|error| {
+        error.message.contains("parameter ABI conversion receipt")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let missing_parameter_native_error =
+        crate::codegen::mir::validate_mir_native(&missing_parameter_mir)
+            .expect_err("native admission must reject missing parameter conversion receipt");
+    assert!(missing_parameter_native_error.iter().any(|error| {
+        error.message.contains("parameter ABI conversion receipt")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let missing_parameter_capability_error =
+        crate::verifier::validate_mir_capabilities(&missing_parameter_mir)
+            .expect_err("capability gate must reject missing parameter conversion receipt");
+    assert!(missing_parameter_capability_error.iter().any(|error| {
+        error.contains("parameter ABI conversion receipt") || error.contains("conversion receipt")
+    }));
+
+    let missing_parameter_verifier_error = crate::verifier::verify_mir(
+        &missing_parameter_mir,
+        "missing-parameter-conversion".into(),
+    )
+    .expect_err("verifier must reject missing parameter conversion receipt");
+    assert!(
+        missing_parameter_verifier_error.contains("parameter ABI conversion receipt")
+            || missing_parameter_verifier_error.contains("conversion receipt")
+    );
+
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
