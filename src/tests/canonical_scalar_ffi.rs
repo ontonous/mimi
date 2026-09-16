@@ -22274,6 +22274,81 @@ int64_t mir_route_direct_recover(int64_t value) { return value + 1; }
 }
 
 #[test]
+fn scalar_ffi_route_profile_replay_is_idempotent_for_native_admission() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_route_profile_replay(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_route_profile_replay(7 as i64))
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("route profile replay fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("route profile replay fixture materialization");
+    let profile_a = mir.route_receipt("r6-810-native-profile-a-v1");
+    let profile_b = mir.route_receipt("r6-810-native-profile-b-v1");
+    assert_ne!(profile_a.profile, profile_b.profile);
+    assert_eq!(
+        profile_a.mir_digest, profile_b.mir_digest,
+        "profile replay must retain one canonical MIR identity"
+    );
+    assert_eq!(profile_a.ffi_digest, profile_b.ffi_digest);
+    assert_eq!(profile_a.abi_digest, profile_b.abi_digest);
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_810_profile_replay");
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect("first native profile admission");
+    native.module.verify().expect("first native profile module");
+    let first_snapshot = native.module.print_to_string().to_string();
+
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("second native profile admission");
+    native
+        .module
+        .verify()
+        .expect("replayed native profile module");
+    assert_eq!(
+        native.module.print_to_string().to_string(),
+        first_snapshot,
+        "semantically equivalent profile replay must not duplicate or rewrite the LLVM module"
+    );
+
+    const OTHER_SOURCE: &str = r#"
+func main() -> i64 {
+    println(99 as i64)
+    0
+}
+"#;
+    let other_checked = crate::core::check_program(&super::parse(OTHER_SOURCE))
+        .expect("different MIR profile replay fixture check");
+    let other_mir = MirProgram::from_checked_program(&other_checked)
+        .expect("different MIR profile replay fixture materialization");
+    let other_receipt = other_mir.route_receipt("r6-810-native-profile-other-v1");
+    assert_ne!(profile_a.mir_digest, other_receipt.mir_digest);
+    let different_error = native
+        .compile_mir_native_with_route_receipt(&other_mir, &other_receipt)
+        .expect_err("native generator must reject a different MIR graph after admission");
+    assert!(different_error[0]
+        .to_string()
+        .contains("different canonical MIR program"));
+    assert_eq!(
+        native.module.print_to_string().to_string(),
+        first_snapshot,
+        "different MIR rejection must preserve the admitted module"
+    );
+    native
+        .module
+        .verify()
+        .expect("different MIR rejection must leave the admitted module valid");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (

@@ -65,11 +65,24 @@ pub fn validate_mir_native(program: &MirProgram) -> Result<(), Vec<Diagnostic>> 
 /// `build` path until the wider MIR shape and differential gates are closed.
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_mir_native(&mut self, program: &MirProgram) -> Result<(), Vec<Diagnostic>> {
+        let mir_digest = program.canonical_digest();
+        if let Some(compiled_digest) = self.mir_native_compiled_digest.as_deref() {
+            if compiled_digest == mir_digest {
+                return Ok(());
+            }
+            return Err(vec![NativeMirError::new(
+                "mir-program",
+                "native generator already contains a different canonical MIR program",
+            )
+            .diagnostic()]);
+        }
         validate_mir_native(program)?;
 
         NativeMirEmitter::new(self, program)
             .compile()
-            .map_err(|error| vec![error.diagnostic()])
+            .map_err(|error| vec![error.diagnostic()])?;
+        self.mir_native_compiled_digest = Some(mir_digest);
+        Ok(())
     }
 
     /// Compile canonical MIR after checking the route receipt supplied by the

@@ -659,6 +659,11 @@ pub struct CodeGenerator<'ctx> {
     /// incorrectly skip them. Track them here so the legacy emitter knows to
     /// recompile even when `count_basic_blocks() != 0`.
     resolved_failed_functions: std::collections::HashSet<String>,
+    /// Canonical MIR identity already emitted into this LLVM module. A native
+    /// generator is a single-program consumer: replaying an equivalent route
+    /// receipt is idempotent, while a different MIR graph fails closed before
+    /// it can collide with or append to the existing module.
+    mir_native_compiled_digest: Option<String>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -891,6 +896,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fault_self_entry: None,
             current_persistent_fields: Vec::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
+            mir_native_compiled_digest: None,
         }
     }
 
