@@ -519,6 +519,92 @@ fn legacy_owner_scalar_zero_owner_evidence_missing_or_forged_fails_closed() {
 }
 
 #[test]
+fn legacy_owner_scalar_cli_matrix_missing_or_forged_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-cli-matrix");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create CLI audit temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into CLI audit temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into CLI audit temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replace(
+        "\"$ROOT_DIR/tests/real_world_cli.rs\"",
+        "\"$ROOT_DIR/fake_scalar_cli.rs\"",
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write CLI audit script fixture");
+    let cli_fixture = temp_root.join("fake_scalar_cli.rs");
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n}\n#[test]\n",
+    )
+    .expect("write CLI fixture missing MIR matrix");
+    let missing = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run missing CLI matrix audit");
+    assert!(
+        !missing.status.success(),
+        "missing CLI matrix dimension must fail closed:\n{}",
+        String::from_utf8_lossy(&missing.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("owner_audit_error=closed_scalar_cli_evidence_missing_mir_matrix"),
+        "missing CLI matrix omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n}\n#[test]\nfn forged_mir_matrix_outside_cli_test() { for explicit_mir in [false, true] {} }\n",
+    )
+    .expect("write CLI fixture with forged outside MIR matrix");
+    let forged = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run forged CLI matrix audit");
+    assert!(
+        !forged.status.success(),
+        "forged CLI matrix outside test must fail closed:\n{}",
+        String::from_utf8_lossy(&forged.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&forged.stderr)
+            .contains("owner_audit_error=closed_scalar_cli_evidence_missing_mir_matrix"),
+        "forged outside CLI matrix omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&forged.stderr)
+    );
+    std::fs::write(
+        &cli_fixture,
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for explicit_mir in [false, true] {}\n}\n#[test]\nfn forged_contract_matrix_outside_cli_test() { for contracts in [true, false] {} }\n",
+    )
+    .expect("write CLI fixture with forged outside contract matrix");
+    let forged_contract = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run forged contract matrix audit");
+    assert!(
+        !forged_contract.status.success(),
+        "forged contract matrix outside test must fail closed:\n{}",
+        String::from_utf8_lossy(&forged_contract.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&forged_contract.stderr)
+            .contains("owner_audit_error=closed_scalar_cli_evidence_missing_contract_matrix"),
+        "forged outside contract matrix omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&forged_contract.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove CLI audit temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
