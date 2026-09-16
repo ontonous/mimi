@@ -21019,6 +21019,147 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
 }
 
 #[test]
+fn scalar_ffi_deterministic_receipt_forgery_matrix_rejects_every_consumer() {
+    const SOURCE: &str = r#"
+extern "C" { func matrix_guard(value: i64) -> i64 requires: value >= 0; }
+func main() -> i64 { matrix_guard(1 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("deterministic receipt forgery fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("deterministic receipt forgery fixture materialization");
+    let instruction_id = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("deterministic receipt forgery instruction");
+
+    #[derive(Clone, Copy)]
+    enum Forgery {
+        Caller,
+        Instruction,
+        Callee,
+        Symbol,
+        Abi,
+        Arguments,
+        ParameterTypes,
+        ParameterConversions,
+        Result,
+        ResultConversion,
+        Requires,
+    }
+
+    const CASES: &[(Forgery, &str)] = &[
+        (Forgery::Caller, "caller"),
+        (Forgery::Instruction, "instruction"),
+        (Forgery::Callee, "callee"),
+        (Forgery::Symbol, "symbol"),
+        (Forgery::Abi, "abi"),
+        (Forgery::Arguments, "arguments"),
+        (Forgery::ParameterTypes, "parameter-types"),
+        (Forgery::ParameterConversions, "parameter-conversions"),
+        (Forgery::Result, "result"),
+        (Forgery::ResultConversion, "result-conversion"),
+        (Forgery::Requires, "requires"),
+    ];
+
+    fn apply_forgery(
+        forgery: Forgery,
+        instruction_id: &crate::core::mir::MirInstructionId,
+        receipts: &mut std::collections::BTreeMap<
+            crate::core::mir::MirInstructionId,
+            crate::core::mir::MirFfiCallContract,
+        >,
+    ) {
+        let receipt = receipts.get_mut(instruction_id).expect("matrix receipt");
+        match forgery {
+            Forgery::Caller => receipt.caller = crate::core::NodeId("function:forged".into()),
+            Forgery::Instruction => {
+                receipt.instruction = crate::core::mir::MirInstructionId::new("inst:call:forged")
+                    .expect("forged instruction id");
+            }
+            Forgery::Callee => receipt.callee = crate::core::NodeId("extern:forged".into()),
+            Forgery::Symbol => receipt.symbol = "matrix_guard_forged".into(),
+            Forgery::Abi => receipt.abi = "Rust".into(),
+            Forgery::Arguments => receipt.arguments.clear(),
+            Forgery::ParameterTypes => receipt.parameter_types.clear(),
+            Forgery::ParameterConversions => receipt.parameter_conversions.clear(),
+            Forgery::Result => receipt.result = None,
+            Forgery::ResultConversion => receipt.result_conversion = None,
+            Forgery::Requires => {
+                receipt.requires = Some(crate::core::mir::MirContractExpr::Value(
+                    crate::core::mir::MirValueId::new("value:forged-requires")
+                        .expect("forged predicate value id"),
+                ));
+            }
+        }
+    }
+
+    let mut seed = 0x9e37_79b9_u64;
+    let mut seen = [false; CASES.len()];
+    for round in 0..(CASES.len() * 3) {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let index = if round < CASES.len() {
+            round
+        } else {
+            (seed as usize) % CASES.len()
+        };
+        seen[index] = true;
+        let (forgery, label) = CASES[index];
+        let mut receipts = canonical.ffi_calls().clone();
+        apply_forgery(forgery, &instruction_id, &mut receipts);
+        let mut forged = canonical.clone();
+        forged.replace_ffi_calls_for_test_only(receipts);
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject deterministic receipt forgery");
+        assert!(
+            reference_error.to_string().contains("FFI")
+                || reference_error.to_string().contains("extern"),
+            "round {round} {label}: {reference_error}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "round {round} {label} reached a compatibility owner"
+        );
+
+        let bytecode_error = compile_mir_program(&forged)
+            .expect_err("bytecode must reject deterministic receipt forgery");
+        assert!(
+            !bytecode_error.is_empty(),
+            "round {round} {label}: {bytecode_error:?}"
+        );
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native must reject deterministic receipt forgery");
+        assert!(
+            !native_error.is_empty(),
+            "round {round} {label}: {native_error:?}"
+        );
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject deterministic receipt forgery");
+        assert!(
+            !capability_error.is_empty(),
+            "round {round} {label}: {capability_error:?}"
+        );
+        let verifier_error =
+            crate::verifier::verify_mir(&forged, format!("deterministic-receipt-forgery-{round}"))
+                .expect_err("verifier must reject deterministic receipt forgery");
+        assert!(
+            !verifier_error.is_empty(),
+            "round {round} {label}: {verifier_error}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "round {round} {label} reached a compatibility owner"
+        );
+    }
+    assert!(seen.into_iter().all(|was_seen| was_seen));
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
