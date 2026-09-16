@@ -22,6 +22,65 @@ audit_failed=0
 printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
 printf 'root=%s\n' "$ROOT_DIR"
 
+# Keep one executable evidence case for each retained owner.  The cases are
+# deliberately split between a closed scalar MIR route (which must bypass all
+# owners) and a representative compatibility shape (which must still reach
+# the named owner).  If a future migration removes or renames one of these
+# tests without replacing its evidence, this audit fails instead of silently
+# turning an owner into an undocumented deletion candidate.
+owner_evidence() {
+    local owner="$1"
+    local source_file="$2"
+    local test_name="$3"
+    local scope="$4"
+    local test_path="$ROOT_DIR/$source_file"
+    if ! rg -q "^[[:space:]]*fn ${test_name}\\(" "$test_path"; then
+        printf 'owner_audit_error=%s missing_evidence_test=%s::%s\n' \
+            "$owner" "$source_file" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'owner=%s evidence_scope=%s evidence_test=%s::%s\n' \
+        "$owner" "$scope" "$source_file" "$test_name"
+}
+
+owner_evidence \
+    CodegenLegacyRemainder \
+    src/codegen/tests.rs \
+    compile_checked_tags_unmigrated_generic_body_with_legacy_owner \
+    'closed scalar bypass + generic compatibility reaches codegen remainder'
+owner_evidence \
+    FlowVerifierCompatibility \
+    src/verifier/tests.rs \
+    compatibility_verifier_access_is_explicitly_tagged \
+    'closed scalar bypass + non-closed contract reaches Flow/Z3 compatibility'
+owner_evidence \
+    FfiVerifierCompatibility \
+    src/tests/canonical_scalar_ffi.rs \
+    ffi_checked_preserves_legacy_for_unmigrated_string_contract \
+    'closed scalar bypass + string FFI contract reaches FFI compatibility'
+owner_evidence \
+    DualVerifierCompatibility \
+    src/verifier/tests.rs \
+    compatibility_verifier_access_is_explicitly_tagged \
+    'closed scalar bypass + secondary Flow/VIR compatibility remains reachable'
+
+if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
+    "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
+    printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
+    audit_failed=1
+else
+    printf 'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\n'
+fi
+
+if ! rg -q '^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts\(' \
+    "$ROOT_DIR/tests/real_world_cli.rs"; then
+    printf 'owner_audit_error=missing_closed_scalar_cli_evidence\n' >&2
+    audit_failed=1
+else
+    printf 'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts\n'
+fi
+
 owner_count=0
 for owner in \
     CodegenLegacyRemainder \
