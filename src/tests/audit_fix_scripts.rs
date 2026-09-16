@@ -196,6 +196,45 @@ fn legacy_owner_reachability_report_stays_conservative() {
 }
 
 #[test]
+fn legacy_owner_evidence_tests_execute_as_lib_tests() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    for test_name in [
+        "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
+        "compatibility_verifier_access_is_explicitly_tagged",
+        "ffi_checked_preserves_legacy_for_unmigrated_string_contract",
+    ] {
+        let output = std::process::Command::new(&cargo)
+            .args([
+                "test",
+                "--features",
+                "llvm18-host-dynamic",
+                "--lib",
+                test_name,
+                "--",
+                "--test-threads=1",
+            ])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("failed to run owner evidence test {test_name}: {error}")
+            });
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "owner evidence test {test_name} failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| { line.starts_with("test result: ok.") && line.contains("0 failed") }),
+            "owner evidence test {test_name} omitted a passing result:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
