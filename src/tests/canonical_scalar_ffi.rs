@@ -22421,6 +22421,152 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_interleaved_route_failures_recover_across_consumers() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_route_interleaved(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_route_interleaved(7 as i64))
+    0
+}
+"#;
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_route_interleaved(int64_t value) { return value + 1; }
+"#;
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("interleaved route fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("interleaved route fixture materialization");
+    let profile_a = mir.route_receipt("r6-812-interleaved-a-v1");
+    let profile_b = mir.route_receipt("r6-812-interleaved-b-v1");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_812_interleaved");
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect("baseline interleaved native admission");
+    native.module.verify().expect("baseline interleaved module");
+    let snapshot = native.module.print_to_string().to_string();
+
+    let mut forged = profile_b.clone();
+    forged.abi_digest = "0".repeat(64);
+    let forged_error = native
+        .compile_mir_native_with_route_receipt(&mir, &forged)
+        .expect_err("forged receipt must fail in the interleaved sequence");
+    assert_eq!(
+        forged_error[0].code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert!(forged_error[0].message.contains("abi_digest"));
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+
+    let malformed_manifest = format!(
+        "{}future_field=reserved\n",
+        profile_b
+            .manifest_text()
+            .expect("interleaved profile manifest rendering")
+    );
+    let manifest_error = native
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("manifest structure must fail after receipt rejection");
+    assert_eq!(
+        manifest_error[0].code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+    );
+    assert!(manifest_error[0].message.contains("future_field"));
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("valid profile must recover after interleaved failures");
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    native
+        .module
+        .verify()
+        .expect("recovered interleaved module");
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode_receipt_error = compile_mir_program_with_route_receipt(&mir, &forged)
+        .expect_err("bytecode must reject the forged receipt in the same sequence");
+    assert_eq!(
+        bytecode_receipt_error[0].diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let bytecode_manifest_error =
+        compile_mir_program_with_route_manifest(&mir, &malformed_manifest)
+            .expect_err("bytecode must reject the malformed manifest after receipt rejection");
+    assert_eq!(
+        bytecode_manifest_error[0].diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+    );
+    let bytecode = compile_mir_program_with_route_receipt(&mir, &profile_b)
+        .expect("bytecode must recover after interleaved failures");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("recovered interleaved bytecode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "8\n");
+
+    let verifier_receipt_error =
+        crate::verifier::verify_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("general verifier must reject the forged receipt in the same sequence");
+    assert!(verifier_receipt_error.contains("abi_digest"));
+    assert!(verifier_receipt_error.starts_with(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE));
+    let verifier_manifest_error = crate::verifier::verify_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("general verifier must reject the malformed manifest after receipt rejection");
+    assert!(verifier_manifest_error.contains("future_field"));
+    assert!(verifier_manifest_error.starts_with(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE));
+    crate::verifier::verify_mir_with_route_receipt(&mir, &profile_b, source_hash)
+        .expect("general verifier must recover after interleaved failures");
+
+    struct InterleavedOracle;
+    impl MirReferenceFfiResolver for InterleavedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_route_interleaved");
+            match arguments {
+                [MirRuntimeValue::Int(value)] => Ok(MirRuntimeValue::Int(value + 1)),
+                other => Err(format!("unexpected interleaved arguments: {other:?}")),
+            }
+        }
+    }
+    let oracle = InterleavedOracle;
+    let reference_error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the forged receipt in the same sequence");
+    assert_eq!(
+        reference_error.diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert!(reference_error.to_diagnostic().origin.is_some());
+    let recovered_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile_b)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover after interleaved failures");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "8\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
