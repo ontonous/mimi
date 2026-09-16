@@ -21160,6 +21160,60 @@ func main() -> i64 { matrix_guard(1 as i64) }
 }
 
 #[test]
+fn scalar_ffi_public_entry_matrix_replays_failure_and_recovery_identically() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_LIBRARY_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(MISSING_LIBRARY_SOURCE))
+        .expect("public-entry matrix fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("public-entry matrix fixture materialization");
+    let bytecode = compile_mir_program(&mir).expect("public-entry matrix bytecode");
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+
+    for mode in 0..3_u8 {
+        let mut vm = BytecodeVM::new(bytecode.clone());
+        let entry = vm.program().entry;
+        let invoke = |vm: &mut BytecodeVM| match mode {
+            0 => vm.call_named("function:main", Vec::new()),
+            1 => vm.call_function(entry, &[]),
+            2 => vm.call_function_wrap_ok(entry, &[], Value::Unit),
+            _ => unreachable!(),
+        };
+
+        let initial = invoke(&mut vm).expect("public entry must execute the valid receipt");
+        assert!(!matches!(initial, Value::Error(_)));
+        assert_eq!(vm.stdout(), "13\n8\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+
+        let original = vm.program().canonical_ffi[0].clone();
+        let mut forged = original.clone();
+        forged.symbol = "forged_public_entry_matrix".into();
+        vm.replace_canonical_ffi_descriptor_for_test_only(0, forged);
+
+        let first_error = invoke(&mut vm).expect_err("forged receipt must fail at every entry");
+        assert!(first_error
+            .to_string()
+            .contains("differs from its compiler binding"));
+        assert_eq!(vm.stdout(), "");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+
+        let second_error = invoke(&mut vm).expect_err("forged receipt must remain deterministic");
+        assert_eq!(second_error.to_string(), first_error.to_string());
+        assert_eq!(vm.stdout(), "");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+
+        vm.replace_canonical_ffi_descriptor_for_test_only(0, original);
+        let recovered = invoke(&mut vm).expect("restored receipt must recover at every entry");
+        assert!(!matches!(recovered, Value::Error(_)));
+        assert_eq!(vm.stdout(), "13\n8\n");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+    }
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
