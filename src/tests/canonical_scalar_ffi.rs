@@ -21704,6 +21704,107 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_manifest_bytecode_failure_recovers_without_cache_poison() {
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_manifest_recover(int64_t value) { return value + 1; }
+"#;
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_manifest_recover(int64_t value) { return value + 2; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_manifest_recover(value: i64) -> i64 ensures: result == value + 1; }
+func main() -> i64 {
+    println(1 as i64)
+    println(mir_manifest_recover(7 as i64))
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("route manifest recovery fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("route manifest recovery fixture materialization");
+    let receipt = mir.route_receipt("r6-805-bytecode-recovery-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("route manifest recovery fixture rendering");
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let good_fixture = library_fixture(counter, GOOD_C_SOURCE);
+    let bad_fixture = library_fixture(counter + 1, BAD_C_SOURCE);
+    let good_path = good_fixture.dir.join("ffi.so");
+    let bad_path = bad_fixture.dir.join("ffi.so");
+    let missing_path = good_fixture.dir.join("missing.so");
+
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("route manifest recovery bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+
+    vm.set_canonical_ffi_library_path(missing_path.to_string_lossy().into_owned());
+    let missing_error = vm
+        .run_value()
+        .expect_err("missing route manifest library must fail closed");
+    assert_eq!(missing_error.code(), "E0800", "{missing_error}");
+    assert!(missing_error.to_string().contains("failed to load"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm.set_canonical_ffi_library_path(bad_path.to_string_lossy().into_owned());
+    let bad_error = vm
+        .run_value()
+        .expect_err("bad route manifest library must fail its postcondition");
+    assert_eq!(bad_error.code(), "E0808", "{bad_error}");
+    assert!(bad_error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm.set_canonical_ffi_library_path(good_path.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value()
+            .expect("good route manifest library recovery"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+
+    vm.set_canonical_ffi_library_path(bad_path.to_string_lossy().into_owned());
+    let repeated_bad_error = vm
+        .run_value()
+        .expect_err("reused bad route manifest library must still fail deterministically");
+    assert_eq!(repeated_bad_error.code(), "E0808", "{repeated_bad_error}");
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        2,
+        "reusing a previously loaded path must not duplicate its cache entry"
+    );
+
+    vm.set_canonical_ffi_library_path(good_path.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value().expect("second good route manifest recovery"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
