@@ -712,13 +712,7 @@ fn legacy_owner_scalar_evidence_markers_have_stable_order() {
     let markers = |output: &std::process::Output| {
         String::from_utf8_lossy(&output.stdout)
             .lines()
-            .filter(|line| {
-                line.starts_with("closed_scalar_zero_owner_evidence=")
-                    || line.starts_with("closed_scalar_zero_owner_evidence_marker=")
-                    || line.starts_with("closed_scalar_cli_evidence=")
-                    || line.starts_with("closed_scalar_cli_matrix_marker=")
-                    || line.starts_with("closed_scalar_cli_abi_marker=")
-            })
+            .filter(|line| line.starts_with("closed_scalar_"))
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
