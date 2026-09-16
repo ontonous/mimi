@@ -480,6 +480,46 @@ fn legacy_owner_audit_temp_roots_are_unique_under_concurrency() {
 }
 
 #[test]
+fn legacy_owner_audit_temp_roots_cleanup_under_concurrency() {
+    use std::sync::{Arc, Mutex};
+    let created = Arc::new(Mutex::new(Vec::new()));
+    let workers = (0..8)
+        .map(|_| {
+            let created = Arc::clone(&created);
+            std::thread::spawn(move || {
+                for _ in 0..16 {
+                    let path = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-cleanup");
+                    std::fs::create_dir_all(&path).expect("create concurrent cleanup root");
+                    {
+                        let _cleanup = LegacyOwnerAuditTempRootCleanup(path.clone());
+                        assert!(path.is_dir(), "concurrent cleanup root must exist in scope");
+                        created
+                            .lock()
+                            .expect("lock created cleanup roots")
+                            .push(path.clone());
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker
+            .join()
+            .expect("concurrent cleanup worker must finish");
+    }
+    let created = created.lock().expect("lock final cleanup roots");
+    assert_eq!(
+        created.len(),
+        8 * 16,
+        "all concurrent cleanup roots must be recorded"
+    );
+    assert!(
+        created.iter().all(|path| !path.exists()),
+        "all concurrent owner audit temp roots must be removed"
+    );
+}
+
+#[test]
 fn legacy_owner_audit_temp_root_cleanup_runs_on_scope_exit() {
     let path = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-cleanup");
     std::fs::create_dir_all(&path).expect("create cleanup probe root");
