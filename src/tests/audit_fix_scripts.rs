@@ -110,6 +110,75 @@ fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
 }
 
 #[test]
+fn legacy_owner_reachability_report_stays_conservative() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let output = std::process::Command::new("bash")
+        .arg(&path)
+        .current_dir(&root)
+        .output()
+        .expect("legacy owner audit must execute");
+    assert!(
+        output.status.success(),
+        "legacy owner audit failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (owner, dependency_class) in [
+        ("CodegenLegacyRemainder", "legacy-codegen-remainder"),
+        ("FlowVerifierCompatibility", "flow-body-compatibility"),
+        ("FfiVerifierCompatibility", "ffi-declaration-compatibility"),
+        (
+            "DualVerifierCompatibility",
+            "secondary-flow-vir-compatibility",
+        ),
+    ] {
+        let evidence_prefix = format!("owner={owner} evidence_scope=");
+        let evidence = stdout
+            .lines()
+            .find(|line| line.starts_with(&evidence_prefix))
+            .unwrap_or_else(|| panic!("missing evidence report for {owner}"));
+        assert!(
+            evidence.contains("closed scalar bypass"),
+            "owner evidence for {owner} must document the closed scalar bypass"
+        );
+        let accessor = format!("owner={owner} production_accessor_call_sites=1");
+        assert!(
+            stdout.lines().any(|line| line == accessor),
+            "owner {owner} must retain exactly one production accessor"
+        );
+        let status_prefix = format!("owner={owner} status=retained");
+        let status = stdout
+            .lines()
+            .find(|line| line.starts_with(&status_prefix))
+            .unwrap_or_else(|| panic!("missing retained status for {owner}"));
+        assert!(
+            status.contains(&format!("dependency_class={dependency_class}")),
+            "owner {owner} dependency class drifted: {status}"
+        );
+        assert!(
+            status.contains("owner_deletion_ready=0"),
+            "owner {owner} must remain fail-closed for deletion: {status}"
+        );
+    }
+    for expected in [
+        "closed_scalar_zero_owner_evidence=",
+        "closed_scalar_cli_evidence=",
+        "production_legacy_body_file_call_sites=4",
+        "production_raw_ast_call_sites=0",
+        "production_compile_func_legacy_call_sites=8",
+        "scalar_ffi_direct_expression_legacy_refs=0",
+        "owner_count=4",
+        "audit_status=ok",
+    ] {
+        assert!(
+            stdout.lines().any(|line| line.starts_with(expected)),
+            "legacy owner audit omitted required marker {expected}"
+        );
+    }
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
