@@ -1564,6 +1564,113 @@ fn legacy_owner_scalar_marker_shuffled_failure_batches_keep_snapshot_order() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_interleaved_duplicate_recovery_is_stable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let prefix = format!(
+        "mimi-legacy-owner-marker-interleaved-{}-",
+        std::process::id()
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let roots = (0..5)
+        .map(|index| {
+            let root = unique_legacy_owner_audit_temp_root(&format!("{prefix}{index}"));
+            let nested = root.join("nested").join("evidence");
+            std::fs::create_dir_all(&nested).expect("create interleaved recovery root");
+            std::fs::write(nested.join("snapshot"), b"interleaved recovery snapshot")
+                .expect("write interleaved recovery snapshot");
+            root
+        })
+        .collect::<Vec<_>>();
+    let blocked = roots[2].clone();
+    let mut permissions = std::fs::metadata(&blocked)
+        .expect("read interleaved recovery permissions")
+        .permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(&blocked, permissions)
+        .expect("make interleaved recovery root unreadable");
+
+    let run_batch = |order: &[usize]| {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(order.len() + 1));
+        std::thread::scope(|scope| {
+            let handles = order
+                .iter()
+                .map(|index| {
+                    let root = roots[*index].clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let result = LegacyOwnerAuditTempRootCleanup::cleanup_path(&root);
+                        (root, result)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("interleaved cleanup worker panicked"))
+                .collect::<Vec<_>>()
+        })
+    };
+    let first_order = [2, 0, 4, 1, 3, 3, 1, 4, 0, 2];
+    let first_results = run_batch(&first_order);
+    let first_snapshots = (0..3)
+        .map(|_| legacy_owner_temp_root_residues(&prefix))
+        .collect::<Vec<_>>();
+
+    let mut permissions = std::fs::metadata(&blocked)
+        .expect("read blocked interleaved recovery permissions")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&blocked, permissions)
+        .expect("restore interleaved recovery permissions");
+    let second_results = run_batch(&first_order);
+    let final_snapshot = legacy_owner_temp_root_residues(&prefix);
+
+    let first_failures = first_results
+        .iter()
+        .filter(|(_, result)| result.is_err())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_failures.len(),
+        2,
+        "both duplicate attempts for the blocked root must fail"
+    );
+    assert!(
+        first_failures.iter().all(|(root, result)| {
+            root == &blocked
+                && result
+                    .as_ref()
+                    .expect_err("blocked cleanup must carry an error")
+                    .contains(&blocked.display().to_string())
+        }),
+        "blocked cleanup errors were not path-specific: {first_failures:?}"
+    );
+    assert!(
+        first_results
+            .iter()
+            .filter(|(root, _)| root != &blocked)
+            .all(|(_, result)| result.is_ok()),
+        "accessible roots must tolerate duplicate cleanup"
+    );
+    assert!(
+        first_snapshots
+            .iter()
+            .all(|snapshot| snapshot == &vec![blocked.clone()]),
+        "interleaved failure snapshots drifted: {first_snapshots:?}"
+    );
+    assert!(
+        second_results.iter().all(|(_, result)| result.is_ok()),
+        "recovery duplicate cleanup must be idempotent"
+    );
+    assert!(
+        final_snapshot.is_empty(),
+        "interleaved recovery left residues: {final_snapshot:?}"
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
