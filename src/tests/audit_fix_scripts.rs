@@ -199,6 +199,22 @@ fn legacy_owner_reachability_report_stays_conservative() {
 fn legacy_owner_evidence_tests_execute_as_lib_tests() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let llvm_config = std::process::Command::new("/tmp/llvm-wrapper/llvm-config")
+        .arg("--version")
+        .output()
+        .expect("LLVM 18 wrapper must be installed for dynamic owner probes");
+    assert!(
+        llvm_config.status.success(),
+        "LLVM wrapper version probe failed: {}",
+        String::from_utf8_lossy(&llvm_config.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&llvm_config.stdout)
+            .trim()
+            .starts_with("18."),
+        "owner probes require LLVM 18 wrapper, got {}",
+        String::from_utf8_lossy(&llvm_config.stdout).trim()
+    );
     for round in 1..=2 {
         for test_name in [
             "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
