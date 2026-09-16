@@ -785,6 +785,35 @@ fn legacy_owner_audit_residue_diagnostics_include_snapshot_context() {
 }
 
 #[test]
+fn legacy_owner_audit_cleanup_race_classifies_type_change_and_missing_path() {
+    let prefix = format!("mimi-legacy-owner-race-{}", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let path = unique_legacy_owner_audit_temp_root(&prefix);
+    std::fs::create_dir(&path).expect("create race directory residue");
+    std::fs::remove_dir(&path).expect("remove race directory before replacement");
+    std::fs::write(&path, b"replacement file residue").expect("replace race path with file");
+
+    let type_error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&path)
+        .expect_err("directory cleanup must classify a path replaced by a file");
+    assert!(
+        type_error.contains(&path.display().to_string()),
+        "type-change diagnostic must include the raced path: {type_error}"
+    );
+    assert!(
+        path.is_file(),
+        "type-change cleanup must preserve the replacement file"
+    );
+    assert_eq!(legacy_owner_temp_root_residues(&prefix), vec![path.clone()]);
+
+    std::fs::remove_file(&path).expect("remove replacement file residue");
+    assert!(
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&path).is_ok(),
+        "cleanup must be idempotent after an external deletion race"
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
