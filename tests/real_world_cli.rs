@@ -5127,6 +5127,196 @@ pub func call(value: i64) -> i64 { mir_cli_imported_provenance(value) }
 }
 
 #[test]
+fn canonical_mir_cli_multi_import_verifier_provenance_repeats_after_failures() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-multi-import-verifier-provenance-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-import verifier provenance directory");
+    fs::write(
+        dir.join("left.mimi"),
+        r#"extern "C" {
+    func left(value: i64) -> i64 requires: value > 10 ensures: true;
+}
+pub func call_left(value: i64) -> i64 { left(value) }
+"#,
+    )
+    .expect("write left verifier provenance helper");
+    fs::write(
+        dir.join("right.mimi"),
+        r#"extern "C" {
+    func right(value: i64) -> i64 requires: value > 20 ensures: true;
+}
+pub func call_right(value: i64) -> i64 { right(value) }
+"#,
+    )
+    .expect("write right verifier provenance helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use left;\nuse right;\nfunc main() -> i64 { println(call_left(7 as i64)); println(call_right(8 as i64)); 0 }\n",
+    )
+    .expect("write multi-import verifier provenance entry");
+
+    let checked = checked_route_receipt(&main);
+    let receipt_output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all", "--receipt"])
+        .arg(&main)
+        .output()
+        .expect("spawn multi-import verifier provenance receipt");
+    assert!(
+        receipt_output.status.success(),
+        "multi-import receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&receipt_output.stdout),
+        String::from_utf8_lossy(&receipt_output.stderr)
+    );
+    let manifest = parse_route_receipt_manifest(&receipt_output.stdout);
+    for field in [
+        "mir_digest",
+        "type_desc_digest",
+        "abi_digest",
+        "ffi_digest",
+        "ownership_digest",
+        "flow_transition_digest",
+    ] {
+        assert_eq!(
+            manifest.get(field),
+            Some(match field {
+                "mir_digest" => &checked.mir_digest,
+                "type_desc_digest" => &checked.type_desc_digest,
+                "abi_digest" => &checked.abi_digest,
+                "ffi_digest" => &checked.ffi_digest,
+                "ownership_digest" => &checked.ownership_digest,
+                "flow_transition_digest" => &checked.flow_transition_digest,
+                _ => unreachable!(),
+            }),
+            "multi-import receipt drifted from checker route for {field}"
+        );
+    }
+    let expected_source_hash = blake3::hash(
+        fs::read_to_string(&main)
+            .expect("read multi-import verifier provenance entry")
+            .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    let parse_provenance = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("canonical MIR verifier provenance: "))
+            .unwrap_or_else(|| panic!("multi-import verifier provenance line missing:\n{text}"));
+        line.strip_prefix("canonical MIR verifier provenance: ")
+            .expect("multi-import verifier provenance prefix")
+            .split_whitespace()
+            .map(|field| {
+                field
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("malformed multi-import provenance field: {field}"))
+            })
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let canonical_failures = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.lines()
+            .filter(|line| line.contains("canonical MIR extern requires contract disproven"))
+            .map(|line| mimi::diagnostic::format::strip_ansi(line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("verify")
+            .env("MIMI_VERBOSE", "1");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn multi-import verifier provenance CLI")
+    };
+    let outputs = [
+        (0..3).map(|_| verify(false)).collect::<Vec<_>>(),
+        (0..3).map(|_| verify(true)).collect::<Vec<_>>(),
+    ];
+    let first_provenance = parse_provenance(&outputs[0][0]);
+    let first_failures = canonical_failures(&outputs[0][0]);
+    assert_eq!(first_failures.len(), 2, "expected both imported failures");
+    assert!(
+        first_failures[0].contains("left.mimi") && first_failures[1].contains("right.mimi"),
+        "multi-import diagnostics lost source order: {first_failures:?}"
+    );
+    assert_eq!(
+        first_provenance.get("profile").map(String::as_str),
+        Some("verify-canonical-v1")
+    );
+    assert_eq!(
+        first_provenance.get("source_hash").map(String::as_str),
+        Some(expected_source_hash.as_str())
+    );
+    for field in [
+        "mir_digest",
+        "type_desc_digest",
+        "abi_digest",
+        "ffi_digest",
+        "ownership_digest",
+        "flow_transition_digest",
+    ] {
+        assert_eq!(
+            first_provenance.get(field),
+            manifest.get(field),
+            "multi-import verifier provenance drifted from receipt for {field}"
+        );
+    }
+    for runs in &outputs {
+        for output in runs {
+            assert_eq!(output.status.code(), Some(1));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(text.contains("0/2 verified"), "{text}");
+            assert!(
+                text.contains("left.mimi") && text.contains("right.mimi"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("canonical route disposition: legacy"),
+                "multi-import verifier fell back to legacy: {text}"
+            );
+            assert_eq!(
+                parse_provenance(output),
+                first_provenance,
+                "multi-import verifier provenance changed across entry/repeat"
+            );
+            assert_eq!(
+                canonical_failures(output),
+                first_failures,
+                "multi-import verifier diagnostics changed across entry/repeat"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
