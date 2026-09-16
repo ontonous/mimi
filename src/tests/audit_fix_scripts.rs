@@ -695,6 +695,53 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
 }
 
 #[test]
+fn legacy_owner_scalar_evidence_markers_have_stable_order() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&path)
+            .current_dir(&root)
+            .output()
+            .expect("legacy owner audit must execute")
+    };
+    let first = run();
+    let second = run();
+    assert!(first.status.success(), "first owner audit failed");
+    assert!(second.status.success(), "second owner audit failed");
+    let markers = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.starts_with("closed_scalar_zero_owner_evidence=")
+                    || line.starts_with("closed_scalar_zero_owner_evidence_marker=")
+                    || line.starts_with("closed_scalar_cli_evidence=")
+                    || line.starts_with("closed_scalar_cli_matrix_marker=")
+                    || line.starts_with("closed_scalar_cli_abi_marker=")
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        "closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers".to_owned(),
+        "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()".to_owned(),
+        "closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts".to_owned(),
+        "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]".to_owned(),
+        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent".to_owned(),
+    ];
+    assert_eq!(
+        markers(&first),
+        expected,
+        "scalar evidence marker order drifted"
+    );
+    assert_eq!(
+        markers(&first),
+        markers(&second),
+        "scalar evidence markers drifted across runs"
+    );
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
