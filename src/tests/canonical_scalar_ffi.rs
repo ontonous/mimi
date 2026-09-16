@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::mir::reference::{
     MirProgram, MirReferenceFfiResolver, MirReferenceInterpreter, MirRuntimeValue,
@@ -246,6 +247,12 @@ struct LibraryFixture {
     dir: PathBuf,
 }
 
+/// The caller-supplied counter is also used by E2E executable names, and
+/// several tests intentionally derive a second fixture as `counter + 1`.
+/// Keep the on-disk library directory unique per fixture so parallel tests
+/// cannot remove one another's shared-object tree during cleanup.
+static LIBRARY_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for LibraryFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -253,10 +260,11 @@ impl Drop for LibraryFixture {
 }
 
 fn library_fixture(counter: u64, c_source: &str) -> LibraryFixture {
+    let fixture_id = LIBRARY_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let fixture = LibraryFixture {
         dir: std::env::temp_dir().join(format!(
-            "mimi-canonical-ffi-{}-{counter}",
-            std::process::id()
+            "mimi-canonical-ffi-{}-{counter}-{fixture_id}",
+            std::process::id(),
         )),
     };
     std::fs::create_dir_all(&fixture.dir).expect("create C FFI fixture directory");
@@ -21211,6 +21219,159 @@ fn scalar_ffi_public_entry_matrix_replays_failure_and_recovery_identically() {
         assert_eq!(vm.stdout(), "13\n8\n");
         assert_eq!(vm.debug_stack_state(), (0, 0));
     }
+}
+
+#[test]
+fn scalar_ffi_route_manifest_replay_counts_host_bindings_and_rejects_forgery() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_route_replay(int64_t value) { return value + 1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_route_replay(value: i64) -> i64 requires: value >= 0; }
+func main() -> i64 {
+    let first = mir_ffi_route_replay(7 as i64)
+    println(first)
+    let second = mir_ffi_route_replay(8 as i64)
+    println(second)
+    0
+}
+"#;
+
+    struct CountingOracle {
+        calls: Cell<usize>,
+    }
+    impl MirReferenceFfiResolver for CountingOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            if receipt.symbol != "mir_ffi_route_replay" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected arguments {arguments:?}"));
+            };
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("route manifest replay fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("route manifest replay fixture materialization");
+    let receipt = mir.route_receipt("r6-801-route-replay-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("route manifest replay fixture rendering");
+    let parsed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+        .expect("route manifest replay fixture parsing");
+    assert_eq!(parsed, receipt, "manifest round-trip must remain lossless");
+
+    let oracle = CountingOracle {
+        calls: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&parsed);
+    let first = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("manifest-bound reference execution");
+    assert_eq!(first.value, MirRuntimeValue::Int(0));
+    assert_eq!(first.output, "8\n9\n");
+    assert_eq!(oracle.calls.get(), 2, "one host call per canonical receipt");
+    let second = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("manifest-bound reference reentry");
+    assert_eq!(second.output, "8\n9\n");
+    assert_eq!(
+        oracle.calls.get(),
+        4,
+        "reentry must not call the host during receipt validation"
+    );
+
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("manifest-bound AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("manifest-bound bytecode execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "8\n9\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        vm.run_value().expect("manifest-bound bytecode reentry"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "8\n9\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_801_route_replay");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("manifest-bound native emission");
+    native
+        .module
+        .verify()
+        .expect("valid manifest-bound native module");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verifier = crate::verifier::verify_mir_with_route_manifest(&mir, &manifest, source_hash)
+        .expect("manifest-bound general verifier");
+    assert!(
+        !verifier.is_empty(),
+        "contract-bound route must produce proof artifacts"
+    );
+    assert!(verifier.iter().all(|result| result
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| { artifact.mir_route_receipt.as_ref() == Some(&receipt) })));
+
+    let forged_manifest = manifest.replacen(&receipt.ffi_digest, &"0".repeat(64), 1);
+    let forged = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&forged_manifest)
+        .expect("forged digest remains structurally parseable");
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&forged);
+    let reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("forged manifest must fail before reference host binding");
+    assert!(reference_error.to_string().contains("ffi_digest"));
+    assert_eq!(forged_reference.captured_output(), "");
+    assert_eq!(
+        oracle.calls.get(),
+        4,
+        "forged route must not reach the host"
+    );
+    let bytecode_error = compile_mir_program_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("bytecode must reject the forged manifest before runtime");
+    assert!(bytecode_error
+        .iter()
+        .any(|error| error.message.contains("ffi_digest")));
+    let forged_context = inkwell::context::Context::create();
+    let mut forged_native = crate::codegen::CodeGenerator::new(&forged_context, "r6_801_forged");
+    let native_error = forged_native
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("native must reject the forged manifest before emission");
+    assert!(native_error
+        .iter()
+        .any(|error| error.message.contains("ffi_digest")));
+    let verifier_error = crate::verifier::verify_mir_with_route_manifest(
+        &mir,
+        &forged_manifest,
+        "r6-801-forged-source".into(),
+    )
+    .expect_err("verifier must reject the forged manifest before proof");
+    assert!(verifier_error.contains("ffi_digest"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
