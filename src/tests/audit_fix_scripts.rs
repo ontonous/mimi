@@ -948,6 +948,89 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_concurrency_stable() 
 }
 
 #[test]
+fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_multi_batch_stable() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-marker-batches");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create batch marker temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into batch marker temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into batch marker temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "expected_closed_scalar_marker_sequence=(",
+        "emit_closed_scalar_marker 'closed_scalar_forged_marker=1'\n\nexpected_closed_scalar_marker_sequence=(",
+        1,
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write batch marker audit script");
+
+    let run_batch = |reverse: bool| {
+        let width = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(width + 1));
+        std::thread::scope(|scope| {
+            let order: Vec<usize> = if reverse {
+                (0..width).rev().collect()
+            } else {
+                (0..width).collect()
+            };
+            let handles = order
+                .into_iter()
+                .map(|_| {
+                    let script_path = script_path.clone();
+                    let temp_root = temp_root.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        std::process::Command::new("bash")
+                            .arg(&script_path)
+                            .current_dir(&temp_root)
+                            .output()
+                            .expect("run batch marker audit")
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("batch marker audit thread panicked"))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let batches = [run_batch(false), run_batch(true), run_batch(false)];
+    let first = &batches[0][0];
+    assert!(!first.status.success(), "injected marker must fail closed");
+    assert!(
+        String::from_utf8_lossy(&first.stderr)
+            .contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift"),
+        "batch failure omitted sequence diagnostic:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    for (batch_index, batch) in batches.iter().enumerate() {
+        for (run_index, run) in batch.iter().enumerate() {
+            assert_eq!(
+                run.status.code(),
+                first.status.code(),
+                "batch {batch_index} run {run_index} failure exit code drifted"
+            );
+            assert_eq!(
+                run.stdout, first.stdout,
+                "batch {batch_index} run {run_index} failure stdout snapshot drifted"
+            );
+            assert_eq!(
+                run.stderr, first.stderr,
+                "batch {batch_index} run {run_index} failure stderr snapshot drifted"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&temp_root).expect("remove batch marker temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
