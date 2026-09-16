@@ -41,6 +41,23 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{sequence}", std::process::id()))
 }
 
+fn assert_no_legacy_owner_temp_roots(prefix: &str) {
+    let entries = std::fs::read_dir(std::env::temp_dir())
+        .expect("scan temporary directory for owner audit residues");
+    let residues = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix).then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        residues.is_empty(),
+        "owner audit temp root residues found for {prefix}: {residues:?}"
+    );
+}
+
 struct LegacyOwnerAuditTempRootCleanup(std::path::PathBuf);
 
 impl Drop for LegacyOwnerAuditTempRootCleanup {
@@ -531,6 +548,19 @@ fn legacy_owner_audit_temp_root_cleanup_runs_on_scope_exit() {
         !path.exists(),
         "owner audit temp root must be removed when the guard leaves scope"
     );
+}
+
+#[test]
+fn legacy_owner_audit_temp_root_prefix_scan_is_clean_after_probe() {
+    let prefix = format!("mimi-legacy-owner-scan-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let path = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-scan");
+    std::fs::create_dir_all(&path).expect("create prefix scan probe root");
+    {
+        let _cleanup = LegacyOwnerAuditTempRootCleanup(path.clone());
+        assert!(path.is_dir(), "prefix scan probe root must exist in scope");
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
 }
 
 #[test]
