@@ -330,6 +330,24 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         .current_dir(&temp_root)
         .output()
         .expect("run tampered legacy owner audit");
+    let repeated = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("repeat tampered legacy owner audit");
+    assert_eq!(
+        output.status.code(),
+        repeated.status.code(),
+        "tampered owner evidence exit code drifted across repeats"
+    );
+    assert_eq!(
+        output.stdout, repeated.stdout,
+        "tampered owner evidence stdout drifted across repeats"
+    );
+    assert_eq!(
+        output.stderr, repeated.stderr,
+        "tampered owner evidence stderr drifted across repeats"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
@@ -374,6 +392,24 @@ fn legacy_owner_condition_digest_drift_fails_closed() {
         .current_dir(&temp_root)
         .output()
         .expect("run tampered digest audit script");
+    let repeated = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("repeat tampered digest audit script");
+    assert_eq!(
+        output.status.code(),
+        repeated.status.code(),
+        "tampered condition digest exit code drifted across repeats"
+    );
+    assert_eq!(
+        output.stdout, repeated.stdout,
+        "tampered condition digest stdout drifted across repeats"
+    );
+    assert_eq!(
+        output.stderr, repeated.stderr,
+        "tampered condition digest stderr drifted across repeats"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
