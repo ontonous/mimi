@@ -21564,9 +21564,16 @@ func main() -> i64 { mir_route_diagnostic(7 as i64) }
 
 #[test]
 fn scalar_ffi_cross_profile_receipts_share_cache_identity_but_preserve_source_provenance() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_cross_profile(int64_t value) { return value + 1; }
+"#;
     const SOURCE: &str = r#"
 extern "C" { func mir_cross_profile(value: i64) -> i64 ensures: result == value + 1; }
-func main() -> i64 { mir_cross_profile(7 as i64) }
+func main() -> i64 {
+    println(mir_cross_profile(7 as i64))
+    0
+}
 "#;
     let checked = crate::core::check_program(&super::parse(SOURCE))
         .expect("cross-profile route fixture check");
@@ -21657,9 +21664,36 @@ func main() -> i64 { mir_cross_profile(7 as i64) }
     let bytecode_manifest = bytecode_receipt
         .manifest_text()
         .expect("cross-profile bytecode manifest");
-    let bytecode = compile_mir_program_with_route_manifest(&mir, &bytecode_manifest)
-        .expect("bytecode must accept its own profile receipt");
-    assert!(bytecode.ast.is_none());
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode_a = compile_mir_program_with_route_manifest(&mir, &verifier_manifest)
+        .expect("bytecode must accept verifier profile receipt");
+    let bytecode_b = compile_mir_program_with_route_manifest(&mir, &bytecode_manifest)
+        .expect("bytecode must accept bytecode profile receipt");
+    assert!(bytecode_a.ast.is_none());
+    assert!(bytecode_b.ast.is_none());
+    assert_eq!(bytecode_a.canonical_ffi, bytecode_b.canonical_ffi);
+    assert_eq!(
+        bytecode_a.canonical_ffi_bindings, bytecode_b.canonical_ffi_bindings,
+        "route profile must not alter bytecode FFI binding identity"
+    );
+    let mut vm_a = BytecodeVM::new(bytecode_a);
+    assert_eq!(
+        vm_a.run_value().expect("bytecode profile A run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_a.stdout(), "8\n");
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
+    let mut vm_b = BytecodeVM::new(bytecode_b);
+    assert_eq!(
+        vm_b.run_value().expect("bytecode profile B run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_b.stdout(), "8\n");
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
     let context = inkwell::context::Context::create();
     let mut native = crate::codegen::CodeGenerator::new(&context, "r6_803_cross_profile");
     native
