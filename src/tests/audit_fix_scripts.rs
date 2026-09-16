@@ -63,6 +63,53 @@ fn script_syntax_mms_consistency_sh() {
 }
 
 #[test]
+fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&path)
+            .current_dir(&root)
+            .output()
+            .expect("legacy owner audit must execute")
+    };
+    let first = run();
+    let second = run();
+    for output in [&first, &second] {
+        assert!(
+            output.status.success(),
+            "legacy owner audit failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let fingerprints = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains("owner_deletion_condition_digest=")
+                    || line.starts_with("owner_deletion_condition_set_digest=")
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let first_fingerprints = fingerprints(&first);
+    assert_eq!(
+        first_fingerprints.len(),
+        5,
+        "legacy owner audit must expose four owner digests and one set digest"
+    );
+    assert_eq!(
+        first_fingerprints,
+        fingerprints(&second),
+        "legacy owner condition fingerprints changed across repeated audits"
+    );
+    assert!(
+        String::from_utf8_lossy(&first.stdout).contains("audit_status=ok"),
+        "legacy owner audit omitted its success marker"
+    );
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
