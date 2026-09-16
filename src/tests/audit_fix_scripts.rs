@@ -301,6 +301,49 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
 }
 
 #[test]
+fn legacy_owner_evidence_marker_drift_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = std::env::temp_dir().join(format!(
+        "mimi-legacy-owner-audit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create audit temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into audit temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into audit temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "LegacyBodyConsumer::CodegenLegacyRemainder",
+        "LegacyBodyConsumer::MissingMarker",
+        1,
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write tampered audit script");
+    let output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered legacy owner audit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "tampered owner evidence must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("evidence_test_missing_marker=compile_checked_tags_unmigrated_generic_body_with_legacy_owner"),
+        "tampered owner evidence omitted marker failure:\n{stderr}"
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove audit temp root");
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
