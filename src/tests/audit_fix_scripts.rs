@@ -878,6 +878,76 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_repeatable() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_concurrency_stable() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-marker-concurrent");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create concurrent marker temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into concurrent marker temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into concurrent marker temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "expected_closed_scalar_marker_sequence=(",
+        "emit_closed_scalar_marker 'closed_scalar_forged_marker=1'\n\nexpected_closed_scalar_marker_sequence=(",
+        1,
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write concurrent marker audit script");
+
+    let runs = std::thread::scope(|scope| {
+        let handles = (0..8)
+            .map(|_| {
+                let script_path = script_path.clone();
+                let temp_root = temp_root.clone();
+                scope.spawn(move || {
+                    std::process::Command::new("bash")
+                        .arg(&script_path)
+                        .current_dir(&temp_root)
+                        .output()
+                        .expect("run concurrent marker audit")
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("concurrent marker audit thread panicked")
+            })
+            .collect::<Vec<_>>()
+    });
+    let first = &runs[0];
+    assert!(!first.status.success(), "injected marker must fail closed");
+    assert!(
+        String::from_utf8_lossy(&first.stderr)
+            .contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift"),
+        "failure snapshot omitted sequence diagnostic:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    for (index, run) in runs.iter().enumerate().skip(1) {
+        assert_eq!(
+            run.status.code(),
+            first.status.code(),
+            "concurrent run {index} failure exit code drifted"
+        );
+        assert_eq!(
+            run.stdout, first.stdout,
+            "concurrent run {index} failure stdout snapshot drifted"
+        );
+        assert_eq!(
+            run.stderr, first.stderr,
+            "concurrent run {index} failure stderr snapshot drifted"
+        );
+    }
+    std::fs::remove_dir_all(&temp_root).expect("remove concurrent marker temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
