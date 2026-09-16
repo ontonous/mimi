@@ -3771,6 +3771,62 @@ func main() -> i64 {
         "{verifier_error}"
     );
 
+    // A non-Unit result identity is inseparable from its checker-owned
+    // conversion receipt.  Dropping only the conversion must fail at the
+    // receipt boundary in every direct consumer, before the leading println
+    // or any dynamic-library lookup can occur.
+    let mut missing_conversion_receipts = mir.ffi_calls().clone();
+    missing_conversion_receipts
+        .get_mut(&instruction_id)
+        .expect("missing-conversion receipt")
+        .result_conversion = None;
+    let mut missing_conversion_mir = mir.clone();
+    missing_conversion_mir.replace_ffi_calls_for_test_only(missing_conversion_receipts);
+
+    let missing_reference = MirReferenceInterpreter::new(&missing_conversion_mir);
+    let missing_reference_error = missing_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a result identity without conversion receipt");
+    assert!(missing_reference_error
+        .to_string()
+        .contains("result ABI conversion receipt disagrees"));
+    assert_eq!(missing_reference.captured_output(), "");
+
+    let missing_bytecode_error = compile_mir_program(&missing_conversion_mir)
+        .expect_err("bytecode adapter must reject a result identity without conversion receipt");
+    assert!(missing_bytecode_error.iter().any(|error| {
+        error
+            .message
+            .contains("result ABI conversion receipt disagrees")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let missing_native_error = crate::codegen::mir::validate_mir_native(&missing_conversion_mir)
+        .expect_err("native admission must reject a result identity without conversion receipt");
+    assert!(missing_native_error.iter().any(|error| {
+        error
+            .message
+            .contains("result ABI conversion receipt disagrees")
+            || error.message.contains("conversion receipt")
+    }));
+
+    let missing_capability_error =
+        crate::verifier::validate_mir_capabilities(&missing_conversion_mir)
+            .expect_err("capability gate must reject a result identity without conversion receipt");
+    assert!(missing_capability_error.iter().any(|error| {
+        error.contains("result ABI conversion receipt disagrees")
+            || error.contains("conversion receipt")
+    }));
+
+    let missing_verifier_error =
+        crate::verifier::verify_mir(&missing_conversion_mir, "missing-result-conversion".into())
+            .expect_err("verifier must reject a result identity without conversion receipt");
+    assert!(
+        missing_verifier_error.contains("result ABI conversion receipt disagrees")
+            || missing_verifier_error.contains("conversion receipt"),
+        "{missing_verifier_error}"
+    );
+
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let fixture = library_fixture(counter, REBINDABLE_SYMBOL_A_C_SOURCE);
