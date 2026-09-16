@@ -451,6 +451,73 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
 }
 
 #[test]
+fn legacy_owner_scalar_zero_owner_evidence_missing_or_forged_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-scalar-evidence");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create scalar audit temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into scalar audit temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into scalar audit temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replace(
+        "\"$ROOT_DIR/src/tests/canonical_scalar_ffi.rs\"",
+        "\"$ROOT_DIR/fake_scalar_ffi.rs\"",
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write scalar audit script fixture");
+    let scalar_fixture = temp_root.join("fake_scalar_ffi.rs");
+    std::fs::write(
+        &scalar_fixture,
+        "fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {\n}\n#[test]\n",
+    )
+    .expect("write scalar fixture without zero-owner assertion");
+    let missing = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run missing scalar assertion audit");
+    assert!(
+        !missing.status.success(),
+        "missing scalar zero-owner assertion must fail closed:\n{}",
+        String::from_utf8_lossy(&missing.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains(
+            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion"
+        ),
+        "missing scalar assertion omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    std::fs::write(
+        &scalar_fixture,
+        "fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {\n}\n#[test]\nfn forged_marker_outside_scalar_test() { assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty()); }\n",
+    )
+    .expect("write scalar fixture with forged outside marker");
+    let forged = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run forged scalar assertion audit");
+    assert!(
+        !forged.status.success(),
+        "forged marker outside scalar test must fail closed:\n{}",
+        String::from_utf8_lossy(&forged.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&forged.stderr).contains(
+            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion"
+        ),
+        "forged outside marker omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&forged.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove scalar audit temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
