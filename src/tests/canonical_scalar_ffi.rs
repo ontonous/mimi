@@ -21375,6 +21375,194 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_route_diagnostic(value: i64) -> i64 ensures: result == value + 1; }
+func main() -> i64 { mir_route_diagnostic(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("route API diagnostic fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("route API diagnostic fixture materialization");
+    let receipt = mir.route_receipt("r6-802-route-diagnostic-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("route API diagnostic fixture rendering");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let project_results = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .map(|result| {
+                let diagnostic = result.diagnostic.as_ref().map(|diagnostic| {
+                    (
+                        diagnostic.message.clone(),
+                        diagnostic.span,
+                        diagnostic.severity,
+                        diagnostic.code.clone(),
+                        diagnostic
+                            .notes
+                            .iter()
+                            .map(|note| (note.message.clone(), note.span))
+                            .collect::<Vec<_>>(),
+                        diagnostic.help.clone(),
+                        diagnostic.origin.clone(),
+                    )
+                });
+                let artifact = result.artifact.as_ref().map(|artifact| {
+                    (
+                        artifact.semantics_version,
+                        artifact.integer_model.clone(),
+                        artifact.float_model.clone(),
+                        artifact.solver_version.clone(),
+                        artifact.source_hash.clone(),
+                        artifact.resolved_ir_hash.clone(),
+                        artifact.mir_hash.clone(),
+                        artifact.mir_route_receipt.clone(),
+                        artifact.vir_hash.clone(),
+                        artifact.engine.clone(),
+                    )
+                });
+                (
+                    result.func_name.clone(),
+                    result.status.clone(),
+                    result.message.clone(),
+                    diagnostic,
+                    result.constraint_count,
+                    artifact,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first =
+        crate::verifier::verify_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("first general route verification");
+    let second =
+        crate::verifier::verify_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("second general route verification");
+    assert_eq!(project_results(&first), project_results(&second));
+    assert!(first.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.source_hash == source_hash
+                && artifact.mir_hash == receipt.mir_digest
+                && artifact.mir_route_receipt.as_ref() == Some(&receipt)
+        })
+    }));
+
+    let ffi_first =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("first FFI route verification");
+    let ffi_second =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("second FFI route verification");
+    assert_eq!(project_results(&ffi_first), project_results(&ffi_second));
+    assert!(ffi_first.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.source_hash == source_hash
+                && artifact.mir_hash == receipt.mir_digest
+                && artifact.mir_route_receipt.as_ref() == Some(&receipt)
+        })
+    }));
+
+    let assert_route_diagnostic = |diagnostic: &crate::diagnostic::Diagnostic, code: &str| {
+        assert_eq!(diagnostic.code.as_deref(), Some(code));
+        let origin = diagnostic.origin.as_ref().expect("route diagnostic origin");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert!(origin.parent_node_id.is_none());
+    };
+
+    let malformed_manifest = format!("{manifest}future_field=reserved\n");
+    let bytecode_first = compile_mir_program_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("bytecode must reject malformed route manifest");
+    let bytecode_second = compile_mir_program_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("bytecode must repeat malformed route manifest rejection");
+    assert_eq!(bytecode_first, bytecode_second);
+    let bytecode_diagnostic = bytecode_first[0].to_diagnostic();
+    assert_route_diagnostic(
+        &bytecode_diagnostic,
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_802_route_diagnostic");
+    let native_first = native
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("native must reject malformed route manifest");
+    let native_message = native_first[0].to_string();
+    let native_diagnostic = &native_first[0];
+    assert_route_diagnostic(
+        native_diagnostic,
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+    let second_context = inkwell::context::Context::create();
+    let mut second_native =
+        crate::codegen::CodeGenerator::new(&second_context, "r6_802_route_diagnostic_repeat");
+    let native_second = second_native
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("native must repeat malformed route manifest rejection");
+    assert_eq!(native_message, native_second[0].to_string());
+    assert_route_diagnostic(
+        &native_second[0],
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+
+    let verifier_first = crate::verifier::verify_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("general verifier must reject malformed route manifest");
+    let verifier_second = crate::verifier::verify_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("general verifier must repeat malformed route manifest rejection");
+    assert_eq!(verifier_first, verifier_second);
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(verifier_first),
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+
+    let ffi_verifier_first = crate::verifier::verify_ffi_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("FFI verifier must reject malformed route manifest");
+    let ffi_verifier_second =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &malformed_manifest, source_hash)
+            .expect_err("FFI verifier must repeat malformed route manifest rejection");
+    assert_eq!(ffi_verifier_first, ffi_verifier_second);
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(ffi_verifier_first),
+        crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+    );
+
+    let mut forged = receipt.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let reference = MirReferenceInterpreter::new(&mir).with_route_receipt(&forged);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject forged route receipt");
+    assert_eq!(
+        reference_error.diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert_route_diagnostic(
+        &reference_error.to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert!(reference.captured_output().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
