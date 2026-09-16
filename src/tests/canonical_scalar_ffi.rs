@@ -21805,6 +21805,78 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_manifest_native_failure_recovers_on_relink() {
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_manifest_native_recover(int64_t value) { return value + 1; }
+"#;
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_manifest_native_recover(int64_t value) { return value + 2; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_manifest_native_recover(value: i64) -> i64 ensures: result == value + 1; }
+func main() -> i64 {
+    println(1 as i64)
+    println(mir_manifest_native_recover(7 as i64))
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("native route manifest recovery fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("native route manifest recovery fixture materialization");
+    let receipt = mir.route_receipt("r6-806-native-recovery-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("native route manifest recovery fixture rendering");
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "r6_806_native_recovery");
+    generator
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("native route manifest recovery lowering");
+    generator
+        .module
+        .verify()
+        .expect("native route manifest recovery LLVM module");
+
+    let bad_counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let bad = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let bad_observation = super::link_and_observe_module(&generator, &bad, bad_counter)
+        .expect("bad native route manifest link");
+    assert_ne!(bad_observation.exit_code, Some(0));
+    assert_eq!(bad_observation.stdout, "1\n");
+    assert!(
+        bad_observation.stderr.contains("E0808"),
+        "{}",
+        bad_observation.stderr
+    );
+
+    let good_counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let good = super::E2EConfig {
+        extra_c_src: Some(GOOD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let good_observation = super::link_and_observe_module(&generator, &good, good_counter)
+        .expect("good native route manifest relink");
+    assert_eq!(good_observation.exit_code, Some(0));
+    assert_eq!(good_observation.stdout, "1\n8\n");
+    assert!(good_observation.stderr.is_empty());
+
+    let repeat_bad_counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let repeat_bad = super::link_and_observe_module(&generator, &bad, repeat_bad_counter)
+        .expect("repeated bad native route manifest link");
+    assert_eq!(repeat_bad.exit_code, bad_observation.exit_code);
+    assert_eq!(repeat_bad.stdout, bad_observation.stdout);
+    assert_eq!(repeat_bad.stderr, bad_observation.stderr);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
