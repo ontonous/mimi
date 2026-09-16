@@ -1040,6 +1040,44 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_runtime_rejects_supported_conversion_endpoint_drift_before_loading() {
+        use crate::core::mir::types::MirAbiClass;
+
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut argument_call = descriptor("labs", CanonicalFfiScalarType::I64);
+        argument_call.parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        };
+        let argument_error = runtime
+            .call(&argument_call, &[Value::Int(1)])
+            .expect_err("supported argument conversion with a forged declaration endpoint");
+        assert!(argument_error
+            .to_string()
+            .contains("conversion target Float { bits: 64 } disagrees with declaration ABI"));
+        assert!(runtime.loaded_libs.is_empty());
+
+        let mut result_call = descriptor("labs", CanonicalFfiScalarType::I64);
+        result_call.result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Float { bits: 64 },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        });
+        let result_error = runtime
+            .call(&result_call, &[Value::Int(1)])
+            .expect_err("supported result conversion with a forged declaration endpoint");
+        assert!(result_error
+            .to_string()
+            .contains("result conversion source disagrees with declaration ABI"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
     fn scalar_ffi_runtime_rejects_result_identity_alias_before_loading() {
         let mut runtime = CanonicalMirFfiRuntime::new();
         let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
