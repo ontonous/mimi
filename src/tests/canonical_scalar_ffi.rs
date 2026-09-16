@@ -18634,6 +18634,49 @@ func main() -> i64 {
     assert_eq!(reference_result.value, MirRuntimeValue::Int(42));
     assert_eq!(reference_result.output, "7\n");
 
+    struct ReentrantRangeOracle {
+        calls: std::cell::Cell<usize>,
+    }
+    impl MirReferenceFfiResolver for ReentrantRangeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_mixed_range_reentry"
+                || arguments != [MirRuntimeValue::Int(20), MirRuntimeValue::Int(22)]
+            {
+                return Err(format!(
+                    "unexpected same-interpreter recovery call: {arguments:?}"
+                ));
+            }
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == 0 {
+                Ok(MirRuntimeValue::Int(i64::from(i32::MAX) + 1))
+            } else {
+                Ok(MirRuntimeValue::Int(42))
+            }
+        }
+    }
+    let reentrant_oracle = ReentrantRangeOracle {
+        calls: std::cell::Cell::new(0),
+    };
+    let reentrant_reference =
+        MirReferenceInterpreter::new(&mir).with_ffi_resolver(&reentrant_oracle);
+    let reentrant_error = reentrant_reference
+        .execute(&owner, &[])
+        .expect_err("same reference interpreter must reject the first range failure");
+    assert!(reentrant_error.to_string().contains("outside i32"));
+    assert_eq!(reentrant_reference.captured_output(), "7\n");
+    let reentrant_result = reentrant_reference
+        .execute_with_output(&owner, &[])
+        .expect("same reference interpreter must recover after the range failure");
+    assert_eq!(reentrant_result.value, MirRuntimeValue::Int(42));
+    assert_eq!(reentrant_result.output, "7\n");
+    assert_eq!(reentrant_reference.captured_output(), "7\n");
+    assert_eq!(reentrant_oracle.calls.get(), 2);
+
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range-reentry".into())
         .expect("verify mixed-width range reentry MIR");
