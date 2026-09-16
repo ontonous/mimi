@@ -814,6 +814,55 @@ fn legacy_owner_audit_cleanup_race_classifies_type_change_and_missing_path() {
 }
 
 #[test]
+fn legacy_owner_audit_cleanup_concurrent_errors_and_missing_paths_are_stable() {
+    let prefix = format!("mimi-legacy-owner-concurrent-race-{}", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let file = unique_legacy_owner_audit_temp_root(&prefix);
+    std::fs::write(&file, b"concurrent file residue").expect("create concurrent file residue");
+    let file_workers = (0..8)
+        .map(|_| {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                LegacyOwnerAuditTempRootCleanup::cleanup_path(&file)
+                    .expect_err("regular-file cleanup must fail for every concurrent worker")
+            })
+        })
+        .collect::<Vec<_>>();
+    let file_errors = file_workers
+        .into_iter()
+        .map(|worker| worker.join().expect("file cleanup worker must finish"))
+        .collect::<Vec<_>>();
+    assert!(!file_errors.is_empty());
+    assert!(
+        file_errors
+            .iter()
+            .all(|error| error == &file_errors[0] && error.contains(&file.display().to_string())),
+        "concurrent type errors must be stable and path-specific: {file_errors:?}"
+    );
+    assert!(
+        file.is_file(),
+        "concurrent failed cleanup must preserve the file"
+    );
+    std::fs::remove_file(&file).expect("remove concurrent file residue");
+
+    let directory = unique_legacy_owner_audit_temp_root(&prefix);
+    std::fs::create_dir(&directory).expect("create concurrent directory residue");
+    let directory_workers = (0..8)
+        .map(|_| {
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                LegacyOwnerAuditTempRootCleanup::cleanup_path(&directory)
+                    .expect("missing directory after a concurrent delete is idempotent")
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in directory_workers {
+        worker.join().expect("directory cleanup worker must finish");
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
