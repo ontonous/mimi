@@ -22567,6 +22567,108 @@ int64_t mir_route_interleaved(int64_t value) { return value + 1; }
 }
 
 #[test]
+fn scalar_ffi_ffi_verifier_cross_profile_replay_preserves_artifact_identity() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_profile_replay(value: i64) -> i64 requires: value >= 0 ensures: result == value + 1; }
+func main() -> i64 {
+    println(mir_ffi_profile_replay(7 as i64))
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("FFI verifier profile fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("FFI verifier profile fixture materialization");
+    let profile_a = mir.route_receipt("r6-813-ffi-verifier-a-v1");
+    let profile_b = mir.route_receipt("r6-813-ffi-verifier-b-v1");
+    let source_a = "r6-813-source-a".to_string();
+    let source_b = "r6-813-source-b".to_string();
+
+    let artifact = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .find_map(|result| result.artifact.clone())
+            .expect("FFI verifier must produce a proof artifact")
+    };
+    let first =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_a, source_a.clone())
+            .expect("FFI verifier profile A");
+    let second =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_b, source_a.clone())
+            .expect("FFI verifier profile B");
+    let changed_source =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_b, source_b.clone())
+            .expect("FFI verifier profile B with changed source");
+    let artifact_a = artifact(&first);
+    let artifact_b = artifact(&second);
+    let artifact_changed_source = artifact(&changed_source);
+
+    assert_eq!(
+        artifact_a.engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
+    assert_eq!(
+        artifact_b.engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
+    assert_eq!(
+        artifact_changed_source.engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
+    assert_eq!(artifact_a.source_hash, source_a);
+    assert_eq!(artifact_b.source_hash, source_a);
+    assert_eq!(artifact_changed_source.source_hash, source_b);
+    assert_eq!(artifact_a.mir_hash, profile_a.mir_digest);
+    assert_eq!(artifact_b.mir_hash, profile_b.mir_digest);
+    assert_eq!(artifact_a.cache_key(), artifact_b.cache_key());
+    assert!(artifact_a.is_compatible(&artifact_b));
+    assert_eq!(artifact_b.cache_key(), artifact_changed_source.cache_key());
+    assert!(!artifact_b.is_compatible(&artifact_changed_source));
+    assert_eq!(
+        artifact_a
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_a.profile.as_str())
+    );
+    assert_eq!(
+        artifact_b
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_b.profile.as_str())
+    );
+    assert_eq!(
+        artifact_changed_source
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_b.profile.as_str())
+    );
+
+    let mut forged = profile_b.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let forged_error =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &forged, source_a.clone())
+            .expect_err("FFI verifier must reject the forged route after valid replays");
+    assert!(forged_error.contains("ffi_digest"));
+    assert!(forged_error.starts_with(crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE));
+    let recovered = crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_a, source_a)
+        .expect("FFI verifier must recover with the original profile after rejection");
+    let recovered_artifact = artifact(&recovered);
+    assert_eq!(recovered_artifact.cache_key(), artifact_a.cache_key());
+    assert_eq!(
+        recovered_artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_a.profile.as_str())
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
