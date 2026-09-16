@@ -261,6 +261,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_zero_owner_evidence=",
         "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()",
         "closed_scalar_cli_evidence=",
+        "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]",
         "production_legacy_body_file_call_sites=4",
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=8",

@@ -106,6 +106,17 @@ if ! rg -q '^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis
     audit_failed=1
 else
     printf 'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts\n'
+    if ! sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" \
+        "$ROOT_DIR/tests/real_world_cli.rs" | rg 'for contracts in \[true, false\]' >/dev/null; then
+        printf 'owner_audit_error=closed_scalar_cli_evidence_missing_contract_matrix\n' >&2
+        audit_failed=1
+    elif ! sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" \
+        "$ROOT_DIR/tests/real_world_cli.rs" | rg 'for explicit_mir in \[false, true\]' >/dev/null; then
+        printf 'owner_audit_error=closed_scalar_cli_evidence_missing_mir_matrix\n' >&2
+        audit_failed=1
+    else
+        printf 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]\n'
+    fi
 fi
 
 owner_count=0
