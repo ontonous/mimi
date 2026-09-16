@@ -826,6 +826,58 @@ fn legacy_owner_scalar_marker_sequence_missing_duplicate_or_reordered_fails_clos
 }
 
 #[test]
+fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_repeatable() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-marker-snapshot");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create marker snapshot temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into marker snapshot temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into marker snapshot temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "expected_closed_scalar_marker_sequence=(",
+        "emit_closed_scalar_marker 'closed_scalar_forged_marker=1'\n\nexpected_closed_scalar_marker_sequence=(",
+        1,
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write snapshot audit script");
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&temp_root)
+            .output()
+            .expect("run snapshot audit")
+    };
+    let first = run();
+    let second = run();
+    assert_eq!(
+        first.status.code(),
+        second.status.code(),
+        "failure exit code drifted"
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "failure stdout snapshot drifted"
+    );
+    assert_eq!(
+        first.stderr, second.stderr,
+        "failure stderr snapshot drifted"
+    );
+    assert!(!first.status.success(), "injected marker must fail closed");
+    assert!(
+        String::from_utf8_lossy(&first.stderr)
+            .contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift"),
+        "failure snapshot omitted sequence diagnostic:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove marker snapshot temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
