@@ -1031,6 +1031,121 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_multi_batch_stable() 
 }
 
 #[test]
+fn legacy_owner_scalar_marker_mixed_success_failure_batches_are_isolated() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-marker-mixed");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create mixed marker temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into mixed marker temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into mixed marker temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "expected_closed_scalar_marker_sequence=(",
+        "emit_closed_scalar_marker 'closed_scalar_forged_marker=1'\n\nexpected_closed_scalar_marker_sequence=(",
+        1,
+    );
+    let valid_path = temp_root.join("scripts/audit-valid.sh");
+    let tampered_path = temp_root.join("scripts/audit-tampered.sh");
+    std::fs::write(&valid_path, &source_script).expect("write valid mixed audit script");
+    std::fs::write(&tampered_path, tampered_script).expect("write tampered mixed audit script");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+    let runs = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for expected_success in [true, false, true, false, true, false, true, false] {
+            let script_path = if expected_success {
+                valid_path.clone()
+            } else {
+                tampered_path.clone()
+            };
+            let temp_root = temp_root.clone();
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                let output = std::process::Command::new("bash")
+                    .arg(&script_path)
+                    .current_dir(&temp_root)
+                    .output()
+                    .expect("run mixed owner audit");
+                (expected_success, output)
+            }));
+        }
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("mixed owner audit thread panicked"))
+            .collect::<Vec<_>>()
+    });
+
+    let success_runs = runs
+        .iter()
+        .filter(|(expected_success, _)| *expected_success)
+        .collect::<Vec<_>>();
+    let failure_runs = runs
+        .iter()
+        .filter(|(expected_success, _)| !*expected_success)
+        .collect::<Vec<_>>();
+    assert_eq!(success_runs.len(), 4, "mixed batch lost successful runs");
+    assert_eq!(failure_runs.len(), 4, "mixed batch lost failure runs");
+    let successful_output = &success_runs[0].1;
+    assert!(
+        successful_output.status.success(),
+        "valid owner audit unexpectedly failed:\n{}",
+        String::from_utf8_lossy(&successful_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&successful_output.stdout)
+            .contains("scalar_evidence_marker_sequence_status=ok"),
+        "valid owner audit omitted marker success status"
+    );
+    for (index, (_, output)) in success_runs.iter().enumerate().skip(1) {
+        assert_eq!(
+            output.status.code(),
+            successful_output.status.code(),
+            "successful mixed run {index} exit code drifted"
+        );
+        assert_eq!(
+            output.stdout, successful_output.stdout,
+            "successful mixed run {index} stdout drifted"
+        );
+        assert_eq!(
+            output.stderr, successful_output.stderr,
+            "successful mixed run {index} stderr drifted"
+        );
+    }
+    let failed_output = &failure_runs[0].1;
+    assert!(
+        !failed_output.status.success(),
+        "tampered owner audit must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_output.stderr)
+            .contains("owner_audit_error=closed_scalar_evidence_marker_sequence_drift"),
+        "tampered owner audit omitted sequence drift diagnostic"
+    );
+    for (index, (_, output)) in failure_runs.iter().enumerate().skip(1) {
+        assert_eq!(
+            output.status.code(),
+            failed_output.status.code(),
+            "failed mixed run {index} exit code drifted"
+        );
+        assert_eq!(
+            output.stdout, failed_output.stdout,
+            "failed mixed run {index} stdout drifted"
+        );
+        assert_eq!(
+            output.stderr, failed_output.stderr,
+            "failed mixed run {index} stderr drifted"
+        );
+    }
+    std::fs::remove_dir_all(&temp_root).expect("remove mixed marker temp root");
+    drop(cleanup);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
