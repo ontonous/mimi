@@ -1441,6 +1441,57 @@ fn legacy_owner_scalar_marker_concurrent_cleanup_failure_snapshot_recovers_in_or
 }
 
 #[test]
+fn legacy_owner_scalar_marker_recovery_batches_clear_stale_snapshots() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let prefix = format!(
+        "mimi-legacy-owner-marker-recovery-batch-{}-",
+        std::process::id()
+    );
+    assert_no_legacy_owner_temp_roots(&prefix);
+    for batch in 0..3 {
+        let root = unique_legacy_owner_audit_temp_root(&format!("{prefix}{batch}"));
+        let nested = root.join("nested").join("evidence");
+        std::fs::create_dir_all(&nested).expect("create recovery batch root");
+        std::fs::write(nested.join("snapshot"), b"recovery batch snapshot")
+            .expect("write recovery batch snapshot");
+        let mut permissions = std::fs::metadata(&root)
+            .expect("read recovery batch permissions")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&root, permissions).expect("make recovery batch root unreadable");
+
+        let error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&root)
+            .expect_err("unreadable recovery batch root must fail closed");
+        assert!(
+            error.contains(&root.display().to_string()),
+            "recovery batch error omitted root path"
+        );
+        let snapshots = (0..3)
+            .map(|_| legacy_owner_temp_root_residues(&prefix))
+            .collect::<Vec<_>>();
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot == &vec![root.clone()]),
+            "recovery batch {batch} snapshots drifted or retained stale roots: {snapshots:?}"
+        );
+
+        let mut permissions = std::fs::metadata(&root)
+            .expect("read blocked recovery batch permissions")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&root, permissions).expect("restore recovery batch permissions");
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&root)
+            .expect("recovery batch retry must succeed");
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&root)
+            .expect("recovery batch retry must be idempotent");
+        assert_no_legacy_owner_temp_roots(&prefix);
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
