@@ -26,6 +26,13 @@ readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=f760de7d0a7f11cb703995b906
 readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=ff30fc215553993cb653cab0746ce34c3b275936e8d699ac25856f8201d210f4
 readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=60261d5b3a6c63c9b0ed4604a72e49505f33501960061ba8e8f4540bbbd67e3f
 audit_failed=0
+closed_scalar_marker_sequence=()
+
+emit_closed_scalar_marker() {
+    local marker="$1"
+    closed_scalar_marker_sequence+=("$marker")
+    printf '%s\n' "$marker"
+}
 
 printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
 printf 'root=%s\n' "$ROOT_DIR"
@@ -90,13 +97,13 @@ if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_c
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
     audit_failed=1
 else
-    printf 'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\n'
+    emit_closed_scalar_marker 'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers'
     if ! sed -n "/^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers(/,/^[[:space:]]*#\[test\]/p" \
         "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs" | rg 'test_legacy_body_access\(\)\.is_empty\(\)' >/dev/null; then
         printf 'owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion\n' >&2
         audit_failed=1
     else
-        printf 'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()\n'
+        emit_closed_scalar_marker 'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()'
     fi
 fi
 
@@ -105,7 +112,7 @@ if ! rg -q '^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis
     printf 'owner_audit_error=missing_closed_scalar_cli_evidence\n' >&2
     audit_failed=1
 else
-    printf 'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts\n'
+    emit_closed_scalar_marker 'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts'
     if ! sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" \
         "$ROOT_DIR/tests/real_world_cli.rs" | rg 'for contracts in \[true, false\]' >/dev/null; then
         printf 'owner_audit_error=closed_scalar_cli_evidence_missing_contract_matrix\n' >&2
@@ -130,10 +137,24 @@ else
         if [ "$missing_abi" -ne 0 ]; then
             audit_failed=1
         else
-            printf 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]\n'
-            printf 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent\n'
+            emit_closed_scalar_marker 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
+            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
         fi
     fi
+fi
+
+expected_closed_scalar_marker_sequence=(
+    'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers'
+    'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()'
+    'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts'
+    'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
+    'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
+)
+if [ "${closed_scalar_marker_sequence[*]}" != "${expected_closed_scalar_marker_sequence[*]}" ]; then
+    printf 'owner_audit_error=closed_scalar_evidence_marker_sequence_drift\n' >&2
+    audit_failed=1
+else
+    printf 'scalar_evidence_marker_sequence_status=ok\n'
 fi
 
 owner_count=0
