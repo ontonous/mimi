@@ -1671,6 +1671,158 @@ fn legacy_owner_scalar_marker_interleaved_duplicate_recovery_is_stable() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_cross_batch_interleaving_keeps_failure_ownership() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let prefix_a = format!("mimi-legacy-owner-marker-cross-a-{}-", std::process::id());
+    let prefix_b = format!("mimi-legacy-owner-marker-cross-b-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix_a);
+    assert_no_legacy_owner_temp_roots(&prefix_b);
+    let create_roots = |prefix: &str| {
+        (0..2)
+            .map(|index| {
+                let root = unique_legacy_owner_audit_temp_root(&format!("{prefix}{index}"));
+                let nested = root.join("nested").join("evidence");
+                std::fs::create_dir_all(&nested).expect("create cross-batch root");
+                std::fs::write(nested.join("snapshot"), b"cross-batch snapshot")
+                    .expect("write cross-batch snapshot");
+                root
+            })
+            .collect::<Vec<_>>()
+    };
+    let roots_a = create_roots(&prefix_a);
+    let roots_b = create_roots(&prefix_b);
+    let blocked_a = roots_a[1].clone();
+    let blocked_b = roots_b[0].clone();
+    for root in [&blocked_a, &blocked_b] {
+        let mut permissions = std::fs::metadata(root)
+            .expect("read cross-batch permissions")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(root, permissions).expect("make cross-batch root unreadable");
+    }
+
+    let operations = [
+        ('a', 0),
+        ('b', 1),
+        ('a', 1),
+        ('b', 0),
+        ('b', 0),
+        ('a', 1),
+        ('b', 1),
+        ('a', 0),
+    ];
+    let run_batch = |operations: &[(char, usize)]| {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(operations.len() + 1));
+        std::thread::scope(|scope| {
+            let handles = operations
+                .iter()
+                .map(|(batch, index)| {
+                    let root = if *batch == 'a' {
+                        roots_a[*index].clone()
+                    } else {
+                        roots_b[*index].clone()
+                    };
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let result = LegacyOwnerAuditTempRootCleanup::cleanup_path(&root);
+                        (*batch, *index, root, result)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("cross-batch cleanup worker panicked"))
+                .collect::<Vec<_>>()
+        })
+    };
+    let first_results = run_batch(&operations);
+    let snapshot_a = legacy_owner_temp_root_residues(&prefix_a);
+    let snapshot_b = legacy_owner_temp_root_residues(&prefix_b);
+
+    for root in [&blocked_a, &blocked_b] {
+        let mut permissions = std::fs::metadata(root)
+            .expect("read blocked cross-batch permissions")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(root, permissions).expect("restore cross-batch permissions");
+    }
+    let second_results = run_batch(&operations);
+    let final_a = legacy_owner_temp_root_residues(&prefix_a);
+    let final_b = legacy_owner_temp_root_residues(&prefix_b);
+
+    let first_failures = first_results
+        .iter()
+        .filter(|(_, _, _, result)| result.is_err())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_failures.len(),
+        4,
+        "both blocked roots need two failures"
+    );
+    assert_eq!(
+        first_failures
+            .iter()
+            .filter(|(_, _, root, _)| root == &blocked_a)
+            .count(),
+        2,
+        "batch A failure ownership drifted"
+    );
+    assert_eq!(
+        first_failures
+            .iter()
+            .filter(|(_, _, root, _)| root == &blocked_b)
+            .count(),
+        2,
+        "batch B failure ownership drifted"
+    );
+    assert!(
+        first_failures.iter().all(|(_, _, root, result)| {
+            result
+                .as_ref()
+                .expect_err("failed cross-batch cleanup must carry an error")
+                .contains(&root.display().to_string())
+        }),
+        "cross-batch errors lost their own path"
+    );
+    assert!(
+        first_results
+            .iter()
+            .filter(|(_, _, root, _)| root != &blocked_a && root != &blocked_b)
+            .all(|(_, _, _, result)| result.is_ok()),
+        "accessible cross-batch roots must tolerate duplicate cleanup"
+    );
+    assert_eq!(
+        snapshot_a,
+        vec![blocked_a.clone()],
+        "batch A snapshot drifted"
+    );
+    assert_eq!(
+        snapshot_b,
+        vec![blocked_b.clone()],
+        "batch B snapshot drifted"
+    );
+    assert!(
+        second_results
+            .iter()
+            .all(|(_, _, _, result)| result.is_ok()),
+        "cross-batch recovery cleanup must be idempotent"
+    );
+    assert!(
+        final_a.is_empty(),
+        "batch A recovery left residues: {final_a:?}"
+    );
+    assert!(
+        final_b.is_empty(),
+        "batch B recovery left residues: {final_b:?}"
+    );
+    assert_no_legacy_owner_temp_roots(&prefix_a);
+    assert_no_legacy_owner_temp_roots(&prefix_b);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
