@@ -344,6 +344,56 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
 }
 
 #[test]
+fn legacy_owner_condition_digest_drift_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = std::env::temp_dir().join(format!(
+        "mimi-legacy-owner-digest-audit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create digest audit temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into digest audit temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into digest audit temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let expected_digest = "2568b029a170043114b68ea0d35f9061617cc969ea2f9c8b7288d3d7f4f5e40c";
+    let tampered_script = source_script.replacen(
+        expected_digest,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        1,
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write tampered digest audit script");
+    let output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered digest audit script");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "tampered condition digest must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains(
+            "owner_audit_error=CodegenLegacyRemainder owner_deletion_condition_digest expected=0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        "tampered condition digest omitted expected-value diagnostic:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("actual={expected_digest}")),
+        "tampered condition digest omitted actual-value diagnostic:\n{stderr}"
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove digest audit temp root");
+}
+
+#[test]
 fn script_syntax_gen_stdlib_docs_py() {
     // Fixed: output path had one `..` too many, writing stdlib_api.md into
     // the repo's PARENT directory instead of in-repo mimispecref/.
