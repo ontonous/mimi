@@ -4774,6 +4774,164 @@ pub func read() -> i64 { mir_ffi_receipt_read() }
 }
 
 #[test]
+fn canonical_mir_cli_verifier_provenance_matches_receipt_across_source_changes() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-verifier-provenance-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create verifier provenance fixture directory");
+    let source_path = dir.join("provenance.mimi");
+    let write_source = |argument: i64| {
+        fs::write(
+            &source_path,
+            format!(
+                "extern \"C\" {{ func mir_cli_provenance(value: i64) -> i64 requires: value >= 0 ensures: true; }}\nfunc main() -> i64 {{ println(mir_cli_provenance({argument} as i64)); 0 }}\n"
+            ),
+        )
+        .expect("write verifier provenance source");
+    };
+    let parse_provenance = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("canonical MIR verifier provenance: "))
+            .unwrap_or_else(|| panic!("verifier provenance line missing:\n{text}"));
+        line.strip_prefix("canonical MIR verifier provenance: ")
+            .expect("verifier provenance prefix")
+            .split_whitespace()
+            .map(|field| {
+                field
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("malformed verifier provenance field: {field}"))
+            })
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("verify")
+            .env("MIMI_VERBOSE", "1");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source_path)
+            .output()
+            .expect("spawn verifier provenance CLI")
+    };
+    let receipt = || {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["mir", "--all", "--receipt"])
+            .arg(&source_path)
+            .output()
+            .expect("spawn verifier provenance receipt CLI");
+        assert!(
+            output.status.success(),
+            "receipt CLI failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse_route_receipt_manifest(&output.stdout)
+    };
+    let assert_snapshot = |argument: i64| {
+        write_source(argument);
+        let source = fs::read_to_string(&source_path).expect("read verifier provenance source");
+        let expected_source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let checked = checked_route_receipt(&source_path);
+        let manifest = receipt();
+        for field in [
+            "mir_digest",
+            "type_desc_digest",
+            "abi_digest",
+            "ffi_digest",
+            "ownership_digest",
+            "flow_transition_digest",
+        ] {
+            assert_eq!(
+                manifest.get(field),
+                Some(match field {
+                    "mir_digest" => &checked.mir_digest,
+                    "type_desc_digest" => &checked.type_desc_digest,
+                    "abi_digest" => &checked.abi_digest,
+                    "ffi_digest" => &checked.ffi_digest,
+                    "ownership_digest" => &checked.ownership_digest,
+                    "flow_transition_digest" => &checked.flow_transition_digest,
+                    _ => unreachable!(),
+                }),
+                "direct checker route and CLI receipt drifted for {field}"
+            );
+        }
+        let default = verify(false);
+        let explicit = verify(true);
+        for (label, output) in [("default", &default), ("explicit MIR", &explicit)] {
+            assert!(
+                output.status.success(),
+                "{label} verifier failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr)
+                .contains("canonical route disposition: legacy"));
+        }
+        let default_provenance = parse_provenance(&default);
+        let explicit_provenance = parse_provenance(&explicit);
+        assert_eq!(
+            default_provenance, explicit_provenance,
+            "default and explicit MIR verifier provenance drifted"
+        );
+        assert_eq!(
+            default_provenance.get("profile").map(String::as_str),
+            Some("verify-canonical-v1")
+        );
+        for field in [
+            "mir_digest",
+            "type_desc_digest",
+            "abi_digest",
+            "ffi_digest",
+            "ownership_digest",
+            "flow_transition_digest",
+        ] {
+            assert_eq!(
+                default_provenance.get(field),
+                manifest.get(field),
+                "CLI verifier provenance drifted from `mir --receipt` for {field}"
+            );
+        }
+        assert_eq!(
+            default_provenance.get("source_hash").map(String::as_str),
+            Some(expected_source_hash.as_str()),
+            "CLI verifier provenance carried the wrong source snapshot"
+        );
+        default_provenance
+    };
+
+    let first = assert_snapshot(7);
+    let second = assert_snapshot(8);
+    assert_ne!(
+        first.get("source_hash"),
+        second.get("source_hash"),
+        "changing the source must change CLI source provenance"
+    );
+    assert_ne!(
+        first.get("mir_digest"),
+        second.get("mir_digest"),
+        "changing the call argument must change canonical MIR identity"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;

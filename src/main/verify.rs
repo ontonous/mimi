@@ -38,7 +38,7 @@ pub(crate) fn verify(
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = loader::parser_for_path(tokens, &path)?.parse_file()?;
 
-    let merged_file = if !file.imports.is_empty() {
+    let mut merged_file = if !file.imports.is_empty() {
         let base_dir = path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
@@ -49,6 +49,21 @@ pub(crate) fn verify(
     } else {
         file
     };
+
+    // Keep verifier route construction identical to `run`, `build`, and
+    // `mir` for programs that actually cross an extern boundary: the
+    // checker-owned prelude declarations are part of that shared source graph
+    // and are excluded only by the canonical MIR materializer.  Compatibility
+    // programs without extern declarations retain their historical verifier
+    // input, so prelude-only helper contracts do not turn a legacy request
+    // into a new inconclusive proof batch.
+    if merged_file
+        .items
+        .iter()
+        .any(|item| matches!(item, mimi::ast::Item::ExternBlock(_)))
+    {
+        loader::merge_prelude_into(&mut merged_file);
+    }
 
     // V-H8: typecheck before Z3 so ill-typed sources cannot produce
     // meaningless positive verification results.
@@ -100,6 +115,14 @@ pub(crate) fn verify(
         }
     };
 
+    // Keep the checker-owned route receipt available for the optional CLI
+    // provenance line below.  The verifier consumes the same receipt object;
+    // this is only a read-only view after verification, never a second route
+    // construction.
+    let canonical_receipt = canonical
+        .as_ref()
+        .map(|program| program.route_receipt("verify-canonical-v1"));
+
     let results = if let Some(canonical) = canonical {
         // The default route is selected only after the shared dispatcher has
         // preflighted every consumer.  The verifier still validates its own
@@ -127,6 +150,35 @@ pub(crate) fn verify(
         // when their verdict classes disagree.
         mimi::verifier::verify_checked_dual(&checked_program, source_hash)?
     };
+
+    // `verify` historically exposed only human verdict text, which made it
+    // impossible for a CLI caller to compare the proof artifact with a route
+    // receipt emitted by `mimi mir --receipt`.  Under the existing verbose
+    // opt-in, expose the immutable MIR/ABI/FFI identity and source provenance
+    // carried by the actual result artifact.  Do not synthesize a receipt or
+    // print anything for the compatibility verifier path.
+    if std::env::var_os("MIMI_VERBOSE").is_some() {
+        if let Some(receipt) = canonical_receipt.as_ref() {
+            if let Some(artifact) = results.iter().find_map(|result| {
+                result
+                    .artifact
+                    .as_ref()
+                    .filter(|artifact| artifact.engine == mimi::verifier::ProofArtifact::ENGINE_MIR)
+            }) {
+                eprintln!(
+                    "canonical MIR verifier provenance: profile={} mir_digest={} type_desc_digest={} abi_digest={} ffi_digest={} ownership_digest={} flow_transition_digest={} source_hash={}",
+                    receipt.profile,
+                    receipt.mir_digest,
+                    receipt.type_desc_digest,
+                    receipt.abi_digest,
+                    receipt.ffi_digest,
+                    receipt.ownership_digest,
+                    receipt.flow_transition_digest,
+                    artifact.source_hash,
+                );
+            }
+        }
+    }
 
     if results.is_empty() {
         println!("No contracts to verify in {}", path.display());
