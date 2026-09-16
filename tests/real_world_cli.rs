@@ -4932,6 +4932,171 @@ fn canonical_mir_cli_verifier_provenance_matches_receipt_across_source_changes()
 }
 
 #[test]
+fn canonical_mir_cli_imported_verifier_provenance_matches_full_receipt() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-verifier-provenance-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported verifier provenance directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"extern "C" {
+    func mir_cli_imported_provenance(value: i64) -> i64 requires: true ensures: true;
+}
+pub func call(value: i64) -> i64 { mir_cli_imported_provenance(value) }
+"#,
+    )
+    .expect("write imported verifier provenance helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use ffi_types;\nfunc main() -> i64 { println(call(7 as i64)); 0 }\n",
+    )
+    .expect("write imported verifier provenance entry");
+
+    let source = fs::read_to_string(&main).expect("read imported verifier provenance entry");
+    let expected_source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let checked = checked_route_receipt(&main);
+    let receipt_output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all", "--receipt"])
+        .arg(&main)
+        .output()
+        .expect("spawn imported verifier provenance receipt");
+    assert!(
+        receipt_output.status.success(),
+        "imported receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&receipt_output.stdout),
+        String::from_utf8_lossy(&receipt_output.stderr)
+    );
+    let manifest = parse_route_receipt_manifest(&receipt_output.stdout);
+    assert_eq!(
+        manifest.get("mir_digest"),
+        Some(&checked.mir_digest),
+        "imported CLI receipt drifted from checker route"
+    );
+    assert_eq!(
+        manifest.get("ffi_digest"),
+        Some(&checked.ffi_digest),
+        "imported CLI FFI receipt drifted from checker route"
+    );
+
+    let parse_provenance = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("canonical MIR verifier provenance: "))
+            .unwrap_or_else(|| panic!("imported verifier provenance line missing:\n{text}"));
+        line.strip_prefix("canonical MIR verifier provenance: ")
+            .expect("imported verifier provenance prefix")
+            .split_whitespace()
+            .map(|field| {
+                field
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("malformed imported provenance field: {field}"))
+            })
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("verify")
+            .env("MIMI_VERBOSE", "1");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn imported verifier provenance CLI")
+    };
+    let default = verify(false);
+    let explicit = verify(true);
+    for (label, output) in [("default", &default), ("explicit MIR", &explicit)] {
+        assert!(
+            output.status.success(),
+            "{label} imported verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    let default_provenance = parse_provenance(&default);
+    let explicit_provenance = parse_provenance(&explicit);
+    assert_eq!(
+        default_provenance, explicit_provenance,
+        "imported default and explicit MIR verifier provenance drifted"
+    );
+    assert_eq!(
+        default_provenance.get("profile").map(String::as_str),
+        Some("verify-canonical-v1")
+    );
+    for field in [
+        "mir_digest",
+        "type_desc_digest",
+        "abi_digest",
+        "ffi_digest",
+        "ownership_digest",
+        "flow_transition_digest",
+    ] {
+        assert_eq!(
+            default_provenance.get(field),
+            manifest.get(field),
+            "imported verifier provenance drifted from full receipt for {field}"
+        );
+    }
+    assert_eq!(
+        default_provenance.get("source_hash").map(String::as_str),
+        Some(expected_source_hash.as_str()),
+        "imported verifier carried the wrong entry source provenance"
+    );
+
+    // A failing imported contract must remain on the canonical route so the
+    // diagnostic retains the helper's source origin and never reopens legacy
+    // FFI verification.
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"extern "C" {
+    func mir_cli_imported_provenance(value: i64) -> i64 requires: value > 10 ensures: true;
+}
+pub func call(value: i64) -> i64 { mir_cli_imported_provenance(value) }
+"#,
+    )
+    .expect("write imported negative verifier provenance helper");
+    let failed = verify(false);
+    assert!(!failed.status.success());
+    let failed_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(
+        failed_text.contains("canonical MIR extern requires contract disproven"),
+        "imported negative verifier lost canonical diagnostic: {failed_text}"
+    );
+    assert!(
+        failed_text.contains("ffi_types.mimi"),
+        "imported negative verifier lost helper source provenance: {failed_text}"
+    );
+    assert!(
+        !failed_text.contains("canonical route disposition: legacy"),
+        "imported negative verifier fell back to legacy: {failed_text}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
