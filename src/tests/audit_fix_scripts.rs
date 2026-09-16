@@ -41,6 +41,14 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{sequence}", std::process::id()))
 }
 
+struct LegacyOwnerAuditTempRootCleanup(std::path::PathBuf);
+
+impl Drop for LegacyOwnerAuditTempRootCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn script_syntax_test_ffi_contracts_sh() {
     // Fixed: `if [ $? -eq 0 ]` tested the *assignment* status (always 0),
@@ -311,6 +319,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
 fn legacy_owner_evidence_marker_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-audit");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
     std::fs::create_dir_all(temp_root.join("scripts")).expect("create audit temp root");
     std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
         .expect("link source tree into audit temp root");
@@ -373,12 +382,14 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         String::from_utf8_lossy(&restored.stdout).contains("audit_status=ok"),
         "restored owner audit omitted its success marker"
     );
+    drop(cleanup);
 }
 
 #[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
     std::fs::create_dir_all(temp_root.join("scripts")).expect("create digest audit temp root");
     std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
         .expect("link source tree into digest audit temp root");
@@ -434,6 +445,7 @@ fn legacy_owner_condition_digest_drift_fails_closed() {
         "tampered condition digest omitted actual-value diagnostic:\n{stderr}"
     );
     std::fs::remove_dir_all(&temp_root).expect("remove digest audit temp root");
+    drop(cleanup);
 }
 
 #[test]
@@ -464,6 +476,20 @@ fn legacy_owner_audit_temp_roots_are_unique_under_concurrency() {
         roots.lock().expect("lock final temp root set").len(),
         8 * 32,
         "all concurrent owner audit temp roots must be unique"
+    );
+}
+
+#[test]
+fn legacy_owner_audit_temp_root_cleanup_runs_on_scope_exit() {
+    let path = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-cleanup");
+    std::fs::create_dir_all(&path).expect("create cleanup probe root");
+    {
+        let _cleanup = LegacyOwnerAuditTempRootCleanup(path.clone());
+        assert!(path.is_dir(), "cleanup probe root must exist in its scope");
+    }
+    assert!(
+        !path.exists(),
+        "owner audit temp root must be removed when the guard leaves scope"
     );
 }
 
