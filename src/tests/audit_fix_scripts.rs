@@ -44,14 +44,16 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
 fn legacy_owner_temp_root_residues(prefix: &str) -> Vec<std::path::PathBuf> {
     let entries = std::fs::read_dir(std::env::temp_dir())
         .expect("scan temporary directory for owner audit residues");
-    entries
+    let mut residues = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             name.starts_with(prefix).then(|| entry.path())
         })
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+    residues.sort();
+    residues
 }
 
 fn assert_no_legacy_owner_temp_roots(prefix: &str) {
@@ -578,6 +580,66 @@ fn legacy_owner_audit_prefix_scan_detects_foreign_process_residue() {
     assert_eq!(residues, vec![foreign.clone()]);
     std::fs::remove_dir_all(&foreign).expect("remove foreign-process residue probe");
     assert_no_legacy_owner_temp_roots(prefix);
+}
+
+#[test]
+fn legacy_owner_audit_prefix_scan_keeps_non_directory_residue_fail_closed() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let prefix = format!("mimi-legacy-owner-nondirectory-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let file = std::env::temp_dir().join(format!("{prefix}file"));
+    let target = std::env::temp_dir().join(format!("{prefix}target"));
+    let link = std::env::temp_dir().join(format!("{prefix}link"));
+    let unreadable = std::env::temp_dir().join(format!("{prefix}unreadable"));
+    std::fs::write(&file, b"stale owner audit file").expect("create file residue probe");
+    std::fs::create_dir(&target).expect("create symlink target residue probe");
+    symlink(&target, &link).expect("create symlink residue probe");
+    std::fs::create_dir(&unreadable).expect("create unreadable residue probe");
+    let mut permissions = std::fs::metadata(&unreadable)
+        .expect("read unreadable residue permissions")
+        .permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(&unreadable, permissions).expect("make residue directory unreadable");
+
+    let expected = vec![
+        file.clone(),
+        link.clone(),
+        target.clone(),
+        unreadable.clone(),
+    ];
+    let mut expected_sorted = expected.clone();
+    expected_sorted.sort();
+    assert_eq!(legacy_owner_temp_root_residues(&prefix), expected_sorted);
+    assert!(
+        std::fs::remove_dir_all(&file).is_err(),
+        "directory-only cleanup must not remove a regular file"
+    );
+    assert!(
+        std::fs::remove_dir_all(&link).is_ok(),
+        "directory cleanup may remove a symlink without following it"
+    );
+    assert!(
+        target.is_dir(),
+        "symlink cleanup must not remove the target directory"
+    );
+    expected_sorted.retain(|path| path != &link);
+    assert_eq!(
+        legacy_owner_temp_root_residues(&prefix),
+        expected_sorted,
+        "failed regular-file cleanup must remain visible to the residue scanner"
+    );
+
+    let mut permissions = std::fs::metadata(&unreadable)
+        .expect("restore unreadable residue permissions")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&unreadable, permissions)
+        .expect("restore residue directory permissions");
+    std::fs::remove_file(&file).expect("remove file residue probe");
+    std::fs::remove_dir(&target).expect("remove symlink target residue probe");
+    std::fs::remove_dir(&unreadable).expect("remove unreadable residue probe");
+    assert_no_legacy_owner_temp_roots(&prefix);
 }
 
 #[test]
