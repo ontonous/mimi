@@ -5074,25 +5074,55 @@ pub func call(value: i64) -> i64 { mir_cli_imported_provenance(value) }
 "#,
     )
     .expect("write imported negative verifier provenance helper");
-    let failed = verify(false);
-    assert!(!failed.status.success());
-    let failed_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&failed.stdout),
-        String::from_utf8_lossy(&failed.stderr)
-    );
-    assert!(
-        failed_text.contains("canonical MIR extern requires contract disproven"),
-        "imported negative verifier lost canonical diagnostic: {failed_text}"
-    );
-    assert!(
-        failed_text.contains("ffi_types.mimi"),
-        "imported negative verifier lost helper source provenance: {failed_text}"
-    );
-    assert!(
-        !failed_text.contains("canonical route disposition: legacy"),
-        "imported negative verifier fell back to legacy: {failed_text}"
-    );
+    let failed_outputs = (0..3).map(|_| verify(false)).collect::<Vec<_>>();
+    let canonical_failure = |output: &std::process::Output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.lines()
+            .filter(|line| line.contains("canonical MIR extern"))
+            .map(|line| mimi::diagnostic::format::strip_ansi(line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    for failed in &failed_outputs {
+        assert!(!failed.status.success());
+        let failed_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&failed.stdout),
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert!(
+            failed_text.contains("canonical MIR extern requires contract disproven"),
+            "imported negative verifier lost canonical diagnostic: {failed_text}"
+        );
+        assert!(
+            failed_text.contains("ffi_types.mimi"),
+            "imported negative verifier lost helper source provenance: {failed_text}"
+        );
+        assert!(
+            !failed_text.contains("canonical route disposition: legacy"),
+            "imported negative verifier fell back to legacy: {failed_text}"
+        );
+        assert_eq!(
+            parse_provenance(failed).get("profile").map(String::as_str),
+            Some("verify-canonical-v1"),
+            "imported negative verifier lost canonical provenance"
+        );
+    }
+    for pair in failed_outputs.windows(2) {
+        assert_eq!(
+            parse_provenance(&pair[0]),
+            parse_provenance(&pair[1]),
+            "repeated imported negative verifier changed canonical provenance"
+        );
+        assert_eq!(
+            canonical_failure(&pair[0]),
+            canonical_failure(&pair[1]),
+            "repeated imported negative verifier changed canonical diagnostics"
+        );
+    }
     fs::remove_dir_all(&dir).ok();
 }
 

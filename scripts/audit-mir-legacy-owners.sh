@@ -17,6 +17,14 @@ readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=4
 readonly EXPECTED_PRODUCTION_RAW_AST_CALL_SITES=0
 readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=8
 readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
+# The deletion conditions are part of the compatibility contract. Keep a
+# digest beside each prose condition so scope changes are detected by the
+# gate and reviewed together with the migration that changes the condition.
+readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=2568b029a170043114b68ea0d35f9061617cc969ea2f9c8b7288d3d7f4f5e40c
+readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=7b995e0731f7fd98c881107d01a68f18f72c254a49df0239f62056f80b8d541a
+readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=f760de7d0a7f11cb703995b9069da4a510935d9ffcb34715418516aa5cc6b5fe
+readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=ff30fc215553993cb653cab0746ce34c3b275936e8d699ac25856f8201d210f4
+readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=60261d5b3a6c63c9b0ed4604a72e49505f33501960061ba8e8f4540bbbd67e3f
 audit_failed=0
 
 printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
@@ -82,6 +90,7 @@ else
 fi
 
 owner_count=0
+condition_inventory=''
 for owner in \
     CodegenLegacyRemainder \
     FlowVerifierCompatibility \
@@ -141,10 +150,39 @@ for owner in \
     # owner-specific condition above; a zero accessor count alone must never
     # be reported as permission to delete the owner.
     deletion_ready=0
+    condition_digest="$(printf '%s' "$condition" | sha256sum | awk '{print $1}')"
+    case "$owner" in
+        CodegenLegacyRemainder)
+            expected_condition_digest="$EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST"
+            ;;
+        FlowVerifierCompatibility)
+            expected_condition_digest="$EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST"
+            ;;
+        FfiVerifierCompatibility)
+            expected_condition_digest="$EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST"
+            ;;
+        DualVerifierCompatibility)
+            expected_condition_digest="$EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST"
+            ;;
+    esac
+    printf 'owner=%s owner_deletion_condition_digest=%s\n' "$owner" "$condition_digest"
+    if [ "$condition_digest" != "$expected_condition_digest" ]; then
+        printf 'owner_audit_error=%s owner_deletion_condition_digest expected=%s actual=%s\n' \
+            "$owner" "$expected_condition_digest" "$condition_digest" >&2
+        audit_failed=1
+    fi
+    condition_inventory+="${owner}=${condition_digest}"$'\n'
     printf 'owner=%s status=%s dependency_class=%s owner_deletion_ready=%s owner_deletion_blocker=%s; %s\n' \
         "$owner" "$owner_status" "$dependency_class" "$deletion_ready" "$accessor_blocker" "$deletion_blocker"
     printf 'owner_deletion_condition=%s\n' "$condition"
 done
+condition_set_digest="$(printf '%s' "$condition_inventory" | sha256sum | awk '{print $1}')"
+printf 'owner_deletion_condition_set_digest=%s\n' "$condition_set_digest"
+if [ "$condition_set_digest" != "$EXPECTED_OWNER_CONDITION_SET_DIGEST" ]; then
+    printf 'owner_audit_error=owner_deletion_condition_set_digest expected=%s actual=%s\n' \
+        "$EXPECTED_OWNER_CONDITION_SET_DIGEST" "$condition_set_digest" >&2
+    audit_failed=1
+fi
 
 body_refs="$(rg -n \
     --glob '*.rs' \
