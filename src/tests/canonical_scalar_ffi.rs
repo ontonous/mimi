@@ -19375,6 +19375,120 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_multi_argument_conversion_order_is_pinned_across_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_ordered_conversion(left: i64, right: f64) -> i64;
+}
+func main() -> i64 {
+    println(7 as i64);
+    generated_ordered_conversion(20 as i32, 2 as i32)
+}
+"#;
+
+    struct CountingOracle {
+        calls: Cell<usize>,
+    }
+    impl MirReferenceFfiResolver for CountingOracle {
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            _args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(MirRuntimeValue::Int(22))
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("ordered conversion fixture check");
+    let canonical =
+        MirProgram::from_checked_program(&checked).expect("ordered conversion fixture MIR");
+    let instruction_id = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("ordered conversion instruction");
+    let receipt = canonical
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("ordered conversion receipt");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                to: MirAbiClass::Float { bits: 64 },
+            },
+        ]
+    );
+
+    let mut forged_receipts = canonical.ffi_calls().clone();
+    forged_receipts
+        .get_mut(&instruction_id)
+        .expect("ordered conversion forged receipt")
+        .parameter_conversions
+        .swap(0, 1);
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let oracle = CountingOracle {
+        calls: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject swapped legal conversion receipts");
+    assert!(reference_error
+        .to_string()
+        .contains("ABI conversion receipt"));
+    assert_eq!(reference.captured_output(), "7\n");
+    assert_eq!(oracle.calls.get(), 0, "host binding must remain untouched");
+
+    let bytecode_error = compile_mir_program(&forged)
+        .expect_err("bytecode adapter must reject swapped conversion receipts");
+    assert!(bytecode_error.iter().any(|error| {
+        error.message.contains("conversion receipt") || error.message.contains("conversion target")
+    }));
+
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native admission must reject swapped conversion receipts");
+    assert!(native_error.iter().any(|error| {
+        error.message.contains("conversion receipt") || error.message.contains("conversion target")
+    }));
+
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject swapped conversion receipts");
+    assert!(capability_error.iter().any(|error| {
+        error.contains("conversion receipt") || error.contains("conversion target")
+    }));
+
+    let verifier_error = crate::verifier::verify_mir(&forged, "swapped-conversions".into())
+        .expect_err("MIR verifier must reject swapped conversion receipts");
+    assert!(
+        verifier_error.contains("conversion receipt")
+            || verifier_error.contains("conversion target")
+    );
+}
+
+#[test]
 fn scalar_ffi_mixed_width_descriptor_and_index_forgery_stabilize_public_entries() {
     const C_SOURCE: &str = r#"
 #include <stdint.h>
