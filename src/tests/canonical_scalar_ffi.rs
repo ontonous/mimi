@@ -21877,6 +21877,178 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_manifest_preserves_foreign_effect_order_across_recovery() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+int64_t mir_manifest_effect_order(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return value + 2;
+    FILE *file = fopen(path, "a");
+    if (!file) return value + 2;
+    fputs("ffi-bad\n", file);
+    fclose(file);
+    return value + 2;
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+int64_t mir_manifest_effect_order(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return value + 1;
+    FILE *file = fopen(path, "a");
+    if (!file) return value + 1;
+    fputs("ffi-good\n", file);
+    fclose(file);
+    return value + 1;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_manifest_effect_order(value: i64) -> i64 ensures: result == value + 1; }
+func main() -> i64 {
+    println(1 as i64)
+    println(mir_manifest_effect_order(7 as i64))
+    0
+}
+"#;
+
+    struct TraceOracle {
+        calls: Cell<u8>,
+        events: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl MirReferenceFfiResolver for TraceOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_manifest_effect_order" {
+                return Err(format!("unexpected effect-order symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected effect-order arguments {arguments:?}"));
+            };
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            self.events
+                .borrow_mut()
+                .push(if call == 0 { "ffi-bad" } else { "ffi-good" });
+            Ok(MirRuntimeValue::Int(*value + if call == 0 { 2 } else { 1 }))
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let bad_library = bad_fixture.dir.join("ffi.so");
+    let good_library = good_fixture.dir.join("ffi.so");
+    let trace_path = bad_fixture.dir.join("effect-order.trace");
+    std::fs::write(&trace_path, "").expect("create effect-order trace");
+    guard.set_trace_path(&trace_path);
+    guard.set_path(&bad_library);
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("effect-order route manifest fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("effect-order route manifest fixture materialization");
+    let manifest = mir
+        .route_receipt("r6-807-effect-order-v1")
+        .manifest_text()
+        .expect("effect-order route manifest rendering");
+
+    let oracle = TraceOracle {
+        calls: Cell::new(0),
+        events: std::cell::RefCell::new(Vec::new()),
+    };
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must expose the bad foreign effect before postcondition failure");
+    assert!(reference.message.contains("FFI postcondition failed"));
+    assert_eq!(oracle.events.borrow().as_slice(), ["ffi-bad"]);
+    assert_eq!(oracle.calls.get(), 1);
+
+    let recovered_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover with the second foreign result");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "1\n8\n");
+    assert_eq!(oracle.events.borrow().as_slice(), ["ffi-bad", "ffi-good"]);
+    assert_eq!(oracle.calls.get(), 2);
+
+    std::fs::write(&trace_path, "").expect("clear bytecode effect-order trace");
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("effect-order AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_canonical_ffi_library_path(bad_library.to_string_lossy().into_owned());
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must report the bad foreign effect result");
+    assert_eq!(bytecode_error.code(), "E0808");
+    assert!(bytecode_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "ffi-bad\n");
+    vm.set_canonical_ffi_library_path(good_library.to_string_lossy().into_owned());
+    assert_eq!(vm.run_value().expect("bytecode recovery"), Value::Int(0));
+    assert_eq!(vm.stdout(), "1\n8\n");
+    assert_eq!(
+        std::fs::read_to_string(&trace_path).unwrap(),
+        "ffi-bad\nffi-good\n"
+    );
+
+    std::fs::write(&trace_path, "").expect("clear native effect-order trace");
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "r6_807_effect_order");
+    generator
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("effect-order native lowering");
+    generator
+        .module
+        .verify()
+        .expect("effect-order native LLVM module");
+    let bad_config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let bad_native = super::link_and_observe_module(
+        &generator,
+        &bad_config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("effect-order bad native execution");
+    assert_ne!(bad_native.exit_code, Some(0));
+    assert_eq!(bad_native.stdout, "1\n");
+    assert!(bad_native.stderr.contains("E0808"));
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "ffi-bad\n");
+    let good_config = super::E2EConfig {
+        extra_c_src: Some(GOOD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let good_native = super::link_and_observe_module(
+        &generator,
+        &good_config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("effect-order good native recovery");
+    assert_eq!(good_native.exit_code, Some(0));
+    assert_eq!(good_native.stdout, "1\n8\n");
+    assert!(good_native.stderr.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&trace_path).unwrap(),
+        "ffi-bad\nffi-good\n"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
