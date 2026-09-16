@@ -44,16 +44,37 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
 fn legacy_owner_temp_root_residues(prefix: &str) -> Vec<std::path::PathBuf> {
     let entries = std::fs::read_dir(std::env::temp_dir())
         .expect("scan temporary directory for owner audit residues");
+    collect_legacy_owner_temp_root_residues(
+        entries.map(|entry| entry.map(|entry| entry.path())),
+        prefix,
+    )
+    .unwrap_or_else(|error| {
+        panic!("scan temporary directory entry for owner audit residues: {error}")
+    })
+}
+
+fn collect_legacy_owner_temp_root_residues<I, E>(
+    entries: I,
+    prefix: &str,
+) -> Result<Vec<std::path::PathBuf>, String>
+where
+    I: IntoIterator<Item = Result<std::path::PathBuf, E>>,
+    E: std::fmt::Display,
+{
     let mut residues = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with(prefix).then(|| entry.path())
+        .into_iter()
+        .map(|entry| entry.map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .map(|name| name.to_string_lossy().starts_with(prefix))
+                .unwrap_or(false)
         })
         .collect::<Vec<_>>();
     residues.sort();
-    residues
+    Ok(residues)
 }
 
 fn assert_no_legacy_owner_temp_roots(prefix: &str) {
@@ -639,6 +660,68 @@ fn legacy_owner_audit_prefix_scan_keeps_non_directory_residue_fail_closed() {
     std::fs::remove_file(&file).expect("remove file residue probe");
     std::fs::remove_dir(&target).expect("remove symlink target residue probe");
     std::fs::remove_dir(&unreadable).expect("remove unreadable residue probe");
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
+fn legacy_owner_audit_prefix_scan_propagates_entry_errors() {
+    let prefix = "mimi-legacy-owner-entry-error-";
+    let entries = vec![
+        Ok(std::env::temp_dir().join(format!("{prefix}before"))),
+        Err("permission denied"),
+        Ok(std::env::temp_dir().join(format!("{prefix}after"))),
+    ];
+    let error = collect_legacy_owner_temp_root_residues(entries, prefix)
+        .expect_err("entry read failure must fail closed");
+    assert_eq!(error, "permission denied");
+}
+
+#[test]
+fn legacy_owner_audit_prefix_scan_observes_interleaved_workers_deterministically() {
+    use std::sync::{Arc, Barrier, Mutex};
+
+    let prefix = format!("mimi-legacy-owner-interleave-{}", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let ready = Arc::new(Barrier::new(9));
+    let release = Arc::new(Barrier::new(9));
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let workers = (0..8)
+        .map(|_| {
+            let ready = Arc::clone(&ready);
+            let release = Arc::clone(&release);
+            let paths = Arc::clone(&paths);
+            let prefix = prefix.clone();
+            std::thread::spawn(move || {
+                let path = unique_legacy_owner_audit_temp_root(&prefix);
+                std::fs::create_dir_all(&path).expect("create interleaved worker root");
+                let cleanup = LegacyOwnerAuditTempRootCleanup(path.clone());
+                paths
+                    .lock()
+                    .expect("lock interleaved worker paths")
+                    .push(path);
+                ready.wait();
+                release.wait();
+                drop(cleanup);
+            })
+        })
+        .collect::<Vec<_>>();
+    ready.wait();
+    let mut expected = paths
+        .lock()
+        .expect("lock interleaved worker paths for scan")
+        .clone();
+    expected.sort();
+    assert_eq!(
+        legacy_owner_temp_root_residues(&prefix),
+        expected,
+        "scanner must observe every worker root at the synchronized creation point"
+    );
+    release.wait();
+    for worker in workers {
+        worker
+            .join()
+            .expect("interleaved owner audit worker must finish");
+    }
     assert_no_legacy_owner_temp_roots(&prefix);
 }
 
