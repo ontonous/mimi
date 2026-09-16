@@ -22049,6 +22049,100 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_manifest_rejection_keeps_native_module_snapshot_intact() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_manifest_state_guard(value: i64) -> i64; }
+func main() -> i64 {
+    println(1 as i64)
+    mir_manifest_state_guard(7 as i64)
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("native route state fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("native route state fixture materialization");
+    let receipt = mir.route_receipt("r6-808-native-state-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("native route state fixture rendering");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "r6_808_native_state");
+    generator
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("valid route must emit before rejection checks");
+    generator
+        .module
+        .verify()
+        .expect("valid native route module");
+    let snapshot = generator.module.print_to_string().to_string();
+    let assert_route_provenance = |diagnostic: &crate::diagnostic::Diagnostic, code: &str| {
+        assert_eq!(diagnostic.code.as_deref(), Some(code));
+        let origin = diagnostic.origin.as_ref().expect("route diagnostic origin");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert!(origin.parent_node_id.is_none());
+    };
+
+    let malformed_manifest = format!("{manifest}future_field=reserved\n");
+    let malformed = generator
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("malformed route must reject before touching an existing module");
+    assert_route_provenance(
+        &malformed[0],
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+    assert_eq!(generator.module.print_to_string().to_string(), snapshot);
+    generator
+        .module
+        .verify()
+        .expect("malformed rejection must leave the prior native module valid");
+    let malformed_repeat = generator
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("malformed route rejection must be repeatable");
+    assert_eq!(malformed_repeat.len(), malformed.len());
+    assert_eq!(malformed_repeat[0].to_string(), malformed[0].to_string());
+    assert_route_provenance(
+        &malformed_repeat[0],
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+    assert_eq!(generator.module.print_to_string().to_string(), snapshot);
+
+    let mut forged = receipt.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let forged_manifest = forged
+        .manifest_text()
+        .expect("forged route state manifest rendering");
+    let forged_error = generator
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("forged route must reject before touching an existing module");
+    assert_route_provenance(
+        &forged_error[0],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert_eq!(generator.module.print_to_string().to_string(), snapshot);
+    generator
+        .module
+        .verify()
+        .expect("forged rejection must leave the prior native module valid");
+    let forged_repeat = generator
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("forged route rejection must be repeatable");
+    assert_eq!(forged_repeat.len(), forged_error.len());
+    assert_eq!(forged_repeat[0].to_string(), forged_error[0].to_string());
+    assert_route_provenance(
+        &forged_repeat[0],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert_eq!(generator.module.print_to_string().to_string(), snapshot);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
