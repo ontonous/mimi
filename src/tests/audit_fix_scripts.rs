@@ -1492,6 +1492,78 @@ fn legacy_owner_scalar_marker_recovery_batches_clear_stale_snapshots() {
 }
 
 #[test]
+fn legacy_owner_scalar_marker_shuffled_failure_batches_keep_snapshot_order() {
+    let prefix = format!("mimi-legacy-owner-marker-shuffled-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    let paths = (0..6)
+        .map(|index| {
+            let path = unique_legacy_owner_audit_temp_root(&format!("{prefix}{index}"));
+            std::fs::write(&path, b"shuffled failure residue")
+                .expect("create shuffled failure residue");
+            path
+        })
+        .collect::<Vec<_>>();
+    let mut expected = paths.clone();
+    expected.sort();
+    let orders = [
+        (0..paths.len()).collect::<Vec<_>>(),
+        (0..paths.len()).rev().collect::<Vec<_>>(),
+        vec![2, 5, 1, 4, 0, 3],
+        vec![3, 0, 4, 1, 5, 2],
+    ];
+    let mut baseline_errors = None;
+    for (batch, order) in orders.into_iter().enumerate() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(paths.len() + 1));
+        let errors = std::thread::scope(|scope| {
+            let handles = order
+                .into_iter()
+                .map(|index| {
+                    let path = paths[index].clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        LegacyOwnerAuditTempRootCleanup::cleanup_path(&path)
+                            .expect_err("regular-file cleanup must fail closed")
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("shuffled cleanup worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        let snapshot = legacy_owner_temp_root_residues(&prefix);
+        assert_eq!(snapshot, expected, "batch {batch} snapshot order drifted");
+        let mut sorted_errors = errors;
+        sorted_errors.sort();
+        assert_eq!(
+            sorted_errors.len(),
+            expected.len(),
+            "batch {batch} lost a failure diagnostic"
+        );
+        for (error, path) in sorted_errors.iter().zip(&expected) {
+            assert!(
+                error.contains(&path.display().to_string()),
+                "batch {batch} error did not identify its path: {error}"
+            );
+        }
+        if let Some(baseline) = &baseline_errors {
+            assert_eq!(
+                &sorted_errors, baseline,
+                "batch {batch} failure diagnostics drifted"
+            );
+        } else {
+            baseline_errors = Some(sorted_errors);
+        }
+    }
+    for path in paths {
+        std::fs::remove_file(path).expect("remove shuffled failure residue");
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
