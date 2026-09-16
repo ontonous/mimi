@@ -21563,6 +21563,113 @@ func main() -> i64 { mir_route_diagnostic(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_cross_profile_receipts_share_cache_identity_but_preserve_source_provenance() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_cross_profile(value: i64) -> i64 ensures: result == value + 1; }
+func main() -> i64 { mir_cross_profile(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cross-profile route fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("cross-profile route fixture materialization");
+    let verifier_receipt = mir.route_receipt("r6-803-verifier-v1");
+    let bytecode_receipt = mir.route_receipt("r6-803-bytecode-v1");
+    assert_ne!(verifier_receipt.profile, bytecode_receipt.profile);
+    assert_eq!(
+        verifier_receipt.mir_digest, bytecode_receipt.mir_digest,
+        "consumer profile must not change canonical MIR identity"
+    );
+    assert_eq!(verifier_receipt.ffi_digest, bytecode_receipt.ffi_digest);
+    assert_eq!(verifier_receipt.abi_digest, bytecode_receipt.abi_digest);
+
+    let source_hash_a = "source-r6-803-a".to_string();
+    let source_hash_b = "source-r6-803-b".to_string();
+    let verifier_a = crate::verifier::verify_mir_with_route_receipt(
+        &mir,
+        &verifier_receipt,
+        source_hash_a.clone(),
+    )
+    .expect("verifier profile A");
+    let verifier_b = crate::verifier::verify_mir_with_route_receipt(
+        &mir,
+        &bytecode_receipt,
+        source_hash_a.clone(),
+    )
+    .expect("verifier profile B");
+    let artifact_a = verifier_a
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("profile A proof artifact");
+    let artifact_b = verifier_b
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("profile B proof artifact");
+    assert_eq!(artifact_a.source_hash, source_hash_a);
+    assert_eq!(artifact_b.source_hash, source_hash_a);
+    assert_eq!(
+        artifact_a.cache_key(),
+        artifact_b.cache_key(),
+        "route profile is invocation provenance, not semantic cache identity"
+    );
+    assert!(
+        artifact_a.is_compatible(artifact_b),
+        "same MIR/source must remain cache-compatible across route profiles"
+    );
+    assert_eq!(
+        artifact_a
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(verifier_receipt.profile.as_str())
+    );
+    assert_eq!(
+        artifact_b
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(bytecode_receipt.profile.as_str())
+    );
+
+    let verifier_c = crate::verifier::verify_mir_with_route_receipt(
+        &mir,
+        &bytecode_receipt,
+        source_hash_b.clone(),
+    )
+    .expect("verifier profile B with changed source provenance");
+    let artifact_c = verifier_c
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("profile B changed-source proof artifact");
+    assert_eq!(artifact_c.source_hash, source_hash_b);
+    assert_eq!(
+        artifact_b.cache_key(),
+        artifact_c.cache_key(),
+        "source provenance is checked separately from semantic cache identity"
+    );
+    assert!(
+        !artifact_b.is_compatible(artifact_c),
+        "proofs from different source snapshots must not be reused"
+    );
+
+    let verifier_manifest = verifier_receipt
+        .manifest_text()
+        .expect("cross-profile verifier manifest");
+    let bytecode_manifest = bytecode_receipt
+        .manifest_text()
+        .expect("cross-profile bytecode manifest");
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &bytecode_manifest)
+        .expect("bytecode must accept its own profile receipt");
+    assert!(bytecode.ast.is_none());
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_803_cross_profile");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &verifier_manifest)
+        .expect("native must accept a semantically equivalent profile receipt");
+    native.module.verify().expect("cross-profile native module");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
