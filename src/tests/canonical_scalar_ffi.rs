@@ -22143,6 +22143,137 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_rejection_recovers_across_direct_consumers() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_route_direct_recover(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_route_direct_recover(7 as i64))
+    0
+}
+"#;
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_route_direct_recover(int64_t value) { return value + 1; }
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("direct route recovery fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("direct route recovery fixture materialization");
+    let receipt = mir.route_receipt("r6-809-direct-recovery-v1");
+    let mut forged = receipt.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let assert_route_diagnostic = |diagnostic: &crate::diagnostic::Diagnostic, code: &str| {
+        assert_eq!(diagnostic.code.as_deref(), Some(code));
+        let origin = diagnostic.origin.as_ref().expect("route diagnostic origin");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert!(origin.parent_node_id.is_none());
+    };
+
+    let bytecode_error = compile_mir_program_with_route_receipt(&mir, &forged)
+        .expect_err("bytecode must reject the forged direct route receipt");
+    assert_eq!(
+        bytecode_error[0].diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert_route_diagnostic(
+        &bytecode_error[0].to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let fixture = library_fixture(super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed), C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+        .expect("bytecode must recover with the original direct route receipt");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("recovered direct route bytecode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "8\n");
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_809_direct_recovery");
+    let before = native.module.print_to_string().to_string();
+    let native_error = native
+        .compile_mir_native_with_route_receipt(&mir, &forged)
+        .expect_err("native must reject the forged direct route receipt");
+    assert_route_diagnostic(
+        &native_error[0],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert_eq!(native.module.print_to_string().to_string(), before);
+    native
+        .compile_mir_native_with_route_receipt(&mir, &receipt)
+        .expect("native must recover with the original direct route receipt");
+    native
+        .module
+        .verify()
+        .expect("recovered direct route native module");
+
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verifier_error =
+        crate::verifier::verify_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("general verifier must reject the forged direct route receipt");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(verifier_error),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    crate::verifier::verify_mir_with_route_receipt(&mir, &receipt, source_hash.clone())
+        .expect("general verifier must recover with the original direct route receipt");
+    let ffi_verifier_error =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("FFI verifier must reject the forged direct route receipt");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(ffi_verifier_error),
+        crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &receipt, source_hash)
+        .expect("FFI verifier must recover with the original direct route receipt");
+
+    struct DirectRecoveryOracle;
+    impl MirReferenceFfiResolver for DirectRecoveryOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_route_direct_recover");
+            match arguments {
+                [MirRuntimeValue::Int(value)] => Ok(MirRuntimeValue::Int(value + 1)),
+                other => Err(format!("unexpected direct route arguments: {other:?}")),
+            }
+        }
+    }
+    let oracle = DirectRecoveryOracle;
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&forged);
+    let forged_reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the forged direct route receipt");
+    assert_route_diagnostic(
+        &forged_reference_error.to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert!(forged_reference.captured_output().is_empty());
+    let recovered_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&receipt)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover with the original direct route receipt");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "8\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (
