@@ -1010,6 +1010,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
+            "bytecode_direct_route_receipt_binding=ffi-call-site->MIR_BYTECODE_DIRECT_ROUTE_PROFILE->compile_mir_program_inner consumer=src/interp/bytecode/mir.rs::pub fn compile_mir_program("
+        ),
+        "legacy owner audit must pin direct bytecode receipt derivation"
+    );
+    assert!(
+        stdout.contains(
             "bytecode_route_receipt_binding=canonical_ffi_route_receipt: if !has_canonical_ffi_bindings"
         ),
         "legacy owner audit must pin the program-level route receipt anchor"

@@ -342,6 +342,26 @@ bytecode_route_receipt_binding() {
         "$pattern" "$source_file" "$start_function"
 }
 
+bytecode_direct_route_receipt_binding() {
+    local context
+    context="$(sed -n '/pub fn compile_mir_program(/,/^\/\/\/ Compile canonical MIR after checking the route receipt supplied by the/p' "$ROOT_DIR/src/interp/bytecode/mir.rs")"
+    for pattern in \
+        'pub fn compile_mir_program(' \
+        'program.ffi_calls().is_empty()' \
+        'MIR_BYTECODE_DIRECT_ROUTE_PROFILE' \
+        'compile_mir_program_inner(program, receipt.as_ref())'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=bytecode_direct_route_receipt_binding_missing=src/interp/bytecode/mir.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'bytecode_direct_route_receipt_binding=ffi-call-site->MIR_BYTECODE_DIRECT_ROUTE_PROFILE->compile_mir_program_inner consumer=src/interp/bytecode/mir.rs::pub fn compile_mir_program(\n'
+}
+
+bytecode_direct_route_receipt_binding
+
 bytecode_route_receipt_binding \
     src/interp/bytecode/mir.rs \
     'pub fn compile_mir_program_with_route_receipt(' \
