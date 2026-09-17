@@ -221,6 +221,38 @@ route_receipt_profile_binding \
     ScalarFfi \
     scalar-ffi-v1
 
+# Keep the consumer-specific receipt labels anchored to the entry points that
+# consume the same canonical graph. The labels may differ by consumer, but a
+# missing label means that a direct API could silently stop binding its proof
+# or ABI snapshot to the route it executed.
+consumer_receipt_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local receipt_label="$4"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "route_receipt(\"${receipt_label}\")" >/dev/null; then
+        printf 'owner_audit_error=consumer_receipt_missing=%s::%s label=%s\n' \
+            "$source_file" "$start_function" "$receipt_label" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'consumer_receipt_binding=%s consumer=%s::%s\n' \
+        "$receipt_label" "$source_file" "$start_function"
+}
+
+consumer_receipt_binding \
+    src/codegen/compile.rs \
+    'pub fn compile_checked(' \
+    'fn try_compile_exact_migrated_mir_island(' \
+    native-direct-v1
+consumer_receipt_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available(' \
+    verify-ffi-v1
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2

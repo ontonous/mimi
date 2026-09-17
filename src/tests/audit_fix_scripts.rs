@@ -291,6 +291,8 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "production_compile_func_legacy_call_sites=8",
         "scalar_ffi_direct_expression_legacy_refs=0",
         "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
+        "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
+        "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -390,6 +392,30 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=scalar_route_receipt_missing="),
         "scalar receipt drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&receipt_output.stderr)
+    );
+    let tampered_consumer_script =
+        source_script.replacen("    native-direct-v1\n", "    missing-native-receipt\n", 1);
+    assert!(
+        source_script != tampered_consumer_script,
+        "consumer receipt fixture must replace the native direct label"
+    );
+    std::fs::write(&script_path, tampered_consumer_script)
+        .expect("write tampered consumer receipt audit script");
+    let consumer_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered consumer receipt audit");
+    assert!(
+        !consumer_output.status.success(),
+        "tampered consumer receipt must fail closed:\n{}",
+        String::from_utf8_lossy(&consumer_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&consumer_output.stderr)
+            .contains("owner_audit_error=consumer_receipt_missing="),
+        "consumer receipt drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&consumer_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
