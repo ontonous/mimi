@@ -21945,6 +21945,142 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_route_cross_profile_vm_cache_isolation() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_vm_isolated(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_vm_isolated(value: i64) ensures: true; }
+func main() -> i64 {
+    println(2 as i64);
+    mir_ffi_unit_vm_isolated(7 as i64);
+    0
+}
+"#;
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("Unit VM isolation fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit VM isolation fixture materialization");
+    let profile_a = mir.route_receipt("r6-890-unit-vm-a-v1");
+    let profile_b = mir.route_receipt("r6-890-unit-vm-b-v1");
+    assert_ne!(profile_a.profile, profile_b.profile);
+    assert_eq!(profile_a.mir_digest, profile_b.mir_digest);
+    assert_eq!(profile_a.ffi_digest, profile_b.ffi_digest);
+
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let artifact = |profile: &crate::core::mir::CanonicalMirRouteReceipt| {
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, profile, source_hash.clone())
+            .expect("Unit VM isolation verifier")
+            .into_iter()
+            .find_map(|result| result.artifact)
+            .expect("Unit VM isolation proof artifact")
+    };
+    let artifact_a = artifact(&profile_a);
+    let artifact_b = artifact(&profile_b);
+    assert_eq!(artifact_a.cache_key(), artifact_b.cache_key());
+    assert!(artifact_a.is_compatible(&artifact_b));
+    assert_eq!(
+        artifact_a
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_a.profile.as_str())
+    );
+    assert_eq!(
+        artifact_b
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some(profile_b.profile.as_str())
+    );
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let good_path = fixture.dir.join("ffi.so");
+    let missing_path = fixture.dir.join("missing.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&missing_path);
+    let manifest_a = profile_a
+        .manifest_text()
+        .expect("Unit VM profile A manifest");
+    let manifest_b = profile_b
+        .manifest_text()
+        .expect("Unit VM profile B manifest");
+    let bytecode_a = compile_mir_program_with_route_manifest(&mir, &manifest_a)
+        .expect("Unit VM profile A bytecode");
+    let bytecode_b = compile_mir_program_with_route_manifest(&mir, &manifest_b)
+        .expect("Unit VM profile B bytecode");
+    assert!(bytecode_a.ast.is_none());
+    assert!(bytecode_b.ast.is_none());
+    assert_eq!(bytecode_a.canonical_ffi, bytecode_b.canonical_ffi);
+    assert_eq!(
+        bytecode_a.canonical_ffi_bindings,
+        bytecode_b.canonical_ffi_bindings
+    );
+    let descriptor_snapshot = bytecode_a.canonical_ffi.clone();
+    let binding_snapshot = bytecode_a.canonical_ffi_bindings.clone();
+    let mut vm_a = BytecodeVM::new(bytecode_a);
+    let mut vm_b = BytecodeVM::new(bytecode_b);
+
+    let vm_a_missing = vm_a
+        .run_value()
+        .expect_err("profile A missing Unit library must fail");
+    assert_eq!(vm_a_missing.code(), "E0800", "{vm_a_missing}");
+    assert_eq!(vm_a.stdout(), "2\n");
+    assert_eq!(vm_a.debug_stack_state(), (0, 0));
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm_b.run_value().expect("profile B must load Unit library"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_b.stdout(), "2\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(
+        vm_a.run_value()
+            .expect("profile A must independently load Unit library"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_a.stdout(), "2\n");
+    assert_eq!(vm_a.debug_stack_state(), (0, 0));
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
+
+    guard.set_path(&missing_path);
+    let vm_b_missing = vm_b
+        .run_value()
+        .expect_err("profile B repeated missing Unit library must fail");
+    assert_eq!(vm_b_missing.code(), "E0800", "{vm_b_missing}");
+    assert_eq!(vm_b.stdout(), "2\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm_b.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "profile B failure must not affect its cached good path"
+    );
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm_b.run_value()
+            .expect("profile B must recover Unit library"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_b.stdout(), "2\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(artifact_a.mir_route_receipt.as_ref(), Some(&profile_a));
+    assert_eq!(artifact_b.mir_route_receipt.as_ref(), Some(&profile_b));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
 extern "C" { func mir_route_diagnostic(value: i64) -> i64 ensures: result == value + 1; }
