@@ -395,6 +395,41 @@ verifier_default_receipt_reuse() {
 
 verifier_default_receipt_reuse
 
+# Public source-hash verifier adapters must derive one default receipt before
+# entering their semantic helpers, then reuse that same witness for provenance
+# validation.  This prevents the wrapper from rebuilding a second default
+# receipt after the semantic batch has already completed.
+verifier_default_entry_receipt_handoff() {
+    local mir_context ffi_context
+    mir_context="$(sed -n '/^pub fn verify_mir(/,/^fn verify_mir_results_with_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    ffi_context="$(sed -n '/^pub fn verify_ffi_mir_with_source_hash(/,/^fn verify_ffi_mir_results_with_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'let receipt = program.route_receipt("verifier-mir-v1");' \
+        'verify_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?' \
+        'validate_mir_result_provenance('; do
+        if ! printf '%s\n' "$mir_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_default_entry_receipt_handoff_missing=src/verifier/mod.rs::verify_mir pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'let receipt = program.route_receipt("verifier-mir-v1");' \
+        'verify_ffi_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?' \
+        'validate_mir_result_provenance('; do
+        if ! printf '%s\n' "$ffi_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_default_entry_receipt_handoff_missing=src/verifier/mod.rs::verify_ffi_mir_with_source_hash pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'verifier_default_entry_receipt_handoff=single-wrapper-witness consumer=src/verifier/mod.rs::verify_mir+verify_ffi_mir_with_source_hash(\n'
+}
+
+verifier_default_entry_receipt_handoff
+
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow
 # a copied receipt to be paired with a different profile; requiring the profile
@@ -740,7 +775,7 @@ mir_verifier_source_provenance_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_source_hash(' \
     'pub fn verify_ffi_mir_with_route_receipt(' \
-    'let results = verify_ffi_mir_results(program, source_hash.clone())?' \
+    'verify_ffi_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?' \
     'validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?'
 
 # Keep the shared artifact validator bound to every immutable identity field.

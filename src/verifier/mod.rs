@@ -38,17 +38,10 @@ pub fn verify_mir(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let results = verify_mir_results(program, source_hash.clone())?;
     let receipt = program.route_receipt("verifier-mir-v1");
+    let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?;
     validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_mir")?;
     Ok(results)
-}
-
-fn verify_mir_results(
-    program: &crate::core::mir::reference::MirProgram,
-    source_hash: String,
-) -> Result<Vec<VerificationResult>, String> {
-    mir::verify_program(program, source_hash)
 }
 
 fn verify_mir_results_with_route_receipt(
@@ -311,20 +304,11 @@ pub fn verify_ffi_mir_with_source_hash(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let results = verify_ffi_mir_results(program, source_hash.clone())?;
     let receipt = program.route_receipt("verifier-mir-v1");
+    let results =
+        verify_ffi_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?;
     validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?;
     Ok(results)
-}
-
-fn verify_ffi_mir_results(
-    program: &crate::core::mir::reference::MirProgram,
-    source_hash: String,
-) -> Result<Vec<VerificationResult>, String> {
-    validate_mir_capabilities(program).map_err(|errors| {
-        format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
-    })?;
-    mir::verify_ffi_program(program, source_hash)
 }
 
 fn verify_ffi_mir_results_with_route_receipt(

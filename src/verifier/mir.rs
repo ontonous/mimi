@@ -301,18 +301,6 @@ fn verify_program_inner(
     Ok(results)
 }
 
-/// Verify canonical scalar FFI call contracts. Each result is one actual MIR
-/// extern call, so a caller with two calls receives two independently bound
-/// proof artifacts and counterexamples. The contract is checked against the
-/// caller's canonical path facts and the symbolic call result; no surface AST
-/// or legacy FFI walker is involved.
-pub(crate) fn verify_ffi_program(
-    program: &MirProgram,
-    source_hash: String,
-) -> Result<Vec<VerificationResult>, String> {
-    verify_ffi_program_inner(program, source_hash, None)
-}
-
 /// Verify canonical FFI call-site contracts while using the caller's route
 /// receipt directly in every emitted proof artifact.
 pub(crate) fn verify_ffi_program_with_route_receipt(
