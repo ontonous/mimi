@@ -1823,6 +1823,101 @@ fn legacy_owner_scalar_marker_cross_batch_interleaving_keeps_failure_ownership()
 }
 
 #[test]
+fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/audit-mir-legacy-owners.sh");
+    let run_audit = || {
+        std::process::Command::new("bash")
+            .arg(&script)
+            .current_dir(&root)
+            .output()
+            .expect("run owner condition summary audit")
+    };
+    let summary = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains("owner_deletion_condition_digest=")
+                    || line.starts_with("owner_deletion_condition_set_digest=")
+                    || line.starts_with("closed_scalar_")
+                    || line.starts_with("scalar_evidence_marker_sequence_status=")
+                    || line.starts_with("production_legacy_body_file_call_sites=")
+                    || line.starts_with("production_raw_ast_call_sites=")
+                    || line.starts_with("production_compile_func_legacy_call_sites=")
+                    || line.starts_with("owner_count=")
+                    || line.starts_with("scalar_ffi_direct_expression_legacy_refs=")
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let baseline = run_audit();
+    assert!(
+        baseline.status.success(),
+        "baseline owner audit failed:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline_summary = summary(&baseline);
+    assert!(
+        baseline_summary
+            .iter()
+            .any(|line| line.starts_with("owner_deletion_condition_set_digest=")),
+        "baseline owner audit omitted condition set digest"
+    );
+
+    let prefix = format!("mimi-legacy-owner-marker-summary-{}-", std::process::id());
+    assert_no_legacy_owner_temp_roots(&prefix);
+    for batch in 0..3 {
+        let residue = unique_legacy_owner_audit_temp_root(&format!("{prefix}{batch}"));
+        let nested = residue.join("nested").join("evidence");
+        std::fs::create_dir_all(&nested).expect("create summary residue root");
+        std::fs::write(nested.join("snapshot"), b"summary residue").expect("write summary residue");
+        let mut permissions = std::fs::metadata(&residue)
+            .expect("read summary residue permissions")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&residue, permissions).expect("make summary residue unreadable");
+
+        let error = LegacyOwnerAuditTempRootCleanup::cleanup_path(&residue)
+            .expect_err("summary residue cleanup must fail closed");
+        let snapshot = legacy_owner_temp_root_residues(&prefix);
+        let mut permissions = std::fs::metadata(&residue)
+            .expect("read blocked summary residue permissions")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&residue, permissions)
+            .expect("restore summary residue permissions");
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&residue)
+            .expect("summary residue recovery must succeed");
+        LegacyOwnerAuditTempRootCleanup::cleanup_path(&residue)
+            .expect("summary residue recovery must be idempotent");
+        let after = run_audit();
+
+        assert!(
+            error.contains(&residue.display().to_string()),
+            "summary failure omitted its residue path"
+        );
+        assert_eq!(
+            snapshot,
+            vec![residue.clone()],
+            "summary batch {batch} residue snapshot drifted"
+        );
+        assert!(
+            after.status.success(),
+            "owner audit failed after batch {batch}"
+        );
+        assert_eq!(
+            summary(&after),
+            baseline_summary,
+            "owner condition summary drifted after recovery batch {batch}"
+        );
+        assert_no_legacy_owner_temp_roots(&prefix);
+    }
+    assert_no_legacy_owner_temp_roots(&prefix);
+}
+
+#[test]
 fn legacy_owner_condition_digest_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
