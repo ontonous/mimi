@@ -16608,6 +16608,181 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_host_failure_recovers_across_three_consumers() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_recover(value: i64); }
+func main() -> i64 {
+    println(1 as i64);
+    mir_ffi_unit_recover(7 as i64);
+    0
+}
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_recover(int64_t value) {
+    (void)value;
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fputs("unit-good\n", file);
+    fclose(file);
+}
+"#;
+
+    struct UnitHost {
+        calls: Cell<u8>,
+        events: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl MirReferenceFfiResolver for UnitHost {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_unit_recover" {
+                return Err(format!("unexpected Unit host symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::Int(7)] {
+                return Err(format!("unexpected Unit host arguments {arguments:?}"));
+            }
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == 0 {
+                return Err("explicit Unit host binding failed".into());
+            }
+            self.events.borrow_mut().push("unit-good");
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let missing_fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let missing_path = missing_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    let trace_path = missing_fixture.dir.join("unit-recovery.trace");
+    std::fs::write(&trace_path, "").expect("create Unit recovery trace");
+    guard.set_trace_path(&trace_path);
+    guard.set_path(&missing_path);
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("Unit FFI recovery fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit FFI recovery fixture materialization");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("Unit FFI recovery receipt");
+    assert_eq!(receipt.symbol, "mir_ffi_unit_recover");
+    assert!(mir
+        .type_catalog()
+        .get(&receipt.result_type)
+        .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit()));
+    assert!(
+        receipt.result.is_some(),
+        "Unit call keeps a stable result identity"
+    );
+    assert_eq!(
+        receipt.result_conversion.map(|conversion| conversion.from),
+        Some(crate::core::mir::types::MirAbiClass::Unit)
+    );
+
+    let host = UnitHost {
+        calls: Cell::new(0),
+        events: std::cell::RefCell::new(Vec::new()),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&host);
+    let first_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference Unit host failure must stop after the prefix");
+    assert!(first_reference
+        .to_string()
+        .contains("explicit Unit host binding failed"));
+    assert_eq!(reference.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 1);
+    assert!(host.events.borrow().is_empty());
+
+    let recovered_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Unit host must recover on reentry");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "1\n");
+    assert_eq!(reference.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 2);
+    assert_eq!(host.events.borrow().as_slice(), ["unit-good"]);
+
+    let bytecode = compile_mir_program(&mir).expect("Unit FFI AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_canonical_ffi_library_path(missing_path.to_string_lossy().into_owned());
+    let missing_error = vm
+        .run_value()
+        .expect_err("bytecode Unit call must fail when the symbol is absent");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "");
+
+    vm.set_canonical_ffi_library_path(good_path.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value().expect("bytecode Unit call must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "unit-good\n");
+
+    std::fs::write(&trace_path, "").expect("clear native Unit recovery trace");
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_unit_recovery");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native Unit FFI recovery lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native Unit FFI recovery module");
+    let bad_config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let bad_native = super::link_and_observe_module(
+        &generator,
+        &bad_config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect_err("native Unit call must fail to link when the symbol is absent");
+    assert!(bad_native.contains("linker failed"), "{bad_native}");
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "");
+
+    let good_config = super::E2EConfig {
+        extra_c_src: Some(GOOD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let good_native = super::link_and_observe_module(
+        &generator,
+        &good_config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("native Unit call must recover with the symbol present");
+    assert_eq!(good_native.exit_code, Some(0));
+    assert_eq!(good_native.stdout, "1\n");
+    assert!(good_native.stderr.is_empty());
+    assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "unit-good\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_reference_contract_switch_keeps_host_and_result_guards() {
     const SOURCE: &str = r#"
 extern "C" {
