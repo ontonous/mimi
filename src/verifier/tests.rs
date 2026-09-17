@@ -49,6 +49,26 @@ fn verifier_route_error_conversion_handles_wrapped_and_invalid_prefixes() {
     assert_eq!(diagnostic.message, invalid_then_valid);
 }
 
+#[test]
+fn verifier_route_error_formats_wrapped_code_once_with_runtime_origin() {
+    let error = format!(
+        "verifier context: {}: canonical route manifest rejected: future field",
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+    );
+    let diagnostic = mir_route_error_to_diagnostic(error.clone());
+    let rendered = crate::diagnostic::format::strip_ansi(
+        &crate::diagnostic::format::format_diagnostic(&diagnostic, None, ""),
+    );
+
+    assert_eq!(
+        rendered,
+        "error[MIR-RECEIPT-MANIFEST-001] verifier context: canonical route manifest rejected: future field\n"
+    );
+    assert_eq!(diagnostic.message, error);
+    let origin = diagnostic.origin.expect("route diagnostic provenance");
+    assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+}
+
 macro_rules! require_z3 {
     () => {
         if !crate::verifier::is_z3_available() {

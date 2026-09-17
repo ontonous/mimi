@@ -166,6 +166,30 @@ mod tests {
     }
 
     #[test]
+    fn disasm_route_error_renderer_matches_direct_diagnostic_for_wrapped_code() {
+        let error = MirBytecodeError {
+            function: mimi::core::NodeId("mir-program".into()),
+            message: format!(
+                "bytecode wrapper: {}: canonical route manifest rejected: future field",
+                mimi::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+        };
+        let rendered = strip_ansi(&render_mir_bytecode_error(&error));
+        let direct = strip_ansi(&mimi::diagnostic::format::format_diagnostic(
+            &error.to_diagnostic(),
+            None,
+            "",
+        ));
+
+        assert_eq!(rendered, direct);
+        assert_eq!(
+            rendered,
+            "error[MIR-RECEIPT-MANIFEST-001] MIR bytecode 'mir-program': bytecode wrapper: canonical route manifest rejected: future field\n"
+        );
+        assert_eq!(rendered.matches("MIR-RECEIPT-MANIFEST-001").count(), 1);
+    }
+
+    #[test]
     fn disasm_plain_error_renderer_keeps_indented_legacy_shape() {
         let error = MirBytecodeError {
             function: mimi::core::NodeId("bad".into()),
