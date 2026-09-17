@@ -17430,6 +17430,45 @@ fn scalar_ffi_default_verifier_batch_reuses_one_route_receipt() {
 }
 
 #[test]
+fn scalar_ffi_default_ffi_verifier_reuses_one_route_receipt() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    let source = r#"
+        extern "C" {
+            func direct_receipt_first(value: i64) -> i64 requires: value >= 0 ensures: true;
+            func direct_receipt_second(value: i64) -> i64 requires: value >= 0 ensures: true;
+        }
+        func main() -> i64 {
+            direct_receipt_first(7 as i64);
+            direct_receipt_second(-8 as i64);
+            0
+        }
+    "#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("direct default FFI verifier fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("direct default FFI verifier fixture materialization");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let expected_receipt = mir.route_receipt("verifier-mir-v1");
+    let results = crate::verifier::verify_ffi_mir_with_source_hash(&mir, source_hash.clone())
+        .expect("direct default FFI verifier");
+    assert_eq!(results.len(), 2, "one proof result per FFI call-site");
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+    assert!(results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.source_hash == source_hash
+                && artifact.mir_hash == mir.canonical_digest()
+                && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
+        })
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
     for source in [
         r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
