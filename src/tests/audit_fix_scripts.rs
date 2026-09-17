@@ -297,6 +297,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "consumer_receipt_profile_binding=verify-ffi-v1 profile=CanonicalMirRouteProfile::ScalarFfi consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "source_hash_entry_binding=blake3-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_source(",
+        "source_hash_parameter_binding=declared-and-forwarded consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -501,6 +502,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=source_hash_entry_hash_missing="),
         "source hash drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&source_hash_output.stderr)
+    );
+    let tampered_source_hash_parameter_script = source_script.replacen(
+        "    'source_hash: String' \\\n",
+        "    'source_hash_value: String' \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_source_hash_parameter_script,
+        "source hash parameter fixture must replace the expected declaration"
+    );
+    std::fs::write(&script_path, tampered_source_hash_parameter_script)
+        .expect("write tampered source hash parameter audit script");
+    let source_hash_parameter_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered source hash parameter audit");
+    assert!(
+        !source_hash_parameter_output.status.success(),
+        "tampered source hash parameter must fail closed:\n{}",
+        String::from_utf8_lossy(&source_hash_parameter_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&source_hash_parameter_output.stderr)
+            .contains("owner_audit_error=source_hash_parameter_missing="),
+        "source hash parameter drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&source_hash_parameter_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

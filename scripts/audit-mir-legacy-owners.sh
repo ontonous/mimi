@@ -355,6 +355,41 @@ source_hash_entry_binding \
     'verify_ffi_checked_with_source_hash(' \
     'blake3::hash(source.as_bytes()).to_hex().to_string(),'
 
+# Tie the checked-program consumer's declared hash parameter to the exact
+# route adapter argument.  This is intentionally separate from the public
+# entry check so a parameter rename or a forwarding omission cannot hide
+# behind a still-correct source entry marker.
+source_hash_parameter_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local parameter_pattern="$4"
+    local invocation_pattern="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$parameter_pattern" >/dev/null; then
+        printf 'owner_audit_error=source_hash_parameter_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$invocation_pattern" >/dev/null; then
+        printf 'owner_audit_error=source_hash_parameter_forward_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'source_hash_parameter_binding=declared-and-forwarded consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+source_hash_parameter_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available(' \
+    'source_hash: String' \
+    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
