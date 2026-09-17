@@ -22080,6 +22080,159 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_route_nested_spawn_binding_inherits_and_recovers() {
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_nested_route(int64_t value) { (void)value; }
+"#;
+    const GOOD_C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_nested_route(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_nested_route(value: i64) ensures: true; }
+func leaf() -> i64 {
+    println(5 as i64);
+    mir_ffi_unit_nested_route(7 as i64);
+    9
+}
+func main() -> i64 { 0 }
+"#;
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("nested Unit route fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("nested Unit route fixture materialization");
+    let receipt = mir.route_receipt("r6-891-unit-nested-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("nested Unit route manifest rendering");
+    let verification = crate::verifier::verify_ffi_mir_with_route_manifest(
+        &mir,
+        &manifest,
+        blake3::hash(SOURCE.as_bytes()).to_hex().to_string(),
+    )
+    .expect("nested Unit route verification");
+    assert!(verification.iter().any(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.mir_route_receipt.as_ref() == Some(&receipt))
+    }));
+
+    let mut bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("nested Unit route bytecode");
+    assert!(bytecode.ast.is_none());
+    let leaf = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf")
+        .expect("nested Unit route leaf") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("nested Unit route main");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("nested route bytecode unique");
+
+    let mut middle_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:middle".into(), 0);
+    let middle_task = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: middle_task,
+        func: leaf,
+        args_base: middle_task,
+        argc: 0,
+    });
+    let middle_result = middle_proto.alloc_reg();
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: middle_result,
+        ra: middle_task,
+    });
+    middle_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: middle_result });
+    let middle = program.functions.len() as u32;
+    program.functions.push(middle_proto);
+
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let outer_task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: outer_task,
+        func: middle,
+        args_base: outer_task,
+        argc: 0,
+    });
+    let outer_result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: outer_result,
+        ra: outer_task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
+    program.functions[main] = main_proto;
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, GOOD_C_SOURCE);
+    let mut guard = super::FfiEnvGuard::lock();
+
+    let good_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut good_vm = BytecodeVM::new(bytecode.clone());
+    good_vm.set_stdout_buf(good_stdout.clone());
+    good_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        good_vm.run_value().expect("nested Unit route success"),
+        Value::Int(9)
+    );
+    assert_eq!(&*good_stdout.lock().unwrap(), "5\n");
+    assert_eq!(good_vm.debug_stack_state(), (0, 0));
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    let recovery_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut recovery_vm = BytecodeVM::new(bytecode);
+    recovery_vm.set_stdout_buf(recovery_stdout.clone());
+    recovery_vm.set_canonical_ffi_library_path(
+        bad_fixture
+            .dir
+            .join("missing.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let first_error = recovery_vm
+        .run_value()
+        .expect_err("nested Unit route missing library must fail");
+    assert_eq!(first_error.code(), "E0800", "{first_error}");
+    assert!(first_error.to_string().contains("failed to load"));
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "5\n");
+    assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    recovery_vm.set_canonical_ffi_library_path(
+        good_fixture
+            .dir
+            .join("ffi.so")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        recovery_vm.run_value().expect("nested Unit route recovery"),
+        Value::Int(9)
+    );
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "5\n5\n");
+    assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+
+    guard.set_path(&good_fixture.dir.join("ffi.so"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
