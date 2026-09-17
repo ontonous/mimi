@@ -408,7 +408,24 @@ impl BytecodeVM {
     /// so this VM-boundary check compares them against that snapshot before a
     /// malformed program can alter a descriptor index, instruction identity,
     /// or descriptor payload together and bypass the per-call runtime check.
+    /// Add a stable route identity to a VM-side artifact rejection.  The
+    /// validator intentionally keeps the historical human-readable message;
+    /// this wrapper only makes the receipt/manifest boundary machine-readable
+    /// when the error crosses the public interpreter API.
     fn validate_canonical_ffi_program(&self) -> Result<(), InterpError> {
+        self.validate_canonical_ffi_program_inner()
+            .map_err(|error| {
+                let message = error.message().to_owned();
+                let code = if message.contains("route receipt manifest replay failed") {
+                    crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+                } else {
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                };
+                InterpError::new(format!("{code}: {message}"))
+            })
+    }
+
+    fn validate_canonical_ffi_program_inner(&self) -> Result<(), InterpError> {
         let descriptors = &self.program.canonical_ffi;
         let bindings = &self.program.canonical_ffi_bindings;
         if descriptors.is_empty() {

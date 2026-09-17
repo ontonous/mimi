@@ -55,6 +55,17 @@ pub enum InterpError {
 }
 
 impl InterpError {
+    /// Return the machine-readable Canonical MIR route code embedded in a
+    /// generic runtime message, when the failure came from a route/receipt
+    /// boundary.  The historical `code()` remains the runtime trap class
+    /// (usually `E0800`); this secondary identity lets direct consumers and
+    /// CLI formatters distinguish a forged MIR artifact from an ordinary
+    /// runtime failure without changing the trap ABI.
+    pub fn diagnostic_code(&self) -> &'static str {
+        crate::diagnostic::codes::canonical_mir_route_code_in_message(self.message())
+            .unwrap_or_else(|| self.code())
+    }
+
     /// Return the error code for this variant.
     pub fn code(&self) -> &'static str {
         match self {
@@ -402,7 +413,15 @@ impl InterpError {
             message = format!("{} [{}]", message, func);
         }
 
-        let mut diag = Diagnostic::error_code(self.code(), message, Span::UNKNOWN);
+        let diagnostic_code = self.diagnostic_code();
+        let mut diag =
+            if crate::diagnostic::codes::canonical_mir_route_code_in_message(&message).is_some() {
+                Diagnostic::error_code(diagnostic_code, message, Span::UNKNOWN).with_origin(
+                    crate::diagnostic::DiagnosticOrigin::runtime_system("mir.route"),
+                )
+            } else {
+                Diagnostic::error_code(diagnostic_code, message, Span::UNKNOWN)
+            };
 
         if let Some(help) = &ctx.help {
             diag = diag.with_help(help.clone());
@@ -492,5 +511,30 @@ mod tests {
         assert_eq!(InterpError::type_mismatch("t").code(), codes::E0812);
         assert_eq!(InterpError::float_error("f").code(), codes::E0813);
         assert_eq!(InterpError::slice_error("s").code(), codes::E0814);
+    }
+
+    #[test]
+    fn route_wrapped_runtime_errors_keep_runtime_trap_and_expose_route_identity() {
+        let error = InterpError::new(format!(
+            "{}: forged canonical FFI binding manifest",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+        assert_eq!(error.code(), codes::E0800);
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(
+            diagnostic
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.rule.as_deref()),
+            Some("mir.route")
+        );
     }
 }

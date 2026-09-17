@@ -12338,6 +12338,10 @@ mod tests {
         let anchor_error = uniform_vm
             .run_value()
             .expect_err("uniform forged route receipt must fail closed");
+        assert_eq!(
+            anchor_error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
         assert!(
             anchor_error
                 .to_string()
@@ -12355,9 +12359,58 @@ mod tests {
         let error = vm
             .run_value()
             .expect_err("mixed canonical route receipts must fail closed");
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
         assert!(
             error.to_string().contains("mixes route receipt identities"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_route_manifest_replay_keeps_manifest_diagnostic_code() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(
+            Lexer::new(source)
+                .tokenize()
+                .expect("lex scalar FFI manifest replay"),
+        )
+        .parse_file()
+        .expect("parse scalar FFI manifest replay");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI manifest replay");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("canonical scalar FFI manifest replay MIR");
+        let receipt = mir.route_receipt("r6-933-bytecode-manifest-replay-v1");
+        let mut bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+            .expect("canonical scalar FFI manifest replay bytecode");
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        let mut invalid = receipt;
+        invalid.mir_digest = "not-a-valid-lowercase-hex-digest".into();
+        forged.canonical_ffi_route_receipt = Some(invalid.clone());
+        for binding in &mut forged.canonical_ffi_bindings {
+            binding.route_receipt = Some(invalid.clone());
+        }
+
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("invalid route manifest must fail before execution");
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+        );
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert_eq!(
+            diagnostic
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.rule.as_deref()),
+            Some("mir.route")
         );
     }
 
@@ -13091,6 +13144,22 @@ func main() -> i32 {
         assert!(
             error.to_string().contains("canonical FFI binding manifest"),
             "{error}"
+        );
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert_eq!(
+            diagnostic
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.rule.as_deref()),
+            Some("mir.route")
         );
         assert!(!error.to_string().contains("legacy_tripwire"));
     }
