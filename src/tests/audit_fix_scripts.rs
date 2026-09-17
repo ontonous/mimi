@@ -1031,6 +1031,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         ),
         "legacy owner audit must pin the native program-level route receipt anchor"
     );
+    assert!(
+        stdout.contains(
+            "mir_route_cache_identity_binding=shared-receipt-digest consumer=src/verifier/ctx.rs"
+        ),
+        "legacy owner audit must pin the shared route cache identity algorithm"
+    );
 }
 
 #[test]

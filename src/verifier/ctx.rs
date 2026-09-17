@@ -195,34 +195,6 @@ fn same_optional_source_provenance(left: &str, right: &str) -> bool {
     left.is_empty() || right.is_empty() || left == right
 }
 
-/// Return the cache identity of a MIR route witness.
-///
-/// The route profile is provenance for a consumer invocation, so it is
-/// intentionally excluded.  Every semantic receipt field, including the
-/// ordered root-owner list, is framed before hashing so delimiter characters
-/// in public owner identities cannot create cache-key collisions.  A separate
-/// digest also makes the MIR cache-key shape independent of the human-readable
-/// manifest format.
-fn mir_route_cache_identity(receipt: &crate::core::mir::CanonicalMirRouteReceipt) -> String {
-    let mut framed = String::from("mimi-proof-mir-route-cache-v1");
-    let mut frame = |value: &str| {
-        use std::fmt::Write as _;
-        write!(framed, "\n{}:", value.len()).expect("writing a String cannot fail");
-        framed.push_str(value);
-    };
-    frame(receipt.schema);
-    frame(&receipt.mir_digest);
-    frame(&receipt.type_desc_digest);
-    frame(&receipt.abi_digest);
-    frame(&receipt.ffi_digest);
-    frame(&receipt.ownership_digest);
-    frame(&receipt.flow_transition_digest);
-    for owner in &receipt.root_owners {
-        frame(&owner.0);
-    }
-    blake3::hash(framed.as_bytes()).to_hex().to_string()
-}
-
 impl ProofArtifact {
     /// Current semantics version. Bump when verification semantics change.
     pub const SEMANTICS_VERSION: u32 = 1;
@@ -323,7 +295,7 @@ impl ProofArtifact {
         let route_identity = self
             .mir_route_receipt
             .as_ref()
-            .map(mir_route_cache_identity)
+            .map(crate::core::mir::CanonicalMirRouteReceipt::semantic_identity_digest)
             .unwrap_or_else(|| "missing".to_string());
         format!("{base}:mir-route-v1:{route_identity}")
     }

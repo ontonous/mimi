@@ -121,6 +121,32 @@ impl CanonicalMirRouteReceipt {
             && self.root_owners == other.root_owners
     }
 
+    /// Return the deterministic digest used when a consumer needs a cache
+    /// identity for this receipt.  The profile remains excluded for the same
+    /// reason as [`Self::same_semantic_identity`]: it records which consumer
+    /// admitted the graph, while the framed schema/digest/owner tuple is the
+    /// reusable semantic witness.  Length framing keeps owner identities from
+    /// creating delimiter collisions.
+    pub fn semantic_identity_digest(&self) -> String {
+        let mut framed = String::from("mimi-proof-mir-route-cache-v1");
+        let mut frame = |value: &str| {
+            use std::fmt::Write as _;
+            write!(framed, "\n{}:", value.len()).expect("writing a String cannot fail");
+            framed.push_str(value);
+        };
+        frame(self.schema);
+        frame(&self.mir_digest);
+        frame(&self.type_desc_digest);
+        frame(&self.abi_digest);
+        frame(&self.ffi_digest);
+        frame(&self.ownership_digest);
+        frame(&self.flow_transition_digest);
+        for owner in &self.root_owners {
+            frame(&owner.0);
+        }
+        blake3::hash(framed.as_bytes()).to_hex().to_string()
+    }
+
     /// Validate the invariants required before a receipt is rendered as an
     /// evidence manifest. This remains a pure receipt check: it does not
     /// inspect source AST, infer types, or consult a backend.
@@ -692,9 +718,18 @@ mod tests {
             receipt.same_semantic_identity(&profile),
             "consumer profile is provenance and must not change semantic identity"
         );
+        assert_eq!(
+            receipt.semantic_identity_digest(),
+            profile.semantic_identity_digest(),
+            "consumer profile is provenance and must not split semantic cache identity"
+        );
         let mut mir_digest = receipt.clone();
         mir_digest.mir_digest = "b".repeat(64);
         assert!(!receipt.same_semantic_identity(&mir_digest));
+        assert_ne!(
+            receipt.semantic_identity_digest(),
+            mir_digest.semantic_identity_digest()
+        );
         let mut type_desc_digest = receipt.clone();
         type_desc_digest.type_desc_digest = "b".repeat(64);
         let mut abi_digest = receipt.clone();

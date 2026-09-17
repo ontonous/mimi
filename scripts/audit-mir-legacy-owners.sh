@@ -408,6 +408,28 @@ native_route_receipt_anchor() {
 
 native_route_receipt_anchor
 
+# Proof cache identity must consume the same canonical receipt algorithm as
+# native and bytecode route admission.  Keep this as a source-level tripwire
+# so a verifier-local field list cannot silently drift from the shared MIR
+# identity contract.
+mir_route_cache_identity_binding() {
+    if ! rg -F "pub fn semantic_identity_digest(&self) -> String" \
+        "$ROOT_DIR/src/core/mir/receipt.rs" >/dev/null; then
+        printf 'owner_audit_error=mir_route_cache_identity_missing=src/core/mir/receipt.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -F ".map(crate::core::mir::CanonicalMirRouteReceipt::semantic_identity_digest)" \
+        "$ROOT_DIR/src/verifier/ctx.rs" >/dev/null; then
+        printf 'owner_audit_error=mir_route_cache_identity_consumer_missing=src/verifier/ctx.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_route_cache_identity_binding=shared-receipt-digest consumer=src/verifier/ctx.rs\n'
+}
+
+mir_route_cache_identity_binding
+
 # Bind the public source entry to the hash-bearing checked-program adapter.
 # This keeps the caller's BLAKE3 provenance on the same path as the verifier
 # receipt; a renamed call or an empty/hashless entry must fail closed.
