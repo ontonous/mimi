@@ -22778,6 +22778,199 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_interleaved_profile_failures_preserve_provenance() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_interleaved_profile(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_interleaved_profile(value: i64) ensures: true; }
+func main() -> i64 {
+    println(6 as i64);
+    mir_ffi_unit_interleaved_profile(7 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit interleaved-profile fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit interleaved-profile fixture materialization");
+    let profile_a = mir.route_receipt("r6-897-unit-interleaved-a-v1");
+    let profile_b = mir.route_receipt("r6-897-unit-interleaved-b-v1");
+    assert_ne!(profile_a.profile, profile_b.profile);
+    assert_eq!(profile_a.mir_digest, profile_b.mir_digest);
+    assert_eq!(profile_a.ffi_digest, profile_b.ffi_digest);
+    let mut forged = profile_b.clone();
+    forged.abi_digest = "0".repeat(64);
+    let malformed_manifest = format!(
+        "{}future_field=reserved\n",
+        profile_b
+            .manifest_text()
+            .expect("Unit interleaved profile manifest")
+    );
+    let assert_route_diagnostic = |diagnostic: &crate::diagnostic::Diagnostic, code: &str| {
+        assert_eq!(diagnostic.code.as_deref(), Some(code));
+        let origin = diagnostic
+            .origin
+            .as_ref()
+            .expect("interleaved route origin");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert!(origin.parent_node_id.is_none());
+    };
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let valid_ffi =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_a, source_hash.clone())
+            .expect("Unit interleaved valid FFI profile");
+    assert!(valid_ffi.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.mir_route_receipt.as_ref() == Some(&profile_a))
+    }));
+    let forged_general =
+        crate::verifier::verify_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("general verifier must reject forged Unit profile");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(forged_general),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let forged_ffi =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("FFI verifier must reject forged Unit profile");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(forged_ffi),
+        crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let malformed_general = crate::verifier::verify_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("general verifier must reject malformed Unit profile manifest");
+    assert!(malformed_general.contains("future_field"));
+    assert!(malformed_general.starts_with(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE));
+    let malformed_ffi = crate::verifier::verify_ffi_mir_with_route_manifest(
+        &mir,
+        &malformed_manifest,
+        source_hash.clone(),
+    )
+    .expect_err("FFI verifier must reject malformed Unit profile manifest");
+    assert!(malformed_ffi.contains("future_field"));
+    assert!(malformed_ffi.starts_with(crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE));
+    let recovered_ffi =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile_b, source_hash.clone())
+            .expect("FFI verifier must recover with the second valid Unit profile");
+    assert!(recovered_ffi.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.mir_route_receipt.as_ref() == Some(&profile_b))
+    }));
+
+    let fixture = library_fixture(super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed), C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode_error = compile_mir_program_with_route_receipt(&mir, &forged)
+        .expect_err("bytecode must reject forged Unit profile");
+    assert_route_diagnostic(
+        &bytecode_error[0].to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let manifest_error = compile_mir_program_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("bytecode must reject malformed Unit profile manifest");
+    assert_route_diagnostic(
+        &manifest_error[0].to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+    let bytecode = compile_mir_program_with_route_receipt(&mir, &profile_b)
+        .expect("bytecode must recover with second valid Unit profile");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("recovered Unit interleaved bytecode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "6\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_897_unit_interleaved");
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect("native must admit first valid Unit profile");
+    native
+        .module
+        .verify()
+        .expect("first Unit interleaved native module");
+    let snapshot = native.module.print_to_string().to_string();
+    let native_forged = native
+        .compile_mir_native_with_route_receipt(&mir, &forged)
+        .expect_err("native must reject forged Unit profile");
+    assert_route_diagnostic(
+        &native_forged[0],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    let native_manifest = native
+        .compile_mir_native_with_route_manifest(&mir, &malformed_manifest)
+        .expect_err("native must reject malformed Unit profile manifest");
+    assert_route_diagnostic(
+        &native_manifest[0],
+        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE,
+    );
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("native must recover with second valid Unit profile");
+    native
+        .module
+        .verify()
+        .expect("recovered Unit interleaved native module");
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+
+    struct UnitInterleavedOracle;
+    impl MirReferenceFfiResolver for UnitInterleavedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_interleaved_profile");
+            assert_eq!(arguments, [MirRuntimeValue::Int(7)]);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&UnitInterleavedOracle)
+        .with_route_receipt(&forged);
+    let reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject forged Unit profile");
+    assert_route_diagnostic(
+        &reference_error.to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert!(forged_reference.captured_output().is_empty());
+    let recovered_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&UnitInterleavedOracle)
+        .with_route_receipt(&profile_b)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover with second valid Unit profile");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "6\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    guard.set_path(&library);
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
