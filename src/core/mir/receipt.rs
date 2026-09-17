@@ -19,8 +19,8 @@ pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 /// these available through the MIR namespace while the diagnostic registry
 /// remains the single source of truth for CLI/LSP code descriptions.
 pub use crate::diagnostic::codes::{
-    MIR_FFI_ROUTE_MANIFEST_ERROR_CODE, MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
-    MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+    MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE, MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+    MIR_FFI_ROUTE_RECEIPT_ERROR_CODE, MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
 };
 
 /// Stable header for the line-oriented CLI evidence manifest.

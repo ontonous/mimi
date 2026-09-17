@@ -215,7 +215,10 @@ impl From<String> for Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{mir_route_error_diagnostic, DiagnosticOriginKind};
-    use crate::diagnostic::codes::{MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
+    use crate::diagnostic::codes::{
+        MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE, MIR_ROUTE_MANIFEST_ERROR_CODE,
+        MIR_ROUTE_RECEIPT_ERROR_CODE,
+    };
     use crate::span::{SourceId, Span};
 
     #[test]
@@ -233,6 +236,17 @@ mod tests {
         let origin = diagnostic.origin.expect("route diagnostic provenance");
         assert_eq!(origin.kind, DiagnosticOriginKind::RuntimeSystem);
         assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+
+        let declaration_boundary = mir_route_error_diagnostic(
+            format!(
+                "default Canonical MIR route rejected: {MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE}: canonical scalar FFI declaration boundary: extern declaration 'foreign' result type is outside canonical scalar FFI"
+            ),
+            span,
+        );
+        assert_eq!(
+            declaration_boundary.code.as_deref(),
+            Some(MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+        );
 
         let ordinary = mir_route_error_diagnostic(
             format!("{MIR_ROUTE_MANIFEST_ERROR_CODE}-extra: ordinary failure"),

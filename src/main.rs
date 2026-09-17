@@ -694,8 +694,8 @@ fn main() -> std::process::ExitCode {
 
 /// Preserve registered MIR route identity when a command returns a textual
 /// error through the top-level CLI boundary.  Most command errors remain on
-/// the historical compact formatter; only the four cross-adapter route codes
-/// are upgraded to the shared machine-first diagnostic shape.
+/// the historical compact formatter; only registered cross-adapter MIR route
+/// codes are upgraded to the shared machine-first diagnostic shape.
 fn format_cli_error(message: &str) -> String {
     let Some((offset, code)) =
         mimi::diagnostic::codes::canonical_mir_route_code_location_in_message(message)
@@ -738,6 +738,7 @@ mod tests {
             "MIR-RECEIPT-MANIFEST-001",
             "MIR-FFI-RECEIPT-001",
             "MIR-FFI-RECEIPT-MANIFEST-001",
+            "MIR-FFI-DECLARATION-001",
         ] {
             let message = format!("canonical MIR verifier input rejected: {code}: stale receipt");
             let rendered = strip_ansi(&format_cli_error(&message));

@@ -144,7 +144,8 @@ pub(crate) fn select_default_route(
     // `build`, or `verify` could silently hand the call to the old emitter.
     if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(checked) {
         return DefaultMirRoute::Rejected(format!(
-            "canonical scalar FFI declaration boundary: {reason}"
+            "{}: canonical scalar FFI declaration boundary: {reason}",
+            mimi::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
         ));
     }
     // Admission is checker-owned and must happen before MIR construction.

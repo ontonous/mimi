@@ -596,7 +596,8 @@ pub(crate) fn build(
             )?);
         } else {
             return Err(format!(
-                "default Canonical MIR route rejected: canonical scalar FFI declaration boundary: {reason}"
+                "default Canonical MIR route rejected: {}: canonical scalar FFI declaration boundary: {reason}",
+                mimi::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
             ));
         }
     }

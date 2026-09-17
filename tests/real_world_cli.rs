@@ -16976,6 +16976,10 @@ func main() -> string { foreign(42 as i64) }
                         stderr.contains("canonical scalar FFI declaration boundary"),
                         "{label} {command}: default route must reject before legacy: {stderr}"
                     );
+                    assert!(
+                        stderr.contains("MIR-FFI-DECLARATION-001"),
+                        "{label} {command}: default boundary must retain its stable diagnostic code: {stderr}"
+                    );
                 } else {
                     assert!(
                         (stderr.contains("FFI") || stderr.contains("ABI"))

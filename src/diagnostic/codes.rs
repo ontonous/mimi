@@ -260,12 +260,14 @@ pub const MIR_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-RECEIPT-001";
 pub const MIR_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-RECEIPT-MANIFEST-001";
 pub const MIR_FFI_ROUTE_RECEIPT_ERROR_CODE: &str = "MIR-FFI-RECEIPT-001";
 pub const MIR_FFI_ROUTE_MANIFEST_ERROR_CODE: &str = "MIR-FFI-RECEIPT-MANIFEST-001";
+pub const MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE: &str = "MIR-FFI-DECLARATION-001";
 
-const MIR_ROUTE_CODES: [&str; 4] = [
+const MIR_ROUTE_CODES: [&str; 5] = [
     MIR_ROUTE_RECEIPT_ERROR_CODE,
     MIR_ROUTE_MANIFEST_ERROR_CODE,
     MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
     MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+    MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
 ];
 
 // Lint warning codes (W0xxx)
@@ -513,6 +515,9 @@ pub fn describe(code: &str) -> &'static str {
         MIR_ROUTE_MANIFEST_ERROR_CODE => "canonical MIR route manifest rejected",
         MIR_FFI_ROUTE_RECEIPT_ERROR_CODE => "canonical MIR FFI route receipt rejected",
         MIR_FFI_ROUTE_MANIFEST_ERROR_CODE => "canonical MIR FFI route manifest rejected",
+        MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE => {
+            "canonical scalar FFI declaration is outside the migrated island"
+        },
 
         W001 => "standalone desc/rule has no implementation",
         W002 => "locked fragment ($/$$) with no implementation body",
@@ -550,6 +555,7 @@ mod tests {
             super::MIR_ROUTE_MANIFEST_ERROR_CODE,
             super::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
             super::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
+            super::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
         ];
         for code in cases {
             assert_eq!(
