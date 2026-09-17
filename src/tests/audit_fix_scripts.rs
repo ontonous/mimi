@@ -1043,6 +1043,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         ),
         "legacy owner audit must pin native route manifest replay"
     );
+    assert!(
+        stdout.contains(
+            "native_route_manifest_adapter_binding=manifest-to-typed-receipt-forward consumer=src/codegen/mir/eligibility.rs"
+        ),
+        "legacy owner audit must pin native manifest adapter forwarding"
+    );
 }
 
 #[test]

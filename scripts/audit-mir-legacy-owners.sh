@@ -453,6 +453,29 @@ native_route_manifest_replay_binding() {
 
 native_route_manifest_replay_binding
 
+# The public native manifest entry must be a thin adapter over the typed
+# receipt entry.  Keeping this forwarding contract in the owner audit prevents
+# a future CLI-facing parser from growing a second emission path that skips
+# the native receipt anchor and semantic replay checks above.
+native_route_manifest_adapter_binding() {
+    local source
+    source="$(cat "$ROOT_DIR/src/codegen/mir/eligibility.rs")"
+    for pattern in \
+        'pub fn compile_mir_native_with_route_manifest(' \
+        'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+        'self.compile_mir_native_with_route_receipt(program, &receipt)'; do
+        if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=native_route_manifest_adapter_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'native_route_manifest_adapter_binding=manifest-to-typed-receipt-forward consumer=src/codegen/mir/eligibility.rs\n'
+}
+
+native_route_manifest_adapter_binding
+
 # Bind the public source entry to the hash-bearing checked-program adapter.
 # This keeps the caller's BLAKE3 provenance on the same path as the verifier
 # receipt; a renamed call or an empty/hashless entry must fail closed.
