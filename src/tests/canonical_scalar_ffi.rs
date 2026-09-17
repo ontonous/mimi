@@ -24965,6 +24965,230 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_multi_call_binding_and_mode_isolation() {
+    const C_SOURCE_A: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_binding_mode(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "A%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const C_SOURCE_B: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_binding_mode(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "B%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_binding_mode(value: i64) ensures: true; }
+func main() -> i64 {
+    println(7 as i64);
+    mir_ffi_unit_binding_mode(7 as i64);
+    println(8 as i64);
+    mir_ffi_unit_binding_mode(8 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit binding/mode isolation fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit binding/mode isolation fixture materialization");
+    let profile = mir.route_receipt("r6-902-unit-binding-mode-v1");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile, source_hash.clone())
+            .expect("Unit binding/mode isolation verification");
+    assert_eq!(verification.len(), 2);
+    assert!(verification.iter().all(|result| {
+        result.status == crate::verifier::VerifStatus::Proven
+            && result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.source_hash == source_hash
+                    && artifact.mir_hash == profile.mir_digest
+                    && artifact.mir_route_receipt.as_ref() == Some(&profile)
+            })
+    }));
+
+    struct BindingModeOracle(std::cell::RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for BindingModeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_binding_mode");
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!(
+                    "unexpected Unit binding/mode arguments: {arguments:?}"
+                ));
+            };
+            self.0.borrow_mut().push(*value);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+    let oracle = BindingModeOracle(std::cell::RefCell::new(Vec::new()));
+    let checked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("checked Unit binding/mode reference");
+    assert_eq!(checked_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(checked_reference.output, "7\n8\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7, 8]);
+    let unchecked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile)
+        .with_ffi_verification(false)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("unchecked Unit binding/mode reference");
+    assert_eq!(unchecked_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(unchecked_reference.output, "7\n8\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7, 8, 7, 8]);
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture_a = library_fixture(counter, C_SOURCE_A);
+    let fixture_b = library_fixture(counter + 1, C_SOURCE_B);
+    let path_a = fixture_a.dir.join("ffi.so");
+    let path_b = fixture_b.dir.join("ffi.so");
+    let missing = fixture_a.dir.join("missing.so");
+    let trace_a = fixture_a.dir.join("binding-mode-a.trace");
+    let trace_b = fixture_b.dir.join("binding-mode-b.trace");
+    std::fs::write(&trace_a, "").expect("create Unit binding/mode trace A");
+    std::fs::write(&trace_b, "").expect("create Unit binding/mode trace B");
+    guard.set_trace_path(&trace_a);
+    guard.set_path(&missing);
+    let manifest = profile
+        .manifest_text()
+        .expect("Unit binding/mode route manifest");
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("Unit binding/mode AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+
+    let mut vm_a = BytecodeVM::new(bytecode.clone());
+    vm_a.set_canonical_ffi_library_path(path_a.to_string_lossy().into_owned());
+    assert_eq!(
+        vm_a.run_value()
+            .expect("checked VM A must use explicit library A"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_a.stdout(), "7\n8\n");
+    assert_eq!(vm_a.debug_stack_state(), (0, 0));
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\nA8\n");
+    assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+
+    let mut vm_b = BytecodeVM::new(bytecode);
+    vm_b.set_canonical_ffi_library_path(path_b.to_string_lossy().into_owned());
+    vm_b.set_verify_ffi(false);
+    guard.set_trace_path(&trace_b);
+    assert_eq!(
+        vm_b.run_value()
+            .expect("unchecked VM B must use its explicit library B"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_b.stdout(), "7\n8\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB8\n");
+    assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm_a.set_canonical_ffi_library_path(path_b.to_string_lossy().into_owned());
+    guard.set_trace_path(&trace_b);
+    assert_eq!(
+        vm_a.run_value()
+            .expect("checked VM A must switch to explicit library B"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_a.stdout(), "7\n8\n");
+    assert_eq!(
+        std::fs::read_to_string(&trace_b).unwrap(),
+        "B7\nB8\nB7\nB8\n"
+    );
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm_b.set_canonical_ffi_library_path(path_a.to_string_lossy().into_owned());
+    vm_b.set_verify_ffi(true);
+    guard.set_trace_path(&trace_a);
+    assert_eq!(
+        vm_b.run_value()
+            .expect("re-enabled VM B must switch to explicit library A"),
+        Value::Int(0)
+    );
+    assert_eq!(vm_b.stdout(), "7\n8\n");
+    assert_eq!(
+        std::fs::read_to_string(&trace_a).unwrap(),
+        "A7\nA8\nA7\nA8\n"
+    );
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 2);
+    assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+
+    std::fs::write(&trace_a, "").expect("clear Unit binding/mode native trace A");
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_902_unit_binding_mode");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("Unit binding/mode native lowering");
+    native
+        .module
+        .verify()
+        .expect("valid Unit binding/mode native module");
+    let observation_a = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE_A.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("Unit binding/mode native library A");
+    assert_eq!(observation_a.exit_code, Some(0));
+    assert_eq!(observation_a.stdout, "7\n8\n");
+    assert!(observation_a.stderr.is_empty());
+    assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\nA8\n");
+
+    std::fs::write(&trace_b, "").expect("clear Unit binding/mode native trace B");
+    guard.set_trace_path(&trace_b);
+    let observation_b = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE_B.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("Unit binding/mode native library B");
+    assert_eq!(observation_b.exit_code, Some(0));
+    assert_eq!(observation_b.stdout, "7\n8\n");
+    assert!(observation_b.stderr.is_empty());
+    assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB8\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
