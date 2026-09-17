@@ -681,6 +681,33 @@ mir_cli_disasm_route_binding \
     'crate::format_cli_error(&error.to_string())' \
     'crate::format_cli_error(&message)'
 
+mir_cli_route_formatter_provenance_binding() {
+    local source_file="$1"
+    local classifier_pattern="$2"
+    local origin_pattern="$3"
+    local source
+    source="$(cat "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$source" | rg -F "$classifier_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_route_formatter_provenance_missing=%s phase=classifier\n' \
+            "$source_file" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$source" | rg -F "$origin_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_route_formatter_provenance_missing=%s phase=origin\n' \
+            "$source_file" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_cli_route_formatter_provenance_binding=registry-code+mir.route-origin consumer=%s\n' \
+        "$source_file"
+}
+
+mir_cli_route_formatter_provenance_binding \
+    src/main.rs \
+    'canonical_mir_route_code_location_in_message(message)' \
+    'runtime_system("mir.route")'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2

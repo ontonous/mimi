@@ -310,6 +310,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=src/main/verify.rs",
         "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
         "mir_cli_disasm_route_binding=shared-format-cli-error consumer=src/main/disasm_cmd.rs",
+        "mir_cli_route_formatter_provenance_binding=registry-code+mir.route-origin consumer=src/main.rs",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -811,6 +812,60 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_cli_disasm_route_missing="),
         "disasm rejection drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&disasm_rejection_output.stderr)
+    );
+    let tampered_cli_classifier_script = source_script.replacen(
+        "    'canonical_mir_route_code_location_in_message(message)' \\\n    'runtime_system(\"mir.route\")'",
+        "    'legacy_route_code_location(message)' \\\n    'runtime_system(\"mir.route\")'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_classifier_script,
+        "CLI classifier fixture must replace the registry classifier"
+    );
+    std::fs::write(&script_path, tampered_cli_classifier_script)
+        .expect("write tampered CLI classifier audit script");
+    let cli_classifier_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered CLI classifier audit");
+    assert!(
+        !cli_classifier_output.status.success(),
+        "tampered CLI classifier must fail closed:\n{}",
+        String::from_utf8_lossy(&cli_classifier_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&cli_classifier_output.stderr)
+            .contains("owner_audit_error=mir_cli_route_formatter_provenance_missing="),
+        "CLI classifier drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&cli_classifier_output.stderr)
+    );
+    let tampered_cli_origin_script = source_script.replacen(
+        "    'runtime_system(\"mir.route\")'",
+        "    'runtime_system(\"legacy.route\")'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_origin_script,
+        "CLI origin fixture must replace the mir.route provenance"
+    );
+    std::fs::write(&script_path, tampered_cli_origin_script)
+        .expect("write tampered CLI origin audit script");
+    let cli_origin_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered CLI origin audit");
+    assert!(
+        !cli_origin_output.status.success(),
+        "tampered CLI origin must fail closed:\n{}",
+        String::from_utf8_lossy(&cli_origin_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&cli_origin_output.stderr)
+            .contains("owner_audit_error=mir_cli_route_formatter_provenance_missing="),
+        "CLI origin drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&cli_origin_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
