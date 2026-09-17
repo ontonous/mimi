@@ -143,9 +143,31 @@ pub(crate) fn verify_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
+    verify_program_inner(program, source_hash, None)
+}
+
+/// Verify canonical MIR while using a caller-owned route receipt for every
+/// proof artifact created by this semantic pass.  Receipt-bound consumers use
+/// this entry point so the verifier never manufactures a temporary default
+/// witness and overwrites it after the fact.
+pub(crate) fn verify_program_with_route_receipt(
+    program: &MirProgram,
+    source_hash: String,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_program_inner(program, source_hash, Some(route_receipt))
+}
+
+fn verify_program_inner(
+    program: &MirProgram,
+    source_hash: String,
+    supplied_route_receipt: Option<&crate::core::mir::CanonicalMirRouteReceipt>,
+) -> Result<Vec<VerificationResult>, String> {
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
-    let mir_route_receipt = program.route_receipt("verifier-mir-v1");
+    let mir_route_receipt = supplied_route_receipt
+        .cloned()
+        .unwrap_or_else(|| program.route_receipt("verifier-mir-v1"));
     let mut results = Vec::new();
 
     // `verify_mir` is also exercised as a public MIR-only API by callers that
@@ -271,7 +293,11 @@ pub(crate) fn verify_program(
     // Extern call contracts are call-site obligations even when the enclosing
     // function has no ensures clause. Keep them in the public MIR result set
     // instead of letting the function-contract fast path erase them.
-    results.extend(verify_ffi_program(program, source_hash)?);
+    results.extend(verify_ffi_program_inner(
+        program,
+        source_hash,
+        supplied_route_receipt,
+    )?);
     Ok(results)
 }
 
@@ -283,6 +309,24 @@ pub(crate) fn verify_program(
 pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_ffi_program_inner(program, source_hash, None)
+}
+
+/// Verify canonical FFI call-site contracts while using the caller's route
+/// receipt directly in every emitted proof artifact.
+pub(crate) fn verify_ffi_program_with_route_receipt(
+    program: &MirProgram,
+    source_hash: String,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_ffi_program_inner(program, source_hash, Some(route_receipt))
+}
+
+fn verify_ffi_program_inner(
+    program: &MirProgram,
+    source_hash: String,
+    supplied_route_receipt: Option<&crate::core::mir::CanonicalMirRouteReceipt>,
 ) -> Result<Vec<VerificationResult>, String> {
     if let Some(message) =
         crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
@@ -375,7 +419,9 @@ pub(crate) fn verify_ffi_program(
     }
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
-    let mir_route_receipt = program.route_receipt("verifier-mir-v1");
+    let mir_route_receipt = supplied_route_receipt
+        .cloned()
+        .unwrap_or_else(|| program.route_receipt("verifier-mir-v1"));
     let mut checks_by_instruction =
         BTreeMap::<crate::core::mir::MirInstructionId, (crate::core::NodeId, Vec<FfiCheck>)>::new();
 

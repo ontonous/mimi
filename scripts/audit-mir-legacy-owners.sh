@@ -320,15 +320,14 @@ native_direct_preflight_receipt_binding() {
 native_direct_preflight_receipt_binding
 
 # The receipt-bearing verifier adapter must invoke the MIR verifier exactly
-# once and bind the caller's witness directly.  Calling the public
-# `verify_mir` wrapper here would manufacture a second verifier profile before
-# the supplied receipt overwrites result metadata.
+# once and pass the caller's witness into the semantic verifier directly.
+# Calling the default wrapper here would manufacture a temporary verifier
+# profile before the supplied receipt reached proof-artifact construction.
 verifier_route_receipt_handoff() {
     local context
-    context="$(sed -n '/pub fn verify_mir_with_route_receipt(/,/^fn bind_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    context="$(sed -n '/pub fn verify_mir_with_route_receipt(/,/^fn validate_mir_result_provenance(/p' "$ROOT_DIR/src/verifier/mod.rs")"
     for pattern in \
-        'verify_mir_results(program, source_hash.clone())?' \
-        'bind_route_receipt(&mut results, receipt)' \
+        'verify_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?' \
         'validate_mir_result_provenance('; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=verifier_route_receipt_handoff_missing=src/verifier/mod.rs pattern=%s\n' \
@@ -342,21 +341,19 @@ verifier_route_receipt_handoff() {
         audit_failed=1
         return
     fi
-    printf 'verifier_route_receipt_handoff=single-mir-verifier-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(\n'
+    printf 'verifier_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(\n'
 }
 
 verifier_route_receipt_handoff
 
 # The FFI receipt-bearing verifier follows the same single-execution rule as
-# the general MIR adapter.  It must not re-enter the source-hash wrapper and
-# manufacture a second default verifier receipt before binding the caller's
-# witness.
+# the general MIR adapter.  It must pass the caller's witness into the
+# semantic verifier so no temporary default receipt is created and replaced.
 verifier_ffi_route_receipt_handoff() {
     local context
     context="$(sed -n '/pub fn verify_ffi_mir_with_route_receipt(/,/^pub fn verify_ffi_mir_with_route_manifest(/p' "$ROOT_DIR/src/verifier/mod.rs")"
     for pattern in \
-        'verify_ffi_mir_results(program, source_hash.clone())?' \
-        'bind_route_receipt(&mut results, receipt)' \
+        'verify_ffi_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?' \
         'validate_mir_result_provenance('; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=verifier_ffi_route_receipt_handoff_missing=src/verifier/mod.rs pattern=%s\n' \
@@ -370,7 +367,7 @@ verifier_ffi_route_receipt_handoff() {
         audit_failed=1
         return
     fi
-    printf 'verifier_ffi_route_receipt_handoff=single-mir-ffi-verifier-run consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(\n'
+    printf 'verifier_ffi_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(\n'
 }
 
 verifier_ffi_route_receipt_handoff
@@ -787,7 +784,7 @@ mir_route_receipt_validation_binding() {
 mir_route_receipt_validation_binding \
     src/verifier/mod.rs \
     'pub fn verify_mir_with_route_receipt(' \
-    'fn bind_route_receipt('
+    'fn validate_mir_result_provenance('
 mir_route_receipt_validation_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_route_receipt(' \
@@ -872,10 +869,10 @@ mir_ffi_capability_order_binding() {
 
 mir_ffi_capability_order_binding \
     src/verifier/mod.rs \
-    'fn verify_ffi_mir_results(' \
+    'fn verify_ffi_mir_results_with_route_receipt(' \
     'pub fn verify_ffi_mir_with_route_receipt(' \
     'validate_mir_capabilities(program)' \
-    'mir::verify_ffi_program(program, source_hash)'
+    'mir::verify_ffi_program_with_route_receipt(program, source_hash, receipt)'
 
 # A caller-supplied route receipt is the outer admission boundary. Validate it
 # before invoking the source-hash adapter so malformed route metadata cannot
@@ -911,15 +908,15 @@ mir_route_receipt_order_binding() {
 mir_route_receipt_order_binding \
     src/verifier/mod.rs \
     'pub fn verify_mir_with_route_receipt(' \
-    'fn bind_route_receipt(' \
+    'fn validate_mir_result_provenance(' \
     '.validate_against_program(program)' \
-    'let mut results = verify_mir_results(program, source_hash.clone())?'
+    'let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?'
 mir_route_receipt_order_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_route_receipt(' \
     'pub fn verify_ffi_mir_with_route_manifest(' \
     '.validate_against_program(program)' \
-    'let mut results = verify_ffi_mir_results(program, source_hash.clone())?'
+    'verify_ffi_mir_results_with_route_receipt('
 
 # Keep the public CLI verifier on the same receipt-bearing adapter as the
 # library entry point, and keep the top-level error boundary routed through

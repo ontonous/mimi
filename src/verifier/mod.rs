@@ -51,6 +51,14 @@ fn verify_mir_results(
     mir::verify_program(program, source_hash)
 }
 
+fn verify_mir_results_with_route_receipt(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<VerificationResult>, String> {
+    mir::verify_program_with_route_receipt(program, source_hash, receipt)
+}
+
 /// Verify canonical MIR after checking the caller-supplied route receipt.
 /// This keeps the general contract verifier on the same immutable graph
 /// identity as bytecode, native, and FFI-only verification consumers.
@@ -67,8 +75,7 @@ pub fn verify_mir_with_route_receipt(
                 crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
             )
         })?;
-    let mut results = verify_mir_results(program, source_hash.clone())?;
-    bind_route_receipt(&mut results, receipt);
+    let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?;
     validate_mir_result_provenance(
         &results,
         receipt,
@@ -76,19 +83,6 @@ pub fn verify_mir_with_route_receipt(
         "verify_mir_with_route_receipt",
     )?;
     Ok(results)
-}
-
-fn bind_route_receipt(
-    results: &mut [VerificationResult],
-    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
-) {
-    for result in results {
-        if let Some(artifact) = result.artifact.as_mut() {
-            if artifact.engine == ProofArtifact::ENGINE_MIR {
-                artifact.mir_route_receipt = Some(receipt.clone());
-            }
-        }
-    }
 }
 
 /// Enforce that one MIR verifier result batch carries one immutable execution
@@ -333,6 +327,17 @@ fn verify_ffi_mir_results(
     mir::verify_ffi_program(program, source_hash)
 }
 
+fn verify_ffi_mir_results_with_route_receipt(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<VerificationResult>, String> {
+    validate_mir_capabilities(program).map_err(|errors| {
+        format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
+    })?;
+    mir::verify_ffi_program_with_route_receipt(program, source_hash, receipt)
+}
+
 /// Verify canonical FFI MIR after checking the caller-supplied route receipt.
 /// The verifier therefore proves the same immutable graph that the execution
 /// consumers admitted, including its ABI and FFI sub-digests.
@@ -349,8 +354,7 @@ pub fn verify_ffi_mir_with_route_receipt(
                 crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE
             )
         })?;
-    let mut results = verify_ffi_mir_results(program, source_hash.clone())?;
-    bind_route_receipt(&mut results, receipt);
+    let results = verify_ffi_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?;
     validate_mir_result_provenance(
         &results,
         receipt,
