@@ -309,6 +309,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
         "mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=src/main/verify.rs",
         "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
+        "mir_cli_disasm_route_binding=shared-format-cli-error consumer=src/main/disasm_cmd.rs",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -756,6 +757,60 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_cli_error_boundary_missing="),
         "CLI error boundary drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&cli_boundary_output.stderr)
+    );
+    let tampered_cli_disasm_renderer_script = source_script.replacen(
+        "    'crate::format_cli_error(&error.to_string())'",
+        "    'crate::format_plain_error(&error.to_string())'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_disasm_renderer_script,
+        "disasm renderer fixture must replace the shared formatter"
+    );
+    std::fs::write(&script_path, tampered_cli_disasm_renderer_script)
+        .expect("write tampered disasm renderer audit script");
+    let disasm_renderer_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered disasm renderer audit");
+    assert!(
+        !disasm_renderer_output.status.success(),
+        "tampered disasm renderer must fail closed:\n{}",
+        String::from_utf8_lossy(&disasm_renderer_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&disasm_renderer_output.stderr)
+            .contains("owner_audit_error=mir_cli_disasm_route_missing="),
+        "disasm renderer drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&disasm_renderer_output.stderr)
+    );
+    let tampered_cli_disasm_rejection_script = source_script.replacen(
+        "    'crate::format_cli_error(&message)'",
+        "    'crate::format_plain_error(&message)'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_disasm_rejection_script,
+        "disasm rejection fixture must replace the shared formatter"
+    );
+    std::fs::write(&script_path, tampered_cli_disasm_rejection_script)
+        .expect("write tampered disasm rejection audit script");
+    let disasm_rejection_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered disasm rejection audit");
+    assert!(
+        !disasm_rejection_output.status.success(),
+        "tampered disasm rejection must fail closed:\n{}",
+        String::from_utf8_lossy(&disasm_rejection_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&disasm_rejection_output.stderr)
+            .contains("owner_audit_error=mir_cli_disasm_route_missing="),
+        "disasm rejection drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&disasm_rejection_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

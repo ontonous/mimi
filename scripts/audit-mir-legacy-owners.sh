@@ -654,6 +654,33 @@ mir_cli_error_boundary_binding \
     src/main.rs \
     'eprintln!("{}", format_cli_error(&e));'
 
+mir_cli_disasm_route_binding() {
+    local source_file="$1"
+    local renderer_pattern="$2"
+    local rejection_pattern="$3"
+    local source
+    source="$(cat "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$source" | rg -F "$renderer_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_disasm_route_missing=%s phase=renderer\n' \
+            "$source_file" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$source" | rg -F "$rejection_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_disasm_route_missing=%s phase=rejection\n' \
+            "$source_file" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_cli_disasm_route_binding=shared-format-cli-error consumer=%s\n' \
+        "$source_file"
+}
+
+mir_cli_disasm_route_binding \
+    src/main/disasm_cmd.rs \
+    'crate::format_cli_error(&error.to_string())' \
+    'crate::format_cli_error(&message)'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
