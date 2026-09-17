@@ -9178,6 +9178,7 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap};
 
     use super::{
@@ -13104,6 +13105,27 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         }
     }
 
+    struct CountingLabsReferenceResolver {
+        calls: Cell<usize>,
+    }
+
+    impl MirReferenceFfiResolver for CountingLabsReferenceResolver {
+        fn call(
+            &self,
+            receipt: &crate::core::mir::MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            if receipt.symbol != "labs" || receipt.abi != "C" {
+                return Err("unexpected scalar reference FFI receipt".into());
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err("labs reference binding expected one integer".into());
+            };
+            Ok(MirRuntimeValue::Int(value.abs()))
+        }
+    }
+
     struct LabsReferenceResolver;
 
     impl MirReferenceFfiResolver for LabsReferenceResolver {
@@ -13155,7 +13177,9 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         let manifest = receipt.manifest_text().expect("reference route manifest");
         let owner = NodeId("function:main".into());
 
-        let resolver = LabsReferenceResolver;
+        let resolver = CountingLabsReferenceResolver {
+            calls: Cell::new(0),
+        };
         let observation = MirReferenceInterpreter::new(&program)
             .try_with_route_manifest(&manifest)
             .expect("reference must admit a canonical route manifest")
@@ -13164,6 +13188,11 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
             .expect("reference manifest route execution");
         assert_eq!(observation.value, MirRuntimeValue::Int(0));
         assert_eq!(observation.output, "42\n");
+        assert_eq!(
+            resolver.calls.get(),
+            1,
+            "valid receipt reaches the host once"
+        );
 
         let forged_manifest = manifest.replacen(&receipt.ffi_digest, &"0".repeat(64), 1);
         let forged_reference = MirReferenceInterpreter::new(&program)
@@ -13179,6 +13208,11 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         );
         assert!(forged_error.to_string().contains("ffi_digest"));
         assert_eq!(forged_reference.captured_output(), "");
+        assert_eq!(
+            resolver.calls.get(),
+            1,
+            "forged receipt is rejected before host execution"
+        );
 
         let malformed = format!("{manifest}future_field=reserved\n");
         let error = match MirReferenceInterpreter::new(&program).try_with_route_manifest(&malformed)
