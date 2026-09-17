@@ -302,6 +302,8 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=src/verifier/mod.rs::fn validate_mir_result_provenance(",
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
+        "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
+        "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -614,6 +616,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_route_receipt_validation_missing="),
         "route receipt validation drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&route_validation_output.stderr)
+    );
+    let tampered_manifest_replay_script = source_script.replacen(
+        "    'verify_mir_with_route_receipt(program, &receipt, source_hash)'\n",
+        "    'missing_mir_with_route_receipt(program, &receipt, source_hash)'\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_manifest_replay_script,
+        "manifest replay fixture must replace the direct MIR adapter"
+    );
+    std::fs::write(&script_path, tampered_manifest_replay_script)
+        .expect("write tampered manifest replay audit script");
+    let manifest_replay_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered manifest replay audit");
+    assert!(
+        !manifest_replay_output.status.success(),
+        "tampered manifest replay adapter must fail closed:\n{}",
+        String::from_utf8_lossy(&manifest_replay_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&manifest_replay_output.stderr)
+            .contains("owner_audit_error=mir_route_manifest_replay_missing="),
+        "manifest replay drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&manifest_replay_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

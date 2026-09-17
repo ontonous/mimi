@@ -495,6 +495,46 @@ mir_route_receipt_validation_binding \
     'pub fn verify_ffi_mir_with_route_receipt(' \
     'pub fn verify_ffi_mir_with_route_manifest('
 
+# Manifest replay must reconstruct a receipt and then use the same direct MIR
+# verifier adapter. Parsing a manifest without forwarding through that adapter
+# would allow a CLI-only proof path to diverge from the checked API.
+mir_route_manifest_replay_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local manifest_pattern="$4"
+    local forwarding_pattern="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$manifest_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_route_manifest_replay_missing=%s::%s phase=manifest-parse\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$forwarding_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_route_manifest_replay_missing=%s::%s phase=direct-adapter\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_route_manifest_replay_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_mir_with_route_manifest(' \
+    'pub fn verify_ffi_mir_with_route_manifest(' \
+    'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+    'verify_mir_with_route_receipt(program, &receipt, source_hash)'
+mir_route_manifest_replay_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_mir_with_route_manifest(' \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+    'verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
