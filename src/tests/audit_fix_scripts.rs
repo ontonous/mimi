@@ -1009,7 +1009,7 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
-            "bytecode_route_receipt_binding=canonical_ffi_route_receipt: route_receipt.cloned()"
+            "bytecode_route_receipt_binding=canonical_ffi_route_receipt: if !has_canonical_ffi_bindings"
         ),
         "legacy owner audit must pin the program-level route receipt anchor"
     );

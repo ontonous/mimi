@@ -186,6 +186,7 @@ fn compile_mir_program_inner(
         })?;
 
     let builtin_names = super::registry::create_registry().names();
+    let has_canonical_ffi_bindings = !canonical_ffi_bindings.is_empty();
     Ok(Arc::new(BytecodeProgram {
         functions,
         entry,
@@ -193,7 +194,11 @@ fn compile_mir_program_inner(
         extern_names: Vec::new(),
         canonical_ffi,
         canonical_ffi_bindings,
-        canonical_ffi_route_receipt: route_receipt.cloned(),
+        canonical_ffi_route_receipt: if !has_canonical_ffi_bindings {
+            None
+        } else {
+            route_receipt.cloned()
+        },
         actor_defs: std::collections::HashMap::new(),
         flow_defs: std::collections::HashMap::new(),
         flow_transition_funcs: std::collections::HashMap::new(),

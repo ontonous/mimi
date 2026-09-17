@@ -351,7 +351,7 @@ bytecode_route_receipt_binding \
     src/interp/bytecode/mir.rs \
     'fn compile_mir_program_inner(' \
     'fn materialize_canonical_ffi_bindings(' \
-    'canonical_ffi_route_receipt: route_receipt.cloned()'
+    'canonical_ffi_route_receipt: if !has_canonical_ffi_bindings'
 bytecode_route_receipt_binding \
     src/interp/bytecode/mir.rs \
     'fn compile_mir_program_inner(' \
