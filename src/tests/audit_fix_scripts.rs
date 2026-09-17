@@ -203,17 +203,21 @@ fn legacy_owner_reachability_report_stays_conservative() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (owner, dependency_class, evidence_marker, accessor_context) in [
+    for (owner, dependency_class, evidence_marker, accessor_context, guard_name, guard_context) in [
         (
             "CodegenLegacyRemainder",
             "legacy-codegen-remainder",
             "LegacyBodyConsumer::CodegenLegacyRemainder",
             "src/codegen/compile.rs::fn compile_file_with_resolved(",
+            "try_compile_exact_migrated_mir_island",
+            "src/codegen/compile.rs::pub fn compile_checked(",
         ),
         (
             "FlowVerifierCompatibility",
             "flow-body-compatibility",
             "LegacyBodyConsumer::FlowVerifierCompatibility",
+            "src/verifier/mod.rs::pub fn verify_checked(",
+            "verify_closed_mir_program",
             "src/verifier/mod.rs::pub fn verify_checked(",
         ),
         (
@@ -221,11 +225,15 @@ fn legacy_owner_reachability_report_stays_conservative() {
             "ffi-declaration-compatibility",
             "LegacyBodyConsumer::FfiVerifierCompatibility",
             "src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
+            "materialize_closed_mir_island",
+            "src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         ),
         (
             "DualVerifierCompatibility",
             "secondary-flow-vir-compatibility",
             "LegacyBodyConsumer::DualVerifierCompatibility",
+            "src/verifier/mod.rs::pub fn verify_checked_dual(",
+            "verify_closed_mir_program",
             "src/verifier/mod.rs::pub fn verify_checked_dual(",
         ),
     ] {
@@ -251,6 +259,12 @@ fn legacy_owner_reachability_report_stays_conservative() {
         assert!(
             stdout.lines().any(|line| line == context),
             "owner {owner} accessor context drifted: expected {context}"
+        );
+        let guard =
+            format!("owner={owner} closed_route_guard={guard_name} context={guard_context}");
+        assert!(
+            stdout.lines().any(|line| line == guard),
+            "owner {owner} closed route guard drifted: expected {guard}"
         );
         let status_prefix = format!("owner={owner} status=retained");
         let status = stdout
@@ -287,7 +301,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
 }
 
 #[test]
-fn legacy_owner_accessor_context_drift_fails_closed() {
+fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-context");
     let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
@@ -324,6 +338,33 @@ fn legacy_owner_accessor_context_drift_fails_closed() {
             .contains("owner_audit_error=CodegenLegacyRemainder accessor_context_missing="),
         "context drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let tampered_guard_script = source_script.replacen(
+        "    'if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)?'",
+        "    'if let Some(canonical) = self.missing_closed_route_guard(program)?'",
+        1,
+    );
+    assert!(
+        source_script != tampered_guard_script,
+        "guard fixture must replace the expected route guard"
+    );
+    std::fs::write(&script_path, tampered_guard_script)
+        .expect("write tampered route guard audit script");
+    let guard_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered route guard audit");
+    assert!(
+        !guard_output.status.success(),
+        "tampered closed route guard must fail closed:\n{}",
+        String::from_utf8_lossy(&guard_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&guard_output.stderr)
+            .contains("owner_audit_error=CodegenLegacyRemainder closed_route_guard_missing="),
+        "route guard drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&guard_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

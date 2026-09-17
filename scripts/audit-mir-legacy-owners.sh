@@ -113,6 +113,29 @@ owner_accessor_context() {
         "$owner" "$source_file" "$start_function"
 }
 
+# The closed scalar guard may live in the public entry function while the
+# retained accessor is delegated to a compatibility helper. Verify the guard
+# in its owning entry context separately so a count-only audit cannot hide a
+# route that re-enters the legacy owner before canonical admission.
+owner_closed_route_guard() {
+    local owner="$1"
+    local source_file="$2"
+    local start_function="$3"
+    local end_function="$4"
+    local guard_name="$5"
+    local guard_pattern="$6"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$guard_pattern" >/dev/null; then
+        printf 'owner_audit_error=%s closed_route_guard_missing=%s::%s\n' \
+            "$owner" "$source_file" "$guard_name" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'owner=%s closed_route_guard=%s context=%s::%s\n' \
+        "$owner" "$guard_name" "$source_file" "$start_function"
+}
+
 owner_accessor_context \
     CodegenLegacyRemainder \
     src/codegen/compile.rs \
@@ -133,6 +156,35 @@ owner_accessor_context \
     src/verifier/mod.rs \
     'pub fn verify_checked_dual(' \
     'fn verify_closed_mir_program('
+
+owner_closed_route_guard \
+    CodegenLegacyRemainder \
+    src/codegen/compile.rs \
+    'pub fn compile_checked(' \
+    'fn try_compile_exact_migrated_mir_island(' \
+    try_compile_exact_migrated_mir_island \
+    'if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)?'
+owner_closed_route_guard \
+    FlowVerifierCompatibility \
+    src/verifier/mod.rs \
+    'pub fn verify_checked(' \
+    'pub fn verify_ffi_source(' \
+    verify_closed_mir_program \
+    'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
+owner_closed_route_guard \
+    FfiVerifierCompatibility \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available(' \
+    materialize_closed_mir_island \
+    'if let Some(canonical) = materialize_closed_mir_island('
+owner_closed_route_guard \
+    DualVerifierCompatibility \
+    src/verifier/mod.rs \
+    'pub fn verify_checked_dual(' \
+    'fn verify_closed_mir_program(' \
+    verify_closed_mir_program \
+    'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
 
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
