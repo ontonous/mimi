@@ -736,6 +736,8 @@ mod tests {
         for code in [
             "MIR-RECEIPT-001",
             "MIR-RECEIPT-MANIFEST-001",
+            "MIR-MATERIALIZATION-001",
+            "MIR-COVERAGE-001",
             "MIR-FFI-RECEIPT-001",
             "MIR-FFI-RECEIPT-MANIFEST-001",
             "MIR-FFI-DECLARATION-001",
