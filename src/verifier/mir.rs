@@ -135,10 +135,10 @@ enum ScalarKind {
     Bool,
 }
 
-/// Verify all contract-bearing functions in a validated canonical MIR
-/// program.  The caller owns source loading and MIR construction; this entry
-/// point deliberately accepts no frontend artifact and cannot invoke a
-/// fallback verifier.
+/// Test-only convenience wrapper for the unbound semantic verifier. Production
+/// adapters must derive and pass an explicit route receipt so proof artifacts
+/// and provenance validation share one immutable witness.
+#[cfg(test)]
 pub(crate) fn verify_program(
     program: &MirProgram,
     source_hash: String,

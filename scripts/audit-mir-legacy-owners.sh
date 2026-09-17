@@ -430,6 +430,22 @@ verifier_default_entry_receipt_handoff() {
 
 verifier_default_entry_receipt_handoff
 
+# The unbound semantic helper remains available only to MIR unit fixtures.
+# Production verifier adapters must use the receipt-bearing helper above so a
+# future caller cannot silently reintroduce an unanchored proof path.
+verifier_unbound_helper_test_only() {
+    local context
+    context="$(sed -n '/^#\[cfg(test)\]/,/^fn verify_program_inner(/p' "$ROOT_DIR/src/verifier/mir.rs")"
+    if ! printf '%s\n' "$context" | rg -F 'pub(crate) fn verify_program(' >/dev/null; then
+        printf 'owner_audit_error=verifier_unbound_helper_test_only_missing=src/verifier/mir.rs::verify_program(\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(\n'
+}
+
+verifier_unbound_helper_test_only
+
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow
 # a copied receipt to be paired with a different profile; requiring the profile
