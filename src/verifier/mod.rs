@@ -317,13 +317,20 @@ pub fn verify_ffi_mir_with_source_hash(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    validate_mir_capabilities(program).map_err(|errors| {
-        format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
-    })?;
-    let results = mir::verify_ffi_program(program, source_hash.clone())?;
+    let results = verify_ffi_mir_results(program, source_hash.clone())?;
     let receipt = program.route_receipt("verifier-mir-v1");
     validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?;
     Ok(results)
+}
+
+fn verify_ffi_mir_results(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    validate_mir_capabilities(program).map_err(|errors| {
+        format!("MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}")
+    })?;
+    mir::verify_ffi_program(program, source_hash)
 }
 
 /// Verify canonical FFI MIR after checking the caller-supplied route receipt.
@@ -342,7 +349,7 @@ pub fn verify_ffi_mir_with_route_receipt(
                 crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE
             )
         })?;
-    let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?;
+    let mut results = verify_ffi_mir_results(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
     validate_mir_result_provenance(
         &results,

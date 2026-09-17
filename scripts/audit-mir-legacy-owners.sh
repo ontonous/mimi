@@ -347,6 +347,34 @@ verifier_route_receipt_handoff() {
 
 verifier_route_receipt_handoff
 
+# The FFI receipt-bearing verifier follows the same single-execution rule as
+# the general MIR adapter.  It must not re-enter the source-hash wrapper and
+# manufacture a second default verifier receipt before binding the caller's
+# witness.
+verifier_ffi_route_receipt_handoff() {
+    local context
+    context="$(sed -n '/pub fn verify_ffi_mir_with_route_receipt(/,/^pub fn verify_ffi_mir_with_route_manifest(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'verify_ffi_mir_results(program, source_hash.clone())?' \
+        'bind_route_receipt(&mut results, receipt)' \
+        'validate_mir_result_provenance('; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_ffi_route_receipt_handoff_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    if printf '%s\n' "$context" | rg -F 'verify_ffi_mir_with_source_hash(program, source_hash.clone())?' >/dev/null; then
+        printf 'owner_audit_error=verifier_ffi_route_receipt_handoff_reenters_default=src/verifier/mod.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'verifier_ffi_route_receipt_handoff=single-mir-ffi-verifier-run consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(\n'
+}
+
+verifier_ffi_route_receipt_handoff
+
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow
 # a copied receipt to be paired with a different profile; requiring the profile
@@ -692,7 +720,7 @@ mir_verifier_source_provenance_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_source_hash(' \
     'pub fn verify_ffi_mir_with_route_receipt(' \
-    'let results = mir::verify_ffi_program(program, source_hash.clone())?' \
+    'let results = verify_ffi_mir_results(program, source_hash.clone())?' \
     'validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?'
 
 # Keep the shared artifact validator bound to every immutable identity field.
@@ -844,10 +872,10 @@ mir_ffi_capability_order_binding() {
 
 mir_ffi_capability_order_binding \
     src/verifier/mod.rs \
-    'pub fn verify_ffi_mir_with_source_hash(' \
+    'fn verify_ffi_mir_results(' \
     'pub fn verify_ffi_mir_with_route_receipt(' \
     'validate_mir_capabilities(program)' \
-    'let results = mir::verify_ffi_program(program, source_hash.clone())?'
+    'mir::verify_ffi_program(program, source_hash)'
 
 # A caller-supplied route receipt is the outer admission boundary. Validate it
 # before invoking the source-hash adapter so malformed route metadata cannot
@@ -891,7 +919,7 @@ mir_route_receipt_order_binding \
     'pub fn verify_ffi_mir_with_route_receipt(' \
     'pub fn verify_ffi_mir_with_route_manifest(' \
     '.validate_against_program(program)' \
-    'let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?'
+    'let mut results = verify_ffi_mir_results(program, source_hash.clone())?'
 
 # Keep the public CLI verifier on the same receipt-bearing adapter as the
 # library entry point, and keep the top-level error boundary routed through
