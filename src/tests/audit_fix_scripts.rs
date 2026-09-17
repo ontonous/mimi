@@ -302,8 +302,8 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=src/verifier/mod.rs::fn validate_mir_result_provenance(",
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
-        "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
-        "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
+        "mir_route_manifest_replay_binding=manifest-parse+round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
+        "mir_route_manifest_replay_binding=manifest-parse+round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
         "mir_ffi_capability_order_binding=capability-before-execution consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
@@ -1018,6 +1018,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
             "bytecode_route_receipt_binding=binding.route_receipt = Some(receipt.clone())"
         ),
         "legacy owner audit must pin receipt propagation into every FFI binding"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_route_manifest_adapter_binding=manifest-round-trip-to-typed-receipt consumer=src/interp/bytecode/mir.rs"
+        ),
+        "legacy owner audit must pin bytecode manifest adapter forwarding"
     );
     assert!(
         stdout.contains(

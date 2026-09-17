@@ -466,22 +466,11 @@ impl BytecodeVM {
             (None, None) | (Some(_), Some(_)) => {}
         }
         if let Some(receipt) = route_receipt {
-            let manifest = receipt.manifest_text().map_err(|message| {
+            receipt.manifest_round_trip().map_err(|message| {
                 InterpError::new(format!(
-                    "canonical FFI route receipt is invalid at VM boundary: {message}"
+                    "canonical FFI route receipt manifest replay failed at VM boundary: {message}"
                 ))
             })?;
-            let parsed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
-                .map_err(|message| {
-                    InterpError::new(format!(
-                        "canonical FFI route receipt cannot be replayed at VM boundary: {message}"
-                    ))
-                })?;
-            if parsed != *receipt {
-                return Err(InterpError::new(
-                    "canonical FFI route receipt changed during manifest replay",
-                ));
-            }
         }
         let mut binding_by_site = BTreeMap::new();
         for binding in bindings {

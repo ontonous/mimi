@@ -126,6 +126,15 @@ pub fn compile_mir_program_with_route_manifest(
             ),
         }]
     })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        vec![MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message: format!(
+                "{}: canonical route manifest replay rejected: {message}",
+                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+        }]
+    })?;
     compile_mir_program_with_route_receipt(program, &receipt)
 }
 

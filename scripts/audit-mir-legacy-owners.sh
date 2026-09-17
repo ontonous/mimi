@@ -358,6 +358,25 @@ bytecode_route_receipt_binding \
     'fn materialize_canonical_ffi_bindings(' \
     'binding.route_receipt = Some(receipt.clone())'
 
+bytecode_route_manifest_adapter_binding() {
+    local context
+    context="$(sed -n '/pub fn compile_mir_program_with_route_manifest(/,/^fn compile_mir_program_inner(/p' "$ROOT_DIR/src/interp/bytecode/mir.rs")"
+    for pattern in \
+        'pub fn compile_mir_program_with_route_manifest(' \
+        '.manifest_round_trip()' \
+        'compile_mir_program_with_route_receipt(program, &receipt)'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=bytecode_route_manifest_adapter_missing=src/interp/bytecode/mir.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'bytecode_route_manifest_adapter_binding=manifest-round-trip-to-typed-receipt consumer=src/interp/bytecode/mir.rs\n'
+}
+
+bytecode_route_manifest_adapter_binding
+
 bytecode_route_receipt_vm_guard() {
     local source_file="$1"
     local source
@@ -365,7 +384,8 @@ bytecode_route_receipt_vm_guard() {
     for pattern in \
         'canonical FFI binding manifest mixes route receipt identities' \
         'canonical FFI binding route receipt disagrees with program anchor' \
-        'canonical FFI route receipt cannot be replayed at VM boundary'; do
+        '.manifest_round_trip()' \
+        'canonical FFI route receipt manifest replay failed at VM boundary'; do
         if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=bytecode_route_receipt_vm_guard_missing=%s pattern=%s\n' \
                 "$source_file" "$pattern" >&2
@@ -395,6 +415,8 @@ native_route_receipt_anchor() {
     fi
     for pattern in \
         'bound.same_semantic_identity(receipt)' \
+        '.manifest_round_trip()' \
+        'canonical route receipt manifest replay failed' \
         'self.mir_native_route_receipt = Some(receipt.clone())'; do
         if ! printf '%s\n' "$consumer_source" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=native_route_receipt_anchor_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
@@ -438,9 +460,8 @@ native_route_manifest_replay_binding() {
     local source
     source="$(cat "$ROOT_DIR/src/codegen/mir/eligibility.rs")"
     for pattern in \
-        'let manifest = receipt.manifest_text()' \
-        'CanonicalMirRouteReceipt::from_manifest(&manifest)' \
-        'canonical route receipt changed during manifest replay'; do
+        '.manifest_round_trip()' \
+        'canonical route receipt manifest replay failed'; do
         if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=native_route_manifest_replay_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
                 "$pattern" >&2
@@ -673,7 +694,13 @@ mir_route_manifest_replay_binding() {
         audit_failed=1
         return
     fi
-    printf 'mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=%s::%s\n' \
+    if ! printf '%s\n' "$context" | rg -F '.manifest_round_trip()' >/dev/null; then
+        printf 'owner_audit_error=mir_route_manifest_replay_missing=%s::%s phase=manifest-round-trip\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_route_manifest_replay_binding=manifest-parse+round-trip+direct-adapter consumer=%s::%s\n' \
         "$source_file" "$start_function"
 }
 

@@ -144,6 +144,12 @@ pub fn verify_mir_with_route_manifest(
                 crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
             )
         })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        format!(
+            "{}: canonical route manifest replay rejected: {message}",
+            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+        )
+    })?;
     verify_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
@@ -359,6 +365,12 @@ pub fn verify_ffi_mir_with_route_manifest(
                 crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE
             )
         })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        format!(
+            "{}: canonical route manifest replay rejected: {message}",
+            crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE
+        )
+    })?;
     verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)
 }
 

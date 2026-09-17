@@ -327,6 +327,22 @@ impl CanonicalMirRouteReceipt {
         Ok(text)
     }
 
+    /// Render and parse this receipt through the canonical evidence-manifest
+    /// boundary, returning the reconstructed value only when the public
+    /// fields survive the round trip exactly.  Every backend that admits a
+    /// manifest can use this helper instead of maintaining its own pair of
+    /// serializer/parser calls.
+    pub fn manifest_round_trip(&self) -> Result<Self, String> {
+        let manifest = self
+            .manifest_text()
+            .map_err(|error| format!("render: {error}"))?;
+        let replayed = Self::from_manifest(&manifest).map_err(|error| format!("parse: {error}"))?;
+        if replayed != *self {
+            return Err("route receipt changed during manifest replay".into());
+        }
+        Ok(replayed)
+    }
+
     /// Parse the line-oriented manifest emitted by [`Self::manifest_text`].
     ///
     /// This is intentionally a strict parser for evidence consumers: the
@@ -984,8 +1000,9 @@ mod tests {
         let manifest = receipt.manifest_text().expect("valid receipt manifest");
         assert_eq!(
             CanonicalMirRouteReceipt::from_manifest(&manifest),
-            Ok(receipt)
+            Ok(receipt.clone())
         );
+        assert_eq!(receipt.manifest_round_trip(), Ok(receipt));
     }
 
     #[test]
