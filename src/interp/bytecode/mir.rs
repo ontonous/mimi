@@ -117,24 +117,16 @@ pub fn compile_mir_program_with_route_manifest(
     program: &MirProgram,
     manifest: &str,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
-    let receipt = CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
-        vec![MirBytecodeError {
-            function: NodeId("mir-program".into()),
-            message: format!(
-                "{}: canonical route manifest rejected: {message}",
-                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
-            ),
-        }]
-    })?;
-    receipt.manifest_round_trip().map_err(|message| {
-        vec![MirBytecodeError {
-            function: NodeId("mir-program".into()),
-            message: format!(
-                "{}: canonical route manifest replay rejected: {message}",
-                crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
-            ),
-        }]
-    })?;
+    let receipt =
+        CanonicalMirRouteReceipt::from_manifest_round_trip(manifest).map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "{}: canonical route manifest rejected: {message}",
+                    crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+                ),
+            }]
+        })?;
     compile_mir_program_with_route_receipt(program, &receipt)
 }
 

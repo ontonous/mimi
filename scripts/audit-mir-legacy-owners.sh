@@ -363,7 +363,7 @@ bytecode_route_manifest_adapter_binding() {
     context="$(sed -n '/pub fn compile_mir_program_with_route_manifest(/,/^fn compile_mir_program_inner(/p' "$ROOT_DIR/src/interp/bytecode/mir.rs")"
     for pattern in \
         'pub fn compile_mir_program_with_route_manifest(' \
-        '.manifest_round_trip()' \
+        'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' \
         'compile_mir_program_with_route_receipt(program, &receipt)'; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=bytecode_route_manifest_adapter_missing=src/interp/bytecode/mir.rs pattern=%s\n' \
@@ -376,6 +376,25 @@ bytecode_route_manifest_adapter_binding() {
 }
 
 bytecode_route_manifest_adapter_binding
+
+reference_route_manifest_adapter_binding() {
+    local context
+    context="$(sed -n '/pub fn try_with_route_manifest(/,/^    pub fn with_step_limit(/p' "$ROOT_DIR/src/core/mir/reference.rs")"
+    for pattern in \
+        'pub fn try_with_route_manifest(' \
+        'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' \
+        'self.with_route_receipt(&receipt)'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=reference_route_manifest_adapter_missing=src/core/mir/reference.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'reference_route_manifest_adapter_binding=manifest-round-trip-to-typed-receipt consumer=src/core/mir/reference.rs\n'
+}
+
+reference_route_manifest_adapter_binding
 
 bytecode_route_receipt_vm_guard() {
     local source_file="$1"
@@ -483,7 +502,7 @@ native_route_manifest_adapter_binding() {
     source="$(cat "$ROOT_DIR/src/codegen/mir/eligibility.rs")"
     for pattern in \
         'pub fn compile_mir_native_with_route_manifest(' \
-        'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+        'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' \
         'self.compile_mir_native_with_route_receipt(program, &receipt)'; do
         if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=native_route_manifest_adapter_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
@@ -694,13 +713,13 @@ mir_route_manifest_replay_binding() {
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$context" | rg -F '.manifest_round_trip()' >/dev/null; then
+    if ! printf '%s\n' "$context" | rg -F 'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' >/dev/null; then
         printf 'owner_audit_error=mir_route_manifest_replay_missing=%s::%s phase=manifest-round-trip\n' \
             "$source_file" "$start_function" >&2
         audit_failed=1
         return
     fi
-    printf 'mir_route_manifest_replay_binding=manifest-parse+round-trip+direct-adapter consumer=%s::%s\n' \
+    printf 'mir_route_manifest_replay_binding=manifest-round-trip+direct-adapter consumer=%s::%s\n' \
         "$source_file" "$start_function"
 }
 
@@ -708,13 +727,13 @@ mir_route_manifest_replay_binding \
     src/verifier/mod.rs \
     'pub fn verify_mir_with_route_manifest(' \
     'pub fn verify_ffi_mir_with_route_manifest(' \
-    'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+    'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' \
     'verify_mir_with_route_receipt(program, &receipt, source_hash)'
 mir_route_manifest_replay_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_route_manifest(' \
     'fn verify_ffi_checked_with_source_hash(' \
-    'CanonicalMirRouteReceipt::from_manifest(manifest)' \
+    'CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)' \
     'verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)'
 
 # Capability admission must happen before symbolic execution in the direct FFI

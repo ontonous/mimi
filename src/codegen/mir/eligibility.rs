@@ -155,19 +155,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &MirProgram,
         manifest: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(
-            |message| {
-                vec![NativeMirError::new(
-                    "mir-program",
-                    format!(
-                        "{}: canonical route manifest rejected: {message}",
-                        crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
-                    ),
-                )
-                .with_code(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
-                .diagnostic()]
-            },
-        )?;
+        let receipt =
+            crate::core::mir::CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)
+                .map_err(|message| {
+                    vec![NativeMirError::new(
+                        "mir-program",
+                        format!(
+                            "{}: canonical route manifest rejected: {message}",
+                            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+                        ),
+                    )
+                    .with_code(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+                    .diagnostic()]
+                })?;
         self.compile_mir_native_with_route_receipt(program, &receipt)
     }
 }

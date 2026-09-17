@@ -5000,6 +5000,24 @@ impl<'a> MirReferenceInterpreter<'a> {
         self
     }
 
+    /// Parse and replay a route manifest before configuring the AST-free
+    /// reference executor.  The typed receipt is retained only after the
+    /// shared canonical serializer/parser boundary succeeds, so reference
+    /// execution cannot accept a manifest through a private parsing path.
+    pub fn try_with_route_manifest(self, manifest: &str) -> Result<Self, MirExecutionError> {
+        let receipt =
+            CanonicalMirRouteReceipt::from_manifest_round_trip(manifest).map_err(|message| {
+                MirExecutionError {
+                    function: NodeId("mir-program".into()),
+                    message: format!(
+                        "{}: canonical route manifest rejected: {message}",
+                        super::MIR_ROUTE_MANIFEST_ERROR_CODE
+                    ),
+                }
+            })?;
+        Ok(self.with_route_receipt(&receipt))
+    }
+
     pub fn with_step_limit(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps;
         self
@@ -13123,6 +13141,42 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
             .expect("reference scalar FFI execution");
         assert_eq!(observation.value, MirRuntimeValue::Int(0));
         assert_eq!(observation.output, "42\n");
+    }
+
+    #[test]
+    fn scalar_ffi_reference_route_manifest_adapter_replays_and_rejects_malformed_input() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program = MirProgram::from_checked_program(&checked).unwrap();
+        let receipt = program.route_receipt("r6-912-reference-manifest-v1");
+        let manifest = receipt.manifest_text().expect("reference route manifest");
+        let owner = NodeId("function:main".into());
+
+        let resolver = LabsReferenceResolver;
+        let observation = MirReferenceInterpreter::new(&program)
+            .try_with_route_manifest(&manifest)
+            .expect("reference must admit a canonical route manifest")
+            .with_ffi_resolver(&resolver)
+            .execute_with_output(&owner, &[])
+            .expect("reference manifest route execution");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "42\n");
+
+        let malformed = format!("{manifest}future_field=reserved\n");
+        let error = match MirReferenceInterpreter::new(&program).try_with_route_manifest(&malformed)
+        {
+            Ok(_) => panic!("reference must reject a future manifest field"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE)
+        );
+        assert!(error.to_string().contains("future_field"));
+        assert_eq!(error.function, NodeId("mir-program".into()));
     }
 
     struct FixedFfiResolver(MirRuntimeValue);

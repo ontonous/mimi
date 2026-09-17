@@ -343,6 +343,15 @@ impl CanonicalMirRouteReceipt {
         Ok(replayed)
     }
 
+    /// Parse a line-oriented manifest and replay it through the canonical
+    /// serializer/parser boundary before admitting the receipt.  This is the
+    /// fallible counterpart used by AST-free consumers that receive a manifest
+    /// directly instead of an already typed receipt.
+    pub fn from_manifest_round_trip(text: &str) -> Result<Self, String> {
+        let receipt = Self::from_manifest(text)?;
+        receipt.manifest_round_trip()
+    }
+
     /// Parse the line-oriented manifest emitted by [`Self::manifest_text`].
     ///
     /// This is intentionally a strict parser for evidence consumers: the
@@ -1000,6 +1009,10 @@ mod tests {
         let manifest = receipt.manifest_text().expect("valid receipt manifest");
         assert_eq!(
             CanonicalMirRouteReceipt::from_manifest(&manifest),
+            Ok(receipt.clone())
+        );
+        assert_eq!(
+            CanonicalMirRouteReceipt::from_manifest_round_trip(&manifest),
             Ok(receipt.clone())
         );
         assert_eq!(receipt.manifest_round_trip(), Ok(receipt));

@@ -137,19 +137,13 @@ pub fn verify_mir_with_route_manifest(
     manifest: &str,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let receipt =
-        crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
+    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)
+        .map_err(|message| {
             format!(
-                "{}: {message}",
+                "{}: canonical route manifest rejected: {message}",
                 crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
             )
         })?;
-    receipt.manifest_round_trip().map_err(|message| {
-        format!(
-            "{}: canonical route manifest replay rejected: {message}",
-            crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
-        )
-    })?;
     verify_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
@@ -358,19 +352,13 @@ pub fn verify_ffi_mir_with_route_manifest(
     manifest: &str,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let receipt =
-        crate::core::mir::CanonicalMirRouteReceipt::from_manifest(manifest).map_err(|message| {
+    let receipt = crate::core::mir::CanonicalMirRouteReceipt::from_manifest_round_trip(manifest)
+        .map_err(|message| {
             format!(
-                "{}: {message}",
+                "{}: canonical route manifest rejected: {message}",
                 crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE
             )
         })?;
-    receipt.manifest_round_trip().map_err(|message| {
-        format!(
-            "{}: canonical route manifest replay rejected: {message}",
-            crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE
-        )
-    })?;
     verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
