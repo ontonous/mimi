@@ -17469,6 +17469,89 @@ fn scalar_ffi_default_ffi_verifier_reuses_one_route_receipt() {
 }
 
 #[test]
+fn scalar_ffi_default_ffi_verifier_replay_preserves_route_identity() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    let source = r#"
+        extern "C" {
+            func replay_receipt_first(value: i64) -> i64 requires: value >= 0 ensures: true;
+            func replay_receipt_second(value: i64) -> i64 requires: value >= 0 ensures: true;
+        }
+        func main() -> i64 {
+            replay_receipt_first(7 as i64);
+            replay_receipt_second(-8 as i64);
+            0
+        }
+    "#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("default FFI verifier replay fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("default FFI verifier replay fixture materialization");
+    let expected_receipt = mir.route_receipt("verifier-mir-v1");
+    let source_a = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let source_b = blake3::hash(b"same MIR, alternate source snapshot")
+        .to_hex()
+        .to_string();
+    let first = crate::verifier::verify_ffi_mir_with_source_hash(&mir, source_a.clone())
+        .expect("default FFI verifier first replay");
+    let second = crate::verifier::verify_ffi_mir_with_source_hash(&mir, source_b.clone())
+        .expect("default FFI verifier changed-source replay");
+    assert_eq!(
+        first
+            .iter()
+            .map(|result| result.status.clone())
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|result| result.status.clone())
+            .collect::<Vec<_>>(),
+        "source provenance must not change proof verdicts"
+    );
+    let artifacts = |results: &[crate::verifier::VerificationResult]| {
+        results
+            .iter()
+            .map(|result| {
+                result
+                    .artifact
+                    .clone()
+                    .expect("default FFI verifier replay artifact")
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_artifacts = artifacts(&first);
+    let second_artifacts = artifacts(&second);
+    assert_eq!(first_artifacts.len(), 2);
+    assert_eq!(second_artifacts.len(), 2);
+    for (first_artifact, second_artifact) in first_artifacts.iter().zip(second_artifacts.iter()) {
+        assert_eq!(
+            first_artifact.engine,
+            crate::verifier::ProofArtifact::ENGINE_MIR
+        );
+        assert_eq!(
+            second_artifact.engine,
+            crate::verifier::ProofArtifact::ENGINE_MIR
+        );
+        assert_eq!(first_artifact.source_hash, source_a);
+        assert_eq!(second_artifact.source_hash, source_b);
+        assert_eq!(first_artifact.mir_hash, mir.canonical_digest());
+        assert_eq!(second_artifact.mir_hash, mir.canonical_digest());
+        assert_eq!(
+            first_artifact.mir_route_receipt.as_ref(),
+            Some(&expected_receipt)
+        );
+        assert_eq!(
+            second_artifact.mir_route_receipt.as_ref(),
+            Some(&expected_receipt)
+        );
+        assert_eq!(first_artifact.cache_key(), second_artifact.cache_key());
+        assert!(!first_artifact.is_compatible(second_artifact));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
     for source in [
         r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
