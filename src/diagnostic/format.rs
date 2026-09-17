@@ -210,14 +210,34 @@ fn display_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
     let Some(code) = diagnostic.code.as_deref() else {
         return Cow::Borrowed(&diagnostic.message);
     };
-    if crate::diagnostic::codes::canonical_mir_route_code_location_in_message(&diagnostic.message)
-        != Some((0, code))
-    {
+    let Some((offset, detected_code)) =
+        crate::diagnostic::codes::canonical_mir_route_code_location_in_message(&diagnostic.message)
+    else {
+        return Cow::Borrowed(&diagnostic.message);
+    };
+    if detected_code != code {
         return Cow::Borrowed(&diagnostic.message);
     }
-    let rest = diagnostic.message[code.len()..].trim_start();
-    let rest = rest.strip_prefix(':').map(str::trim_start).unwrap_or(rest);
-    Cow::Owned(rest.to_string())
+    // Keep the machine-first code in the prefix, but remove the same
+    // occurrence from the historical message even when an adapter prepended
+    // context before it.  This makes direct Diagnostic formatting agree with
+    // the top-level CLI formatter without mutating Diagnostic.message.
+    let context = diagnostic.message[..offset]
+        .trim_end()
+        .trim_end_matches(':')
+        .trim_end();
+    let detail = diagnostic.message[offset + code.len()..]
+        .trim_start()
+        .strip_prefix(':')
+        .map(str::trim_start)
+        .unwrap_or_else(|| diagnostic.message[offset + code.len()..].trim_start());
+    let normalized = match (context, detail) {
+        ("", "") => code.to_string(),
+        ("", detail) => detail.to_string(),
+        (context, "") => context.to_string(),
+        (context, detail) => format!("{context}: {detail}"),
+    };
+    Cow::Owned(normalized)
 }
 
 /// Column part of a span location: `:5-14` for a single-line range,
@@ -281,7 +301,7 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{format_diagnostic, format_diagnostic_with_registry, strip_ansi};
-    use crate::diagnostic::codes::MIR_ROUTE_MANIFEST_ERROR_CODE;
+    use crate::diagnostic::codes::{MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
     use crate::diagnostic::Diagnostic;
     use crate::span::{SourceKey, SourceRecord, SourceRegistry, SourceTextOrigin, Span};
     use std::fs;
@@ -382,6 +402,19 @@ mod tests {
         assert_eq!(
             rendered,
             format!("error[{MIR_ROUTE_MANIFEST_ERROR_CODE}] {message}\n")
+        );
+        assert_eq!(diagnostic.message, message);
+    }
+
+    #[test]
+    fn formatter_normalizes_wrapped_route_code_once_without_mutating_message() {
+        let message = format!("verifier context: {MIR_ROUTE_RECEIPT_ERROR_CODE}: stale receipt");
+        let diagnostic =
+            Diagnostic::error_code(MIR_ROUTE_RECEIPT_ERROR_CODE, message.clone(), Span::UNKNOWN);
+        let rendered = strip_ansi(&format_diagnostic(&diagnostic, None, ""));
+        assert_eq!(
+            rendered,
+            "error[MIR-RECEIPT-001] verifier context: stale receipt\n"
         );
         assert_eq!(diagnostic.message, message);
     }
