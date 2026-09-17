@@ -319,6 +319,34 @@ native_direct_preflight_receipt_binding() {
 
 native_direct_preflight_receipt_binding
 
+# The receipt-bearing verifier adapter must invoke the MIR verifier exactly
+# once and bind the caller's witness directly.  Calling the public
+# `verify_mir` wrapper here would manufacture a second verifier profile before
+# the supplied receipt overwrites result metadata.
+verifier_route_receipt_handoff() {
+    local context
+    context="$(sed -n '/pub fn verify_mir_with_route_receipt(/,/^fn bind_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'verify_mir_results(program, source_hash.clone())?' \
+        'bind_route_receipt(&mut results, receipt)' \
+        'validate_mir_result_provenance('; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_route_receipt_handoff_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    if printf '%s\n' "$context" | rg -F 'verify_mir(program, source_hash.clone())?' >/dev/null; then
+        printf 'owner_audit_error=verifier_route_receipt_handoff_reenters_default=src/verifier/mod.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'verifier_route_receipt_handoff=single-mir-verifier-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(\n'
+}
+
+verifier_route_receipt_handoff
+
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow
 # a copied receipt to be paired with a different profile; requiring the profile
@@ -857,7 +885,7 @@ mir_route_receipt_order_binding \
     'pub fn verify_mir_with_route_receipt(' \
     'fn bind_route_receipt(' \
     '.validate_against_program(program)' \
-    'let mut results = verify_mir(program, source_hash.clone())?'
+    'let mut results = verify_mir_results(program, source_hash.clone())?'
 mir_route_receipt_order_binding \
     src/verifier/mod.rs \
     'pub fn verify_ffi_mir_with_route_receipt(' \

@@ -294,6 +294,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "native_direct_preflight_receipt_binding=native-direct-v1->bytecode+verifier+native consumer=src/codegen/compile.rs::try_compile_exact_migrated_mir_island(",
+        "verifier_route_receipt_handoff=single-mir-verifier-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "consumer_receipt_profile_binding=verify-ffi-v1 profile=CanonicalMirRouteProfile::ScalarFfi consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
@@ -681,8 +682,8 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&capability_order_output.stderr)
     );
     let tampered_route_order_script = source_script.replacen(
-        "    '.validate_against_program(program)' \\\n    'let mut results = verify_mir(program, source_hash.clone())?'",
-        "    'let mut results = verify_mir(program, source_hash.clone())?' \\\n    '.validate_against_program(program)'",
+        "    '.validate_against_program(program)' \\\n    'let mut results = verify_mir_results(program, source_hash.clone())?'",
+        "    'let mut results = verify_mir_results(program, source_hash.clone())?' \\\n    '.validate_against_program(program)'",
         1,
     );
     assert!(

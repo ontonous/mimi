@@ -38,10 +38,17 @@ pub fn verify_mir(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let results = mir::verify_program(program, source_hash.clone())?;
+    let results = verify_mir_results(program, source_hash.clone())?;
     let receipt = program.route_receipt("verifier-mir-v1");
     validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_mir")?;
     Ok(results)
+}
+
+fn verify_mir_results(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    mir::verify_program(program, source_hash)
 }
 
 /// Verify canonical MIR after checking the caller-supplied route receipt.
@@ -60,7 +67,7 @@ pub fn verify_mir_with_route_receipt(
                 crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
             )
         })?;
-    let mut results = verify_mir(program, source_hash.clone())?;
+    let mut results = verify_mir_results(program, source_hash.clone())?;
     bind_route_receipt(&mut results, receipt);
     validate_mir_result_provenance(
         &results,
