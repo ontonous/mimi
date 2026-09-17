@@ -17865,6 +17865,62 @@ int64_t generated_foreign(int64_t x) { return x; }
 }
 
 #[test]
+fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    // The seed, recurrence, and two body shapes are part of this regression
+    // contract; a failure identifies a stable call-site/value pair.
+    let mut seed = 0x51eed_947_u64;
+    for case_index in 0..8_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let positive = ((seed >> 9) % 31 + 1) as i64;
+        let negative = -(((seed >> 17) % 31 + 1) as i64);
+        let symbol = format!("seeded_verifier_{case_index}");
+        let body = if seed & 1 == 0 {
+            format!("{symbol}({positive} as i64); {symbol}({negative} as i64); 0")
+        } else {
+            format!(
+                "let first = {symbol}({positive} as i64); let second = {symbol}({negative} as i64); 0"
+            )
+        };
+        let source = format!(
+            r#"extern "C" {{ func {symbol}(value: i64) -> i64 requires: value >= 0 ensures: true; }}
+            func main() -> i64 {{ {body} }}"#
+        );
+        let checked = crate::core::check_program(&super::parse(&source))
+            .unwrap_or_else(|error| panic!("seeded verifier case {case_index} check: {error:?}"));
+        let mir = MirProgram::from_checked_program(&checked).unwrap_or_else(|error| {
+            panic!("seeded verifier case {case_index} materialization: {error}")
+        });
+        assert_eq!(
+            mir.ffi_calls().len(),
+            2,
+            "seeded verifier case {case_index}"
+        );
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let expected_receipt = mir.route_receipt("verifier-mir-v1");
+        let results = crate::verifier::verify_ffi_mir_with_source_hash(&mir, source_hash.clone())
+            .unwrap_or_else(|error| panic!("seeded verifier case {case_index}: {error}"));
+        assert_eq!(results.len(), 2, "one result per generated FFI call-site");
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.source_hash == source_hash
+                    && artifact.mir_hash == mir.canonical_digest()
+                    && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
+            })
+        }));
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
 fn scalar_ffi_multi_argument_abi_shares_one_mir_across_consumers() {
     struct MultiArgumentOracle;
     impl MirReferenceFfiResolver for MultiArgumentOracle {
