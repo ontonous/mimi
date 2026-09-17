@@ -93,8 +93,8 @@ pub fn compile_mir_program(
     // receipt from this immutable MIR graph rather than accepting an
     // unbound/legacy-shaped bytecode artifact.  Explicit route owners use
     // `compile_mir_program_with_route_receipt` below and retain their profile.
-    let receipt =
-        (!program.ffi_calls().is_empty()).then(|| program.route_receipt("bytecode-direct-v1"));
+    let receipt = (!program.ffi_calls().is_empty())
+        .then(|| program.route_receipt(crate::core::mir::MIR_BYTECODE_DIRECT_ROUTE_PROFILE));
     compile_mir_program_inner(program, receipt.as_ref())
 }
 
@@ -12279,7 +12279,15 @@ mod tests {
             .canonical_ffi_route_receipt
             .as_ref()
             .expect("direct canonical FFI adapter must derive a route receipt");
-        assert_eq!(derived_receipt.profile, "bytecode-direct-v1");
+        assert_eq!(
+            derived_receipt.profile,
+            crate::core::mir::MIR_BYTECODE_DIRECT_ROUTE_PROFILE
+        );
+        assert_eq!(
+            derived_receipt,
+            &mir.route_receipt(crate::core::mir::MIR_BYTECODE_DIRECT_ROUTE_PROFILE),
+            "direct adapter anchor must be the complete receipt for this MIR graph"
+        );
         assert!(bytecode
             .canonical_ffi_bindings
             .iter()

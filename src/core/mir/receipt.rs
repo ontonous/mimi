@@ -15,6 +15,12 @@ use crate::core::NodeId;
 /// Schema version for the cross-consumer route receipt.
 pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 
+/// Stable profile used by the public AST-free bytecode adapter when the
+/// caller supplies only an immutable `MirProgram` and no route manifest.
+/// Keeping the profile beside the receipt schema prevents the adapter and its
+/// evidence consumers from drifting into different provenance labels.
+pub const MIR_BYTECODE_DIRECT_ROUTE_PROFILE: &str = "bytecode-direct-v1";
+
 /// Stable diagnostic identifiers for route receipt admission failures. Keep
 /// these available through the MIR namespace while the diagnostic registry
 /// remains the single source of truth for CLI/LSP code descriptions.
