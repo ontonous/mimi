@@ -1126,6 +1126,44 @@ mod tests {
     }
 
     #[test]
+    fn persisted_wrapped_route_roundtrip_preserves_normalized_display() {
+        let mut registry = crate::span::SourceRegistry::default();
+        let source_id = registry
+            .register_key("workspace:wrapped-route.mimi", SourceTextOrigin::Memory)
+            .expect("register source");
+        let span = Span::new(2, 3, 2, 11).with_source(source_id);
+        let diagnostic = crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "cache wrapper: {}: stale route receipt",
+                MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+            span,
+        );
+        let before = crate::diagnostic::format::strip_ansi(
+            &crate::diagnostic::format::format_diagnostic(&diagnostic, None, "wrapped-route.mimi"),
+        );
+
+        let persisted =
+            PersistedDiagnostic::from_runtime(&diagnostic, &registry).expect("persist diagnostic");
+        let json = serde_json::to_string(&persisted).expect("serialize diagnostic");
+        let decoded: PersistedDiagnostic =
+            serde_json::from_str(&json).expect("deserialize diagnostic");
+        let restored = decoded.to_runtime(&registry).expect("restore diagnostic");
+        let after = crate::diagnostic::format::strip_ansi(
+            &crate::diagnostic::format::format_diagnostic(&restored, None, "wrapped-route.mimi"),
+        );
+
+        assert_eq!(restored.code, diagnostic.code);
+        assert_eq!(restored.message, diagnostic.message);
+        assert_eq!(restored.origin, diagnostic.origin);
+        assert_eq!(after, before);
+        assert_eq!(
+            after,
+            "error[MIR-RECEIPT-MANIFEST-001] wrapped-route.mimi:2:3-11 cache wrapper: stale route receipt\n"
+        );
+    }
+
+    #[test]
     fn persisted_cache_rejects_source_less_route_diagnostic() {
         let registry = crate::span::SourceRegistry::default();
         let diagnostic = Diagnostic::error_code(
