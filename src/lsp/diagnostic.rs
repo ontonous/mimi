@@ -91,6 +91,7 @@ fn lsp_diagnostic_sort_key(
 mod tests {
     use super::*;
     use crate::diagnostic::codes::{describe, MIR_ROUTE_MANIFEST_ERROR_CODE};
+    use crate::diagnostic::DiagnosticOrigin;
     use crate::span::Span;
 
     #[test]
@@ -177,5 +178,34 @@ mod tests {
         assert_eq!(normalized.len(), 2);
         assert_eq!(normalized.remove(0)["message"], "ordinary failure");
         assert_eq!(normalized.remove(0)["code"], MIR_ROUTE_MANIFEST_ERROR_CODE);
+    }
+
+    #[test]
+    fn lsp_normalization_keeps_same_route_text_with_distinct_origins() {
+        let span = Span::new(2, 1, 2, 4);
+        let message = format!("cache wrapper: {MIR_ROUTE_MANIFEST_ERROR_CODE}: stale route");
+        let runtime = diagnostic_to_lsp(
+            &crate::diagnostic::mir_route_error_diagnostic(message.clone(), span),
+            Some("a\nb"),
+        );
+        let user = diagnostic_to_lsp(
+            &Diagnostic::error_code(MIR_ROUTE_MANIFEST_ERROR_CODE, message, span)
+                .with_origin(DiagnosticOrigin::user()),
+            Some("a\nb"),
+        );
+
+        let normalized =
+            normalize_diagnostics(vec![runtime.clone(), user.clone(), runtime.clone()]);
+        let replayed = normalize_diagnostics(vec![user, runtime]);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(replayed, normalized);
+        assert!(normalized.iter().any(|value| {
+            value["data"]["origin"]["kind"] == "runtime_system"
+                && value["data"]["origin"]["rule"] == "mir.route"
+        }));
+        assert!(normalized
+            .iter()
+            .any(|value| { value["data"]["origin"]["kind"] == "user" }));
     }
 }
