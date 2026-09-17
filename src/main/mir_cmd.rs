@@ -92,11 +92,14 @@ pub(crate) fn mir(
     // therefore disagreed with `run/build --mir` for imported typed facades.
     // `None` means the complete user/import graph; `Some` preserves the
     // historical source-only inspection mode.
-    let program = crate::canonical_dispatch::build_canonical_program_for_sources(
+    let program = crate::canonical_dispatch::build_canonical_program_for_sources_with_diagnostics(
         &checked,
         &file,
         source_ids.as_ref(),
     )
+    // Keep the typed build failure intact until this CLI presentation
+    // boundary. Other direct consumers can inspect `to_diagnostics()` and
+    // `diagnostic_codes()` without parsing the aggregate display text.
     .map_err(|error| format!("MIR inspection input rejected: {error}"))?;
 
     if receipt {

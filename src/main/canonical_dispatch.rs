@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use mimi::ast::File;
-use mimi::core::mir::reference::MirProgram;
+use mimi::core::mir::reference::{MirProgram, MirProgramBuildError};
 use mimi::core::CheckedProgram;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +98,22 @@ pub(crate) fn build_canonical_program_for_sources(
     merged_file: &File,
     included_sources: Option<&HashSet<mimi::span::SourceId>>,
 ) -> Result<MirProgram, String> {
+    build_canonical_program_for_sources_with_diagnostics(checked, merged_file, included_sources)
+        // Use the stable error contract rather than Rust's debug shape.  The
+        // latter exposed enum/field syntax (`Validation([...])`) through the
+        // CLI and made construction diagnostics depend on internal layout.
+        .map_err(|error| format!("canonical MIR build error: {error}"))
+}
+
+/// Build a source-scoped canonical graph while retaining the typed aggregate
+/// error until the caller chooses a presentation boundary.  The source filter
+/// is only graph selection; lowering, generic instance materialization,
+/// TypeDesc construction, and validation remain owned by `MirProgram`.
+pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    included_sources: Option<&HashSet<mimi::span::SourceId>>,
+) -> Result<MirProgram, MirProgramBuildError> {
     let excluded_sources = merged_file
         .sources
         .records()
@@ -109,10 +125,6 @@ pub(crate) fn build_canonical_program_for_sources(
         .map(|record| record.id)
         .collect::<HashSet<_>>();
     MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)
-        // Use the stable error contract rather than Rust's debug shape.  The
-        // latter exposed enum/field syntax (`Validation([...])`) through the
-        // CLI and made construction diagnostics depend on internal layout.
-        .map_err(|error| format!("canonical MIR build error: {error}"))
 }
 
 /// Select a default route for a complete checked program.
@@ -1670,6 +1682,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn source_scope_builder_preserves_typed_build_diagnostics_until_cli_boundary() {
+        let source = r#"
+            extern "C" { func foreign(value: f64) -> f64 requires: value > 0.0; }
+            func main() -> f64 { foreign(42.5) }
+        "#;
+        let (checked, file) = checked(source);
+        let error = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+            .expect_err("unsupported scalar FFI graph must retain a typed build error");
+        assert!(matches!(
+            error,
+            mimi::core::mir::reference::MirProgramBuildError::Validation(_)
+        ));
+        assert_eq!(error.diagnostic_codes(), vec![None]);
+        let display = format!("MIR inspection input rejected: {error}");
+        assert!(display.contains("MIR inspection input rejected"));
+        assert!(display.contains("MIR validation failed"));
+        assert!(!display.contains(mimi::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE));
     }
 
     #[test]
