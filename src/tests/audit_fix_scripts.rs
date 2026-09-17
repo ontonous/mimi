@@ -295,6 +295,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
+        "consumer_receipt_profile_binding=verify-ffi-v1 profile=CanonicalMirRouteProfile::ScalarFfi consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -445,6 +446,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=consumer_receipt_invocation_missing="),
         "receipt provenance drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&provenance_output.stderr)
+    );
+    let tampered_profile_script = source_script.replacen(
+        "    ScalarFfi\n\nif ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\\(",
+        "    ScalarCollection\n\nif ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\\(",
+        1,
+    );
+    assert!(
+        source_script != tampered_profile_script,
+        "profile fixture must replace the expected verifier profile"
+    );
+    std::fs::write(&script_path, tampered_profile_script)
+        .expect("write tampered profile audit script");
+    let profile_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered profile audit");
+    assert!(
+        !profile_output.status.success(),
+        "tampered verifier route profile must fail closed:\n{}",
+        String::from_utf8_lossy(&profile_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&profile_output.stderr)
+            .contains("owner_audit_error=consumer_receipt_profile_missing="),
+        "verifier profile drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&profile_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

@@ -292,6 +292,35 @@ consumer_receipt_provenance_binding \
     'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)' \
     canonical-mir-graph+source-hash
 
+# Keep the FFI verifier's receipt tied to the same canonical route profile that
+# admitted the island.  A source-hash forwarding check alone would still allow
+# a copied receipt to be paired with a different profile; requiring the profile
+# expression in the consumer context makes that drift fail closed.
+consumer_receipt_profile_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local receipt_label="$4"
+    local profile_name="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "CanonicalMirRouteProfile::${profile_name}" >/dev/null; then
+        printf 'owner_audit_error=consumer_receipt_profile_missing=%s::%s label=%s profile=%s\n' \
+            "$source_file" "$start_function" "$receipt_label" "$profile_name" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'consumer_receipt_profile_binding=%s profile=CanonicalMirRouteProfile::%s consumer=%s::%s\n' \
+        "$receipt_label" "$profile_name" "$source_file" "$start_function"
+}
+
+consumer_receipt_profile_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available(' \
+    verify-ffi-v1 \
+    ScalarFfi
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
