@@ -22628,6 +22628,156 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_route_receipt_rejection_recovers_across_consumers() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_receipt_recovery(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_receipt_recovery(value: i64) ensures: true; }
+func main() -> i64 {
+    println(4 as i64);
+    mir_ffi_unit_receipt_recovery(7 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit receipt-recovery fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit receipt-recovery fixture materialization");
+    let receipt = mir.route_receipt("r6-896-unit-receipt-recovery-v1");
+    let mut forged = receipt.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let assert_route_diagnostic = |diagnostic: &crate::diagnostic::Diagnostic, code: &str| {
+        assert_eq!(diagnostic.code.as_deref(), Some(code));
+        let origin = diagnostic
+            .origin
+            .as_ref()
+            .expect("Unit route diagnostic origin");
+        assert_eq!(
+            origin.kind,
+            crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+        );
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert!(origin.parent_node_id.is_none());
+    };
+
+    let bytecode_error = compile_mir_program_with_route_receipt(&mir, &forged)
+        .expect_err("bytecode must reject forged Unit route receipt");
+    assert_route_diagnostic(
+        &bytecode_error[0].to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let fixture = library_fixture(super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed), C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+        .expect("bytecode must recover with valid Unit route receipt");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("recovered Unit route bytecode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "4\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_896_unit_receipt_recovery");
+    let native_before = native.module.print_to_string().to_string();
+    let native_error = native
+        .compile_mir_native_with_route_receipt(&mir, &forged)
+        .expect_err("native must reject forged Unit route receipt");
+    assert_route_diagnostic(
+        &native_error[0],
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert_eq!(native.module.print_to_string().to_string(), native_before);
+    native
+        .compile_mir_native_with_route_receipt(&mir, &receipt)
+        .expect("native must recover with valid Unit route receipt");
+    native
+        .module
+        .verify()
+        .expect("recovered Unit route native module");
+    let native_observation = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("recovered Unit route native execution");
+    assert_eq!(native_observation.exit_code, Some(0));
+    assert_eq!(native_observation.stdout, "4\n");
+    assert!(native_observation.stderr.is_empty());
+
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verifier_error =
+        crate::verifier::verify_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("general verifier must reject forged Unit route receipt");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(verifier_error),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    crate::verifier::verify_mir_with_route_receipt(&mir, &receipt, source_hash.clone())
+        .expect("general verifier must recover with valid Unit route receipt");
+
+    let ffi_verifier_error =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &forged, source_hash.clone())
+            .expect_err("FFI verifier must reject forged Unit route receipt");
+    assert_route_diagnostic(
+        &crate::verifier::mir_route_error_to_diagnostic(ffi_verifier_error),
+        crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    let ffi_results =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &receipt, source_hash)
+            .expect("FFI verifier must recover with valid Unit route receipt");
+    assert!(ffi_results.iter().all(|result| {
+        result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.mir_route_receipt.as_ref() == Some(&receipt))
+    }));
+
+    struct UnitReceiptOracle;
+    impl MirReferenceFfiResolver for UnitReceiptOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_receipt_recovery");
+            assert_eq!(arguments, [MirRuntimeValue::Int(7)]);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&UnitReceiptOracle)
+        .with_route_receipt(&forged);
+    let reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject forged Unit route receipt");
+    assert_route_diagnostic(
+        &reference_error.to_diagnostic(),
+        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+    );
+    assert!(forged_reference.captured_output().is_empty());
+    let recovered_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&UnitReceiptOracle)
+        .with_route_receipt(&receipt)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference must recover with valid Unit route receipt");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "4\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
