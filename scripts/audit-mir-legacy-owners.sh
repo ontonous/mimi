@@ -136,6 +136,34 @@ owner_closed_route_guard() {
         "$owner" "$guard_name" "$source_file" "$start_function"
 }
 
+# Bind the scalar route's receipt label to the canonical profile declaration.
+# This prevents a renamed or copied receipt from silently drifting away from
+# the profile that the closed-route guard is meant to protect.
+route_receipt_profile_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local profile_name="$4"
+    local receipt_label="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "route_receipt(\"${receipt_label}\")" >/dev/null; then
+        printf 'owner_audit_error=scalar_route_receipt_missing=%s::%s label=%s\n' \
+            "$source_file" "$start_function" "$receipt_label" >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -F "Self::${profile_name} => \"${receipt_label}\"" \
+        "$ROOT_DIR/src/core/mir/route.rs" >/dev/null; then
+        printf 'owner_audit_error=scalar_route_profile_receipt_mapping_missing=CanonicalMirRouteProfile::%s label=%s\n' \
+            "$profile_name" "$receipt_label" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'scalar_route_receipt_binding=CanonicalMirRouteProfile::%s->%s consumer=%s::%s\n' \
+        "$profile_name" "$receipt_label" "$source_file" "$start_function"
+}
+
 owner_accessor_context \
     CodegenLegacyRemainder \
     src/codegen/compile.rs \
@@ -185,6 +213,13 @@ owner_closed_route_guard \
     'fn verify_closed_mir_program(' \
     verify_closed_mir_program \
     'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
+
+route_receipt_profile_binding \
+    src/main/canonical_dispatch.rs \
+    'fn select_scalar_ffi_route(' \
+    'fn reject_migrated_candidates(' \
+    ScalarFfi \
+    scalar-ffi-v1
 
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then

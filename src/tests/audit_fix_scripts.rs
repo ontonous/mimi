@@ -290,6 +290,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=8",
         "scalar_ffi_direct_expression_legacy_refs=0",
+        "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -365,6 +366,30 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=CodegenLegacyRemainder closed_route_guard_missing="),
         "route guard drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&guard_output.stderr)
+    );
+    let tampered_receipt_script =
+        source_script.replacen("    scalar-ffi-v1\n", "    missing-route-receipt\n", 1);
+    assert!(
+        source_script != tampered_receipt_script,
+        "receipt fixture must replace the expected scalar route label"
+    );
+    std::fs::write(&script_path, tampered_receipt_script)
+        .expect("write tampered scalar receipt audit script");
+    let receipt_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered scalar receipt audit");
+    assert!(
+        !receipt_output.status.success(),
+        "tampered scalar route receipt must fail closed:\n{}",
+        String::from_utf8_lossy(&receipt_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&receipt_output.stderr)
+            .contains("owner_audit_error=scalar_route_receipt_missing="),
+        "scalar receipt drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&receipt_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
