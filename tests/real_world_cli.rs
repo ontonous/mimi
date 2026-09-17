@@ -16905,6 +16905,27 @@ func main() -> i64 { foreign(42 as i64) }
 "#,
             "variadic",
         ),
+        (
+            "string_payload",
+            r#"extern "C" { func foreign(value: string) -> i64; }
+func main() -> i64 { println(1); foreign("ok") }
+"#,
+            "parameter type is outside canonical scalar FFI",
+        ),
+        (
+            "tuple_payload",
+            r#"extern "C" { func foreign(value: (i64, string)) -> i64; }
+func main() -> i64 { println(1); foreign((42 as i64, "ok")) }
+"#,
+            "parameter type is outside canonical scalar FFI",
+        ),
+        (
+            "string_result",
+            r#"extern "C" { func foreign(value: i64) -> string; }
+func main() -> string { foreign(42 as i64) }
+"#,
+            "result type is outside canonical scalar FFI",
+        ),
     ];
 
     for (label, source_text, boundary) in fixtures {
@@ -16912,9 +16933,9 @@ func main() -> i64 { foreign(42 as i64) }
         fs::write(&source, source_text).expect("write FFI boundary CLI fixture");
         for command in ["run", "build", "verify"] {
             // The default route reports the checker-owned declaration boundary;
-            // explicit --mir reaches the same rejection during MIR validation.
-            // Their diagnostics therefore have different prefixes, while the
-            // outcome, stdout, and boundary attribution must remain aligned.
+            // explicit --mir reaches the same rejection in its canonical
+            // construction/backend consumer. Their diagnostic prefixes differ,
+            // but neither route may execute the host call or enter legacy.
             let mut route_outputs = Vec::new();
             for explicit_mir in [false, true] {
                 let mut invocation = Command::new(mimi_bin());
@@ -16949,16 +16970,20 @@ func main() -> i64 { foreign(42 as i64) }
                     }
                 );
                 assert!(stdout.is_empty(), "{label} {command}: {stdout}");
-                assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
                 if explicit_mir == 0 {
+                    assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
                     assert!(
                         stderr.contains("canonical scalar FFI declaration boundary"),
                         "{label} {command}: default route must reject before legacy: {stderr}"
                     );
                 } else {
                     assert!(
-                        stderr.contains("MIR validation failed"),
-                        "{label} {command}: explicit MIR must report validation: {stderr}"
+                        (stderr.contains("FFI") || stderr.contains("ABI"))
+                            && (stderr.contains("MIR validation failed")
+                                || stderr.contains("MIR bytecode")
+                                || stderr.contains("MIR verifier")
+                                || stderr.contains("native backend")),
+                        "{label} {command}: explicit MIR must report a canonical FFI boundary: {stderr}"
                     );
                 }
                 assert!(

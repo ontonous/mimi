@@ -1616,6 +1616,21 @@ mod tests {
                 func main() -> i64 { foreign(42 as i64) }"#,
                 "variadic ABI",
             ),
+            (
+                r#"extern "C" { func foreign(value: string) -> i64; }
+                func main() -> i64 { foreign("ok") }"#,
+                "parameter type is outside canonical scalar FFI",
+            ),
+            (
+                r#"extern "C" { func foreign(value: (i64, string)) -> i64; }
+                func main() -> i64 { foreign((42 as i64, "ok")) }"#,
+                "parameter type is outside canonical scalar FFI",
+            ),
+            (
+                r#"extern "C" { func foreign(value: i64) -> string; }
+                func main() -> string { foreign(42 as i64) }"#,
+                "result type is outside canonical scalar FFI",
+            ),
         ] {
             let (checked, file) = checked(source);
             let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {

@@ -90,7 +90,8 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
 /// enter the scalar C ABI island.  This is intentionally limited to
 /// declaration-level semantics: route selection can report these boundaries
 /// before compatibility-source materialization (for example the merged
-/// prelude) produces an unrelated error.  Type/layout failures remain
+/// prelude) produces an unrelated error.  Unsupported source type shapes are
+/// rejected here; concrete TypeDesc/layout inconsistencies remain
 /// construction-time diagnostics because they require the MIR TypeDesc.
 pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
     for site in program.call_sites_sorted() {
@@ -154,6 +155,31 @@ pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
         {
             return Some(format!(
                 "extern declaration '{}' uses parameter mode outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+        // A called C declaration with a managed or aggregate ABI is still an
+        // FFI boundary, even though it is not a scalar-island candidate.  Do
+        // not let the default dispatcher hand that call to the legacy
+        // bytecode/native emitter: the migrated profile must reject the
+        // unsupported shape before any observable effect or host lookup.
+        if declaration
+            .ret_type
+            .as_ref()
+            .is_some_and(|ty| !is_scalar_ffi_decl_type(program, ty, true))
+        {
+            return Some(format!(
+                "extern declaration '{}' result type is outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+        if declaration
+            .typed_params
+            .iter()
+            .any(|(_, ty, _)| !is_scalar_ffi_decl_type(program, ty, false))
+        {
+            return Some(format!(
+                "extern declaration '{}' parameter type is outside canonical scalar FFI",
                 declaration.name
             ));
         }
