@@ -5074,6 +5074,35 @@ fn valid_function_passes_structural_validation() {
 }
 
 #[test]
+fn validation_error_to_diagnostic_preserves_route_provenance_only_for_registered_codes() {
+    let route_error = MirValidationError {
+        subject: "extern:foreign".into(),
+        message: format!(
+            "{}: FFI declaration uses an unsupported variadic ABI",
+            crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+        ),
+    };
+    let diagnostic = route_error.to_diagnostic();
+    assert_eq!(
+        diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+    );
+    assert_eq!(
+        diagnostic.origin.expect("route provenance").rule.as_deref(),
+        Some("mir.route")
+    );
+    assert_eq!(diagnostic.span, crate::span::Span::UNKNOWN);
+
+    let ordinary_error = MirValidationError {
+        subject: "value:missing".into(),
+        message: "value is used before its definition".into(),
+    };
+    let ordinary_diagnostic = ordinary_error.to_diagnostic();
+    assert!(ordinary_diagnostic.code.is_none());
+    assert!(ordinary_diagnostic.origin.is_none());
+}
+
+#[test]
 fn direct_variant_projection_reference_checks_active_tag_and_returns_payload() {
     let fixture = crate::core::mir::test_support::direct_variant_projection_fixture();
     let nominal =

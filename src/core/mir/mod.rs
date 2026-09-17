@@ -2407,6 +2407,18 @@ impl MirValidationError {
     pub fn diagnostic_code(&self) -> Option<&'static str> {
         crate::diagnostic::codes::canonical_mir_route_code_in_message(&self.message)
     }
+
+    /// Convert a validation failure to the shared diagnostic shape used by
+    /// direct MIR, CLI, and LSP callers.  Only messages carrying a registered
+    /// route code receive route provenance; ordinary MIR shape failures stay
+    /// generic so backend internals do not become a public diagnostic protocol.
+    pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        let message = match self.diagnostic_code() {
+            Some(code) => format!("{code}: {self}"),
+            None => self.to_string(),
+        };
+        crate::diagnostic::mir_route_error_diagnostic(message, crate::span::Span::UNKNOWN)
+    }
 }
 
 impl MirFunction {
