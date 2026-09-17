@@ -535,6 +535,88 @@ mir_route_manifest_replay_binding \
     'CanonicalMirRouteReceipt::from_manifest(manifest)' \
     'verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)'
 
+# Capability admission must happen before symbolic execution in the direct FFI
+# verifier. Compare source-order positions so a future refactor cannot leave a
+# provenance validator while moving malformed MIR past the capability gate.
+mir_ffi_capability_order_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local capability_pattern="$4"
+    local execution_pattern="$5"
+    local context
+    local capability_line
+    local execution_line
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    capability_line="$(printf '%s\n' "$context" | rg -n -F "$capability_pattern" | head -n 1 | cut -d: -f1 || true)"
+    execution_line="$(printf '%s\n' "$context" | rg -n -F "$execution_pattern" | head -n 1 | cut -d: -f1 || true)"
+    if [ -z "$capability_line" ] || [ -z "$execution_line" ]; then
+        printf 'owner_audit_error=mir_ffi_capability_order_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if [ "$capability_line" -ge "$execution_line" ]; then
+        printf 'owner_audit_error=mir_ffi_capability_order_drift=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_ffi_capability_order_binding=capability-before-execution consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_ffi_capability_order_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_mir_with_source_hash(' \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'validate_mir_capabilities(program)' \
+    'let results = mir::verify_ffi_program(program, source_hash.clone())?'
+
+# A caller-supplied route receipt is the outer admission boundary. Validate it
+# before invoking the source-hash adapter so malformed route metadata cannot
+# reach capability/proof work or produce a misleading artifact.
+mir_route_receipt_order_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local receipt_pattern="$4"
+    local adapter_pattern="$5"
+    local context
+    local receipt_line
+    local adapter_line
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    receipt_line="$(printf '%s\n' "$context" | rg -n -F "$receipt_pattern" | head -n 1 | cut -d: -f1 || true)"
+    adapter_line="$(printf '%s\n' "$context" | rg -n -F "$adapter_pattern" | head -n 1 | cut -d: -f1 || true)"
+    if [ -z "$receipt_line" ] || [ -z "$adapter_line" ]; then
+        printf 'owner_audit_error=mir_route_receipt_order_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if [ "$receipt_line" -ge "$adapter_line" ]; then
+        printf 'owner_audit_error=mir_route_receipt_order_drift=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_route_receipt_order_binding=receipt-before-adapter consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_route_receipt_order_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_mir_with_route_receipt(' \
+    'fn bind_route_receipt(' \
+    '.validate_against_program(program)' \
+    'let mut results = verify_mir(program, source_hash.clone())?'
+mir_route_receipt_order_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'pub fn verify_ffi_mir_with_route_manifest(' \
+    '.validate_against_program(program)' \
+    'let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2

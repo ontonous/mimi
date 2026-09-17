@@ -304,6 +304,9 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
         "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
         "mir_route_manifest_replay_binding=manifest-parse+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
+        "mir_ffi_capability_order_binding=capability-before-execution consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
+        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
+        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -643,6 +646,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_route_manifest_replay_missing="),
         "manifest replay drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&manifest_replay_output.stderr)
+    );
+    let tampered_capability_order_script = source_script.replacen(
+        "    'validate_mir_capabilities(program)' \\\n",
+        "    'missing_mir_capability_gate(program)' \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_capability_order_script,
+        "capability order fixture must replace the expected gate"
+    );
+    std::fs::write(&script_path, tampered_capability_order_script)
+        .expect("write tampered capability order audit script");
+    let capability_order_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered capability order audit");
+    assert!(
+        !capability_order_output.status.success(),
+        "tampered capability order must fail closed:\n{}",
+        String::from_utf8_lossy(&capability_order_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&capability_order_output.stderr)
+            .contains("owner_audit_error=mir_ffi_capability_order_missing="),
+        "capability order drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&capability_order_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
