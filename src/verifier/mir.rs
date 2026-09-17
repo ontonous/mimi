@@ -296,7 +296,7 @@ fn verify_program_inner(
     results.extend(verify_ffi_program_inner(
         program,
         source_hash,
-        supplied_route_receipt,
+        Some(&mir_route_receipt),
     )?);
     Ok(results)
 }

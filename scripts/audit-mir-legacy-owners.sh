@@ -372,6 +372,29 @@ verifier_ffi_route_receipt_handoff() {
 
 verifier_ffi_route_receipt_handoff
 
+# The general verifier's default source-hash path must reuse the one receipt
+# materialized for the function-contract pass when it appends FFI obligations.
+# This keeps a mixed function/FFI result batch on one semantic witness even
+# when no caller supplied an explicit route profile.
+verifier_default_receipt_reuse() {
+    local context
+    context="$(sed -n '/^fn verify_program_inner(/,/^pub(crate) fn verify_ffi_program(/p' "$ROOT_DIR/src/verifier/mir.rs")"
+    for pattern in \
+        'let mir_route_receipt = supplied_route_receipt' \
+        'results.extend(verify_ffi_program_inner(' \
+        'Some(&mir_route_receipt),'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_default_receipt_reuse_missing=src/verifier/mir.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'verifier_default_receipt_reuse=single-batch-witness consumer=src/verifier/mir.rs::fn verify_program_inner(\n'
+}
+
+verifier_default_receipt_reuse
+
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow
 # a copied receipt to be paired with a different profile; requiring the profile
