@@ -321,6 +321,58 @@ consumer_receipt_profile_binding \
     verify-ffi-v1 \
     ScalarFfi
 
+# The AST-free bytecode adapter must retain the route receipt that admitted
+# the MIR graph.  Without this hand-off the compile-time receipt check would
+# end at emission and a reusable VM could no longer prove that its binding
+# snapshot belongs to one canonical route identity.
+bytecode_route_receipt_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local pattern="$4"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+        printf 'owner_audit_error=bytecode_route_receipt_binding_missing=%s::%s pattern=%s\n' \
+            "$source_file" "$start_function" "$pattern" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'bytecode_route_receipt_binding=%s consumer=%s::%s\n' \
+        "$pattern" "$source_file" "$start_function"
+}
+
+bytecode_route_receipt_binding \
+    src/interp/bytecode/mir.rs \
+    'pub fn compile_mir_program_with_route_receipt(' \
+    'fn compile_mir_program_inner(' \
+    'compile_mir_program_inner(program, Some(receipt))'
+bytecode_route_receipt_binding \
+    src/interp/bytecode/mir.rs \
+    'fn compile_mir_program_inner(' \
+    'fn materialize_canonical_ffi_bindings(' \
+    'binding.route_receipt = Some(receipt.clone())'
+
+bytecode_route_receipt_vm_guard() {
+    local source_file="$1"
+    local source
+    source="$(cat "$ROOT_DIR/$source_file")"
+    for pattern in \
+        'canonical FFI binding manifest mixes route receipt identities' \
+        'canonical FFI route receipt cannot be replayed at VM boundary'; do
+        if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=bytecode_route_receipt_vm_guard_missing=%s pattern=%s\n' \
+                "$source_file" "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'bytecode_route_receipt_vm_guard=identity-consistency+manifest-replay consumer=%s\n' \
+        "$source_file"
+}
+
+bytecode_route_receipt_vm_guard src/interp/bytecode/vm.rs
+
 # Bind the public source entry to the hash-bearing checked-program adapter.
 # This keeps the caller's BLAKE3 provenance on the same path as the verifier
 # receipt; a renamed call or an empty/hashless entry must fail closed.

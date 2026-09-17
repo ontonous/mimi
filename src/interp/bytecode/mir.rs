@@ -87,7 +87,7 @@ fn checked_function_index(index: usize, owner: &NodeId) -> Result<FuncIdx, MirBy
 pub fn compile_mir_program(
     program: &MirProgram,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
-    compile_mir_program_inner(program)
+    compile_mir_program_inner(program, None)
 }
 
 /// Compile canonical MIR after checking the route receipt supplied by the
@@ -107,7 +107,7 @@ pub fn compile_mir_program_with_route_receipt(
             ),
         }]);
     }
-    compile_mir_program_inner(program)
+    compile_mir_program_inner(program, Some(receipt))
 }
 
 /// Compile canonical MIR after parsing and checking a CLI route manifest.
@@ -131,6 +131,7 @@ pub fn compile_mir_program_with_route_manifest(
 
 fn compile_mir_program_inner(
     program: &MirProgram,
+    route_receipt: Option<&CanonicalMirRouteReceipt>,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
     let ordered: Vec<(&NodeId, &MirFunction)> = program.functions().iter().collect();
     if ordered.is_empty() {
@@ -160,7 +161,13 @@ fn compile_mir_program_inner(
         return Err(errors);
     }
 
-    let canonical_ffi_bindings = materialize_canonical_ffi_bindings(&functions, &canonical_ffi)?;
+    let mut canonical_ffi_bindings =
+        materialize_canonical_ffi_bindings(&functions, &canonical_ffi)?;
+    if let Some(receipt) = route_receipt {
+        for binding in &mut canonical_ffi_bindings {
+            binding.route_receipt = Some(receipt.clone());
+        }
+    }
 
     let entry = ordered
         .iter()
@@ -410,6 +417,7 @@ fn materialize_canonical_ffi_bindings(
                 ensures_funcs: proto.ensures_funcs.clone(),
                 instruction_text: instruction_text.clone(),
                 descriptor: descriptor.clone(),
+                route_receipt: None,
             });
         }
     }
@@ -5218,7 +5226,10 @@ impl<'a> FunctionEmitter<'a> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{checked_function_index, compile_mir_program, FunctionEmitter, MirBytecodeError};
+    use super::{
+        checked_function_index, compile_mir_program, compile_mir_program_with_route_receipt,
+        FunctionEmitter, MirBytecodeError,
+    };
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
@@ -12274,6 +12285,48 @@ mod tests {
             .expect("AST-free canonical scalar FFI bytecode execution");
         assert!(matches!(value, Value::Int(0)));
         assert_eq!(vm.stdout(), "42\n");
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_route_receipt_is_pinned_in_bytecode_bindings() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(
+            Lexer::new(source)
+                .tokenize()
+                .expect("lex scalar FFI route receipt"),
+        )
+        .parse_file()
+        .expect("parse scalar FFI route receipt");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI route receipt");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("canonical scalar FFI route receipt MIR");
+        let receipt = mir.route_receipt("r6-905-bytecode-route-v1");
+        let bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+            .expect("canonical scalar FFI route receipt bytecode");
+        assert!(bytecode
+            .canonical_ffi_bindings
+            .iter()
+            .all(|binding| { binding.route_receipt.as_ref() == Some(&receipt) }));
+
+        // A mixed binding snapshot must stop at the VM boundary before the
+        // duplicate call-site check or any dynamic library load. This models
+        // a consumer that combines two independently admitted route views.
+        let mut drifted = receipt.clone();
+        drifted.profile = "r6-905-bytecode-route-drift".into();
+        let mut forged_bindings = bytecode.canonical_ffi_bindings.clone();
+        let mut forged = forged_bindings[0].clone();
+        forged.route_receipt = Some(drifted);
+        forged_bindings.push(forged);
+        let descriptors = bytecode.canonical_ffi.clone();
+        let mut vm = BytecodeVM::new(bytecode);
+        vm.replace_canonical_ffi_tables_for_test_only(descriptors, forged_bindings);
+        let error = vm
+            .run_value()
+            .expect_err("mixed canonical route receipts must fail closed");
+        assert!(
+            error.to_string().contains("mixes route receipt identities"),
+            "{error}"
+        );
     }
 
     #[test]

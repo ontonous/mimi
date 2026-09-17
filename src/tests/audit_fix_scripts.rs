@@ -463,8 +463,8 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&provenance_output.stderr)
     );
     let tampered_profile_script = source_script.replacen(
-        "    ScalarFfi\n\n# Bind the public source entry to the hash-bearing checked-program adapter.",
-        "    ScalarCollection\n\n# Bind the public source entry to the hash-bearing checked-program adapter.",
+        "    ScalarFfi\n\n# The AST-free bytecode adapter must retain the route receipt that admitted",
+        "    ScalarCollection\n\n# The AST-free bytecode adapter must retain the route receipt that admitted",
         1,
     );
     assert!(
@@ -984,6 +984,41 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
             }
         }
     }
+}
+
+#[test]
+fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let output = std::process::Command::new("bash")
+        .arg(&path)
+        .current_dir(&root)
+        .output()
+        .expect("legacy owner audit must execute");
+    assert!(
+        output.status.success(),
+        "legacy owner audit failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "bytecode_route_receipt_binding=compile_mir_program_inner(program, Some(receipt))"
+        ),
+        "legacy owner audit must pin route receipt hand-off from the canonical bytecode entry"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_route_receipt_binding=binding.route_receipt = Some(receipt.clone())"
+        ),
+        "legacy owner audit must pin receipt propagation into every FFI binding"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_route_receipt_vm_guard=identity-consistency+manifest-replay consumer=src/interp/bytecode/vm.rs"
+        ),
+        "legacy owner audit must pin the VM boundary receipt guard"
+    );
 }
 
 #[test]

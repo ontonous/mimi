@@ -422,6 +422,41 @@ impl BytecodeVM {
                 "canonical FFI binding manifest is missing",
             ));
         }
+        // A route receipt is the immutable admission identity for the
+        // canonical bytecode snapshot. All call-site bindings must either
+        // carry the same valid receipt or (for compatibility bytecode) carry
+        // none. Checking this before the per-site table walk prevents a
+        // caller from combining descriptors from one route with a binding
+        // snapshot from another route after compilation.
+        let route_receipt = bindings
+            .iter()
+            .find_map(|binding| binding.route_receipt.as_ref());
+        if bindings
+            .iter()
+            .any(|binding| binding.route_receipt.as_ref() != route_receipt)
+        {
+            return Err(InterpError::new(
+                "canonical FFI binding manifest mixes route receipt identities",
+            ));
+        }
+        if let Some(receipt) = route_receipt {
+            let manifest = receipt.manifest_text().map_err(|message| {
+                InterpError::new(format!(
+                    "canonical FFI route receipt is invalid at VM boundary: {message}"
+                ))
+            })?;
+            let parsed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+                .map_err(|message| {
+                    InterpError::new(format!(
+                        "canonical FFI route receipt cannot be replayed at VM boundary: {message}"
+                    ))
+                })?;
+            if parsed != *receipt {
+                return Err(InterpError::new(
+                    "canonical FFI route receipt changed during manifest replay",
+                ));
+            }
+        }
         let mut binding_by_site = BTreeMap::new();
         for binding in bindings {
             let site = (binding.function, binding.pc);

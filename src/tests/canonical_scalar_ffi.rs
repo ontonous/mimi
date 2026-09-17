@@ -22015,12 +22015,33 @@ func main() -> i64 {
     assert!(bytecode_a.ast.is_none());
     assert!(bytecode_b.ast.is_none());
     assert_eq!(bytecode_a.canonical_ffi, bytecode_b.canonical_ffi);
+    assert!(bytecode_a.canonical_ffi_bindings.iter().all(|binding| {
+        binding
+            .route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.profile == profile_a.profile)
+    }));
+    assert!(bytecode_b.canonical_ffi_bindings.iter().all(|binding| {
+        binding
+            .route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.profile == profile_b.profile)
+    }));
+    let mut profile_a_bindings = bytecode_a.canonical_ffi_bindings.clone();
+    let mut profile_b_bindings = bytecode_b.canonical_ffi_bindings.clone();
+    for binding in profile_a_bindings
+        .iter_mut()
+        .chain(profile_b_bindings.iter_mut())
+    {
+        binding.route_receipt = None;
+    }
     assert_eq!(
-        bytecode_a.canonical_ffi_bindings,
-        bytecode_b.canonical_ffi_bindings
+        profile_a_bindings, profile_b_bindings,
+        "route profile provenance must not alter bytecode call-site identity"
     );
     let descriptor_snapshot = bytecode_a.canonical_ffi.clone();
-    let binding_snapshot = bytecode_a.canonical_ffi_bindings.clone();
+    let binding_snapshot_a = bytecode_a.canonical_ffi_bindings.clone();
+    let binding_snapshot_b = bytecode_b.canonical_ffi_bindings.clone();
     let mut vm_a = BytecodeVM::new(bytecode_a);
     let mut vm_b = BytecodeVM::new(bytecode_b);
 
@@ -22072,9 +22093,9 @@ func main() -> i64 {
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
     assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
-    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot_a);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
-    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot_b);
     assert_eq!(artifact_a.mir_route_receipt.as_ref(), Some(&profile_a));
     assert_eq!(artifact_b.mir_route_receipt.as_ref(), Some(&profile_b));
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -23273,8 +23294,28 @@ func main() -> i64 {
     assert!(bytecode_a.ast.is_none());
     assert!(bytecode_b.ast.is_none());
     assert_eq!(bytecode_a.canonical_ffi, bytecode_b.canonical_ffi);
+    assert!(bytecode_a.canonical_ffi_bindings.iter().all(|binding| {
+        binding
+            .route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.profile == verifier_receipt.profile)
+    }));
+    assert!(bytecode_b.canonical_ffi_bindings.iter().all(|binding| {
+        binding
+            .route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.profile == bytecode_receipt.profile)
+    }));
+    let mut verifier_bindings = bytecode_a.canonical_ffi_bindings.clone();
+    let mut bytecode_bindings = bytecode_b.canonical_ffi_bindings.clone();
+    for binding in verifier_bindings
+        .iter_mut()
+        .chain(bytecode_bindings.iter_mut())
+    {
+        binding.route_receipt = None;
+    }
     assert_eq!(
-        bytecode_a.canonical_ffi_bindings, bytecode_b.canonical_ffi_bindings,
+        verifier_bindings, bytecode_bindings,
         "route profile must not alter bytecode FFI binding identity"
     );
     let mut vm_a = BytecodeVM::new(bytecode_a);

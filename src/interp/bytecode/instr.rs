@@ -1960,6 +1960,12 @@ pub(crate) struct CanonicalFfiBinding {
     pub(crate) ensures_funcs: Vec<FuncIdx>,
     pub(crate) instruction_text: String,
     pub(crate) descriptor: CanonicalFfiDescriptor,
+    /// The route receipt used to admit this bytecode snapshot. Canonical
+    /// callers pass it through the binding so a VM can verify that every
+    /// call-site snapshot still belongs to one immutable route identity
+    /// before loading any FFI symbol. Compatibility bytecode leaves this
+    /// unset because it has no canonical route receipt.
+    pub(crate) route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
 }
 
 /// The deliberately narrow scalar ABI admitted by the Canonical MIR FFI
