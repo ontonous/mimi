@@ -13165,6 +13165,21 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         assert_eq!(observation.value, MirRuntimeValue::Int(0));
         assert_eq!(observation.output, "42\n");
 
+        let forged_manifest = manifest.replacen(&receipt.ffi_digest, &"0".repeat(64), 1);
+        let forged_reference = MirReferenceInterpreter::new(&program)
+            .try_with_route_manifest(&forged_manifest)
+            .expect("a forged digest remains structurally valid manifest input")
+            .with_ffi_resolver(&resolver);
+        let forged_error = forged_reference
+            .execute_with_output(&owner, &[])
+            .expect_err("reference must reject a forged manifest before host execution");
+        assert_eq!(
+            forged_error.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert!(forged_error.to_string().contains("ffi_digest"));
+        assert_eq!(forged_reference.captured_output(), "");
+
         let malformed = format!("{manifest}future_field=reserved\n");
         let error = match MirReferenceInterpreter::new(&program).try_with_route_manifest(&malformed)
         {
