@@ -13199,6 +13199,10 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
             .try_with_route_manifest(&forged_manifest)
             .expect("a forged digest remains structurally valid manifest input")
             .with_ffi_resolver(&resolver);
+        forged_reference
+            .output
+            .borrow_mut()
+            .push_str("stale-before-forged\n");
         let forged_error = forged_reference
             .execute_with_output(&owner, &[])
             .expect_err("reference must reject a forged manifest before host execution");
@@ -13207,7 +13211,11 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
             Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
         );
         assert!(forged_error.to_string().contains("ffi_digest"));
-        assert_eq!(forged_reference.captured_output(), "");
+        assert_eq!(
+            forged_reference.captured_output(),
+            "",
+            "forged receipt rejection must clear stale output before validation"
+        );
         assert_eq!(
             resolver.calls.get(),
             1,
