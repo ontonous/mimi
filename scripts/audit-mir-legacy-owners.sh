@@ -430,6 +430,29 @@ mir_route_cache_identity_binding() {
 
 mir_route_cache_identity_binding
 
+# Native typed receipts must cross the same manifest serialization boundary as
+# bytecode and verifier receipts.  This catches a future field-order or parser
+# drift before LLVM emission can accept a witness that another consumer cannot
+# replay.
+native_route_manifest_replay_binding() {
+    local source
+    source="$(cat "$ROOT_DIR/src/codegen/mir/eligibility.rs")"
+    for pattern in \
+        'let manifest = receipt.manifest_text()' \
+        'CanonicalMirRouteReceipt::from_manifest(&manifest)' \
+        'canonical route receipt changed during manifest replay'; do
+        if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=native_route_manifest_replay_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'native_route_manifest_replay_binding=manifest-parse+identity-check consumer=src/codegen/mir/eligibility.rs\n'
+}
+
+native_route_manifest_replay_binding
+
 # Bind the public source entry to the hash-bearing checked-program adapter.
 # This keeps the caller's BLAKE3 provenance on the same path as the verifier
 # receipt; a renamed call or an empty/hashless entry must fail closed.

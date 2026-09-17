@@ -104,6 +104,40 @@ impl<'ctx> CodeGenerator<'ctx> {
             .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
             .diagnostic()]);
         }
+        let manifest = receipt.manifest_text().map_err(|message| {
+            vec![NativeMirError::new(
+                "mir-program",
+                format!(
+                    "{}: canonical route receipt cannot be rendered for replay: {message}",
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ),
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+            .diagnostic()]
+        })?;
+        let replayed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+            .map_err(|message| {
+                vec![NativeMirError::new(
+                    "mir-program",
+                    format!(
+                        "{}: canonical route receipt cannot be replayed: {message}",
+                        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                    ),
+                )
+                .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+                .diagnostic()]
+            })?;
+        if replayed != *receipt {
+            return Err(vec![NativeMirError::new(
+                "mir-program",
+                format!(
+                    "{}: canonical route receipt changed during manifest replay",
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ),
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+            .diagnostic()]);
+        }
         // Preserve the primary single-program diagnostic when a caller hands
         // this generator a receipt for a different MIR graph.  The digest is
         // the graph identity; the route anchor is checked only after this

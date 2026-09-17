@@ -1037,6 +1037,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         ),
         "legacy owner audit must pin the shared route cache identity algorithm"
     );
+    assert!(
+        stdout.contains(
+            "native_route_manifest_replay_binding=manifest-parse+identity-check consumer=src/codegen/mir/eligibility.rs"
+        ),
+        "legacy owner audit must pin native route manifest replay"
+    );
 }
 
 #[test]
