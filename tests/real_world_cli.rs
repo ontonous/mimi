@@ -17077,6 +17077,71 @@ func main() -> i64 { foreign("ok") }
 }
 
 #[test]
+fn canonical_mir_cli_rejects_ffi_boundary_in_test_and_disasm_with_stable_code() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_boundary_aux_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create auxiliary FFI boundary directory");
+    let source = dir.join("boundary.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" { func foreign(value: string) -> i64; }
+func test_boundary() -> bool { true }
+func main() -> i64 { foreign("ok") }
+"#,
+    )
+    .expect("write auxiliary FFI boundary fixture");
+
+    for command in ["test", "disasm"] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args([command])
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn auxiliary FFI {command}: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "auxiliary FFI {command} must reject the declaration boundary"
+        );
+        assert!(
+            stderr.contains("MIR-FFI-DECLARATION-001"),
+            "auxiliary FFI {command} lost its stable declaration code: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "auxiliary FFI {command} entered legacy: {stderr}"
+        );
+        assert!(
+            !stderr.contains("flow_ast"),
+            "auxiliary FFI {command}: {stderr}"
+        );
+        if command == "disasm" {
+            assert!(
+                stdout.is_empty(),
+                "disasm emitted output before rejection: {stdout}"
+            );
+        } else {
+            assert!(
+                stdout.contains("Running 1 test(s)"),
+                "test command lost its test discovery output: {stdout}"
+            );
+            assert!(
+                !stdout.contains("✓"),
+                "test command ran a rejected test: {stdout}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove auxiliary FFI boundary directory");
+}
+
+#[test]
 fn canonical_mir_cli_rejects_imported_ffi_boundary_without_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_import_boundary_cli_{}_{}",
