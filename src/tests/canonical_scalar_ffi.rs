@@ -25189,6 +25189,220 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_child_binding_and_mode_inheritance_isolated() {
+    const C_SOURCE_A: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_child_binding_mode(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "A%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const C_SOURCE_B: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_child_binding_mode(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "B%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_child_binding_mode(value: i64) ensures: false; }
+func worker() -> i64 {
+    println(5 as i64);
+    mir_ffi_unit_child_binding_mode(7 as i64);
+    9
+}
+func main() -> i64 { 0 }
+"#;
+
+    struct ChildBindingModeOracle(std::cell::RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for ChildBindingModeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_child_binding_mode");
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!(
+                    "unexpected child binding/mode arguments: {arguments:?}"
+                ));
+            };
+            self.0.borrow_mut().push(*value);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit child binding/mode fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit child binding/mode fixture materialization");
+    let receipt = mir.route_receipt("r6-903-unit-child-binding-mode-v1");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &receipt, source_hash.clone())
+            .expect("Unit child binding/mode verification");
+    assert_eq!(verification.len(), 1);
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+    assert!(verification[0].artifact.as_ref().is_some_and(|artifact| {
+        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            && artifact.source_hash == source_hash
+            && artifact.mir_hash == receipt.mir_digest
+            && artifact.mir_route_receipt.as_ref() == Some(&receipt)
+    }));
+
+    let oracle = ChildBindingModeOracle(std::cell::RefCell::new(Vec::new()));
+    let checked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&receipt)
+        .execute_with_output(&crate::core::NodeId("function:worker".into()), &[])
+        .expect_err("checked child worker must reject false Unit ensures");
+    assert!(
+        checked_reference
+            .message
+            .contains("FFI postcondition failed"),
+        "{checked_reference}"
+    );
+    let unchecked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&receipt)
+        .with_ffi_verification(false)
+        .execute_with_output(&crate::core::NodeId("function:worker".into()), &[])
+        .expect("unchecked child worker must execute Unit call");
+    assert_eq!(unchecked_reference.value, MirRuntimeValue::Int(9));
+    assert_eq!(unchecked_reference.output, "5\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7, 7]);
+
+    let mut bytecode = compile_mir_program_with_route_manifest(
+        &mir,
+        &receipt
+            .manifest_text()
+            .expect("Unit child binding/mode route manifest"),
+    )
+    .expect("Unit child binding/mode AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let worker = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("Unit child binding/mode worker") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("Unit child binding/mode main");
+    let program = std::sync::Arc::get_mut(&mut bytecode)
+        .expect("Unit child binding/mode bytecode must be unique");
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task,
+        func: worker,
+        args_base: task,
+        argc: 0,
+    });
+    let result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result,
+        ra: task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
+    program.functions[main] = main_proto;
+    program.entry = main as u32;
+    let descriptor_snapshot = program.canonical_ffi.clone();
+    let binding_snapshot = program.canonical_ffi_bindings.clone();
+    let program = std::sync::Arc::new(program.clone());
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture_a = library_fixture(counter, C_SOURCE_A);
+    let fixture_b = library_fixture(counter + 1, C_SOURCE_B);
+    let path_a = fixture_a.dir.join("ffi.so");
+    let path_b = fixture_b.dir.join("ffi.so");
+    let missing = fixture_a.dir.join("missing.so");
+    let trace_a = fixture_a.dir.join("child-binding-mode-a.trace");
+    let trace_b = fixture_b.dir.join("child-binding-mode-b.trace");
+    std::fs::write(&trace_a, "").expect("create child binding/mode trace A");
+    std::fs::write(&trace_b, "").expect("create child binding/mode trace B");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&missing);
+    guard.set_trace_path(&trace_a);
+
+    let stdout_a = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut vm_a = BytecodeVM::new(program.clone());
+    vm_a.set_stdout_buf(stdout_a.clone());
+    vm_a.set_canonical_ffi_library_path(path_a.to_string_lossy().into_owned());
+    vm_a.set_verify_ffi(false);
+    assert_eq!(
+        vm_a.run_value().expect("unchecked child VM A"),
+        Value::Int(9)
+    );
+    assert_eq!(&*stdout_a.lock().unwrap(), "5\n");
+    assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\n");
+    assert_eq!(vm_a.debug_stack_state(), (0, 0));
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+
+    let stdout_b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut vm_b = BytecodeVM::new(program.clone());
+    vm_b.set_stdout_buf(stdout_b.clone());
+    vm_b.set_canonical_ffi_library_path(path_b.to_string_lossy().into_owned());
+    guard.set_trace_path(&trace_b);
+    let error = vm_b
+        .run_value()
+        .expect_err("checked child VM B must reject false Unit ensures");
+    assert_eq!(error.code(), "E0808", "{error}");
+    assert_eq!(&*stdout_b.lock().unwrap(), "5\n");
+    assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm_b.set_verify_ffi(false);
+    assert_eq!(
+        vm_b.run_value()
+            .expect("unchecked child VM B must recover and execute"),
+        Value::Int(9)
+    );
+    assert_eq!(&*stdout_b.lock().unwrap(), "5\n5\n");
+    assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB7\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+
+    vm_b.set_canonical_ffi_library_path(path_a.to_string_lossy().into_owned());
+    vm_b.set_verify_ffi(true);
+    guard.set_trace_path(&trace_a);
+    let error = vm_b
+        .run_value()
+        .expect_err("re-enabled child VM B must reject after switching to A");
+    assert_eq!(error.code(), "E0808", "{error}");
+    assert_eq!(&*stdout_b.lock().unwrap(), "5\n5\n5\n");
+    assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\nA7\n");
+    assert_eq!(vm_b.debug_stack_state(), (0, 0));
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
