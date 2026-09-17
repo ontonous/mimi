@@ -203,26 +203,30 @@ fn legacy_owner_reachability_report_stays_conservative() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (owner, dependency_class, evidence_marker) in [
+    for (owner, dependency_class, evidence_marker, accessor_context) in [
         (
             "CodegenLegacyRemainder",
             "legacy-codegen-remainder",
             "LegacyBodyConsumer::CodegenLegacyRemainder",
+            "src/codegen/compile.rs::fn compile_file_with_resolved(",
         ),
         (
             "FlowVerifierCompatibility",
             "flow-body-compatibility",
             "LegacyBodyConsumer::FlowVerifierCompatibility",
+            "src/verifier/mod.rs::pub fn verify_checked(",
         ),
         (
             "FfiVerifierCompatibility",
             "ffi-declaration-compatibility",
             "LegacyBodyConsumer::FfiVerifierCompatibility",
+            "src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         ),
         (
             "DualVerifierCompatibility",
             "secondary-flow-vir-compatibility",
             "LegacyBodyConsumer::DualVerifierCompatibility",
+            "src/verifier/mod.rs::pub fn verify_checked_dual(",
         ),
     ] {
         let evidence_prefix = format!("owner={owner} evidence_scope=");
@@ -242,6 +246,11 @@ fn legacy_owner_reachability_report_stays_conservative() {
         assert!(
             stdout.lines().any(|line| line == accessor),
             "owner {owner} must retain exactly one production accessor"
+        );
+        let context = format!("owner={owner} accessor_context={accessor_context}");
+        assert!(
+            stdout.lines().any(|line| line == context),
+            "owner {owner} accessor context drifted: expected {context}"
         );
         let status_prefix = format!("owner={owner} status=retained");
         let status = stdout
@@ -275,6 +284,59 @@ fn legacy_owner_reachability_report_stays_conservative() {
             "legacy owner audit omitted required marker {expected}"
         );
     }
+}
+
+#[test]
+fn legacy_owner_accessor_context_drift_fails_closed() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-context");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create context audit temp root");
+    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
+        .expect("link source tree into context audit temp root");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into context audit temp root");
+    let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .expect("read legacy owner audit script");
+    let tampered_script = source_script.replacen(
+        "    'fn compile_file_with_resolved(' \\\n",
+        "    'fn missing_compile_context(' \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_script,
+        "context fixture must replace the expected function marker"
+    );
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+    std::fs::write(&script_path, tampered_script).expect("write tampered context audit script");
+    let output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered context audit");
+    assert!(
+        !output.status.success(),
+        "tampered accessor context must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("owner_audit_error=CodegenLegacyRemainder accessor_context_missing="),
+        "context drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
+    drop(cleanup);
+    let restored = std::process::Command::new("bash")
+        .arg(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .current_dir(&root)
+        .output()
+        .expect("rerun restored context audit");
+    assert!(
+        restored.status.success(),
+        "restored owner audit failed after context probe:\n{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
 }
 
 #[test]

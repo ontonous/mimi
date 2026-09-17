@@ -92,6 +92,48 @@ owner_evidence \
     'closed scalar bypass + secondary Flow/VIR compatibility remains reachable' \
     'LegacyBodyConsumer::DualVerifierCompatibility'
 
+# Keep the retained accessor tied to the function that owns its compatibility
+# boundary. A count-only check would miss an accidental move into a closed MIR
+# route or a new helper that widens the raw-AST surface while preserving the
+# same number of calls.
+owner_accessor_context() {
+    local owner="$1"
+    local source_file="$2"
+    local start_function="$3"
+    local end_function="$4"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg "legacy_body_file\\([^)]*LegacyBodyConsumer::${owner}" >/dev/null; then
+        printf 'owner_audit_error=%s accessor_context_missing=%s::%s\n' \
+            "$owner" "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'owner=%s accessor_context=%s::%s\n' \
+        "$owner" "$source_file" "$start_function"
+}
+
+owner_accessor_context \
+    CodegenLegacyRemainder \
+    src/codegen/compile.rs \
+    'fn compile_file_with_resolved(' \
+    'fn compile_file_inner('
+owner_accessor_context \
+    FlowVerifierCompatibility \
+    src/verifier/mod.rs \
+    'pub fn verify_checked(' \
+    'pub fn verify_ffi_source('
+owner_accessor_context \
+    FfiVerifierCompatibility \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available('
+owner_accessor_context \
+    DualVerifierCompatibility \
+    src/verifier/mod.rs \
+    'pub fn verify_checked_dual(' \
+    'fn verify_closed_mir_program('
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
