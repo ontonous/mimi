@@ -425,6 +425,76 @@ mir_verifier_source_provenance_binding \
     'let results = mir::verify_ffi_program(program, source_hash.clone())?' \
     'validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?'
 
+# Keep the shared artifact validator bound to every immutable identity field.
+# Source hash, MIR digest, and route receipt are one proof witness; validating
+# only one of them would permit a copied artifact to cross a canonical route.
+mir_result_identity_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local source_pattern="$4"
+    local mir_pattern="$5"
+    local receipt_pattern="$6"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$source_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_result_identity_missing=%s::%s field=source-hash\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$mir_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_result_identity_missing=%s::%s field=mir-hash\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$receipt_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_result_identity_missing=%s::%s field=route-receipt\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_result_identity_binding \
+    src/verifier/mod.rs \
+    'fn validate_mir_result_provenance(' \
+    'pub fn verify_mir_with_route_manifest(' \
+    'if artifact.source_hash != source_hash' \
+    'if artifact.mir_hash != receipt.mir_digest' \
+    'if artifact.mir_route_receipt.as_ref() != Some(receipt)'
+
+# Both direct MIR entry points must validate a caller-supplied receipt before
+# proof execution. This keeps the public general verifier and FFI verifier on
+# the same fail-closed route boundary.
+mir_route_receipt_validation_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F '.validate_against_program(program)' >/dev/null; then
+        printf 'owner_audit_error=mir_route_receipt_validation_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_route_receipt_validation_binding=validate-against-program consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_route_receipt_validation_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_mir_with_route_receipt(' \
+    'fn bind_route_receipt('
+mir_route_receipt_validation_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'pub fn verify_ffi_mir_with_route_manifest('
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2

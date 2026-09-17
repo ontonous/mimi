@@ -299,6 +299,9 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "source_hash_entry_binding=blake3-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_source(",
         "source_hash_parameter_binding=declared-and-forwarded consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "mir_verifier_source_provenance_binding=single-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
+        "mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=src/verifier/mod.rs::fn validate_mir_result_provenance(",
+        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
+        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -557,6 +560,60 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_verifier_source_provenance_missing="),
         "MIR provenance drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&mir_provenance_output.stderr)
+    );
+    let tampered_identity_script = source_script.replacen(
+        "    'if artifact.mir_hash != receipt.mir_digest' \\\n",
+        "    'if artifact.mir_hash == receipt.mir_digest' \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_identity_script,
+        "MIR identity fixture must replace the expected digest guard"
+    );
+    std::fs::write(&script_path, tampered_identity_script)
+        .expect("write tampered MIR identity audit script");
+    let identity_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered MIR identity audit");
+    assert!(
+        !identity_output.status.success(),
+        "tampered MIR identity validation must fail closed:\n{}",
+        String::from_utf8_lossy(&identity_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&identity_output.stderr)
+            .contains("owner_audit_error=mir_result_identity_missing="),
+        "MIR identity drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&identity_output.stderr)
+    );
+    let tampered_route_validation_script = source_script.replacen(
+        "    if ! printf '%s\\n' \"$context\" | rg -F '.validate_against_program(program)' >/dev/null; then\n",
+        "    if ! printf '%s\\n' \"$context\" | rg -F '.validate_without_program(program)' >/dev/null; then\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_route_validation_script,
+        "route validation fixture must replace the expected receipt guard"
+    );
+    std::fs::write(&script_path, tampered_route_validation_script)
+        .expect("write tampered route validation audit script");
+    let route_validation_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered route validation audit");
+    assert!(
+        !route_validation_output.status.success(),
+        "tampered route receipt validation must fail closed:\n{}",
+        String::from_utf8_lossy(&route_validation_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&route_validation_output.stderr)
+            .contains("owner_audit_error=mir_route_receipt_validation_missing="),
+        "route receipt validation drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&route_validation_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
