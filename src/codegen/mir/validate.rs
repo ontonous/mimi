@@ -2607,15 +2607,32 @@ impl<'a> NativeMirValidator<'a> {
         for message in receipt_errors {
             // Preserve the native validator's established ABI wording while
             // taking the decision itself from the shared receipt gate.
-            let message = if let Some(rest) = message
+            let route_code = message
+                .starts_with(crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                .then_some(crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE);
+            let message_without_code = message
+                .strip_prefix(crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                .and_then(|message| message.strip_prefix(": "))
+                .unwrap_or(&message);
+            let message = if let Some(rest) = message_without_code
                 .strip_prefix("extern call FFI contract ABI '")
                 .and_then(|rest| rest.strip_suffix("' is outside the canonical C ABI"))
             {
-                format!("FFI ABI '{rest}' is outside the canonical native C ABI")
+                let native_message =
+                    format!("FFI ABI '{rest}' is outside the canonical native C ABI");
+                route_code
+                    .map(|code| format!("{code}: {native_message}"))
+                    .unwrap_or(native_message)
             } else {
                 message
             };
-            self.errors.push(NativeMirError::new(subject, message));
+            let error = NativeMirError::new(subject, message);
+            let error = if route_code.is_some() {
+                error.with_code(crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+            } else {
+                error
+            };
+            self.errors.push(error);
         }
         if !type_arguments.is_empty() {
             self.errors.push(NativeMirError::new(

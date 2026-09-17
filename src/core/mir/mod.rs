@@ -1866,8 +1866,9 @@ fn validate_ffi_call_contract_receipt_with_options(
     }
     if contract.abi != "C" {
         errors.push(format!(
-            "extern call FFI contract ABI '{}' is outside the canonical C ABI",
-            contract.abi
+            "{}: extern call FFI contract ABI '{}' is outside the canonical C ABI",
+            crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
+            contract.abi,
         ));
     }
     if let Err(message) = validate_ffi_symbol_manifest_safety(&contract.symbol) {
@@ -1905,7 +1906,8 @@ fn validate_ffi_call_contract_receipt_with_options(
         for (index, declared_type) in contract.parameter_types.iter().enumerate() {
             if !type_catalog.is_canonical_ffi_endpoint(declared_type, false) {
                 errors.push(format!(
-                    "extern call FFI declaration parameter {index} TypeDesc is outside the complete scalar endpoint contract"
+                    "{}: extern call FFI declaration parameter {index} TypeDesc is outside the complete scalar endpoint contract",
+                    crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
                 ));
             }
         }
@@ -1918,8 +1920,10 @@ fn validate_ffi_call_contract_receipt_with_options(
         };
         if !canonical_result {
             errors.push(
-                "extern call FFI declaration result TypeDesc is outside the complete scalar endpoint contract"
-                    .into(),
+                format!(
+                    "{}: extern call FFI declaration result TypeDesc is outside the complete scalar endpoint contract",
+                    crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+                ),
             );
         }
     }

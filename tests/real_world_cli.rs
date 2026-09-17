@@ -16989,6 +16989,10 @@ func main() -> string { foreign(42 as i64) }
                                 || stderr.contains("native backend")),
                         "{label} {command}: explicit MIR must report a canonical FFI boundary: {stderr}"
                     );
+                    assert!(
+                        stderr.contains("MIR-FFI-DECLARATION-001"),
+                        "{label} {command}: explicit MIR boundary must retain its stable diagnostic code: {stderr}"
+                    );
                 }
                 assert!(
                     !stderr.contains("Validation(["),

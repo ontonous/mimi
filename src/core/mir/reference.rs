@@ -3200,7 +3200,8 @@ fn materialize_ffi_call_contracts(
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
-                            "extern declaration '{}' has unsupported {feature} semantics in canonical scalar FFI",
+                            "{}: extern declaration '{}' has unsupported {feature} semantics in canonical scalar FFI",
+                            crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
                             signature.name
                         ),
                     });
@@ -12574,6 +12575,10 @@ func main() -> i64 {
         let reference_error = MirReferenceInterpreter::new(&forged)
             .execute(&NodeId("function:main".into()), &[])
             .expect_err("reference must reject forged endpoint metadata");
+        assert_eq!(
+            reference_error.diagnostic_code(),
+            Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+        );
         assert!(
             reference_error
                 .to_string()
@@ -12584,26 +12589,31 @@ func main() -> i64 {
         let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
             .expect_err("bytecode must reject forged endpoint metadata");
         assert!(bytecode_error.iter().any(|error| {
-            error.message.contains("complete scalar endpoint contract")
-                || error.message.contains("complete Copy scalar shape")
+            error.diagnostic_code()
+                == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                && (error.message.contains("complete scalar endpoint contract")
+                    || error.message.contains("complete Copy scalar shape"))
         }));
 
         let native_error = crate::codegen::mir::validate_mir_native(&forged)
             .expect_err("native must reject forged endpoint metadata");
-        assert!(native_error
-            .iter()
-            .any(|error| error.message.contains("complete scalar endpoint contract")));
+        assert!(native_error.iter().any(|error| {
+            error.code.as_deref() == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                && error.message.contains("complete scalar endpoint contract")
+        }));
 
         let capability_error = crate::verifier::validate_mir_capabilities(&forged)
             .expect_err("verifier capability gate must reject forged endpoint metadata");
-        assert!(capability_error
-            .iter()
-            .any(|error| error.contains("complete scalar endpoint contract")));
+        assert!(capability_error.iter().any(|error| {
+            error.contains(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                && error.contains("complete scalar endpoint contract")
+        }));
 
         let verifier_error = crate::verifier::verify_mir(&forged, "forged-ffi-endpoint".into())
             .expect_err("verifier must reject forged endpoint metadata");
         assert!(
-            verifier_error.contains("complete scalar endpoint contract"),
+            verifier_error.contains(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                && verifier_error.contains("complete scalar endpoint contract"),
             "{verifier_error}"
         );
     }

@@ -640,7 +640,8 @@ fn scalar_ffi_type(
     }
     if descriptor.layout != MirLayout::Scalar || descriptor.ownership != MirOwnership::Copy {
         return Err(format!(
-            "canonical FFI '{}' {} TypeDesc '{}' has non-scalar layout {:?}",
+            "{}: canonical FFI '{}' {} TypeDesc '{}' has non-scalar layout {:?}",
+            crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
             instruction,
             role,
             ty.as_str(),
@@ -652,7 +653,8 @@ fn scalar_ffi_type(
         .is_canonical_ffi_endpoint(ty, allow_unit_result)
     {
         return Err(format!(
-            "canonical FFI '{}' {} TypeDesc '{}' is outside the complete Copy scalar shape",
+            "{}: canonical FFI '{}' {} TypeDesc '{}' is outside the complete Copy scalar shape",
+            crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
             instruction,
             role,
             ty.as_str()
