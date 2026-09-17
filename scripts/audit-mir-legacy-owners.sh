@@ -232,7 +232,11 @@ consumer_receipt_binding() {
     local receipt_label="$4"
     local context
     context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
-    if ! printf '%s\n' "$context" | rg -F "route_receipt(\"${receipt_label}\")" >/dev/null; then
+    local receipt_pattern="route_receipt(\"${receipt_label}\")"
+    if [[ "$receipt_label" == "native-direct-v1" ]]; then
+        receipt_pattern="MIR_NATIVE_DIRECT_ROUTE_PROFILE"
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$receipt_pattern" >/dev/null; then
         printf 'owner_audit_error=consumer_receipt_missing=%s::%s label=%s\n' \
             "$source_file" "$start_function" "$receipt_label" >&2
         audit_failed=1
@@ -291,6 +295,29 @@ consumer_receipt_provenance_binding \
     verify-ffi-v1 \
     'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)' \
     canonical-mir-graph+source-hash
+
+# The direct native entry performs bytecode and verifier preflight before LLVM
+# emission. Keep all three consumers on the same native-direct receipt so a
+# preflight cannot silently manufacture a different route identity and then
+# hand native emission a separate witness.
+native_direct_preflight_receipt_binding() {
+    local context
+    context="$(sed -n '/fn try_compile_exact_migrated_mir_island(/,/^    fn mir_gate_diagnostics(/p' "$ROOT_DIR/src/codegen/compile.rs")"
+    for pattern in \
+        'MIR_NATIVE_DIRECT_ROUTE_PROFILE' \
+        'compile_mir_program_with_route_receipt(&canonical, &receipt)' \
+        'verify_mir_with_route_receipt(&canonical, &receipt, String::new())'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=native_direct_preflight_receipt_binding_missing=src/codegen/compile.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'native_direct_preflight_receipt_binding=native-direct-v1->bytecode+verifier+native consumer=src/codegen/compile.rs::try_compile_exact_migrated_mir_island(\n'
+}
+
+native_direct_preflight_receipt_binding
 
 # Keep the FFI verifier's receipt tied to the same canonical route profile that
 # admitted the island.  A source-hash forwarding check alone would still allow

@@ -21,6 +21,12 @@ pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 /// evidence consumers from drifting into different provenance labels.
 pub const MIR_BYTECODE_DIRECT_ROUTE_PROFILE: &str = "bytecode-direct-v1";
 
+/// Stable profile used by the direct native `CodeGenerator::compile_checked`
+/// entry.  The native preflight and final LLVM emission must carry the same
+/// immutable MIR witness instead of silently manufacturing separate route
+/// identities for bytecode, verifier, and native consumers.
+pub const MIR_NATIVE_DIRECT_ROUTE_PROFILE: &str = "native-direct-v1";
+
 /// Stable diagnostic identifiers for route receipt admission failures. Keep
 /// these available through the MIR namespace while the diagnostic registry
 /// remains the single source of truth for CLI/LSP code descriptions.

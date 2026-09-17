@@ -377,6 +377,11 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
         .compile_checked(&checked)
         .expect("direct native uses scalar FFI MIR");
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert_eq!(
+        direct.test_mir_native_route_receipt(),
+        Some(&mir.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE)),
+        "direct native preflight and LLVM emission must share one route receipt"
+    );
     let native = super::link_and_observe_module(
         &direct,
         &config,

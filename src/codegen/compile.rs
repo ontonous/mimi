@@ -39,7 +39,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // canonical lowering has not materialized one of these candidates,
         // this remains the compatibility path for unrelated legacy programs.
         if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
-            let receipt = canonical.route_receipt("native-direct-v1");
+            let receipt =
+                canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
             return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
         }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
@@ -1184,7 +1185,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &errors,
             ));
         }
-        if let Err(errors) = crate::interp::bytecode::compile_mir_program(&canonical) {
+        let receipt = canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+        if let Err(errors) =
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+        {
             return Err(Self::mir_gate_diagnostics(
                 program,
                 "MIR bytecode",
@@ -1195,13 +1199,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Err(errors) = crate::codegen::mir::validate_mir_native(&canonical) {
             return Err(errors);
         }
-        let results = crate::verifier::verify_mir(&canonical, String::new()).map_err(|error| {
-            vec![crate::diagnostic::Diagnostic::error_code(
-                "MIR-VERIFY-001",
-                format!("MIR verifier contract pass failed: {error}"),
-                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-            )]
-        })?;
+        let results =
+            crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new())
+                .map_err(|error| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-VERIFY-001",
+                        format!("MIR verifier contract pass failed: {error}"),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
         if !crate::verifier::canonical_execution_route_verifier_ready(
             &results,
             crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
