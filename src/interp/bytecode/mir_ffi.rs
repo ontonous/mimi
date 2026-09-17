@@ -1274,6 +1274,27 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_runtime_child_binding_snapshot_survives_parent_rebind() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        assert_eq!(runtime.library_path_for_child(), None);
+
+        runtime.set_library_path("/tmp/mimi-ffi-parent-a.so");
+        let child_snapshot = runtime
+            .library_path_for_child()
+            .expect("a bound parent must provide a child snapshot");
+        runtime.set_library_path("/tmp/mimi-ffi-parent-b.so");
+        assert_eq!(child_snapshot, "/tmp/mimi-ffi-parent-a.so");
+        assert_eq!(
+            runtime.library_path_for_child().as_deref(),
+            Some("/tmp/mimi-ffi-parent-b.so")
+        );
+
+        runtime.clear_library_path();
+        assert_eq!(runtime.library_path_for_child(), None);
+        assert_eq!(child_snapshot, "/tmp/mimi-ffi-parent-a.so");
+    }
+
+    #[test]
     fn scalar_ffi_runtime_missing_symbol_preserves_cached_library_for_next_call() {
         let mut guard = crate::tests::FfiEnvGuard::lock();
         let libc = default_libc_candidates()
