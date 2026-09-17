@@ -9981,6 +9981,20 @@ func main() -> i64 {
     let bytecode = compile_mir_program(&mir).expect("AST-free default libc multi-symbol bytecode");
     assert!(bytecode.ast.is_none());
     assert!(bytecode.extern_names.is_empty());
+    let direct_receipt = bytecode
+        .canonical_ffi_route_receipt
+        .as_ref()
+        .expect("multi-symbol direct bytecode must derive a route receipt");
+    assert_eq!(
+        direct_receipt,
+        &mir.route_receipt(crate::core::mir::MIR_BYTECODE_DIRECT_ROUTE_PROFILE),
+        "multi-symbol direct bytecode anchor must cover the complete MIR graph"
+    );
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 2);
+    assert!(bytecode
+        .canonical_ffi_bindings
+        .iter()
+        .all(|binding| binding.route_receipt.as_ref() == Some(direct_receipt)));
     let descriptor_snapshot = bytecode.canonical_ffi.clone();
     let mut vm = BytecodeVM::new(bytecode);
     assert_eq!(
