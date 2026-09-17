@@ -17002,6 +17002,73 @@ func main() -> string { foreign(42 as i64) }
 }
 
 #[test]
+fn canonical_mir_cli_keeps_non_scalar_ffi_representational_without_legacy() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_representation_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create FFI representation directory");
+    let source = dir.join("string_ffi.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" { func foreign(value: string) -> i64; }
+func main() -> i64 { foreign("ok") }
+"#,
+    )
+    .expect("write non-scalar FFI representation fixture");
+
+    let invocations = [vec!["mir"], vec!["mir", "--receipt"]];
+    for args in invocations {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(&args)
+            .arg(&source)
+            .output()
+            .expect("spawn non-scalar FFI MIR inspection");
+        assert!(
+            output.status.success(),
+            "MIR representation must remain inspectable:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("lowered 1 callable(s) to canonical MIR"),
+            "MIR inspection lost its completion evidence: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "MIR inspection must never imply a legacy execution route: {stderr}"
+        );
+        if args.len() == 2 {
+            assert!(
+                stdout.contains("mimi-mir-route-manifest-v1\n"),
+                "receipt inspection must emit a route manifest: {stdout}"
+            );
+            assert!(
+                stdout.contains("ffi_digest="),
+                "receipt lost FFI identity: {stdout}"
+            );
+        } else {
+            assert!(
+                stdout.contains("mir.function function:main"),
+                "MIR lost main: {stdout}"
+            );
+            assert!(
+                stdout.contains("Extern(extern:C:foreign"),
+                "MIR lost FFI call: {stdout}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove FFI representation directory");
+}
+
+#[test]
 fn canonical_mir_cli_rejects_imported_ffi_boundary_without_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_import_boundary_cli_{}_{}",
