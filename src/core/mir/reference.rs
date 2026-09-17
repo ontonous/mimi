@@ -155,6 +155,24 @@ impl std::fmt::Display for MirProgramBuildError {
 }
 
 impl MirProgramBuildError {
+    /// Return the registered route code for each contained build failure.
+    ///
+    /// The result has the same length and order as the underlying error
+    /// vector. Lowering and type-catalog failures remain unclassified;
+    /// validation failures expose only the route codes carried by their
+    /// individual messages. Callers that need the full text should use
+    /// [`Self::to_diagnostics`] instead of parsing `Display` output.
+    pub fn diagnostic_codes(&self) -> Vec<Option<&'static str>> {
+        match self {
+            Self::Lowering(errors) => vec![None; errors.len()],
+            Self::Types(errors) => vec![None; errors.len()],
+            Self::Validation(errors) => errors
+                .iter()
+                .map(super::MirValidationError::diagnostic_code)
+                .collect(),
+        }
+    }
+
     /// Convert every contained build failure to an independent diagnostic.
     ///
     /// The order is intentionally identical to the source error vector so
@@ -9268,22 +9286,21 @@ mod tests {
             },
         ]);
         let lowering_diagnostics = lowering.to_diagnostics();
+        assert_eq!(lowering.diagnostic_codes(), vec![None, None]);
         assert_eq!(lowering_diagnostics.len(), 2);
         assert!(lowering_diagnostics[0].message.contains("lower:first"));
         assert!(lowering_diagnostics[1].message.contains("lower:second"));
         assert!(lowering_diagnostics
             .iter()
             .all(|diagnostic| diagnostic.code.is_none() && diagnostic.origin.is_none()));
-        assert_eq!(
-            lowering_diagnostics[0].span,
-            crate::span::Span::UNKNOWN
-        );
+        assert_eq!(lowering_diagnostics[0].span, crate::span::Span::UNKNOWN);
 
         let types = MirProgramBuildError::Types(vec![
             "unknown nominal type".into(),
             "duplicate type id".into(),
         ]);
         let type_diagnostics = types.to_diagnostics();
+        assert_eq!(types.diagnostic_codes(), vec![None, None]);
         assert_eq!(type_diagnostics.len(), 2);
         assert_eq!(
             type_diagnostics[0].message,
@@ -9314,6 +9331,14 @@ mod tests {
             },
         ]);
         let validation_diagnostics = validation.to_diagnostics();
+        assert_eq!(
+            validation.diagnostic_codes(),
+            vec![
+                Some(MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE),
+                None,
+                Some(MIR_ROUTE_RECEIPT_ERROR_CODE),
+            ]
+        );
         assert_eq!(validation_diagnostics.len(), 3);
         assert_eq!(
             validation_diagnostics[0].code.as_deref(),
