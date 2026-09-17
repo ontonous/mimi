@@ -253,6 +253,45 @@ consumer_receipt_binding \
     'pub fn is_z3_available(' \
     verify-ffi-v1
 
+# Bind each consumer receipt to the canonical graph and, where applicable, to
+# the caller's source provenance.  A label-only check could survive an
+# accidental call that manufactures a receipt but drops it before invoking
+# the consumer; checking the exact adapter call keeps the immutable MIR
+# identity and source hash on the same path.
+consumer_receipt_provenance_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local receipt_label="$4"
+    local invocation_pattern="$5"
+    local provenance_kind="$6"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$invocation_pattern" >/dev/null; then
+        printf 'owner_audit_error=consumer_receipt_invocation_missing=%s::%s label=%s\n' \
+            "$source_file" "$start_function" "$receipt_label" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'consumer_receipt_provenance_binding=%s graph=canonical provenance=%s consumer=%s::%s\n' \
+        "$receipt_label" "$provenance_kind" "$source_file" "$start_function"
+}
+
+consumer_receipt_provenance_binding \
+    src/codegen/compile.rs \
+    'pub fn compile_checked(' \
+    'fn try_compile_exact_migrated_mir_island(' \
+    native-direct-v1 \
+    'self.compile_mir_native_with_route_receipt(&canonical, &receipt)' \
+    canonical-mir-graph
+consumer_receipt_provenance_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_checked_with_source_hash(' \
+    'pub fn is_z3_available(' \
+    verify-ffi-v1 \
+    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)' \
+    canonical-mir-graph+source-hash
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2

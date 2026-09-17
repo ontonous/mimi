@@ -293,6 +293,8 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
         "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
+        "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
+        "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -416,6 +418,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=consumer_receipt_missing="),
         "consumer receipt drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&consumer_output.stderr)
+    );
+    let tampered_provenance_script = source_script.replacen(
+        "    'self.compile_mir_native_with_route_receipt(&canonical, &receipt)' \\\n",
+        "    'self.missing_native_route_receipt(&canonical, &receipt)' \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_provenance_script,
+        "provenance fixture must replace the native receipt invocation"
+    );
+    std::fs::write(&script_path, tampered_provenance_script)
+        .expect("write tampered provenance audit script");
+    let provenance_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered provenance audit");
+    assert!(
+        !provenance_output.status.success(),
+        "tampered receipt provenance must fail closed:\n{}",
+        String::from_utf8_lossy(&provenance_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&provenance_output.stderr)
+            .contains("owner_audit_error=consumer_receipt_invocation_missing="),
+        "receipt provenance drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&provenance_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
