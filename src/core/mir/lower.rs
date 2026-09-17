@@ -63,6 +63,16 @@ impl std::fmt::Display for MirLoweringError {
 
 impl std::error::Error for MirLoweringError {}
 
+impl MirLoweringError {
+    /// Convert a lowering failure to the shared diagnostic shape used by
+    /// direct MIR and CLI callers. Lowering failures do not carry a
+    /// registered route code, so they remain generic diagnostics with an
+    /// explicit unknown span.
+    pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        crate::diagnostic::Diagnostic::error(self.to_string(), crate::span::Span::UNKNOWN)
+    }
+}
+
 /// Lower the currently supported expression/statement subset.
 ///
 /// Supported forms are deliberately small: literals, local loads, unary and

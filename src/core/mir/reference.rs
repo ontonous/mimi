@@ -166,12 +166,7 @@ impl MirProgramBuildError {
         match self {
             Self::Lowering(errors) => errors
                 .iter()
-                .map(|error| {
-                    crate::diagnostic::Diagnostic::error(
-                        error.to_string(),
-                        crate::span::Span::UNKNOWN,
-                    )
-                })
+                .map(super::lower::MirLoweringError::to_diagnostic)
                 .collect(),
             Self::Types(errors) => errors
                 .iter()
@@ -9279,6 +9274,10 @@ mod tests {
         assert!(lowering_diagnostics
             .iter()
             .all(|diagnostic| diagnostic.code.is_none() && diagnostic.origin.is_none()));
+        assert_eq!(
+            lowering_diagnostics[0].span,
+            crate::span::Span::UNKNOWN
+        );
 
         let types = MirProgramBuildError::Types(vec![
             "unknown nominal type".into(),
