@@ -15787,6 +15787,9 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
         .expect("current manifest must admit general verifier");
     crate::verifier::verify_ffi_mir_with_route_manifest(&program, &manifest, source_hash)
         .expect("current manifest must admit FFI verifier");
+    MirReferenceInterpreter::new(&program)
+        .try_with_route_manifest(&manifest)
+        .expect("current manifest must admit the reference executor");
 
     for (label, mutated, expected) in [
         (
@@ -15870,6 +15873,26 @@ func main() -> i64 { mir_manifest_i64(7 as i64) }
         assert!(
             ffi_verifier_error.starts_with(crate::core::mir::MIR_FFI_ROUTE_MANIFEST_ERROR_CODE),
             "{label}: FFI verifier manifest error lost its stable code: {ffi_verifier_error}"
+        );
+
+        let reference_error =
+            match MirReferenceInterpreter::new(&program).try_with_route_manifest(&mutated) {
+                Ok(_) => panic!("reference must reject unsupported manifest schema"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            reference_error.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE),
+            "{label}: reference manifest error lost its stable code: {reference_error}"
+        );
+        assert!(
+            reference_error.to_string().contains(expected),
+            "{label}: {reference_error}"
+        );
+        assert_eq!(
+            reference_error.function,
+            crate::core::NodeId("mir-program".into()),
+            "{label}: reference manifest error lost its stable function anchor"
         );
     }
 }
