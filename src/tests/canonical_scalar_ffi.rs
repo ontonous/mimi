@@ -21550,6 +21550,167 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_route_manifest_replay_preserves_identity_and_provenance() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_route(value: i64); }
+func main() -> i64 {
+    println(1 as i64);
+    mir_ffi_unit_route(7 as i64);
+    0
+}
+"#;
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_route(int64_t value) { (void)value; }
+"#;
+
+    struct UnitRouteOracle(Cell<u8>);
+    impl MirReferenceFfiResolver for UnitRouteOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_unit_route" {
+                return Err(format!("unexpected Unit route symbol {}", receipt.symbol));
+            }
+            if arguments != [MirRuntimeValue::Int(7)] {
+                return Err(format!("unexpected Unit route arguments {arguments:?}"));
+            }
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit route manifest fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit route manifest fixture materialization");
+    let receipt = mir.route_receipt("r6-887-unit-route-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("Unit route manifest rendering");
+    let parsed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+        .expect("Unit route manifest parsing");
+    assert_eq!(parsed, receipt, "Unit manifest replay must be lossless");
+    let ffi_receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("Unit route FFI receipt");
+    assert_eq!(
+        ffi_receipt
+            .result_conversion
+            .map(|conversion| conversion.from),
+        Some(crate::core::mir::types::MirAbiClass::Unit)
+    );
+
+    let oracle = UnitRouteOracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&parsed);
+    let valid_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("manifest-bound Unit reference execution");
+    assert_eq!(valid_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(valid_reference.output, "1\n");
+    assert_eq!(oracle.0.get(), 1);
+
+    let forged_manifest = manifest.replacen(&receipt.ffi_digest, &"0".repeat(64), 1);
+    let forged = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&forged_manifest)
+        .expect("forged Unit manifest remains parseable");
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&forged);
+    let reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("forged Unit route must fail before host binding");
+    assert_eq!(
+        reference_error.diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let reference_diagnostic = reference_error.to_diagnostic();
+    assert_eq!(
+        reference_diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let origin = reference_diagnostic
+        .origin
+        .as_ref()
+        .expect("Unit route diagnostic origin");
+    assert_eq!(
+        origin.kind,
+        crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+    );
+    assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+    assert_eq!(forged_reference.captured_output(), "");
+    assert_eq!(oracle.0.get(), 1, "forged route must not reach Unit host");
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&library);
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("manifest-bound Unit bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("manifest-bound Unit bytecode"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let bytecode_error = compile_mir_program_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("bytecode must reject forged Unit route before execution");
+    assert!(bytecode_error.iter().any(|error| {
+        error.diagnostic_code() == Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    }));
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_887_unit_route");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("manifest-bound Unit native emission");
+    native
+        .module
+        .verify()
+        .expect("manifest-bound Unit native module");
+    let native = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("manifest-bound Unit native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n");
+    assert!(native.stderr.is_empty());
+
+    let forged_context = inkwell::context::Context::create();
+    let mut forged_native =
+        crate::codegen::CodeGenerator::new(&forged_context, "r6_887_forged_unit_route");
+    let native_error = forged_native
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("native must reject forged Unit route before emission");
+    assert!(native_error.iter().any(|error| {
+        error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    }));
+
+    let verifier_error = crate::verifier::verify_ffi_mir_with_route_manifest(
+        &mir,
+        &forged_manifest,
+        blake3::hash(SOURCE.as_bytes()).to_hex().to_string(),
+    )
+    .expect_err("verifier must reject forged Unit route before proof");
+    assert!(verifier_error.starts_with(crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
 extern "C" { func mir_route_diagnostic(value: i64) -> i64 ensures: result == value + 1; }
