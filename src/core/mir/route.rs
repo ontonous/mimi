@@ -254,6 +254,18 @@ impl CanonicalMirRouteMaterializationError {
             }),
         }
     }
+
+    /// Convert the route failure to the shared diagnostic shape used by CLI,
+    /// LSP, and embedded callers.  Hard failures carry their stage code and
+    /// runtime-system provenance; compatibility remains an ordinary untyped
+    /// error because callers are allowed to continue on the legacy route.
+    pub fn to_diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        let message = match self.diagnostic_code() {
+            Some(code) => format!("{code}: {self}"),
+            None => self.to_string(),
+        };
+        crate::diagnostic::mir_route_error_diagnostic(message, crate::span::Span::UNKNOWN)
+    }
 }
 
 /// Checker-owned route admission captured alongside one canonical graph.
@@ -1041,6 +1053,16 @@ mod tests {
             construction.diagnostic_code(),
             Some(crate::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE)
         );
+        let construction_diagnostic = construction.to_diagnostic();
+        assert_eq!(
+            construction_diagnostic.code.as_deref(),
+            Some(crate::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE)
+        );
+        let origin = construction_diagnostic
+            .origin
+            .expect("hard route failure keeps runtime provenance");
+        assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+        assert_eq!(construction_diagnostic.span, crate::span::Span::UNKNOWN);
 
         let coverage = CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -1098,6 +1120,9 @@ mod tests {
             "unsupported mixed graph".into(),
         );
         assert_eq!(error.diagnostic_code(), None);
+        let compatibility_diagnostic = error.to_diagnostic();
+        assert!(compatibility_diagnostic.code.is_none());
+        assert!(compatibility_diagnostic.origin.is_none());
         let CanonicalMirRouteMaterializationError::Compatibility {
             admission: preserved,
             ..
