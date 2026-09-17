@@ -87,7 +87,15 @@ fn checked_function_index(index: usize, owner: &NodeId) -> Result<FuncIdx, MirBy
 pub fn compile_mir_program(
     program: &MirProgram,
 ) -> Result<Arc<BytecodeProgram>, Vec<MirBytecodeError>> {
-    compile_mir_program_inner(program, None)
+    // The direct adapter is still useful to embedders that do not carry a
+    // route manifest, but a canonical FFI program must never cross into an
+    // AST-free VM without a checker-owned identity anchor.  Derive the
+    // receipt from this immutable MIR graph rather than accepting an
+    // unbound/legacy-shaped bytecode artifact.  Explicit route owners use
+    // `compile_mir_program_with_route_receipt` below and retain their profile.
+    let receipt =
+        (!program.ffi_calls().is_empty()).then(|| program.route_receipt("bytecode-direct-v1"));
+    compile_mir_program_inner(program, receipt.as_ref())
 }
 
 /// Compile canonical MIR after checking the route receipt supplied by the
@@ -12234,6 +12242,23 @@ mod tests {
     }
 
     #[test]
+    fn direct_mir_bytecode_without_ffi_keeps_route_receipt_empty() {
+        let source = "func main() -> i32 { 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex non-FFI MIR");
+        let file = Parser::new(tokens).parse_file().expect("parse non-FFI MIR");
+        let checked = crate::core::check_program(&file).expect("check non-FFI MIR");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical non-FFI MIR");
+        assert!(mir.ffi_calls().is_empty());
+        let bytecode = compile_mir_program(&mir).expect("non-FFI MIR bytecode");
+        assert!(bytecode.canonical_ffi_bindings.is_empty());
+        assert!(bytecode.canonical_ffi_route_receipt.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("non-FFI bytecode execution");
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn canonical_scalar_ffi_uses_ast_free_bytecode_receipt() {
         let _guard = crate::tests::FfiEnvLock::lock();
         let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
@@ -12250,6 +12275,15 @@ mod tests {
         assert!(bytecode.ast.is_none());
         assert_eq!(bytecode.canonical_ffi.len(), 1);
         assert_eq!(bytecode.canonical_ffi_bindings.len(), 1);
+        let derived_receipt = bytecode
+            .canonical_ffi_route_receipt
+            .as_ref()
+            .expect("direct canonical FFI adapter must derive a route receipt");
+        assert_eq!(derived_receipt.profile, "bytecode-direct-v1");
+        assert!(bytecode
+            .canonical_ffi_bindings
+            .iter()
+            .all(|binding| { binding.route_receipt.as_ref() == Some(derived_receipt) }));
         assert_eq!(bytecode.canonical_ffi[0].symbol, "labs");
         assert_eq!(bytecode.canonical_ffi[0].abi, "C");
         assert_eq!(
