@@ -674,6 +674,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         "capability order drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&capability_order_output.stderr)
     );
+    let tampered_route_order_script = source_script.replacen(
+        "    '.validate_against_program(program)' \\\n    'let mut results = verify_mir(program, source_hash.clone())?'",
+        "    'let mut results = verify_mir(program, source_hash.clone())?' \\\n    '.validate_against_program(program)'",
+        1,
+    );
+    assert!(
+        source_script != tampered_route_order_script,
+        "route order fixture must swap the expected receipt and adapter patterns"
+    );
+    std::fs::write(&script_path, tampered_route_order_script)
+        .expect("write tampered route order audit script");
+    let route_order_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered route order audit");
+    assert!(
+        !route_order_output.status.success(),
+        "tampered route receipt order must fail closed:\n{}",
+        String::from_utf8_lossy(&route_order_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&route_order_output.stderr)
+            .contains("owner_audit_error=mir_route_receipt_order_drift="),
+        "route receipt order drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&route_order_output.stderr)
+    );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
     let restored = std::process::Command::new("bash")
