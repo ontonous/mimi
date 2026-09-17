@@ -1164,6 +1164,40 @@ mod tests {
     }
 
     #[test]
+    fn persisted_route_diagnostic_rejects_missing_or_unknown_origin_schema() {
+        let mut registry = crate::span::SourceRegistry::default();
+        let source_id = registry
+            .register_key("workspace:malformed-route.mimi", SourceTextOrigin::Memory)
+            .expect("register source");
+        let diagnostic = crate::diagnostic::mir_route_error_diagnostic(
+            format!(
+                "cache wrapper: {}: stale route receipt",
+                MIR_ROUTE_MANIFEST_ERROR_CODE
+            ),
+            Span::single(2, 3).with_source(source_id),
+        );
+        let persisted =
+            PersistedDiagnostic::from_runtime(&diagnostic, &registry).expect("persist diagnostic");
+
+        let mut missing_origin = serde_json::to_value(&persisted).expect("serialize diagnostic");
+        missing_origin
+            .as_object_mut()
+            .expect("diagnostic object")
+            .remove("origin");
+        assert!(
+            serde_json::from_value::<PersistedDiagnostic>(missing_origin).is_err(),
+            "cache entries without origin must fail closed"
+        );
+
+        let mut unknown_origin = serde_json::to_value(&persisted).expect("serialize diagnostic");
+        unknown_origin["origin"]["kind"] = serde_json::Value::String("future_runtime".into());
+        assert!(
+            serde_json::from_value::<PersistedDiagnostic>(unknown_origin).is_err(),
+            "cache entries with unknown origin kinds must fail closed"
+        );
+    }
+
+    #[test]
     fn persisted_cache_rejects_source_less_route_diagnostic() {
         let registry = crate::span::SourceRegistry::default();
         let diagnostic = Diagnostic::error_code(
