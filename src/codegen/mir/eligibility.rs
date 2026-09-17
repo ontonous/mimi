@@ -104,7 +104,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
             .diagnostic()]);
         }
-        self.compile_mir_native(program)
+        // Preserve the primary single-program diagnostic when a caller hands
+        // this generator a receipt for a different MIR graph.  The digest is
+        // the graph identity; the route anchor is checked only after this
+        // mismatch has been ruled out, so diagnostics cannot depend on which
+        // provenance field happened to be tampered with first.
+        if self
+            .mir_native_compiled_digest
+            .as_deref()
+            .is_some_and(|compiled_digest| compiled_digest != program.canonical_digest())
+        {
+            return self.compile_mir_native(program);
+        }
+        if let Some(bound) = self.mir_native_route_receipt.as_ref() {
+            if !bound.same_semantic_identity(receipt) {
+                return Err(vec![NativeMirError::new(
+                    "mir-program",
+                    format!(
+                        "{}: canonical route receipt disagrees with native program anchor",
+                        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                    ),
+                )
+                .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+                .diagnostic()]);
+            }
+        }
+        self.compile_mir_native(program)?;
+        if self.mir_native_route_receipt.is_none() {
+            self.mir_native_route_receipt = Some(receipt.clone());
+        }
+        Ok(())
     }
 
     /// Compile canonical MIR after parsing and checking a CLI route manifest.

@@ -187,20 +187,6 @@ pub struct ProofArtifact {
     pub engine: String,
 }
 
-fn same_mir_route_identity(
-    left: &crate::core::mir::CanonicalMirRouteReceipt,
-    right: &crate::core::mir::CanonicalMirRouteReceipt,
-) -> bool {
-    left.schema == right.schema
-        && left.mir_digest == right.mir_digest
-        && left.type_desc_digest == right.type_desc_digest
-        && left.abi_digest == right.abi_digest
-        && left.ffi_digest == right.ffi_digest
-        && left.ownership_digest == right.ownership_digest
-        && left.flow_transition_digest == right.flow_transition_digest
-        && left.root_owners == right.root_owners
-}
-
 /// Compare optional source provenance without making old direct APIs
 /// incompatible solely because they did not receive source text.  Once both
 /// artifacts carry a source hash, a proof from one source must never be reused
@@ -300,7 +286,7 @@ impl ProofArtifact {
             && self.mir_hash == current.mir_hash
             && same_optional_source_provenance(&self.source_hash, &current.source_hash)
             && match (&self.mir_route_receipt, &current.mir_route_receipt) {
-                (Some(left), Some(right)) => same_mir_route_identity(left, right),
+                (Some(left), Some(right)) => left.same_semantic_identity(right),
                 (None, None) => true,
                 _ => false,
             }

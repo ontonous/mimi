@@ -664,6 +664,10 @@ pub struct CodeGenerator<'ctx> {
     /// receipt is idempotent, while a different MIR graph fails closed before
     /// it can collide with or append to the existing module.
     mir_native_compiled_digest: Option<String>,
+    /// Immutable route identity admitted into this LLVM module.  The profile
+    /// is consumer provenance and may change on an idempotent replay, while
+    /// every canonical MIR/ABI/FFI/ownership field must remain identical.
+    mir_native_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -897,7 +901,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_persistent_fields: Vec::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
             mir_native_compiled_digest: None,
+            mir_native_route_receipt: None,
         }
+    }
+
+    /// Test-only snapshot of the native module's route admission anchor.
+    #[cfg(test)]
+    pub(crate) fn test_mir_native_route_receipt(
+        &self,
+    ) -> Option<&crate::core::mir::CanonicalMirRouteReceipt> {
+        self.mir_native_route_receipt.as_ref()
+    }
+
+    /// Test-only tamper hook used by fail-closed route provenance tests.
+    #[cfg(test)]
+    pub(crate) fn replace_mir_native_route_receipt_for_test_only(
+        &mut self,
+        receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
+    ) {
+        self.mir_native_route_receipt = receipt;
     }
 
     /// Function names the resolved emitter attempted and then handed to

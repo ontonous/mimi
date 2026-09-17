@@ -25688,6 +25688,88 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn scalar_ffi_native_route_anchor_replay_and_tamper_fail_closed() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_native_route_anchor(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_native_route_anchor(7 as i64));
+    0
+}
+"#;
+    const OTHER_SOURCE: &str = r#"
+func main() -> i64 {
+    println(99 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("native route anchor fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("native route anchor fixture materialization");
+    let profile_a = mir.route_receipt("r6-907-native-anchor-a-v1");
+    let profile_b = mir.route_receipt("r6-907-native-anchor-b-v1");
+    assert_ne!(profile_a.profile, profile_b.profile);
+    assert!(
+        profile_a.same_semantic_identity(&profile_b),
+        "profile replay must retain one native semantic identity"
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_907_native_anchor");
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect("first native route anchor admission");
+    native
+        .module
+        .verify()
+        .expect("first native route anchor module");
+    assert_eq!(native.test_mir_native_route_receipt(), Some(&profile_a));
+    let snapshot = native.module.print_to_string().to_string();
+
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("equivalent profile replay must be idempotent");
+    assert_eq!(
+        native.test_mir_native_route_receipt(),
+        Some(&profile_a),
+        "native anchor keeps the first admitted receipt while accepting profile replay"
+    );
+    assert_eq!(native.module.print_to_string().to_string(), snapshot);
+
+    let other_checked = crate::core::check_program(&super::parse(OTHER_SOURCE))
+        .expect("different native route anchor fixture check");
+    let other_mir = MirProgram::from_checked_program(&other_checked)
+        .expect("different native route anchor fixture materialization");
+    let other_receipt = other_mir.route_receipt("r6-907-native-anchor-other-v1");
+    assert_ne!(profile_a.mir_digest, other_receipt.mir_digest);
+    native.replace_mir_native_route_receipt_for_test_only(Some(other_receipt));
+    let error = native
+        .compile_mir_native_with_route_receipt(&mir, &profile_a)
+        .expect_err("native route anchor tamper must fail closed");
+    assert_eq!(
+        error[0].code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    assert!(error[0].message.contains("native program anchor"));
+    assert_eq!(
+        native.module.print_to_string().to_string(),
+        snapshot,
+        "native route anchor rejection must not mutate the LLVM module"
+    );
+
+    native.replace_mir_native_route_receipt_for_test_only(Some(profile_a.clone()));
+    native
+        .compile_mir_native_with_route_receipt(&mir, &profile_b)
+        .expect("native route anchor must recover after restoring the admitted receipt");
+    native
+        .module
+        .verify()
+        .expect("recovered native route anchor module");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
         (

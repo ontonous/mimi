@@ -103,6 +103,24 @@ impl MirProgram {
 }
 
 impl CanonicalMirRouteReceipt {
+    /// Compare the immutable semantic identity carried by two route receipts.
+    ///
+    /// The consumer profile is invocation provenance (for example, native,
+    /// bytecode, or verifier) rather than program identity, so it is
+    /// intentionally excluded.  All schema, digest, and root-owner fields
+    /// remain part of the comparison; a receipt from another canonical MIR
+    /// graph must never be accepted as an equivalent replay.
+    pub fn same_semantic_identity(&self, other: &CanonicalMirRouteReceipt) -> bool {
+        self.schema == other.schema
+            && self.mir_digest == other.mir_digest
+            && self.type_desc_digest == other.type_desc_digest
+            && self.abi_digest == other.abi_digest
+            && self.ffi_digest == other.ffi_digest
+            && self.ownership_digest == other.ownership_digest
+            && self.flow_transition_digest == other.flow_transition_digest
+            && self.root_owners == other.root_owners
+    }
+
     /// Validate the invariants required before a receipt is rendered as an
     /// evidence manifest. This remains a pure receipt check: it does not
     /// inspect source AST, infer types, or consult a backend.
@@ -670,8 +688,13 @@ mod tests {
 
         let mut profile = receipt.clone();
         profile.profile = "other-v1".into();
+        assert!(
+            receipt.same_semantic_identity(&profile),
+            "consumer profile is provenance and must not change semantic identity"
+        );
         let mut mir_digest = receipt.clone();
         mir_digest.mir_digest = "b".repeat(64);
+        assert!(!receipt.same_semantic_identity(&mir_digest));
         let mut type_desc_digest = receipt.clone();
         type_desc_digest.type_desc_digest = "b".repeat(64);
         let mut abi_digest = receipt.clone();

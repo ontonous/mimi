@@ -379,6 +379,35 @@ bytecode_route_receipt_vm_guard() {
 
 bytecode_route_receipt_vm_guard src/interp/bytecode/vm.rs
 
+# The native LLVM adapter is also a reusable single-program consumer.  Keep an
+# independent receipt anchor beside its MIR digest so an equivalent profile
+# replay is idempotent while a tampered in-memory route cannot be paired with
+# an already emitted module.
+native_route_receipt_anchor() {
+    local field_source
+    local consumer_source
+    field_source="$(cat "$ROOT_DIR/src/codegen/mod.rs")"
+    consumer_source="$(cat "$ROOT_DIR/src/codegen/mir/eligibility.rs")"
+    if ! printf '%s\n' "$field_source" | rg -F "mir_native_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>" >/dev/null; then
+        printf 'owner_audit_error=native_route_receipt_anchor_missing=src/codegen/mod.rs field\n' >&2
+        audit_failed=1
+        return
+    fi
+    for pattern in \
+        'bound.same_semantic_identity(receipt)' \
+        'self.mir_native_route_receipt = Some(receipt.clone())'; do
+        if ! printf '%s\n' "$consumer_source" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=native_route_receipt_anchor_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'native_route_receipt_anchor=program-anchor+semantic-replay consumer=src/codegen/mir/eligibility.rs\n'
+}
+
+native_route_receipt_anchor
+
 # Bind the public source entry to the hash-bearing checked-program adapter.
 # This keeps the caller's BLAKE3 provenance on the same path as the verifier
 # receipt; a renamed call or an empty/hashless entry must fail closed.

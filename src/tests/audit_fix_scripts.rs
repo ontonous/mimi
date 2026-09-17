@@ -1025,6 +1025,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         ),
         "legacy owner audit must pin the VM boundary receipt guard"
     );
+    assert!(
+        stdout.contains(
+            "native_route_receipt_anchor=program-anchor+semantic-replay consumer=src/codegen/mir/eligibility.rs"
+        ),
+        "legacy owner audit must pin the native program-level route receipt anchor"
+    );
 }
 
 #[test]
