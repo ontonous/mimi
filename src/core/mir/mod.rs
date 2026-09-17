@@ -2398,6 +2398,15 @@ impl fmt::Display for MirValidationError {
 
 impl std::error::Error for MirValidationError {}
 
+impl MirValidationError {
+    /// Return a registered route code carried by this validation message.
+    /// Ordinary MIR shape failures remain unclassified; declaration-boundary
+    /// failures expose the same identity used by CLI and backend adapters.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        crate::diagnostic::codes::canonical_mir_route_code_in_message(&self.message)
+    }
+}
+
 impl MirFunction {
     /// Validate identities, graph shape, and SSA-like value dominance without
     /// depending on a backend. Kind/effect/ownership checks belong to later

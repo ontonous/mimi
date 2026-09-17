@@ -11841,6 +11841,14 @@ fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
             .expect("parse declaration");
         let checked = crate::core::check_program(&file).expect("check declaration");
         let error = match MirProgram::from_checked_program(&checked) {
+            Err(crate::core::mir::reference::MirProgramBuildError::Validation(errors)) => {
+                assert!(errors.iter().any(|error| {
+                    error.diagnostic_code()
+                        == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                        && error.message.contains(expected)
+                }));
+                format!("{errors:?}")
+            }
             Err(error) => format!("{error:?}"),
             Ok(_) => panic!("unrepresented declaration admitted: {declaration}"),
         };
@@ -17521,6 +17529,16 @@ fn scalar_ffi_materialization_rejects_unrepresented_no_panic_semantics() {
     let error = MirProgram::from_checked_program(&checked)
         .expect_err("no_panic protection must not be silently dropped from MIR");
     let message = error.to_string();
+    match error {
+        crate::core::mir::reference::MirProgramBuildError::Validation(errors) => assert!(
+            errors.iter().any(|error| {
+                error.diagnostic_code()
+                    == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+            }),
+            "no_panic declaration lost its stable route code: {errors:?}"
+        ),
+        other => panic!("no_panic declaration returned unexpected MIR error: {other:?}"),
+    }
     assert!(
         message.contains("unsupported no_panic FFI protection semantics"),
         "unexpected no_panic materialization diagnostic: {message}"
