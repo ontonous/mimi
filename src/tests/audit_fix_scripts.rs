@@ -307,6 +307,8 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_ffi_capability_order_binding=capability-before-execution consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
+        "mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=src/main/verify.rs",
+        "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -700,6 +702,60 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=mir_route_receipt_order_drift="),
         "route receipt order drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&route_order_output.stderr)
+    );
+    let tampered_cli_route_script = source_script.replacen(
+        "    'verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?'",
+        "    'missing_cli_verifier_route(&canonical, &receipt, source_hash)?'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_route_script,
+        "CLI route fixture must replace the receipt-bearing adapter"
+    );
+    std::fs::write(&script_path, tampered_cli_route_script)
+        .expect("write tampered CLI route audit script");
+    let cli_route_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered CLI route audit");
+    assert!(
+        !cli_route_output.status.success(),
+        "tampered CLI verifier route must fail closed:\n{}",
+        String::from_utf8_lossy(&cli_route_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&cli_route_output.stderr)
+            .contains("owner_audit_error=mir_cli_verifier_route_missing="),
+        "CLI route drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&cli_route_output.stderr)
+    );
+    let tampered_cli_boundary_script = source_script.replacen(
+        "    'eprintln!(\"{}\", format_cli_error(&e));'",
+        "    'eprintln!(\"{}\", e);'",
+        1,
+    );
+    assert!(
+        source_script != tampered_cli_boundary_script,
+        "CLI error boundary fixture must replace the shared formatter"
+    );
+    std::fs::write(&script_path, tampered_cli_boundary_script)
+        .expect("write tampered CLI error boundary audit script");
+    let cli_boundary_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered CLI error boundary audit");
+    assert!(
+        !cli_boundary_output.status.success(),
+        "tampered CLI error boundary must fail closed:\n{}",
+        String::from_utf8_lossy(&cli_boundary_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&cli_boundary_output.stderr)
+            .contains("owner_audit_error=mir_cli_error_boundary_missing="),
+        "CLI error boundary drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&cli_boundary_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

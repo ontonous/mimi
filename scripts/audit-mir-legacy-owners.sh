@@ -617,6 +617,43 @@ mir_route_receipt_order_binding \
     '.validate_against_program(program)' \
     'let mut results = verify_ffi_mir_with_source_hash(program, source_hash.clone())?'
 
+# Keep the public CLI verifier on the same receipt-bearing adapter as the
+# library entry point, and keep the top-level error boundary routed through
+# the shared formatter.  These checks prevent a future CLI refactor from
+# silently dropping route provenance while all direct APIs remain correct.
+mir_cli_verifier_route_binding() {
+    local source_file="$1"
+    local adapter_pattern="$2"
+    if ! rg -F "$adapter_pattern" "$ROOT_DIR/$source_file" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_verifier_route_missing=%s pattern=%s\n' \
+            "$source_file" "$adapter_pattern" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=%s\n' \
+        "$source_file"
+}
+
+mir_cli_error_boundary_binding() {
+    local source_file="$1"
+    local boundary_pattern="$2"
+    if ! rg -F "$boundary_pattern" "$ROOT_DIR/$source_file" >/dev/null; then
+        printf 'owner_audit_error=mir_cli_error_boundary_missing=%s pattern=%s\n' \
+            "$source_file" "$boundary_pattern" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_cli_error_boundary_binding=shared-format-cli-error consumer=%s\n' \
+        "$source_file"
+}
+
+mir_cli_verifier_route_binding \
+    src/main/verify.rs \
+    'verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?'
+mir_cli_error_boundary_binding \
+    src/main.rs \
+    'eprintln!("{}", format_cli_error(&e));'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
