@@ -24780,6 +24780,191 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_multi_call_contract_mode_switch_matches_native() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_mode_switch(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_mode_switch(value: i64) requires: value >= 0 ensures: true; }
+func main() -> i64 {
+    println(5 as i64);
+    mir_ffi_unit_mode_switch(7 as i64);
+    println(6 as i64);
+    mir_ffi_unit_mode_switch(-8 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit contract-mode switch fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit contract-mode switch fixture materialization");
+    let profile = mir.route_receipt("r6-901-unit-mode-switch-v1");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile, source_hash.clone())
+            .expect("Unit contract-mode switch verification");
+    assert_eq!(verification.len(), 2);
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Proven,
+        "the valid Unit call must remain proven"
+    );
+    assert_eq!(
+        verification[1].status,
+        crate::verifier::VerifStatus::Disproven,
+        "the negative Unit call must remain disproven"
+    );
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.source_hash == source_hash
+                && artifact.mir_hash == profile.mir_digest
+                && artifact.mir_route_receipt.as_ref() == Some(&profile)
+        })
+    }));
+    assert_eq!(
+        verification[1]
+            .diagnostic
+            .as_ref()
+            .expect("Unit mode-switch requires diagnostic")
+            .span,
+        ordered[1].1.span
+    );
+
+    struct UnitModeSwitchOracle(std::cell::RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for UnitModeSwitchOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_mode_switch");
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!(
+                    "unexpected Unit mode-switch arguments: {arguments:?}"
+                ));
+            };
+            self.0.borrow_mut().push(*value);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+    let oracle = UnitModeSwitchOracle(std::cell::RefCell::new(Vec::new()));
+    let checked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile);
+    let checked_reference_error = checked_reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("checked reference must reject the negative Unit call");
+    assert!(
+        checked_reference_error.to_string().contains("requires")
+            || checked_reference_error.to_string().contains("precondition"),
+        "{checked_reference_error}"
+    );
+    assert_eq!(checked_reference.captured_output(), "5\n6\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7]);
+
+    let unchecked_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile)
+        .with_ffi_verification(false);
+    let unchecked_reference_result = unchecked_reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("unchecked reference must execute both Unit calls");
+    assert_eq!(unchecked_reference_result.value, MirRuntimeValue::Int(0));
+    assert_eq!(unchecked_reference_result.output, "5\n6\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7, 7, -8]);
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let trace = fixture.dir.join("unit-mode-switch.trace");
+    std::fs::write(&trace, "").expect("create Unit mode-switch trace");
+    guard.set_trace_path(&trace);
+    guard.set_path(&library);
+    let manifest = profile
+        .manifest_text()
+        .expect("Unit contract-mode switch route manifest");
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("Unit contract-mode switch AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+    let mut vm = BytecodeVM::new(bytecode);
+    let checked_error = vm
+        .run_value()
+        .expect_err("checked bytecode must reject the negative Unit call");
+    assert_eq!(checked_error.code(), "E0808", "{checked_error}");
+    assert!(checked_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "5\n6\n");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.set_verify_ffi(false);
+    assert_eq!(
+        vm.run_value()
+            .expect("unchecked bytecode must execute both Unit calls"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "5\n6\n");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n7\n-8\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    vm.set_verify_ffi(true);
+    let reenabled_error = vm
+        .run_value()
+        .expect_err("re-enabled bytecode checks must reject again");
+    assert_eq!(reenabled_error.code(), "E0808", "{reenabled_error}");
+    assert!(reenabled_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "5\n6\n");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n7\n-8\n7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    std::fs::write(&trace, "").expect("clear Unit mode-switch native trace");
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_901_unit_mode_switch");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("Unit contract-mode switch native lowering");
+    native
+        .module
+        .verify()
+        .expect("valid Unit contract-mode switch native module");
+    let observation = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("Unit contract-mode switch native execution");
+    assert_ne!(observation.exit_code, Some(0));
+    assert_eq!(observation.stdout, "5\n6\n");
+    assert!(observation.stderr.contains("E0808"));
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
