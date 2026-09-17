@@ -321,6 +321,40 @@ consumer_receipt_profile_binding \
     verify-ffi-v1 \
     ScalarFfi
 
+# Bind the public source entry to the hash-bearing checked-program adapter.
+# This keeps the caller's BLAKE3 provenance on the same path as the verifier
+# receipt; a renamed call or an empty/hashless entry must fail closed.
+source_hash_entry_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local call_pattern="$4"
+    local hash_pattern="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$call_pattern" >/dev/null; then
+        printf 'owner_audit_error=source_hash_entry_call_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$hash_pattern" >/dev/null; then
+        printf 'owner_audit_error=source_hash_entry_hash_missing=%s::%s\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'source_hash_entry_binding=blake3-source-hash consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+source_hash_entry_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_source(' \
+    'pub fn verify_ffi_checked(' \
+    'verify_ffi_checked_with_source_hash(' \
+    'blake3::hash(source.as_bytes()).to_hex().to_string(),'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
