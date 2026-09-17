@@ -21711,6 +21711,135 @@ void mir_ffi_unit_route(int64_t value) { (void)value; }
 }
 
 #[test]
+fn scalar_ffi_unit_route_verifier_artifact_matches_runtime_receipt_provenance() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_artifact(value: i64) ensures: true; }
+func main() -> i64 {
+    println(3 as i64);
+    mir_ffi_unit_artifact(7 as i64);
+    0
+}
+"#;
+
+    struct UnitArtifactOracle(Cell<usize>);
+    impl MirReferenceFfiResolver for UnitArtifactOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_artifact");
+            assert_eq!(arguments, [MirRuntimeValue::Int(7)]);
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("Unit artifact fixture check");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("Unit artifact fixture materialization");
+    let receipt = mir.route_receipt("r6-888-unit-artifact-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("Unit artifact route manifest rendering");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let ffi_receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("Unit artifact FFI receipt");
+    assert!(matches!(
+        ffi_receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Unit,
+            to: crate::core::mir::types::MirAbiClass::Unit,
+        })
+    ));
+
+    let results =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("Unit artifact route verification");
+    assert_eq!(results.len(), 1, "Unit ensures produces one FFI proof");
+    let result = &results[0];
+    assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    let artifact = result
+        .artifact
+        .as_ref()
+        .expect("Unit ensures proof artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.source_hash, source_hash);
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
+    assert_eq!(artifact.mir_route_receipt.as_ref(), Some(&receipt));
+    assert_eq!(
+        artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|route| route.ffi_digest.as_str()),
+        Some(receipt.ffi_digest.as_str())
+    );
+
+    let oracle = UnitArtifactOracle(Cell::new(0));
+    let valid_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&receipt)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("Unit artifact runtime replay");
+    assert_eq!(valid_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(valid_reference.output, "3\n");
+    assert_eq!(oracle.0.get(), 1);
+
+    let mut forged = receipt.clone();
+    forged.ffi_digest = "0".repeat(64);
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&forged);
+    let runtime_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("forged Unit artifact route must fail before host binding");
+    assert_eq!(
+        runtime_error.diagnostic_code(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let runtime_diagnostic = runtime_error.to_diagnostic();
+    assert_eq!(
+        runtime_diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let origin = runtime_diagnostic
+        .origin
+        .as_ref()
+        .expect("Unit artifact runtime route origin");
+    assert_eq!(
+        origin.kind,
+        crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+    );
+    assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+    assert!(forged_reference.captured_output().is_empty());
+    assert_eq!(oracle.0.get(), 1, "forged route must not reach Unit host");
+
+    let verifier_error =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &forged, source_hash)
+            .expect_err("FFI verifier must reject the forged Unit artifact route");
+    let verifier_diagnostic = crate::verifier::mir_route_error_to_diagnostic(verifier_error);
+    assert_eq!(
+        verifier_diagnostic.code.as_deref(),
+        Some(crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE)
+    );
+    let verifier_origin = verifier_diagnostic
+        .origin
+        .as_ref()
+        .expect("Unit artifact verifier route origin");
+    assert_eq!(
+        verifier_origin.kind,
+        crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
+    );
+    assert_eq!(verifier_origin.rule.as_deref(), Some("mir.route"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
 extern "C" { func mir_route_diagnostic(value: i64) -> i64 ensures: result == value + 1; }
