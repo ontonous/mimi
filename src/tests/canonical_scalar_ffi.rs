@@ -22524,6 +22524,110 @@ func main() -> i64 { 0 }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_ensures_violation_matches_all_consumers() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_false_ensures(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_false_ensures(value: i64) ensures: false; }
+func main() -> i64 {
+    println(3 as i64);
+    mir_ffi_unit_false_ensures(7 as i64);
+    0
+}
+"#;
+
+    struct UnitFalseOracle;
+    impl MirReferenceFfiResolver for UnitFalseOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_false_ensures");
+            assert_eq!(arguments, [MirRuntimeValue::Int(7)]);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit false-ensures fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit false-ensures fixture materialization");
+    let receipt = mir.route_receipt("r6-895-unit-false-ensures-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("Unit false-ensures route manifest");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash)
+            .expect("Unit false-ensures route verification");
+    assert_eq!(verification.len(), 1);
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+
+    let reference_interpreter = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&UnitFalseOracle)
+        .with_route_receipt(&receipt);
+    let reference = reference_interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject the false Unit ensures");
+    assert!(
+        reference.message.contains("FFI postcondition failed"),
+        "{reference}"
+    );
+    assert_eq!(reference_interpreter.captured_output(), "3\n");
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library_path = fixture.dir.join("ffi.so").to_string_lossy().into_owned();
+    let _guard = super::FfiEnvGuard::lock();
+    let mut bytecode = BytecodeVM::new(
+        compile_mir_program_with_route_manifest(&mir, &manifest)
+            .expect("Unit false-ensures route bytecode"),
+    );
+    bytecode.set_canonical_ffi_library_path(library_path.clone());
+    let bytecode_error = bytecode
+        .run_value()
+        .expect_err("bytecode must reject the false Unit ensures");
+    assert_eq!(bytecode_error.code(), "E0808");
+    assert!(bytecode_error
+        .to_string()
+        .contains("FFI postcondition failed"));
+    assert_eq!(bytecode.stdout(), "3\n");
+    assert_eq!(bytecode.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "r6_895_unit_false_ensures");
+    generator
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("native Unit false-ensures compile");
+    generator
+        .module
+        .verify()
+        .expect("native Unit false-ensures LLVM verify");
+    let native = super::link_and_observe_module(
+        &generator,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("native Unit false-ensures execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "3\n");
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
+    assert!(native.stderr.contains("FFI postcondition failed"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
