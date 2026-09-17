@@ -21840,6 +21840,111 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_route_manifest_cache_recovery_preserves_verifier_artifact() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_cache(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_cache(value: i64) ensures: true; }
+func main() -> i64 {
+    println(1 as i64);
+    mir_ffi_unit_cache(7 as i64);
+    0
+}
+"#;
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("Unit cache fixture check");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("Unit cache fixture materialization");
+    let receipt = mir.route_receipt("r6-889-unit-cache-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("Unit cache route manifest rendering");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+            .expect("Unit cache route verification");
+    let artifact = verification
+        .iter()
+        .find_map(|result| result.artifact.as_ref())
+        .expect("Unit cache route proof artifact");
+    assert_eq!(artifact.source_hash, source_hash);
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
+    assert_eq!(artifact.mir_route_receipt.as_ref(), Some(&receipt));
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let good_path = fixture.dir.join("ffi.so");
+    let missing_path = fixture.dir.join("missing.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&missing_path);
+
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("Unit cache route bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+    assert_eq!(descriptor_snapshot.len(), 1);
+    assert_eq!(
+        descriptor_snapshot[0].result,
+        crate::interp::bytecode::CanonicalFfiScalarType::Unit
+    );
+    assert!(descriptor_snapshot[0].result_id.is_some());
+
+    let mut vm = BytecodeVM::new(bytecode);
+    let missing_error = vm
+        .run_value()
+        .expect_err("Unit cache missing library must fail closed");
+    assert_eq!(missing_error.code(), "E0800", "{missing_error}");
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.run_value().expect("Unit cache route recovery"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    guard.set_path(&missing_path);
+    let repeated_missing = vm
+        .run_value()
+        .expect_err("repeated Unit cache missing library must remain deterministic");
+    assert_eq!(repeated_missing.code(), "E0800", "{repeated_missing}");
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(
+        vm.debug_canonical_ffi_loaded_library_count(),
+        1,
+        "failed reentry must not poison or duplicate the cached good path"
+    );
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    guard.set_path(&good_path);
+    assert_eq!(
+        vm.run_value().expect("second Unit cache route recovery"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(artifact.mir_route_receipt.as_ref(), Some(&receipt));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
 extern "C" { func mir_route_diagnostic(value: i64) -> i64 ensures: result == value + 1; }
