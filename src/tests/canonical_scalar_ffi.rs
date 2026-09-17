@@ -22233,6 +22233,188 @@ func main() -> i64 { 0 }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_route_parallel_nested_binding_isolates_and_recovers() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_parallel_nested(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_parallel_nested(value: i64) ensures: true; }
+func leaf() -> i64 {
+    println(7 as i64);
+    mir_ffi_unit_parallel_nested(11 as i64);
+    13
+}
+func main() -> i64 { 0 }
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("parallel nested Unit route fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("parallel nested Unit route fixture materialization");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let route_a = mir.route_receipt("r6-892-unit-parallel-a-v1");
+    let route_b = mir.route_receipt("r6-892-unit-parallel-b-v1");
+    assert_ne!(route_a.profile, route_b.profile);
+    assert_eq!(route_a.mir_digest, route_b.mir_digest);
+    assert_eq!(route_a.ffi_digest, route_b.ffi_digest);
+    for route in [&route_a, &route_b] {
+        let manifest = route
+            .manifest_text()
+            .expect("parallel nested Unit route manifest");
+        let verification = crate::verifier::verify_ffi_mir_with_route_manifest(
+            &mir,
+            &manifest,
+            source_hash.clone(),
+        )
+        .expect("parallel nested Unit route verification");
+        assert!(verification.iter().any(|result| {
+            result
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.mir_route_receipt.as_ref() == Some(route))
+        }));
+    }
+
+    let build_program = |route: &crate::core::mir::CanonicalMirRouteReceipt| {
+        let manifest = route
+            .manifest_text()
+            .expect("parallel nested Unit route manifest replay");
+        let mut bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+            .expect("parallel nested Unit route bytecode");
+        assert!(bytecode.ast.is_none());
+        let leaf = bytecode
+            .functions
+            .iter()
+            .position(|function| function.name == "function:leaf")
+            .expect("parallel nested Unit route leaf") as u32;
+        let main = bytecode
+            .functions
+            .iter()
+            .position(|function| function.name == "function:main")
+            .expect("parallel nested Unit route main");
+        let program =
+            std::sync::Arc::get_mut(&mut bytecode).expect("parallel nested bytecode unique");
+
+        let mut relay_proto =
+            crate::interp::bytecode::instr::FunctionProto::new("function:relay".into(), 0);
+        let relay_task = relay_proto.alloc_reg();
+        relay_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+            rd: relay_task,
+            func: leaf,
+            args_base: relay_task,
+            argc: 0,
+        });
+        let relay_result = relay_proto.alloc_reg();
+        relay_proto.emit(crate::interp::bytecode::instr::Op::Await {
+            rd: relay_result,
+            ra: relay_task,
+        });
+        relay_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: relay_result });
+        let relay = program.functions.len() as u32;
+        program.functions.push(relay_proto);
+
+        let mut middle_proto =
+            crate::interp::bytecode::instr::FunctionProto::new("function:middle".into(), 0);
+        let middle_task = middle_proto.alloc_reg();
+        middle_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+            rd: middle_task,
+            func: relay,
+            args_base: middle_task,
+            argc: 0,
+        });
+        let middle_result = middle_proto.alloc_reg();
+        middle_proto.emit(crate::interp::bytecode::instr::Op::Await {
+            rd: middle_result,
+            ra: middle_task,
+        });
+        middle_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: middle_result });
+        let middle = program.functions.len() as u32;
+        program.functions.push(middle_proto);
+
+        let mut main_proto =
+            crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+        let outer_task = main_proto.alloc_reg();
+        main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+            rd: outer_task,
+            func: middle,
+            args_base: outer_task,
+            argc: 0,
+        });
+        let outer_result = main_proto.alloc_reg();
+        main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+            rd: outer_result,
+            ra: outer_task,
+        });
+        main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
+        program.functions[main] = main_proto;
+        bytecode
+    };
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let good_path = fixture.dir.join("ffi.so").to_string_lossy().into_owned();
+    let missing_path = fixture
+        .dir
+        .join("missing.so")
+        .to_string_lossy()
+        .into_owned();
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let program_a = build_program(&route_a);
+    let program_b = build_program(&route_b);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let run = |program: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+               library_path: String,
+               barrier: std::sync::Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let mut vm = BytecodeVM::new(program);
+            vm.set_stdout_buf(stdout.clone());
+            vm.set_canonical_ffi_library_path(library_path);
+            barrier.wait();
+            let outcome = match vm.run_value() {
+                Ok(value) => Ok(value),
+                Err(error) => Err((error.code().to_string(), error.to_string())),
+            };
+            let stdout_snapshot = stdout.lock().unwrap().clone();
+            (
+                outcome,
+                stdout_snapshot,
+                vm.debug_stack_state(),
+                vm.debug_canonical_ffi_loaded_library_count(),
+            )
+        })
+    };
+
+    let good_handle = run(program_a, good_path, barrier.clone());
+    let missing_handle = run(program_b, missing_path, barrier);
+    let (good_outcome, good_stdout, good_stack, good_cache) =
+        good_handle.join().expect("parallel nested Unit good VM");
+    let (missing_outcome, missing_stdout, missing_stack, missing_cache) = missing_handle
+        .join()
+        .expect("parallel nested Unit missing VM");
+
+    assert_eq!(
+        good_outcome.expect("parallel nested Unit success"),
+        Value::Int(13)
+    );
+    assert_eq!(good_stdout, "7\n");
+    assert_eq!(good_stack, (0, 0));
+    assert_eq!(good_cache, 0);
+    let (code, message) =
+        missing_outcome.expect_err("parallel nested Unit missing library must fail");
+    assert_eq!(code, "E0800");
+    assert!(message.contains("failed to load"), "{message}");
+    assert_eq!(missing_stdout, "7\n");
+    assert_eq!(missing_stack, (0, 0));
+    assert_eq!(missing_cache, 0);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
