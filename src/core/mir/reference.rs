@@ -151,6 +151,42 @@ impl std::fmt::Display for MirProgramBuildError {
     }
 }
 
+impl MirProgramBuildError {
+    /// Convert every contained build failure to an independent diagnostic.
+    ///
+    /// The order is intentionally identical to the source error vector so
+    /// callers can present or serialize a deterministic multi-error result.
+    /// Registered canonical-route validation prefixes retain their shared code
+    /// and provenance; ordinary lowering and type-catalog failures remain
+    /// generic diagnostics.
+    pub fn to_diagnostics(&self) -> Vec<crate::diagnostic::Diagnostic> {
+        match self {
+            Self::Lowering(errors) => errors
+                .iter()
+                .map(|error| {
+                    crate::diagnostic::Diagnostic::error(
+                        error.to_string(),
+                        crate::span::Span::UNKNOWN,
+                    )
+                })
+                .collect(),
+            Self::Types(errors) => errors
+                .iter()
+                .map(|error| {
+                    crate::diagnostic::Diagnostic::error(
+                        format!("MIR type catalog error: {error}"),
+                        crate::span::Span::UNKNOWN,
+                    )
+                })
+                .collect(),
+            Self::Validation(errors) => errors
+                .iter()
+                .map(super::MirValidationError::to_diagnostic)
+                .collect(),
+        }
+    }
+}
+
 impl std::error::Error for MirProgramBuildError {}
 
 /// A validated collection of concrete MIR functions.
@@ -9186,13 +9222,13 @@ mod tests {
         MirExecutionError, MirProgram, MirProgramBuildError, MirReferenceFfiResolver,
         MirReferenceInterpreter, MirRuntimeValue,
     };
-    use crate::core::mir::lower::{lower_body, lower_program};
+    use crate::core::mir::lower::{lower_body, lower_program, MirLoweringError};
     use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
-    use crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE;
     use crate::core::mir::{
         MirAggregateKind, MirFfiAbiConversion, MirGenericInstanceContract, MirInstruction,
         MirInstructionKind,
     };
+    use crate::core::mir::{MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
     use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -9219,6 +9255,73 @@ mod tests {
             crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
         );
         assert_eq!(origin.rule.as_deref(), Some("mir.route"));
+    }
+
+    #[test]
+    fn program_build_error_to_diagnostics_preserves_order_and_route_metadata() {
+        let lowering = MirProgramBuildError::Lowering(vec![
+            MirLoweringError {
+                node_id: NodeId("lower:first".into()),
+                message: "unsupported expression".into(),
+            },
+            MirLoweringError {
+                node_id: NodeId("lower:second".into()),
+                message: "missing type descriptor".into(),
+            },
+        ]);
+        let lowering_diagnostics = lowering.to_diagnostics();
+        assert_eq!(lowering_diagnostics.len(), 2);
+        assert!(lowering_diagnostics[0].message.contains("lower:first"));
+        assert!(lowering_diagnostics[1].message.contains("lower:second"));
+        assert!(lowering_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code.is_none() && diagnostic.origin.is_none()));
+
+        let types = MirProgramBuildError::Types(vec![
+            "unknown nominal type".into(),
+            "duplicate type id".into(),
+        ]);
+        let type_diagnostics = types.to_diagnostics();
+        assert_eq!(type_diagnostics.len(), 2);
+        assert_eq!(
+            type_diagnostics[0].message,
+            "MIR type catalog error: unknown nominal type"
+        );
+        assert_eq!(
+            type_diagnostics[1].message,
+            "MIR type catalog error: duplicate type id"
+        );
+
+        let validation = MirProgramBuildError::Validation(vec![
+            super::super::MirValidationError {
+                subject: "extern:foreign".into(),
+                message: format!(
+                    "{MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE}: unsupported result type"
+                ),
+            },
+            super::super::MirValidationError {
+                subject: "value:missing".into(),
+                message: "value is used before its definition".into(),
+            },
+            super::super::MirValidationError {
+                subject: "route:coverage".into(),
+                message: format!("{MIR_ROUTE_RECEIPT_ERROR_CODE}: stale receipt"),
+            },
+        ]);
+        let validation_diagnostics = validation.to_diagnostics();
+        assert_eq!(validation_diagnostics.len(), 3);
+        assert_eq!(
+            validation_diagnostics[0].code.as_deref(),
+            Some(MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+        );
+        assert!(validation_diagnostics[0].origin.is_some());
+        assert!(validation_diagnostics[1].code.is_none());
+        assert!(validation_diagnostics[1].origin.is_none());
+        assert_eq!(
+            validation_diagnostics[2].code.as_deref(),
+            Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        );
+        assert!(validation_diagnostics[2].origin.is_some());
     }
 
     fn lower_main(source: &str) -> (crate::core::NodeId, MirProgram) {
