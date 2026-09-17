@@ -155,7 +155,7 @@ pub(crate) fn select_default_route(
     if admission.scalar_ffi {
         return match materialize_canonical_route(checked, merged_file) {
             Ok(route) => select_scalar_ffi_route(route.program),
-            Err(error) => DefaultMirRoute::Rejected(error.to_string()),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
         };
     }
     let collection_admission = admission.collection;
@@ -1648,16 +1648,27 @@ mod tests {
 
     #[test]
     fn scalar_ffi_default_route_rejects_uncovered_graph_without_fallback() {
-        for source in [
+        for (index, source) in [
             r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
                 func main() -> f64 { foreign(42.5) }"#,
             r#"extern "C" { func foreign(x: i64) -> i64; }
                 func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let (checked, file) = checked(source);
             assert!(mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
             let route = select_default_route(&checked, &file);
-            assert!(matches!(route, DefaultMirRoute::Rejected(_)), "{route:?}");
+            let DefaultMirRoute::Rejected(reason) = route else {
+                panic!("uncovered scalar FFI graph must fail closed");
+            };
+            if index == 0 {
+                assert!(
+                    reason.contains(mimi::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE),
+                    "materialization rejection must preserve its registered code: {reason}"
+                );
+            }
         }
     }
 
