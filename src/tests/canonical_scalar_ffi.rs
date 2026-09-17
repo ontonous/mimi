@@ -24586,6 +24586,200 @@ func main() -> i64 {
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_multi_call_requires_failure_resets_state() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+void mir_ffi_unit_multi_requires(int64_t value) {
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) return;
+    FILE *file = fopen(path, "a");
+    if (!file) return;
+    fprintf(file, "%lld\n", (long long)value);
+    fclose(file);
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_multi_requires(value: i64) requires: value >= 0 ensures: true; }
+func main() -> i64 {
+    println(3 as i64);
+    mir_ffi_unit_multi_requires(7 as i64);
+    println(4 as i64);
+    mir_ffi_unit_multi_requires(-8 as i64);
+    0
+}
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit multi-call requires fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit multi-call requires fixture materialization");
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 2);
+    assert!(ordered.iter().all(|(_, receipt)| {
+        receipt.symbol == "mir_ffi_unit_multi_requires"
+            && receipt.requires.is_some()
+            && receipt.ensures.is_some()
+            && receipt.result_conversion.is_some_and(|conversion| {
+                conversion.from == crate::core::mir::types::MirAbiClass::Unit
+            })
+    }));
+    let profile = mir.route_receipt("r6-900-unit-multi-requires-v1");
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    let verification =
+        crate::verifier::verify_ffi_mir_with_route_receipt(&mir, &profile, source_hash.clone())
+            .expect("Unit multi-call requires verification");
+    assert_eq!(verification.len(), 2);
+    assert_eq!(
+        verification[0].status,
+        crate::verifier::VerifStatus::Proven,
+        "the first Unit call must remain proven"
+    );
+    assert_eq!(
+        verification[1].status,
+        crate::verifier::VerifStatus::Disproven,
+        "the negative Unit call must remain disproven"
+    );
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.source_hash == source_hash
+                && artifact.mir_hash == profile.mir_digest
+                && artifact.mir_route_receipt.as_ref() == Some(&profile)
+        })
+    }));
+    assert_eq!(
+        verification[1]
+            .diagnostic
+            .as_ref()
+            .expect("negative Unit call diagnostic")
+            .span,
+        ordered[1].1.span,
+        "the failed Unit call must retain its receipt span"
+    );
+
+    struct UnitRequiresOracle(std::cell::RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for UnitRequiresOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            assert_eq!(receipt.symbol, "mir_ffi_unit_multi_requires");
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected Unit requires arguments: {arguments:?}"));
+            };
+            self.0.borrow_mut().push(*value);
+            Ok(MirRuntimeValue::Unit)
+        }
+    }
+    let oracle = UnitRequiresOracle(std::cell::RefCell::new(Vec::new()));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .with_route_receipt(&profile);
+    let first_reference_error = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must stop at the negative second Unit requires");
+    assert!(
+        first_reference_error.to_string().contains("requires")
+            || first_reference_error.to_string().contains("precondition"),
+        "{first_reference_error}"
+    );
+    assert_eq!(reference.captured_output(), "3\n4\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7]);
+    let second_reference_error = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must deterministically repeat the negative Unit requires");
+    assert!(
+        second_reference_error.to_string().contains("requires")
+            || second_reference_error.to_string().contains("precondition"),
+        "{second_reference_error}"
+    );
+    assert_eq!(reference.captured_output(), "3\n4\n");
+    assert_eq!(oracle.0.borrow().as_slice(), [7, 7]);
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    let trace = fixture.dir.join("unit-multi-requires.trace");
+    std::fs::write(&trace, "").expect("create Unit requires trace");
+    guard.set_trace_path(&trace);
+    guard.set_path(&library);
+    let manifest = profile
+        .manifest_text()
+        .expect("Unit multi-call requires route manifest");
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("Unit multi-call requires AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let descriptor_snapshot = bytecode.canonical_ffi.clone();
+    let binding_snapshot = bytecode.canonical_ffi_bindings.clone();
+    assert_eq!(descriptor_snapshot.len(), 2);
+    assert!(descriptor_snapshot.iter().all(|descriptor| {
+        descriptor.symbol == "mir_ffi_unit_multi_requires"
+            && descriptor.result == CanonicalFfiScalarType::Unit
+            && descriptor.requires.is_some()
+            && descriptor.ensures.is_some()
+    }));
+    let mut vm = BytecodeVM::new(bytecode);
+    let first_bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must stop before invoking the negative Unit call");
+    assert_eq!(
+        first_bytecode_error.code(),
+        "E0808",
+        "{first_bytecode_error}"
+    );
+    assert!(first_bytecode_error.to_string().contains("precondition"));
+    assert_eq!(vm.stdout(), "3\n4\n");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    let second_bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must repeat the negative Unit call deterministically");
+    assert_eq!(
+        second_bytecode_error.code(),
+        "E0808",
+        "{second_bytecode_error}"
+    );
+    assert_eq!(vm.stdout(), "3\n4\n");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
+    assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
+
+    std::fs::write(&trace, "").expect("clear Unit requires native trace");
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "r6_900_unit_multi_requires");
+    native
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("Unit multi-call requires native lowering");
+    native
+        .module
+        .verify()
+        .expect("valid Unit multi-call requires native module");
+    let observation = super::link_and_observe_module(
+        &native,
+        &super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        },
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("Unit multi-call requires native execution");
+    assert_ne!(observation.exit_code, Some(0));
+    assert_eq!(observation.stdout, "3\n4\n");
+    assert!(observation.stderr.contains("E0808"));
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
     const CASES: &[(&str, &str, usize)] = &[
