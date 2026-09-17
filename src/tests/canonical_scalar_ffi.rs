@@ -22415,6 +22415,115 @@ func main() -> i64 { 0 }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_unit_spawned_vm_inherits_contract_mode() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+void mir_ffi_unit_contract_mode(int64_t value) { (void)value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_unit_contract_mode(value: i64) ensures: false; }
+func worker() -> i64 {
+    mir_ffi_unit_contract_mode(7 as i64);
+    5
+}
+func main() -> i64 { 0 }
+"#;
+
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("Unit contract-mode fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("Unit contract-mode fixture materialization");
+    let receipt = mir.route_receipt("r6-894-unit-contract-mode-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("Unit contract-mode route manifest");
+    let verification = crate::verifier::verify_ffi_mir_with_route_manifest(
+        &mir,
+        &manifest,
+        blake3::hash(SOURCE.as_bytes()).to_hex().to_string(),
+    )
+    .expect("Unit contract-mode route verification");
+    assert!(verification
+        .iter()
+        .any(|result| result.status == crate::verifier::VerifStatus::Disproven));
+
+    let mut bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("Unit contract-mode route bytecode");
+    assert!(bytecode.ast.is_none());
+    let worker = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("Unit contract-mode worker") as u32;
+    let main = bytecode
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("Unit contract-mode main");
+    let program = std::sync::Arc::get_mut(&mut bytecode).expect("contract-mode bytecode unique");
+    let mut main_proto =
+        crate::interp::bytecode::instr::FunctionProto::new("function:main".into(), 0);
+    let task = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: task,
+        func: worker,
+        args_base: task,
+        argc: 0,
+    });
+    let result = main_proto.alloc_reg();
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: result,
+        ra: task,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
+    program.functions[main] = main_proto;
+    program.entry = main as u32;
+
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library_path = fixture.dir.join("ffi.so").to_string_lossy().into_owned();
+    let _guard = super::FfiEnvGuard::lock();
+
+    let mut unchecked_ffi = BytecodeVM::new(bytecode.clone());
+    unchecked_ffi.set_canonical_ffi_library_path(library_path.clone());
+    unchecked_ffi.set_verify_ffi(false);
+    assert_eq!(
+        unchecked_ffi
+            .run_value()
+            .expect("child must inherit disabled FFI contract mode"),
+        Value::Int(5)
+    );
+    assert_eq!(unchecked_ffi.debug_stack_state(), (0, 0));
+
+    let mut ordinary_unchecked = BytecodeVM::new(bytecode.clone());
+    ordinary_unchecked.set_canonical_ffi_library_path(library_path.clone());
+    ordinary_unchecked.verify_contracts = false;
+    let error = ordinary_unchecked
+        .run_value()
+        .expect_err("ordinary contract mode must not disable child FFI checks");
+    assert_eq!(error.code(), "E0808", "{error}");
+    assert!(
+        error.to_string().contains("FFI postcondition failed"),
+        "{error}"
+    );
+    assert_eq!(ordinary_unchecked.debug_stack_state(), (0, 0));
+
+    let mut checked_ffi = BytecodeVM::new(bytecode);
+    checked_ffi.set_canonical_ffi_library_path(library_path);
+    let error = checked_ffi
+        .run_value()
+        .expect_err("enabled child FFI contract mode must reject false ensures");
+    assert_eq!(error.code(), "E0808", "{error}");
+    assert!(
+        error.to_string().contains("FFI postcondition failed"),
+        "{error}"
+    );
+    assert_eq!(checked_ffi.debug_stack_state(), (0, 0));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
 #[test]
 fn scalar_ffi_route_api_replay_preserves_diagnostic_provenance_and_result_identity() {
     const SOURCE: &str = r#"
