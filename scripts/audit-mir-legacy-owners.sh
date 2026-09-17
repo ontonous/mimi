@@ -378,11 +378,10 @@ verifier_ffi_route_receipt_handoff
 # when no caller supplied an explicit route profile.
 verifier_default_receipt_reuse() {
     local context
-    context="$(sed -n '/^fn verify_program_inner(/,/^pub(crate) fn verify_ffi_program(/p' "$ROOT_DIR/src/verifier/mir.rs")"
+    context="$(sed -n '/^fn verify_program_inner(/,/^fn verify_ffi_program_inner(/p' "$ROOT_DIR/src/verifier/mir.rs")"
     for pattern in \
-        'let mir_route_receipt = supplied_route_receipt' \
         'results.extend(verify_ffi_program_inner(' \
-        'Some(&mir_route_receipt),'; do
+        'route_receipt,'; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=verifier_default_receipt_reuse_missing=src/verifier/mir.rs pattern=%s\n' \
                 "$pattern" >&2
@@ -394,6 +393,32 @@ verifier_default_receipt_reuse() {
 }
 
 verifier_default_receipt_reuse
+
+# Both semantic bodies require the immutable receipt supplied by their adapter.
+# A test-only convenience wrapper may materialize the default profile, but the
+# inner proof path must never accept an optional receipt or rebuild one after
+# entering the semantic pass.
+verifier_semantic_receipt_required() {
+    local source="$ROOT_DIR/src/verifier/mir.rs"
+    if rg -n 'supplied_route_receipt: Option<|unwrap_or_else\(\|\| program\.route_receipt\("verifier-mir-v1"\)\)' "$source" >/dev/null; then
+        printf 'owner_audit_error=verifier_semantic_receipt_optional_or_rebuilt=src/verifier/mir.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    if [ "$(rg -F -c 'route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,' "$source")" -lt 2 ]; then
+        printf 'owner_audit_error=verifier_semantic_receipt_reference_missing=src/verifier/mir.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -F 'verify_program_with_route_receipt(program, source_hash, &route_receipt)' "$source" >/dev/null; then
+        printf 'owner_audit_error=verifier_test_wrapper_receipt_handoff_missing=src/verifier/mir.rs\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'verifier_semantic_receipt_required=explicit-reference consumer=src/verifier/mir.rs::verify_program_inner+verify_ffi_program_inner(\n'
+}
+
+verifier_semantic_receipt_required
 
 # Public source-hash verifier adapters must derive one default receipt before
 # entering their semantic helpers, then reuse that same witness for provenance
@@ -436,11 +461,17 @@ verifier_default_entry_receipt_handoff
 verifier_unbound_helper_test_only() {
     local context
     context="$(sed -n '/^#\[cfg(test)\]/,/^fn verify_program_inner(/p' "$ROOT_DIR/src/verifier/mir.rs")"
-    if ! printf '%s\n' "$context" | rg -F 'pub(crate) fn verify_program(' >/dev/null; then
-        printf 'owner_audit_error=verifier_unbound_helper_test_only_missing=src/verifier/mir.rs::verify_program(\n' >&2
-        audit_failed=1
-        return
-    fi
+    for pattern in \
+        'pub(crate) fn verify_program(' \
+        'let route_receipt = program.route_receipt("verifier-mir-v1");' \
+        'verify_program_with_route_receipt(program, source_hash, &route_receipt)'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=verifier_unbound_helper_test_only_missing=src/verifier/mir.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
     printf 'verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(\n'
 }
 

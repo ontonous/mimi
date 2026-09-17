@@ -143,7 +143,8 @@ pub(crate) fn verify_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    verify_program_inner(program, source_hash, None)
+    let route_receipt = program.route_receipt("verifier-mir-v1");
+    verify_program_with_route_receipt(program, source_hash, &route_receipt)
 }
 
 /// Verify canonical MIR while using a caller-owned route receipt for every
@@ -155,19 +156,16 @@ pub(crate) fn verify_program_with_route_receipt(
     source_hash: String,
     route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
-    verify_program_inner(program, source_hash, Some(route_receipt))
+    verify_program_inner(program, source_hash, route_receipt)
 }
 
 fn verify_program_inner(
     program: &MirProgram,
     source_hash: String,
-    supplied_route_receipt: Option<&crate::core::mir::CanonicalMirRouteReceipt>,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
-    let mir_route_receipt = supplied_route_receipt
-        .cloned()
-        .unwrap_or_else(|| program.route_receipt("verifier-mir-v1"));
     let mut results = Vec::new();
 
     // `verify_mir` is also exercised as a public MIR-only API by callers that
@@ -271,7 +269,7 @@ fn verify_program_inner(
                 source_hash: source_hash.clone(),
                 resolved_ir_hash: String::new(),
                 mir_hash: mir_hash.clone(),
-                mir_route_receipt: Some(mir_route_receipt.clone()),
+                mir_route_receipt: Some(route_receipt.clone()),
                 vir_hash: String::new(),
                 engine: ProofArtifact::ENGINE_MIR.to_string(),
             })
@@ -296,7 +294,7 @@ fn verify_program_inner(
     results.extend(verify_ffi_program_inner(
         program,
         source_hash,
-        Some(&mir_route_receipt),
+        route_receipt,
     )?);
     Ok(results)
 }
@@ -308,13 +306,13 @@ pub(crate) fn verify_ffi_program_with_route_receipt(
     source_hash: String,
     route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
-    verify_ffi_program_inner(program, source_hash, Some(route_receipt))
+    verify_ffi_program_inner(program, source_hash, route_receipt)
 }
 
 fn verify_ffi_program_inner(
     program: &MirProgram,
     source_hash: String,
-    supplied_route_receipt: Option<&crate::core::mir::CanonicalMirRouteReceipt>,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
     if let Some(message) =
         crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
@@ -407,9 +405,6 @@ fn verify_ffi_program_inner(
     }
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
-    let mir_route_receipt = supplied_route_receipt
-        .cloned()
-        .unwrap_or_else(|| program.route_receipt("verifier-mir-v1"));
     let mut checks_by_instruction =
         BTreeMap::<crate::core::mir::MirInstructionId, (crate::core::NodeId, Vec<FfiCheck>)>::new();
 
@@ -574,7 +569,7 @@ fn verify_ffi_program_inner(
                 source_hash: source_hash.clone(),
                 resolved_ir_hash: String::new(),
                 mir_hash: mir_hash.clone(),
-                mir_route_receipt: Some(mir_route_receipt.clone()),
+                mir_route_receipt: Some(route_receipt.clone()),
                 vir_hash: String::new(),
                 engine: ProofArtifact::ENGINE_MIR.to_string(),
             })

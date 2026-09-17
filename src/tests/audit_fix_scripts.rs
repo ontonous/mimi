@@ -297,6 +297,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "verifier_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
         "verifier_ffi_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
         "verifier_default_receipt_reuse=single-batch-witness consumer=src/verifier/mir.rs::fn verify_program_inner(",
+        "verifier_semantic_receipt_required=explicit-reference consumer=src/verifier/mir.rs::verify_program_inner+verify_ffi_program_inner(",
         "verifier_default_entry_receipt_handoff=single-wrapper-witness consumer=src/verifier/mod.rs::verify_mir+verify_ffi_mir_with_source_hash(",
         "verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(",
         "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
