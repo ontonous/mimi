@@ -130,11 +130,14 @@ impl std::fmt::Display for MirProgramBuildError {
                     errors.len()
                 )
             }
-            Self::Types(errors) => write!(
-                formatter,
-                "MIR type catalog failed ({} errors)",
-                errors.len()
-            ),
+            Self::Types(errors) => {
+                let details = errors.join("; ");
+                write!(
+                    formatter,
+                    "MIR type catalog failed ({} errors): {details}",
+                    errors.len()
+                )
+            }
             Self::Validation(errors) => {
                 let details = errors
                     .iter()
@@ -9291,6 +9294,9 @@ mod tests {
             type_diagnostics[1].message,
             "MIR type catalog error: duplicate type id"
         );
+        let type_display = types.to_string();
+        assert!(type_display.contains("MIR type catalog failed (2 errors)"));
+        assert!(type_display.contains("unknown nominal type; duplicate type id"));
 
         let validation = MirProgramBuildError::Validation(vec![
             super::super::MirValidationError {
