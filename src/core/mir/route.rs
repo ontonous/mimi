@@ -239,6 +239,23 @@ impl std::fmt::Display for CanonicalMirRouteMaterializationError {
     }
 }
 
+impl CanonicalMirRouteMaterializationError {
+    /// Return the stable diagnostic for a hard canonical route failure.
+    /// Compatibility materialization remains intentionally unclassified: it
+    /// is the explicit signal that the caller may keep its legacy route.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Compatibility { .. } => None,
+            Self::Complete { stage, .. } => Some(match stage {
+                CanonicalMirRouteFailureStage::Construction => {
+                    super::MIR_ROUTE_MATERIALIZATION_ERROR_CODE
+                }
+                CanonicalMirRouteFailureStage::Coverage => super::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            }),
+        }
+    }
+}
+
 /// Checker-owned route admission captured alongside one canonical graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMirRouteAdmission {
@@ -1014,6 +1031,29 @@ mod tests {
     }
 
     #[test]
+    fn route_materialization_failures_expose_stage_specific_diagnostic_codes() {
+        let construction = CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarCollection,
+            stage: CanonicalMirRouteFailureStage::Construction,
+            message: "builder rejected the admitted body".into(),
+        };
+        assert_eq!(
+            construction.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE)
+        );
+
+        let coverage = CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarCollection,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "receipt omitted the admitted operation".into(),
+        };
+        assert_eq!(
+            coverage.diagnostic_code(),
+            Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        );
+    }
+
+    #[test]
     fn complete_s8_flow_materialization_carries_one_receipt() {
         let program = checked(
             "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
@@ -1057,6 +1097,7 @@ mod tests {
             CanonicalMirRouteFailureStage::Construction,
             "unsupported mixed graph".into(),
         );
+        assert_eq!(error.diagnostic_code(), None);
         let CanonicalMirRouteMaterializationError::Compatibility {
             admission: preserved,
             ..

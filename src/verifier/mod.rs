@@ -826,27 +826,16 @@ fn materialize_closed_mir_island(
             return Ok(None)
         }
         Err(error) => {
-            let code = match error {
-                crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
-                    stage, ..
-                } => match stage {
-                    crate::core::mir::CanonicalMirRouteFailureStage::Construction => {
-                        "MIR-MATERIALIZATION-001"
-                    }
-                    crate::core::mir::CanonicalMirRouteFailureStage::Coverage => "MIR-COVERAGE-001",
-                },
-                crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
-                    ..
-                } => {
-                    unreachable!("compatibility errors are returned above")
-                }
-            };
+            let code = error
+                .diagnostic_code()
+                .expect("complete route materialization errors carry a diagnostic code");
             return Err(format!("{code}: {error}"));
         }
     };
     if !island.is_materialized(&route) {
         return Err(format!(
-            "MIR-COVERAGE-001: {} admission did not materialize its canonical operation",
+            "{}: {} admission did not materialize its canonical operation",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
             island.as_str()
         ));
     }
