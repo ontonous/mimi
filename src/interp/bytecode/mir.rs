@@ -193,6 +193,7 @@ fn compile_mir_program_inner(
         extern_names: Vec::new(),
         canonical_ffi,
         canonical_ffi_bindings,
+        canonical_ffi_route_receipt: route_receipt.cloned(),
         actor_defs: std::collections::HashMap::new(),
         flow_defs: std::collections::HashMap::new(),
         flow_transition_funcs: std::collections::HashMap::new(),
@@ -12307,12 +12308,35 @@ mod tests {
             .canonical_ffi_bindings
             .iter()
             .all(|binding| { binding.route_receipt.as_ref() == Some(&receipt) }));
+        assert_eq!(
+            bytecode.canonical_ffi_route_receipt.as_ref(),
+            Some(&receipt)
+        );
 
         // A mixed binding snapshot must stop at the VM boundary before the
         // duplicate call-site check or any dynamic library load. This models
         // a consumer that combines two independently admitted route views.
         let mut drifted = receipt.clone();
         drifted.profile = "r6-905-bytecode-route-drift".into();
+        let mut uniform_bindings = bytecode.canonical_ffi_bindings.clone();
+        for binding in &mut uniform_bindings {
+            binding.route_receipt = Some(drifted.clone());
+        }
+        let mut uniform_vm = BytecodeVM::new(bytecode.clone());
+        uniform_vm.replace_canonical_ffi_tables_for_test_only(
+            bytecode.canonical_ffi.clone(),
+            uniform_bindings,
+        );
+        let anchor_error = uniform_vm
+            .run_value()
+            .expect_err("uniform forged route receipt must fail closed");
+        assert!(
+            anchor_error
+                .to_string()
+                .contains("disagrees with program anchor"),
+            "{anchor_error}"
+        );
+
         let mut forged_bindings = bytecode.canonical_ffi_bindings.clone();
         let mut forged = forged_bindings[0].clone();
         forged.route_receipt = Some(drifted);

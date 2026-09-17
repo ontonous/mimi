@@ -1906,6 +1906,11 @@ pub struct BytecodeProgram {
     /// boundary so public bytecode fields cannot swap a call's descriptor and
     /// instruction identity together without being detected.
     pub(crate) canonical_ffi_bindings: Vec<CanonicalFfiBinding>,
+    /// Route receipt anchor for canonical MIR bytecode. Compatibility
+    /// bytecode leaves this unset; receipt-bound consumers copy the checked
+    /// admission snapshot here so VM children and re-entry share one source
+    /// of truth.
+    pub(crate) canonical_ffi_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
     /// Actor definitions (for spawn at runtime).
     pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
     /// Flow definitions (for transition dispatch).

@@ -1009,13 +1009,19 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
+            "bytecode_route_receipt_binding=canonical_ffi_route_receipt: route_receipt.cloned()"
+        ),
+        "legacy owner audit must pin the program-level route receipt anchor"
+    );
+    assert!(
+        stdout.contains(
             "bytecode_route_receipt_binding=binding.route_receipt = Some(receipt.clone())"
         ),
         "legacy owner audit must pin receipt propagation into every FFI binding"
     );
     assert!(
         stdout.contains(
-            "bytecode_route_receipt_vm_guard=identity-consistency+manifest-replay consumer=src/interp/bytecode/vm.rs"
+            "bytecode_route_receipt_vm_guard=program-anchor+identity-consistency+manifest-replay consumer=src/interp/bytecode/vm.rs"
         ),
         "legacy owner audit must pin the VM boundary receipt guard"
     );

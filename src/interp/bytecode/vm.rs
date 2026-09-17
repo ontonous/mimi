@@ -439,6 +439,32 @@ impl BytecodeVM {
                 "canonical FFI binding manifest mixes route receipt identities",
             ));
         }
+        // Keep an independent program-level anchor as the source of truth.
+        // Checking only the binding vector would let a caller replace every
+        // binding with the same, otherwise well-formed receipt from another
+        // MIR graph.  The anchor is copied from the receipt-bound compiler
+        // entry and is shared by every child VM through the Arc program.
+        match (
+            self.program.canonical_ffi_route_receipt.as_ref(),
+            route_receipt,
+        ) {
+            (Some(_), None) => {
+                return Err(InterpError::new(
+                    "canonical FFI program route receipt is missing from binding manifest",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(InterpError::new(
+                    "canonical FFI binding route receipt has no program anchor",
+                ));
+            }
+            (Some(expected), Some(actual)) if expected != actual => {
+                return Err(InterpError::new(
+                    "canonical FFI binding route receipt disagrees with program anchor",
+                ));
+            }
+            (None, None) | (Some(_), Some(_)) => {}
+        }
         if let Some(receipt) = route_receipt {
             let manifest = receipt.manifest_text().map_err(|message| {
                 InterpError::new(format!(

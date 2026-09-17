@@ -997,6 +997,7 @@ mod tests {
                     extern_names: Vec::new(),
                     canonical_ffi: Vec::new(),
                     canonical_ffi_bindings: Vec::new(),
+                    canonical_ffi_route_receipt: None,
                     functions: Vec::new(),
                     entry: 0,
                     builtin_names: vec![],

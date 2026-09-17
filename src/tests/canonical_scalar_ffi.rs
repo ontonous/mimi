@@ -25369,6 +25369,11 @@ func main() -> i64 { 0 }
     program.entry = main as u32;
     let descriptor_snapshot = program.canonical_ffi.clone();
     let binding_snapshot = program.canonical_ffi_bindings.clone();
+    assert_eq!(
+        program.canonical_ffi_route_receipt.as_ref(),
+        Some(&receipt),
+        "child VM program must retain the admitted route receipt anchor"
+    );
     let program = std::sync::Arc::new(program.clone());
 
     let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -25400,6 +25405,10 @@ func main() -> i64 { 0 }
     assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(
+        vm_a.program().canonical_ffi_route_receipt.as_ref(),
+        Some(&receipt)
+    );
 
     let stdout_b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut vm_b = BytecodeVM::new(program.clone());
@@ -25416,6 +25425,10 @@ func main() -> i64 { 0 }
     assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
+    assert_eq!(
+        vm_b.program().canonical_ffi_route_receipt.as_ref(),
+        Some(&receipt)
+    );
 
     vm_b.set_verify_ffi(false);
     assert_eq!(

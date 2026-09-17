@@ -351,6 +351,11 @@ bytecode_route_receipt_binding \
     src/interp/bytecode/mir.rs \
     'fn compile_mir_program_inner(' \
     'fn materialize_canonical_ffi_bindings(' \
+    'canonical_ffi_route_receipt: route_receipt.cloned()'
+bytecode_route_receipt_binding \
+    src/interp/bytecode/mir.rs \
+    'fn compile_mir_program_inner(' \
+    'fn materialize_canonical_ffi_bindings(' \
     'binding.route_receipt = Some(receipt.clone())'
 
 bytecode_route_receipt_vm_guard() {
@@ -359,6 +364,7 @@ bytecode_route_receipt_vm_guard() {
     source="$(cat "$ROOT_DIR/$source_file")"
     for pattern in \
         'canonical FFI binding manifest mixes route receipt identities' \
+        'canonical FFI binding route receipt disagrees with program anchor' \
         'canonical FFI route receipt cannot be replayed at VM boundary'; do
         if ! printf '%s\n' "$source" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=bytecode_route_receipt_vm_guard_missing=%s pattern=%s\n' \
@@ -367,7 +373,7 @@ bytecode_route_receipt_vm_guard() {
             return
         fi
     done
-    printf 'bytecode_route_receipt_vm_guard=identity-consistency+manifest-replay consumer=%s\n' \
+    printf 'bytecode_route_receipt_vm_guard=program-anchor+identity-consistency+manifest-replay consumer=%s\n' \
         "$source_file"
 }
 
