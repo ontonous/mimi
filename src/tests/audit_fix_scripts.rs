@@ -298,6 +298,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "consumer_receipt_profile_binding=verify-ffi-v1 profile=CanonicalMirRouteProfile::ScalarFfi consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "source_hash_entry_binding=blake3-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_source(",
         "source_hash_parameter_binding=declared-and-forwarded consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
+        "mir_verifier_source_provenance_binding=single-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
         "owner_count=4",
         "audit_status=ok",
     ] {
@@ -529,6 +530,33 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
             .contains("owner_audit_error=source_hash_parameter_missing="),
         "source hash parameter drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&source_hash_parameter_output.stderr)
+    );
+    let tampered_mir_provenance_script = source_script.replacen(
+        "    'validate_mir_result_provenance(&results, &receipt, &source_hash, \"verify_ffi_mir\")?'\n",
+        "    'missing_mir_result_provenance(&results, &receipt, &source_hash, \"verify_ffi_mir\")?'\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_mir_provenance_script,
+        "MIR provenance fixture must replace the expected artifact validation"
+    );
+    std::fs::write(&script_path, tampered_mir_provenance_script)
+        .expect("write tampered MIR provenance audit script");
+    let mir_provenance_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered MIR provenance audit");
+    assert!(
+        !mir_provenance_output.status.success(),
+        "tampered MIR provenance validation must fail closed:\n{}",
+        String::from_utf8_lossy(&mir_provenance_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&mir_provenance_output.stderr)
+            .contains("owner_audit_error=mir_verifier_source_provenance_missing="),
+        "MIR provenance drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&mir_provenance_output.stderr)
     );
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);

@@ -390,6 +390,41 @@ source_hash_parameter_binding \
     'source_hash: String' \
     'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)'
 
+# Keep the FFI MIR adapter's proof artifacts sourced from the same hash passed
+# into the MIR verifier.  The route-level check above proves the caller passes
+# a hash; this check proves the adapter clones it into MIR verification and
+# validates every returned artifact against that same value.
+mir_verifier_source_provenance_binding() {
+    local source_file="$1"
+    local start_function="$2"
+    local end_function="$3"
+    local execution_pattern="$4"
+    local validation_pattern="$5"
+    local context
+    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    if ! printf '%s\n' "$context" | rg -F "$execution_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_verifier_source_provenance_missing=%s::%s phase=mir-call\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$context" | rg -F "$validation_pattern" >/dev/null; then
+        printf 'owner_audit_error=mir_verifier_source_provenance_missing=%s::%s phase=artifact-validation\n' \
+            "$source_file" "$start_function" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'mir_verifier_source_provenance_binding=single-source-hash consumer=%s::%s\n' \
+        "$source_file" "$start_function"
+}
+
+mir_verifier_source_provenance_binding \
+    src/verifier/mod.rs \
+    'pub fn verify_ffi_mir_with_source_hash(' \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'let results = mir::verify_ffi_program(program, source_hash.clone())?' \
+    'validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_ffi_mir")?'
+
 if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers\(' \
     "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs"; then
     printf 'owner_audit_error=missing_closed_scalar_zero_owner_evidence\n' >&2
