@@ -173,6 +173,58 @@ func main() -> i64 {
     mir_ffi_f32_literal(value)
 }
 "#;
+const F32_NARROW_C_SOURCE: &str = r#"
+#include <stdint.h>
+
+int64_t mir_ffi_f32_rounding(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x3f800001u ? 1 : -1;
+}
+
+int64_t mir_ffi_f32_integer_boundary(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x4b800000u ? 1 : -1;
+}
+
+int64_t mir_ffi_f32_underflow(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x00000000u ? 1 : -1;
+}
+
+int64_t mir_ffi_f32_negative_underflow(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x80000000u ? 1 : -1;
+}
+
+int64_t mir_ffi_f32_overflow(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x7f800000u ? 1 : -1;
+}
+
+int64_t mir_ffi_f32_negative_overflow(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0xff800000u ? 1 : -1;
+}
+"#;
+const F32_NARROW_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f32_rounding(x: f32) -> i64;
+    func mir_ffi_f32_integer_boundary(x: f32) -> i64;
+    func mir_ffi_f32_underflow(x: f32) -> i64;
+    func mir_ffi_f32_negative_underflow(x: f32) -> i64;
+    func mir_ffi_f32_overflow(x: f32) -> i64;
+    func mir_ffi_f32_negative_overflow(x: f32) -> i64;
+}
+func main() -> i64 {
+    println(mir_ffi_f32_rounding(1.0000001 as f32))
+    println(mir_ffi_f32_integer_boundary(16777217.0 as f32))
+    println(mir_ffi_f32_underflow(1e-50 as f32))
+    println(mir_ffi_f32_negative_underflow((-1e-50) as f32))
+    println(mir_ffi_f32_overflow(3.4028236e38 as f32))
+    println(mir_ffi_f32_negative_overflow((-3.4028236e38) as f32))
+    0
+}
+"#;
 const RESULT_CONVERSION_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 double mir_ffi_result_f64(int64_t x) { return x == 7 ? 42.75 : -1.0; }
@@ -1340,6 +1392,116 @@ fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
     .expect("native direct f32 literal FFI execution");
     assert_eq!(native.exit_code, Some(42));
     assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_f32_narrowing_values_match_three_consumers() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_NARROW_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let tokens = crate::lexer::Lexer::new(F32_NARROW_SOURCE)
+        .tokenize()
+        .expect("lex f64-to-f32 narrowing FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse f64-to-f32 narrowing FFI fixture");
+    let checked =
+        crate::core::check_program(&file).expect("check f64-to-f32 narrowing FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize f64-to-f32 narrowing FFI MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    assert_eq!(mir.ffi_calls().len(), 6);
+    let narrowing_conversions = mir
+        .functions()
+        .get(&owner)
+        .expect("f64-to-f32 narrowing main MIR")
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Convert { .. }
+            )
+        })
+        .count();
+    assert_eq!(narrowing_conversions, 6);
+
+    struct F32NarrowingOracle;
+    impl MirReferenceFfiResolver for F32NarrowingOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let expected_bits = match receipt.symbol.as_str() {
+                "mir_ffi_f32_rounding" => 0x3f800001,
+                "mir_ffi_f32_integer_boundary" => 0x4b800000,
+                "mir_ffi_f32_underflow" => 0x00000000,
+                "mir_ffi_f32_negative_underflow" => 0x80000000,
+                "mir_ffi_f32_overflow" => 0x7f800000,
+                "mir_ffi_f32_negative_overflow" => 0xff800000,
+                symbol => return Err(format!("unexpected f64-to-f32 narrowing symbol: {symbol}")),
+            };
+            let [MirRuntimeValue::FloatBits(bits)] = arguments else {
+                return Err(format!(
+                    "unexpected f64-to-f32 narrowing arguments for {}: {:?}",
+                    receipt.symbol, arguments
+                ));
+            };
+            let actual_bits = (f64::from_bits(*bits) as f32).to_bits();
+            if actual_bits == expected_bits {
+                Ok(MirRuntimeValue::Int(1))
+            } else {
+                Err(format!(
+                    "f64-to-f32 narrowing mismatch for {}: got {actual_bits:#010x}, expected {expected_bits:#010x}",
+                    receipt.symbol
+                ))
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&F32NarrowingOracle)
+        .execute_with_output(&owner, &[])
+        .expect("reference f64-to-f32 narrowing FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "1\n1\n1\n1\n1\n1\n");
+
+    let bytecode = compile_mir_program(&mir).expect("f64-to-f32 narrowing bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode f64-to-f32 narrowing"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n1\n1\n1\n1\n1\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_narrowing");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native f64-to-f32 narrowing FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native f64-to-f32 narrowing FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_NARROW_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native f64-to-f32 narrowing FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "1\n1\n1\n1\n1\n1\n");
     assert_eq!(native.stderr, "");
 }
 
