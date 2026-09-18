@@ -3574,6 +3574,92 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_imported_module_test_executes_external_call() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_imported_test_exec_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f32 test execution directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nstatic int calls;\nfloat imported_f32(float value) { calls += 1; return value + 1.0f; }\nint imported_f32_seen(void) { return calls; }\n",
+    )
+    .expect("write imported f32 test execution C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported f32 test execution C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f32
+pub extern "C" {
+    func imported_f32(value: Scalar) -> Scalar;
+    func imported_f32_seen() -> i32;
+}
+pub func call(value: Scalar) -> Scalar { imported_f32(value) }
+pub func seen() -> i32 { imported_f32_seen() }
+"#,
+    )
+    .expect("write imported f32 test execution module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func test_boundary() -> bool { call(7.5 as Scalar); seen() == 1 }
+func main() -> i64 {
+    call(7.5 as Scalar);
+    0
+}
+"#,
+    )
+    .expect("write imported f32 test execution entry");
+
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["test"])
+        .arg(&source)
+        .env("MIMI_FFI_LIB", &library)
+        .output()
+        .expect("spawn imported f32 test execution route");
+    assert!(
+        output.status.success(),
+        "imported f32 test execution failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Running 1 test(s)..."));
+    assert!(stdout.contains("✓ test_boundary"));
+    assert!(stdout.contains("1 passed, 0 failed"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("canonical route disposition: legacy"));
+    assert!(!stderr.contains("failed to find canonical MIR FFI symbol"));
+    assert!(!stderr.contains("canonical scalar FFI declaration boundary"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
