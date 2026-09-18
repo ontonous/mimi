@@ -1029,6 +1029,17 @@ mod tests {
         let _ = std::fs::remove_file(bad_path);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonical_candidate_probe_skips_loaded_library_without_symbol() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let selected = runtime
+            .select_library_for_symbol(vec!["libc.so.6".into(), "libm.so.6".into()], false, "cos")
+            .expect("the loader must continue to libm after libc misses the symbol");
+        assert_eq!(runtime.loaded_libs[selected].0, "libm.so.6");
+        assert_eq!(runtime.loaded_libs.len(), 2);
+    }
+
     #[test]
     fn canonical_candidate_probe_reports_all_load_failures() {
         let mut runtime = CanonicalMirFfiRuntime::new();
