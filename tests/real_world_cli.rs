@@ -3887,6 +3887,146 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_imported_module_preserves_special_values() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_special_values_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f32 special-value directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        r#"
+#include <stdint.h>
+
+float imported_f32_nan(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x7fc00000u };
+    return payload.value;
+}
+
+int64_t imported_f32_is_nan(float value) {
+    return value != value ? 42 : -1;
+}
+
+float imported_f32_negative_zero(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x80000000u };
+    return payload.value;
+}
+
+int64_t imported_f32_is_negative_zero(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x80000000u ? 43 : -2;
+}
+"#,
+    )
+    .expect("write imported f32 special-value C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported f32 special-value C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f32
+pub extern "C" {
+    func imported_f32_nan() -> Scalar;
+    func imported_f32_is_nan(value: Scalar) -> i64;
+    func imported_f32_negative_zero() -> Scalar;
+    func imported_f32_is_negative_zero(value: Scalar) -> i64;
+}
+pub func nan() -> Scalar { imported_f32_nan() }
+pub func check_nan(value: Scalar) -> i64 { imported_f32_is_nan(value) }
+pub func negative_zero() -> Scalar { imported_f32_negative_zero() }
+pub func check_negative_zero(value: Scalar) -> i64 { imported_f32_is_negative_zero(value) }
+"#,
+    )
+    .expect("write imported f32 special-value module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(check_nan(nan()))
+    println(check_negative_zero(negative_zero()))
+    0
+}
+"#,
+    )
+    .expect("write imported f32 special-value entry");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("imported f32 special values run {explicit_mir}: {error}")
+            });
+        assert!(
+            run.status.success(),
+            "imported f32 special values run {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"42\n43\n");
+        assert!(run.stderr.is_empty());
+        assert!(
+            !String::from_utf8_lossy(&run.stderr).contains("canonical route disposition: legacy")
+        );
+
+        let mut build_ir = Command::new(mimi_bin());
+        build_ir.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build_ir.arg("--mir");
+        }
+        let build_ir = build_ir
+            .args(["--emit-ir"])
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("imported f32 special values IR {explicit_mir}: {error}")
+            });
+        assert!(
+            build_ir.status.success(),
+            "imported f32 special values IR {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build_ir.stdout),
+            String::from_utf8_lossy(&build_ir.stderr)
+        );
+        let ir = String::from_utf8_lossy(&build_ir.stdout);
+        assert!(ir.contains("imported_f32_nan"));
+        assert!(ir.contains("imported_f32_negative_zero"));
+        assert!(ir.contains("float"));
+        assert!(build_ir.stderr.is_empty());
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
