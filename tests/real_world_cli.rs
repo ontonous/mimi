@@ -4278,6 +4278,48 @@ func main() -> i64 {
         !String::from_utf8_lossy(&receipt.stderr).contains("canonical route disposition: legacy")
     );
 
+    let build_ir_runs = [
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["build", "--emit-ir"])
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported f32 auxiliary default IR build"),
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["build", "--mir", "--emit-ir"])
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .expect("spawn imported f32 auxiliary explicit MIR IR build"),
+    ];
+    assert_eq!(
+        build_ir_runs[0].stdout, build_ir_runs[1].stdout,
+        "imported f32 no-contract IR must match between default and explicit MIR routes"
+    );
+    assert_eq!(
+        build_ir_runs[0].stderr, build_ir_runs[1].stderr,
+        "imported f32 no-contract IR diagnostics must match between routes"
+    );
+    for build_ir in &build_ir_runs {
+        assert!(
+            build_ir.status.success(),
+            "imported f32 no-contract IR build failed:\n{}\n{}",
+            String::from_utf8_lossy(&build_ir.stdout),
+            String::from_utf8_lossy(&build_ir.stderr)
+        );
+        let ir = String::from_utf8_lossy(&build_ir.stdout);
+        assert!(ir.contains("imported_f32"), "{ir}");
+        assert!(ir.contains("float"), "{ir}");
+        let stderr = String::from_utf8_lossy(&build_ir.stderr);
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("flow_ast"), "{stderr}");
+    }
+
     fs::remove_dir_all(dir).ok();
 }
 
