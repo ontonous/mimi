@@ -3705,6 +3705,127 @@ func main() -> i64 {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_f64_imported_libm_fallback_matches_explicit_mir_and_native() {
+    let libm_available = [
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib64/libm.so.6",
+        "/usr/lib/libm.so.6",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file());
+    if !libm_available {
+        eprintln!("SKIP: libm.so.6 not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_imported_f64_libm_fallback_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 libm fallback directory");
+    fs::write(
+        dir.join("libm_float.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func ldexp(value: Scalar, exponent: i32) -> Scalar;
+    func llrint(value: Scalar) -> i64;
+}
+pub func imported_value(value: Scalar) -> i64 { llrint(ldexp(value, 3)) }
+"#,
+    )
+    .expect("write imported f64 libm fallback module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use libm_float
+func main() -> i64 {
+    println(imported_value(1.5 as f64));
+    0
+}
+"#,
+    )
+    .expect("write imported f64 libm fallback entry");
+
+    let mut run_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 libm fallback {explicit_mir}: {error}"));
+        assert!(
+            output.status.success(),
+            "imported f64 libm fallback {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"12\n");
+        assert!(output.stderr.is_empty());
+        run_outputs.push(output);
+    }
+    assert_eq!(run_outputs[0].stdout, run_outputs[1].stdout);
+    assert_eq!(run_outputs[0].stderr, run_outputs[1].stderr);
+
+    let mut native_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "imported-f64-mir"
+        } else {
+            "imported-f64-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("imported f64 libm fallback native build {explicit_mir}: {error}")
+            });
+        assert!(
+            build.status.success(),
+            "imported f64 libm fallback native build {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(!build_stderr.contains("canonical route disposition: legacy"));
+        assert!(!build_stderr.contains("flow_ast"));
+        let native = Command::new(&binary).output().unwrap_or_else(|error| {
+            panic!("run imported f64 libm fallback native {explicit_mir}: {error}")
+        });
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"12\n");
+        assert!(native.stderr.is_empty());
+        native_outputs.push(native);
+    }
+    assert_eq!(native_outputs[0].stdout, native_outputs[1].stdout);
+    assert_eq!(native_outputs[0].stderr, native_outputs[1].stderr);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f64_imported_module_mixed_integer_abi_matches_cli_consumers() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
