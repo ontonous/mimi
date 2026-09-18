@@ -4129,7 +4129,7 @@ fn canonical_scalar_ffi_f32_imported_libm_mixed_integer_abi_matches_native() {
     .iter()
     .map(Path::new)
     .find(|path| path.is_file());
-    let Some(libm) = libm else {
+    let Some(_libm) = libm else {
         eprintln!("SKIP: libm.so.6 not found");
         return;
     };
@@ -4180,7 +4180,7 @@ func main() -> i64 {
         let run = run
             .arg(&source)
             .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", libm)
+            .env_remove("MIMI_FFI_LIB")
             .output()
             .unwrap_or_else(|error| panic!("imported libm mixed f32 run {explicit_mir}: {error}"));
         assert!(
@@ -4222,7 +4222,7 @@ func main() -> i64 {
             .args(["--emit-ir"])
             .arg(&source)
             .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", libm)
+            .env_remove("MIMI_FFI_LIB")
             .output()
             .unwrap_or_else(|error| panic!("imported libm mixed f32 IR {explicit_mir}: {error}"));
         assert!(
