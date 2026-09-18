@@ -1781,6 +1781,98 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_contract_boundary_rejects_all_cli_routes_without_legacy() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_contract_boundary_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create f64 contract boundary directory");
+    let source = dir.join("f64-contract.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func mir_ffi_f64_contract(value: f64) -> f64 requires: value > 0.0;
+}
+func main() -> i64 {
+    mir_ffi_f64_contract(7.5);
+    0
+}
+"#,
+    )
+    .expect("write f64 contract boundary source");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run.arg(&source).output().expect("spawn f64 boundary run");
+        assert!(
+            !run.status.success(),
+            "f64 FFI contract must be rejected by run route (explicit_mir={explicit_mir})"
+        );
+        assert!(run.stdout.is_empty());
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            run_stderr.contains("extern contract expression is outside scalar MIR"),
+            "run route lost the explicit f64 contract boundary: {run_stderr}"
+        );
+        assert!(!run_stderr.contains("canonical route disposition: legacy"));
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg("--emit-ir")
+            .arg(&source)
+            .output()
+            .expect("spawn f64 boundary build");
+        assert!(
+            !build.status.success(),
+            "f64 FFI contract must be rejected by build route (explicit_mir={explicit_mir})"
+        );
+        assert!(build.stdout.is_empty());
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build_stderr.contains("extern contract expression is outside scalar MIR"),
+            "build route lost the explicit f64 contract boundary: {build_stderr}"
+        );
+        assert!(!build_stderr.contains("canonical route disposition: legacy"));
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .output()
+            .expect("spawn f64 boundary verify");
+        assert!(
+            !verify.status.success(),
+            "f64 FFI contract must be rejected by verify route (explicit_mir={explicit_mir})"
+        );
+        assert!(verify.stdout.is_empty());
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            verify_stderr.contains("extern contract expression is outside scalar MIR"),
+            "verify route lost the explicit f64 contract boundary: {verify_stderr}"
+        );
+        assert!(!verify_stderr.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
