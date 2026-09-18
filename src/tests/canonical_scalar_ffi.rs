@@ -847,6 +847,72 @@ fn scalar_ffi_f32_reference_rejects_noncanonical_host_result() {
 }
 
 #[test]
+fn scalar_ffi_f32_forged_result_conversion_rejects_all_consumers() {
+    let tokens = crate::lexer::Lexer::new(F32_CHAIN_SOURCE)
+        .tokenize()
+        .expect("lex forged f32 result conversion fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse forged f32 result conversion fixture");
+    let checked = crate::core::check_program(&file).expect("check forged f32 result conversion");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize forged f32 result conversion MIR");
+    let (instruction, _) = mir
+        .ffi_calls()
+        .iter()
+        .find(|(_, receipt)| receipt.symbol == "mir_ffi_f32_seed")
+        .expect("f32 seed receipt");
+
+    let mut forged_receipts = mir.ffi_calls().clone();
+    forged_receipts
+        .get_mut(instruction)
+        .expect("f32 seed receipt for conversion forgery")
+        .result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Float { bits: 32 },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+    });
+    let mut forged = mir.clone();
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject forged f32 result conversion");
+    assert!(
+        reference_error.to_string().contains("conversion")
+            || reference_error.to_string().contains("ABI"),
+        "{reference_error}"
+    );
+
+    let bytecode_error = compile_mir_program(&forged)
+        .expect_err("bytecode must reject forged f32 result conversion");
+    assert!(bytecode_error.iter().any(|error| {
+        error.message.contains("conversion") || error.message.contains("identity/ABI")
+    }));
+
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native validator must reject forged f32 result conversion");
+    assert!(native_error
+        .iter()
+        .any(|error| error.message.contains("conversion")));
+
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject forged f32 result conversion");
+    assert!(capability_error
+        .iter()
+        .any(|error| error.contains("conversion")));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verifier_error =
+        crate::verifier::verify_mir(&forged, "forged-f32-result-conversion".into())
+            .expect_err("verifier must reject forged f32 result conversion");
+    assert!(verifier_error.contains("conversion"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
