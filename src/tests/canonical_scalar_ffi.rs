@@ -22680,6 +22680,7 @@ func main() -> i64 { matrix_guard(1 as i64) }
         Result,
         ResultConversion,
         Requires,
+        Ensures,
     }
 
     const CASES: &[(Forgery, &str)] = &[
@@ -22694,6 +22695,7 @@ func main() -> i64 { matrix_guard(1 as i64) }
         (Forgery::Result, "result"),
         (Forgery::ResultConversion, "result-conversion"),
         (Forgery::Requires, "requires"),
+        (Forgery::Ensures, "ensures"),
     ];
 
     fn apply_forgery(
@@ -22723,6 +22725,12 @@ func main() -> i64 { matrix_guard(1 as i64) }
                 receipt.requires = Some(crate::core::mir::MirContractExpr::Value(
                     crate::core::mir::MirValueId::new("value:forged-requires")
                         .expect("forged predicate value id"),
+                ));
+            }
+            Forgery::Ensures => {
+                receipt.ensures = Some(crate::core::mir::MirContractExpr::Value(
+                    crate::core::mir::MirValueId::new("value:forged-ensures")
+                        .expect("forged postcondition value id"),
                 ));
             }
         }
