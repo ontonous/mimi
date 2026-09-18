@@ -645,6 +645,60 @@ fn scalar_ffi_f32_reference_bytecode_native_chain_matches() {
 }
 
 #[test]
+fn scalar_ffi_f32_reference_rejects_noncanonical_host_result() {
+    let tokens = crate::lexer::Lexer::new(F32_CHAIN_SOURCE)
+        .tokenize()
+        .expect("lex noncanonical f32 result fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse noncanonical f32 result fixture");
+    let checked = crate::core::check_program(&file).expect("check noncanonical f32 result");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize noncanonical f32 result MIR");
+
+    struct NonCanonicalF32Oracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for NonCanonicalF32Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let ordinal = self.calls.get();
+            self.calls.set(ordinal + 1);
+            if ordinal == 0
+                && receipt.symbol == "mir_ffi_f32_seed"
+                && matches!(arguments, [MirRuntimeValue::FloatBits(bits)] if f64::from_bits(*bits) == 1.5)
+            {
+                // This is a valid f64 value but cannot be the widened result
+                // of a C `float` return.  The reference consumer must reject
+                // it before the second host binding is observable.
+                return Ok(MirRuntimeValue::FloatBits(1.751_f64.to_bits()));
+            }
+            Err(format!(
+                "unexpected noncanonical f32 call #{}: {} {:?}",
+                ordinal, receipt.symbol, arguments
+            ))
+        }
+    }
+
+    let oracle = NonCanonicalF32Oracle {
+        calls: Cell::new(0),
+    };
+    let error = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a noncanonical f32 host result");
+    assert!(error.message.contains("FFI result does not match"));
+    assert_eq!(
+        oracle.calls.get(),
+        1,
+        "second host binding must stay unreachable"
+    );
+}
+
+#[test]
 fn scalar_ffi_result_conversion_matches_three_consumers() {
     use crate::core::mir::types::MirAbiClass;
 

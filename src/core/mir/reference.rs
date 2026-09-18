@@ -5248,9 +5248,18 @@ impl<'a> MirReferenceInterpreter<'a> {
         let valid = match (kind, actual) {
             (Some(MirFfiScalarKind::I32), MirRuntimeValue::Int(n)) => i32::try_from(*n).is_ok(),
             (Some(MirFfiScalarKind::I64), MirRuntimeValue::Int(_))
-            | (Some(MirFfiScalarKind::Bool), MirRuntimeValue::Bool(_))
-            | (Some(MirFfiScalarKind::F32), MirRuntimeValue::FloatBits(_))
-            | (Some(MirFfiScalarKind::F64), MirRuntimeValue::FloatBits(_))
+            | (Some(MirFfiScalarKind::Bool), MirRuntimeValue::Bool(_)) => true,
+            (Some(MirFfiScalarKind::F32), MirRuntimeValue::FloatBits(bits)) => {
+                let value = f64::from_bits(*bits);
+                let widened = (value as f32) as f64;
+                // `FloatBits` is the reference executor's shared f64 storage,
+                // but a declared f32 endpoint must still carry the value a C
+                // float ABI would produce.  Preserve signed zero/infinities;
+                // NaN payloads are intentionally not part of the scalar
+                // contract, so any NaN remains a valid f32 result.
+                (value.is_nan() && widened.is_nan()) || widened.to_bits() == *bits
+            }
+            (Some(MirFfiScalarKind::F64), MirRuntimeValue::FloatBits(_))
             | (Some(MirFfiScalarKind::Unit), MirRuntimeValue::Unit) => true,
             (None, MirRuntimeValue::Unit) => expected_type.is_none(),
             _ => false,
