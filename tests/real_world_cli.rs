@@ -2336,6 +2336,98 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_imported_module_run_preserves_return_and_order() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_imported_run_return_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 run return directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nstatic int calls;\ndouble imported_f64(double value) { calls += 1; return value < 0.0 ? -value : value; }\nint64_t imported_f64_check(double value) { calls += 1; return value == 7.5 ? 42 : -1; }\nint imported_f64_seen(void) { return calls; }\n",
+    )
+    .expect("write imported f64 run return C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported f64 run return C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func imported_f64(value: Scalar) -> Scalar;
+    func imported_f64_check(value: Scalar) -> i64;
+    func imported_f64_seen() -> i32;
+}
+pub func call(value: Scalar) -> Scalar { imported_f64(value) }
+pub func check(value: Scalar) -> i64 { imported_f64_check(value) }
+pub func seen() -> i32 { imported_f64_seen() }
+"#,
+    )
+    .expect("write imported f64 run return module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(check(call(-7.5)))
+    println(seen())
+    0
+}
+"#,
+    )
+    .expect("write imported f64 run return entry");
+
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 run {explicit_mir}: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "imported f64 run {explicit_mir} failed:\n{stdout}\n{stderr}"
+        );
+        assert_eq!(stdout, "42\n2\n", "imported f64 run {explicit_mir}");
+        assert!(
+            stderr.is_empty(),
+            "imported f64 run {explicit_mir} emitted diagnostics: {stderr}"
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!stderr.contains("failed to find canonical MIR FFI symbol"));
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
