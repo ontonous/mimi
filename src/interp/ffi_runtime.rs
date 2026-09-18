@@ -1364,6 +1364,29 @@ mod tests {
         let _ = std::fs::remove_file(bad_path);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compatibility_candidate_probe_prefers_symbol_diagnostic_over_later_load_failure() {
+        let mut runtime = FfiRuntime::from_parts(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let error = runtime
+            .select_library_for_symbol(
+                vec![
+                    "libc.so.6".into(),
+                    "/definitely/missing/mimi-ffi-library.so".into(),
+                ],
+                false,
+                "cos",
+            )
+            .expect_err("a symbol miss must remain the primary diagnostic");
+        let text = error.to_string();
+        assert!(text.contains("failed to find symbol 'cos'"), "{text}");
+        assert_eq!(runtime.loaded_libs.len(), 1);
+    }
+
     #[test]
     fn compatibility_candidate_probe_reports_all_load_failures() {
         let mut runtime = FfiRuntime::from_parts(

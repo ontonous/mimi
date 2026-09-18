@@ -1040,6 +1040,27 @@ mod tests {
         assert_eq!(runtime.loaded_libs.len(), 2);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonical_candidate_probe_prefers_symbol_diagnostic_over_later_load_failure() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let error = runtime
+            .select_library_for_symbol(
+                vec![
+                    "libc.so.6".into(),
+                    "/definitely/missing/mimi-canonical-ffi-library.so".into(),
+                ],
+                false,
+                "cos",
+            )
+            .expect_err("a symbol miss must remain the primary diagnostic");
+        assert!(
+            error.contains("failed to find canonical MIR FFI symbol 'cos'"),
+            "{error}"
+        );
+        assert_eq!(runtime.loaded_libs.len(), 1);
+    }
+
     #[test]
     fn canonical_candidate_probe_reports_all_load_failures() {
         let mut runtime = CanonicalMirFfiRuntime::new();
