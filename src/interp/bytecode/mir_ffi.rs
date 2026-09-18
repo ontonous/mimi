@@ -88,12 +88,12 @@ fn default_system_library_candidates() -> Vec<&'static str> {
 
 fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
     let path = std::path::Path::new(candidate);
-    if path.exists() {
-        return true;
+    if path.is_absolute() {
+        return path.exists();
     }
     #[cfg(target_os = "linux")]
     {
-        return !path.is_absolute() && matches!(candidate, "libc.so.6" | "libm.so.6");
+        return matches!(candidate, "libc.so.6" | "libm.so.6");
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -823,6 +823,14 @@ mod tests {
         assert!(is_discoverable_system_library_candidate("libc.so.6"));
         assert!(is_discoverable_system_library_candidate("libm.so.6"));
         assert!(!is_discoverable_system_library_candidate("missing.so"));
+        assert!(
+            !is_discoverable_system_library_candidate("."),
+            "an existing relative directory must not become a system-library candidate"
+        );
+        assert!(
+            !is_discoverable_system_library_candidate("./libc.so.6"),
+            "relative paths must not bypass the soname allowlist"
+        );
     }
 
     #[test]
