@@ -1170,12 +1170,24 @@ func main() -> i64 {
     let missing_fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
     let good_fixture = library_fixture(counter + 1, F32_CHAIN_C_SOURCE);
     let missing_path = missing_fixture.dir.join("ffi.so");
+    let missing_library_path = missing_fixture.dir.join("missing.so");
     let good_path = good_fixture.dir.join("ffi.so");
     let mut guard = super::FfiEnvGuard::lock();
     guard.set_path(&missing_path);
 
     let bytecode = compile_mir_program(&mir).expect("f32 host-failure AST-free bytecode");
     assert!(bytecode.ast.is_none());
+    let mut missing_library_vm = BytecodeVM::new(bytecode.clone());
+    missing_library_vm
+        .set_canonical_ffi_library_path(missing_library_path.to_string_lossy().into_owned());
+    let missing_library_error = missing_library_vm
+        .run_value()
+        .expect_err("bytecode f32 call must fail when the dynamic library is absent");
+    assert_eq!(missing_library_error.code(), "E0800");
+    assert!(missing_library_error.to_string().contains("failed to load"));
+    assert_eq!(missing_library_vm.stdout(), "1\n");
+    assert_eq!(missing_library_vm.debug_stack_state(), (0, 0));
+
     let mut vm = BytecodeVM::new(bytecode);
     let missing_error = vm
         .run_value()
