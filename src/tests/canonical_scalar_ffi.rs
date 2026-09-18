@@ -44,6 +44,21 @@ const MIXED_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_expect_f64(x: f64) -> i64; }
 func main() -> i64 { mir_ffi_expect_f64(7 as i32) }
 "#;
+const F32_CHAIN_C_SOURCE: &str = r#"
+#include <stdint.h>
+float mir_ffi_f32_seed(float x) { return x + 0.25f; }
+int64_t mir_ffi_f32_check(float x) { return x == 1.75f ? 42 : -1; }
+"#;
+const F32_CHAIN_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f32_seed(x: f32) -> f32;
+    func mir_ffi_f32_check(x: f32) -> i64;
+}
+func main() -> i64 {
+    let value = mir_ffi_f32_seed(1.5 as f32)
+    mir_ffi_f32_check(value)
+}
+"#;
 const RESULT_CONVERSION_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 double mir_ffi_result_f64(int64_t x) { return x == 7 ? 42.75 : -1.0; }
@@ -530,6 +545,102 @@ fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
         .expect("native mixed-width FFI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n7\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_f32_reference_bytecode_native_chain_matches() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_CHAIN_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let tokens = crate::lexer::Lexer::new(F32_CHAIN_SOURCE)
+        .tokenize()
+        .expect("lex f32 chain FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse f32 chain FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check f32 chain FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize f32 chain MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-chain".into())
+        .expect("verify f32 chain MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    struct F32ChainOracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for F32ChainOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let ordinal = self.calls.get();
+            self.calls.set(ordinal + 1);
+            match (ordinal, receipt.symbol.as_str(), arguments) {
+                (0, "mir_ffi_f32_seed", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 1.5 =>
+                {
+                    Ok(MirRuntimeValue::FloatBits((1.75_f32 as f64).to_bits()))
+                }
+                (1, "mir_ffi_f32_check", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 1.75_f32 as f64 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err(format!(
+                    "unexpected f32 chain call #{}: {} {:?}",
+                    ordinal, receipt.symbol, arguments
+                )),
+            }
+        }
+    }
+
+    let oracle = F32ChainOracle {
+        calls: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference f32 chain FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference.output, "");
+    assert_eq!(oracle.calls.get(), 2);
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free f32 chain bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode f32 chain execution"),
+        Value::Int(42)
+    );
+    assert_eq!(vm.stdout(), "");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_chain");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native f32 chain FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native f32 chain LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_CHAIN_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native f32 chain FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
     assert_eq!(native.stderr, "");
 }
 

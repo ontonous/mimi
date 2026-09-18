@@ -5249,6 +5249,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             (Some(MirFfiScalarKind::I32), MirRuntimeValue::Int(n)) => i32::try_from(*n).is_ok(),
             (Some(MirFfiScalarKind::I64), MirRuntimeValue::Int(_))
             | (Some(MirFfiScalarKind::Bool), MirRuntimeValue::Bool(_))
+            | (Some(MirFfiScalarKind::F32), MirRuntimeValue::FloatBits(_))
             | (Some(MirFfiScalarKind::F64), MirRuntimeValue::FloatBits(_))
             | (Some(MirFfiScalarKind::Unit), MirRuntimeValue::Unit) => true,
             (None, MirRuntimeValue::Unit) => expected_type.is_none(),
