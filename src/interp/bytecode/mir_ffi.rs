@@ -70,16 +70,35 @@ fn default_libc_candidates() -> [&'static str; 5] {
 /// Native builds already link both libc and libm; the canonical bytecode
 /// runtime must search the same system surface when `MIMI_FFI_LIB` is absent.
 fn default_system_library_candidates() -> Vec<&'static str> {
-    default_libc_candidates()
-        .into_iter()
-        .chain([
-            "/lib/x86_64-linux-gnu/libm.so.6",
-            "/usr/lib/x86_64-linux-gnu/libm.so.6",
-            "/lib64/libm.so.6",
-            "/usr/lib64/libm.so.6",
-            "/usr/lib/libm.so.6",
-        ])
-        .collect()
+    let mut candidates = default_libc_candidates().to_vec();
+    candidates.extend([
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib64/libm.so.6",
+        "/usr/lib/libm.so.6",
+    ]);
+    // Keep the loader's soname search as the final fallback.  Cross-target
+    // Linux installs (for example aarch64) use multiarch directories that
+    // are not knowable from this host's absolute path table.
+    #[cfg(target_os = "linux")]
+    candidates.extend(["libc.so.6", "libm.so.6"]);
+    candidates
+}
+
+fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
+    let path = std::path::Path::new(candidate);
+    if path.exists() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return !path.is_absolute() && matches!(candidate, "libc.so.6" | "libm.so.6");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// AST-free dynamic library state owned by one bytecode VM.
@@ -504,7 +523,7 @@ impl CanonicalMirFfiRuntime {
             Some(path) => vec![path],
             None => default_system_library_candidates()
                 .into_iter()
-                .filter(|candidate| std::path::Path::new(candidate).exists())
+                .filter(|candidate| is_discoverable_system_library_candidate(candidate))
                 .map(str::to_owned)
                 .collect(),
         };
@@ -770,6 +789,43 @@ unsafe fn call_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn scalar_ffi_system_candidates_retain_loader_soname_fallback() {
+        let candidates = default_system_library_candidates();
+        let libc_soname = candidates
+            .iter()
+            .position(|candidate| *candidate == "libc.so.6")
+            .expect("Linux scalar FFI must retain the libc loader soname");
+        let libm_soname = candidates
+            .iter()
+            .position(|candidate| *candidate == "libm.so.6")
+            .expect("Linux scalar FFI must retain the libm loader soname");
+        assert!(
+            libc_soname > 0 && libm_soname > libc_soname,
+            "loader sonames must remain after absolute candidate paths"
+        );
+        assert!(is_discoverable_system_library_candidate("libc.so.6"));
+        assert!(is_discoverable_system_library_candidate("libm.so.6"));
+        assert!(!is_discoverable_system_library_candidate("missing.so"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn scalar_ffi_runtime_can_load_linux_loader_soname() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        runtime.set_library_path("libc.so.6");
+        assert_eq!(
+            runtime
+                .call(
+                    &descriptor("labs", CanonicalFfiScalarType::I64),
+                    &[Value::Int(-41)]
+                )
+                .expect("Linux loader soname must resolve libc"),
+            Value::Int(41)
+        );
+    }
 
     #[test]
     fn scalar_ffi_result_receipt_applies_declared_float_to_mir_integer() {
