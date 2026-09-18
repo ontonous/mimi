@@ -4131,6 +4131,49 @@ func main() -> i64 {
     assert!(String::from_utf8_lossy(&test.stdout).contains("✓ test_boundary"));
     assert!(!String::from_utf8_lossy(&test.stderr).contains("canonical route disposition: legacy"));
 
+    let verify_runs = [
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["verify"])
+            .arg(&source)
+            .output()
+            .expect("spawn imported f32 auxiliary success default verify"),
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["verify", "--mir"])
+            .arg(&source)
+            .output()
+            .expect("spawn imported f32 auxiliary success explicit MIR verify"),
+    ];
+    assert_eq!(
+        verify_runs[0].stdout, verify_runs[1].stdout,
+        "imported f32 no-contract verify stdout must match between routes"
+    );
+    assert_eq!(
+        verify_runs[0].stderr, verify_runs[1].stderr,
+        "imported f32 no-contract verify stderr must match between routes"
+    );
+    for verify in &verify_runs {
+        assert!(
+            verify.status.success(),
+            "imported f32 no-contract verify failed:\n{}\n{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&verify.stdout);
+        let stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(stdout.contains("No contracts to verify"), "{stdout}");
+        assert!(
+            !stdout.contains("canonical MIR verifier provenance"),
+            "{stdout}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("flow_ast"), "{stderr}");
+    }
+
     let disasm = Command::new(mimi_bin())
         .current_dir(project_root())
         .args(["disasm"])
