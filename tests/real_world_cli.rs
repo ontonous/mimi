@@ -2049,6 +2049,132 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_result_cast_rejects_all_cli_routes_without_legacy() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_result_cast_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create direct f32 result-cast directory");
+    let source = dir.join("f32-result-cast.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func mir_ffi_f32_result_cast(value: f32) -> f32;
+}
+func test_boundary() -> bool { true }
+func main() -> i64 {
+    let value = mir_ffi_f32_result_cast(7.5 as f32)
+    value as i64
+}
+"#,
+    )
+    .expect("write direct f32 result-cast source");
+
+    for command in ["run", "build", "verify"] {
+        for explicit_mir in [false, true] {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if explicit_mir {
+                invocation.arg("--mir");
+            }
+            if command == "build" {
+                invocation.arg("--emit-ir");
+            }
+            let output = invocation.arg(&source).output().unwrap_or_else(|error| {
+                panic!("spawn direct f32 result cast {command} {explicit_mir}: {error}")
+            });
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "direct f32 result cast must reject {command} explicit_mir={explicit_mir}"
+            );
+            assert!(
+                stdout.is_empty(),
+                "direct f32 result cast emitted output before rejection: {stdout}"
+            );
+            assert!(
+                stderr.contains("conversion from ABI Float { bits: 32 }")
+                    && stderr.contains("outside the canonical contract"),
+                "direct f32 result cast boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "direct f32 result cast entered legacy: {stderr}"
+            );
+            assert!(
+                !stderr.contains("flow_ast"),
+                "direct f32 result cast: {stderr}"
+            );
+            assert!(
+                !stderr.contains("Validation(["),
+                "direct f32 result cast leaked debug-shaped MIR error: {stderr}"
+            );
+        }
+    }
+
+    let invocations = [
+        ("test", vec!["test"]),
+        ("disasm", vec!["disasm"]),
+        ("mir --all", vec!["mir", "--all"]),
+        ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
+    ];
+    for (label, args) in invocations {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(&args)
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn direct f32 result cast {label}: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "direct f32 result cast must reject auxiliary CLI {label}"
+        );
+        assert!(
+            stderr.contains("conversion from ABI Float { bits: 32 }")
+                && stderr.contains("outside the canonical contract"),
+            "direct f32 result cast auxiliary boundary drifted for {label}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "direct f32 result cast auxiliary entered legacy: {stderr}"
+        );
+        assert!(
+            !stderr.contains("flow_ast"),
+            "direct f32 result cast {label}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Validation(["),
+            "direct f32 result cast {label} leaked debug-shaped MIR error: {stderr}"
+        );
+        if label == "test" {
+            assert!(
+                stdout.contains("Running 1 test(s)..."),
+                "direct f32 result cast test discovery disappeared: {stdout}"
+            );
+            assert!(
+                !stdout.contains("✓"),
+                "rejected direct f32 result cast test body was executed: {stdout}"
+            );
+        } else {
+            assert!(
+                stdout.is_empty(),
+                "direct f32 result cast auxiliary {label} emitted output: {stdout}"
+            );
+        }
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f32_direct_missing_symbol_recovers_without_legacy() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
