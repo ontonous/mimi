@@ -1902,7 +1902,46 @@ func main() -> i64 { 0 }
         String::from_utf8_lossy(&receipt.stdout),
         String::from_utf8_lossy(&receipt.stderr)
     );
+    let repeated_receipt = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all", "--receipt"])
+        .arg(&source)
+        .output()
+        .expect("spawn repeated direct f32 auxiliary success receipt");
+    assert!(
+        repeated_receipt.status.success(),
+        "repeated direct f32 auxiliary receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&repeated_receipt.stdout),
+        String::from_utf8_lossy(&repeated_receipt.stderr)
+    );
+    assert_eq!(
+        receipt.stdout, repeated_receipt.stdout,
+        "direct f32 route manifest must be byte-deterministic"
+    );
     let manifest = parse_route_receipt_manifest(&receipt.stdout);
+    let manifest_text = String::from_utf8_lossy(&receipt.stdout);
+    let checked = checked_route_receipt(&source);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest_text)
+        .expect("direct f32 route manifest must round-trip through the public API");
+    assert_eq!(manifest_receipt, checked);
+    assert_eq!(manifest.get("mir_digest"), Some(&checked.mir_digest));
+    assert_eq!(
+        manifest.get("type_desc_digest"),
+        Some(&checked.type_desc_digest)
+    );
+    assert_eq!(manifest.get("abi_digest"), Some(&checked.abi_digest));
+    assert_eq!(
+        manifest.get("ownership_digest"),
+        Some(&checked.ownership_digest)
+    );
+    assert_eq!(
+        manifest.get("flow_transition_digest"),
+        Some(&checked.flow_transition_digest)
+    );
+    assert_eq!(
+        manifest.len(),
+        mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+    );
     assert_eq!(
         manifest.get("profile").map(String::as_str),
         Some("cli-mir-v1")
