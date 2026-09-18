@@ -2036,6 +2036,97 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_contract_imported_module_rejects_auxiliary_cli() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_contract_imported_auxiliary_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 auxiliary boundary directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func imported_f64_contract(value: Scalar) -> Scalar requires: value > 0.0;
+}
+pub func call(value: Scalar) -> Scalar { imported_f64_contract(value) }
+"#,
+    )
+    .expect("write imported f64 auxiliary boundary module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func test_boundary() -> bool { true }
+func main() -> i64 {
+    call(7.5);
+    0
+}
+"#,
+    )
+    .expect("write imported f64 auxiliary boundary entry");
+
+    let invocations = [
+        ("test", vec!["test"]),
+        ("disasm", vec!["disasm"]),
+        // MIR inspection is source-scoped by default; include the imported
+        // module explicitly so the canonical boundary is exercised in the
+        // same complete graph as run/build/verify.
+        ("mir --all", vec!["mir", "--all"]),
+        ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
+    ];
+    for (label, args) in invocations {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(&args)
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("spawn imported f64 auxiliary CLI {label}: {error}")
+            });
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "imported f64 contract must reject auxiliary CLI {label}"
+        );
+        assert!(
+            stderr.contains("imported_f64_contract")
+                && stderr.contains("extern contract expression is outside scalar MIR"),
+            "imported auxiliary CLI {label} lost the explicit f64 contract boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "imported auxiliary CLI {label} entered legacy: {stderr}"
+        );
+        assert!(!stderr.contains("flow_ast"), "imported auxiliary CLI {label}: {stderr}");
+        assert!(
+            !stderr.contains("Validation(["),
+            "imported auxiliary CLI {label} leaked debug-shaped MIR error: {stderr}"
+        );
+        if label == "test" {
+            assert!(
+                stdout.contains("Running 1 test(s)..."),
+                "imported auxiliary test discovery output disappeared before rejection: {stdout}"
+            );
+            assert!(!stdout.contains("✓"), "rejected imported test body was executed: {stdout}");
+        } else {
+            assert!(
+                stdout.is_empty(),
+                "imported auxiliary CLI {label} emitted output before rejection: {stdout}"
+            );
+        }
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
