@@ -68,6 +68,8 @@ fn default_libc_candidates() -> Vec<&'static str> {
     candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
     #[cfg(target_os = "windows")]
     candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
+    #[cfg(target_os = "android")]
+    candidates.extend(["/system/lib64/libc.so", "/system/lib/libc.so", "libc.so"]);
     candidates
 }
 
@@ -91,6 +93,8 @@ fn default_system_library_candidates() -> Vec<&'static str> {
     candidates.extend(["libc.so.6", "libm.so.6"]);
     #[cfg(target_os = "macos")]
     candidates.extend(["/usr/lib/libm.dylib", "libm.dylib"]);
+    #[cfg(target_os = "android")]
+    candidates.extend(["/system/lib64/libm.so", "/system/lib/libm.so", "libm.so"]);
     candidates
 }
 
@@ -111,7 +115,16 @@ fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
     {
         return matches!(candidate, "ucrtbase.dll" | "msvcrt.dll");
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        return matches!(candidate, "libc.so" | "libm.so");
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     {
         false
     }
@@ -905,6 +918,23 @@ mod tests {
         assert!(msvcrt > ucrt);
         assert!(is_discoverable_system_library_candidate("ucrtbase.dll"));
         assert!(is_discoverable_system_library_candidate("msvcrt.dll"));
+    }
+
+    #[test]
+    #[cfg(target_os = "android")]
+    fn scalar_ffi_system_candidates_retain_android_loader_names() {
+        let candidates = default_system_library_candidates();
+        let libc = candidates
+            .iter()
+            .position(|candidate| *candidate == "libc.so")
+            .expect("Android scalar FFI must retain the Bionic libc loader name");
+        let libm = candidates
+            .iter()
+            .position(|candidate| *candidate == "libm.so")
+            .expect("Android scalar FFI must retain the Bionic libm loader name");
+        assert!(libm > libc);
+        assert!(is_discoverable_system_library_candidate("libc.so"));
+        assert!(is_discoverable_system_library_candidate("libm.so"));
     }
 
     #[test]
