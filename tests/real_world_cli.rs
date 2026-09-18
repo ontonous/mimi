@@ -3568,7 +3568,7 @@ fn canonical_scalar_ffi_f64_imported_libm_matches_cli_consumers() {
     .iter()
     .map(Path::new)
     .find(|path| path.is_file());
-    let Some(libm) = libm else {
+    let Some(_libm) = libm else {
         eprintln!("SKIP: libm.so.6 not found");
         return;
     };
@@ -3616,7 +3616,7 @@ func main() -> i64 {
         let run = run
             .arg(&source)
             .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", libm)
+            .env_remove("MIMI_FFI_LIB")
             .output()
             .unwrap_or_else(|error| panic!("imported libm f64 run {explicit_mir}: {error}"));
         assert!(
@@ -3636,7 +3636,7 @@ func main() -> i64 {
         let verify = verify
             .arg(&source)
             .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", libm)
+            .env_remove("MIMI_FFI_LIB")
             .output()
             .unwrap_or_else(|error| panic!("imported libm f64 verify {explicit_mir}: {error}"));
         assert!(
@@ -3657,7 +3657,7 @@ func main() -> i64 {
             .args(["--emit-ir"])
             .arg(&source)
             .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", libm)
+            .env_remove("MIMI_FFI_LIB")
             .output()
             .unwrap_or_else(|error| panic!("imported libm f64 IR {explicit_mir}: {error}"));
         assert!(
