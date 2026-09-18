@@ -89,7 +89,7 @@ fn default_system_library_candidates() -> Vec<&'static str> {
 fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
     let path = std::path::Path::new(candidate);
     if path.is_absolute() {
-        return path.exists();
+        return path.is_file();
     }
     #[cfg(target_os = "linux")]
     {
@@ -830,6 +830,17 @@ mod tests {
         assert!(
             !is_discoverable_system_library_candidate("./libc.so.6"),
             "relative paths must not bypass the soname allowlist"
+        );
+        assert!(
+            !is_discoverable_system_library_candidate("/"),
+            "an absolute directory must not become a system-library candidate"
+        );
+        assert!(
+            candidates.iter().any(|candidate| {
+                std::path::Path::new(candidate).is_file()
+                    && is_discoverable_system_library_candidate(candidate)
+            }),
+            "at least one absolute libc/libm candidate must be a regular file on Linux"
         );
     }
 
