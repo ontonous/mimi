@@ -142,6 +142,7 @@ pub enum MirFfiScalarKind {
     I32,
     I64,
     Bool,
+    F32,
     F64,
     Unit,
 }
@@ -161,6 +162,7 @@ impl MirFfiScalarKind {
                 signed: true,
             },
             Self::Bool => MirAbiClass::Bool,
+            Self::F32 => MirAbiClass::Float { bits: 32 },
             Self::F64 => MirAbiClass::Float { bits: 64 },
             Self::Unit => MirAbiClass::Unit,
         }
@@ -206,6 +208,7 @@ impl MirAbiClass {
                 signed: true,
             } => Some(MirFfiScalarKind::I64),
             Self::Bool => Some(MirFfiScalarKind::Bool),
+            Self::Float { bits: 32 } => Some(MirFfiScalarKind::F32),
             Self::Float { bits: 64 } => Some(MirFfiScalarKind::F64),
             Self::Unit => Some(MirFfiScalarKind::Unit),
             _ => None,
@@ -506,6 +509,11 @@ pub enum MirConversionKind {
     /// Exact signed integer widening.  Runtime scalar values are already
     /// carried in the canonical integer slot, so this has no trap or loss.
     SignedI32ToI64,
+    /// Explicit IEEE narrowing from the language's f64 literal/runtime slot
+    /// to a C-compatible f32 scalar.  The bytecode/reference values retain
+    /// f64 storage, so consumers round through Rust/LLVM f32 before crossing
+    /// the FFI boundary.
+    Float64ToFloat32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +539,12 @@ impl MirConversionContract {
                 requires_scalar: true,
                 requires_copy: true,
             },
+            MirConversionKind::Float64ToFloat32 => Self {
+                kind,
+                name: "f64 to f32 narrowing",
+                requires_scalar: true,
+                requires_copy: true,
+            },
         }
     }
 
@@ -540,6 +554,7 @@ impl MirConversionContract {
         [
             MirConversionKind::ScalarIdentity,
             MirConversionKind::SignedI32ToI64,
+            MirConversionKind::Float64ToFloat32,
         ]
         .into_iter()
         .map(Self::for_kind)
@@ -572,11 +587,15 @@ impl MirConversionContract {
                     }
                 )
             }
+            MirConversionKind::Float64ToFloat32 => {
+                matches!(source.abi, MirAbiClass::Float { bits: 64 })
+                    && matches!(target.abi, MirAbiClass::Float { bits: 32 })
+            }
         }
     }
 
     pub fn accepted_description() -> &'static str {
-        "same Copy scalar type or signed i32 to signed i64"
+        "same Copy scalar type, signed i32 to signed i64, or f64 to f32"
     }
 }
 

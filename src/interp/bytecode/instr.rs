@@ -164,6 +164,10 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
     },
+    FloatNarrow {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Comparison (rd = Bool)
@@ -1144,6 +1148,7 @@ impl Op {
             | PowInt { rd, .. }
             | PowFloat { rd, .. }
             | IntToFloat { rd, .. }
+            | FloatNarrow { rd, .. }
             | Cast { rd, .. }
             | EqInt { rd, .. }
             | NeInt { rd, .. }
@@ -1252,6 +1257,7 @@ impl Op {
             | Op::PowInt { rd, .. }
             | Op::PowFloat { rd, .. }
             | Op::IntToFloat { rd, .. }
+            | Op::FloatNarrow { rd, .. }
             | Op::Cast { rd, .. }
             | Op::EqInt { rd, .. }
             | Op::NeInt { rd, .. }
@@ -1412,6 +1418,7 @@ impl Op {
             | BitNot { ra, .. }
             | Not { ra, .. }
             | IntToFloat { ra, .. }
+            | FloatNarrow { ra, .. }
             | Cast { ra, .. }
             | DerefValue { ra, .. }
             | Some { ra, .. }
@@ -1982,6 +1989,7 @@ pub enum CanonicalFfiScalarType {
     I32,
     I64,
     Bool,
+    F32,
     F64,
     Unit,
 }
@@ -1992,6 +2000,7 @@ impl CanonicalFfiScalarType {
             crate::core::mir::types::MirFfiScalarKind::I32 => Self::I32,
             crate::core::mir::types::MirFfiScalarKind::I64 => Self::I64,
             crate::core::mir::types::MirFfiScalarKind::Bool => Self::Bool,
+            crate::core::mir::types::MirFfiScalarKind::F32 => Self::F32,
             crate::core::mir::types::MirFfiScalarKind::F64 => Self::F64,
             crate::core::mir::types::MirFfiScalarKind::Unit => Self::Unit,
         }
@@ -2002,6 +2011,7 @@ impl CanonicalFfiScalarType {
             Self::I32 => crate::core::mir::types::MirFfiScalarKind::I32,
             Self::I64 => crate::core::mir::types::MirFfiScalarKind::I64,
             Self::Bool => crate::core::mir::types::MirFfiScalarKind::Bool,
+            Self::F32 => crate::core::mir::types::MirFfiScalarKind::F32,
             Self::F64 => crate::core::mir::types::MirFfiScalarKind::F64,
             Self::Unit => crate::core::mir::types::MirFfiScalarKind::Unit,
         }

@@ -2713,6 +2713,7 @@ impl<'a> FunctionEmitter<'a> {
             MirConversionKind::ScalarIdentity | MirConversionKind::SignedI32ToI64 => {
                 Op::Mov { rd, rs: ra }
             }
+            MirConversionKind::Float64ToFloat32 => Op::FloatNarrow { rd, ra },
         };
         self.proto.emit(opcode);
     }

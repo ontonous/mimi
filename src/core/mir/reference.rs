@@ -5662,6 +5662,20 @@ impl<'a> MirReferenceInterpreter<'a> {
                             ))
                         }
                     },
+                    super::types::MirConversionKind::Float64ToFloat32 => match value {
+                        MirRuntimeValue::FloatBits(bits) => MirRuntimeValue::FloatBits(
+                            ((f64::from_bits(bits) as f32) as f64).to_bits(),
+                        ),
+                        _ => {
+                            return Err(self.error(
+                                &function.owner,
+                                format!(
+                                    "conversion '{}' received an incompatible runtime value",
+                                    contract.name
+                                ),
+                            ))
+                        }
+                    },
                 };
                 values.insert(result.clone(), value);
             }

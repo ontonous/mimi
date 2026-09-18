@@ -3083,6 +3083,163 @@ func main() -> i64 {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_f32_imported_libm_mixed_integer_abi_matches_native() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let libm = [
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib64/libm.so.6",
+    ]
+    .iter()
+    .map(Path::new)
+    .find(|path| path.is_file());
+    let Some(libm) = libm else {
+        eprintln!("SKIP: libm.so.6 not found");
+        return;
+    };
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-imported-libm-f32-mixed-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported libm mixed f32 directory");
+    fs::write(
+        dir.join("libm_float.mimi"),
+        r#"
+pub type Scalar = f32
+pub extern "C" {
+    func ldexpf(value: Scalar, exponent: i32) -> Scalar;
+    func llrintf(value: Scalar) -> i64;
+}
+pub func rounded_scaled(value: Scalar, exponent: i32) -> i64 {
+    llrintf(ldexpf(value, exponent))
+}
+"#,
+    )
+    .expect("write imported libm mixed f32 module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use libm_float
+func main() -> i64 {
+    let value = 1.5 as Scalar;
+    println(rounded_scaled(value, 3));
+    0
+}
+"#,
+    )
+    .expect("write imported libm mixed f32 entry");
+    let binary = dir.join("imported-libm-f32-mixed");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", libm)
+            .output()
+            .unwrap_or_else(|error| panic!("imported libm mixed f32 run {explicit_mir}: {error}"));
+        assert!(
+            run.status.success(),
+            "imported libm mixed f32 run {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"12\n");
+        assert!(String::from_utf8_lossy(&run.stderr).is_empty());
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("imported libm mixed f32 verify {explicit_mir}: {error}")
+            });
+        assert!(
+            verify.status.success(),
+            "imported libm mixed f32 verify {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(String::from_utf8_lossy(&verify.stdout).contains("No contracts to verify"));
+        assert!(String::from_utf8_lossy(&verify.stderr).is_empty());
+
+        let mut build_ir = Command::new(mimi_bin());
+        build_ir.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build_ir.arg("--mir");
+        }
+        let build_ir = build_ir
+            .args(["--emit-ir"])
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", libm)
+            .output()
+            .unwrap_or_else(|error| panic!("imported libm mixed f32 IR {explicit_mir}: {error}"));
+        assert!(
+            build_ir.status.success(),
+            "imported libm mixed f32 IR {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build_ir.stdout),
+            String::from_utf8_lossy(&build_ir.stderr)
+        );
+        let ir = String::from_utf8_lossy(&build_ir.stdout);
+        assert!(ir.contains("ldexpf"));
+        assert!(ir.contains("llrintf"));
+        assert!(ir.contains("float"));
+        assert!(String::from_utf8_lossy(&build_ir.stderr).is_empty());
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("imported libm mixed f32 native build {explicit_mir}: {error}")
+            });
+        assert!(
+            build.status.success(),
+            "imported libm mixed f32 native build {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(String::from_utf8_lossy(&build.stderr).is_empty());
+        let native = Command::new(&binary).output().unwrap_or_else(|error| {
+            panic!("run imported libm mixed f32 native {explicit_mir}: {error}")
+        });
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"12\n");
+        assert!(native.stderr.is_empty());
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;

@@ -220,7 +220,7 @@ impl LspServer {
             }
             "type" => {
                 // Type completions after `:`
-                let type_keywords = vec!["i32", "i64", "f64", "bool", "string", "unit"];
+                let type_keywords = vec!["i32", "i64", "f32", "f64", "bool", "string", "unit"];
                 for t in type_keywords {
                     items.push(serde_json::json!({
                         "label": t,

@@ -731,7 +731,9 @@ impl<'a> NativeMirValidator<'a> {
                     Ok(contract) => {
                         if !matches!(
                             contract.kind,
-                            MirConversionKind::ScalarIdentity | MirConversionKind::SignedI32ToI64
+                            MirConversionKind::ScalarIdentity
+                                | MirConversionKind::SignedI32ToI64
+                                | MirConversionKind::Float64ToFloat32
                         ) {
                             self.errors.push(NativeMirError::new(
                                 subject,

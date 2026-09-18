@@ -1658,6 +1658,17 @@ impl BytecodeVM {
                     };
                     frame.regs[rd as usize] = Value::Float(a as f64);
                 }
+                Op::FloatNarrow { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "float-narrow")?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Float(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Float((a as f32) as f64);
+                }
 
                 // ── Comparison ─────────────────────────────────
                 Op::EqInt { rd, ra, rb } => {

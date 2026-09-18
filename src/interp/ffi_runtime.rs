@@ -1658,7 +1658,7 @@ impl FfiRuntime {
             Value::Record(_, _) | Value::Variant(_, _) | Value::List(_) | Value::Tuple(_) | Value::Set(_) => {
                 Errno::Generic(format!(
                     "FFI safety: unsupported argument type '{}' for extern function call. \
-                     Only scalar types (i32/i64/f64/bool) and borrowed strings are allowed. \
+                     Only scalar types (i32/i64/f32/f64/bool) and borrowed strings are allowed. \
                      Complex Mimi values must be converted to passport types (c_shared T, \
                      c_borrow T, c_borrow_mut T, *T, *mut T) before crossing the FFI boundary.",
                     arg
@@ -1667,7 +1667,7 @@ impl FfiRuntime {
             other => {
                 Errno::Generic(format!(
                     "FFI safety: unsupported argument type '{}' for extern function call. \
-                     Only scalar types (i32/i64/f64/bool) and borrowed strings are allowed. \
+                     Only scalar types (i32/i64/f32/f64/bool) and borrowed strings are allowed. \
                      Complex Mimi values must be converted to passport types (c_shared T, \
                      c_borrow T, c_borrow_mut T, *T, *mut T) before crossing the FFI boundary.",
                     other

@@ -131,7 +131,7 @@ pub fn keyword_or_ident(name: &str) -> TokenKind {
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "unit" => TokenKind::Unit,
-        "i32" | "i64" | "f64" | "bool" | "string" => TokenKind::Ident(name.into()),
+        "i32" | "i64" | "f32" | "f64" | "bool" | "string" => TokenKind::Ident(name.into()),
         _ => TokenKind::Ident(name.into()),
     }
 }

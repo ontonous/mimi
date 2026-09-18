@@ -673,7 +673,7 @@ impl<'a> Checker<'a> {
                             crate::diagnostic::codes::E0242,
                             format!(
                                 "to_json: cannot serialize type `{}`; \
-                                 only i32/i64/f64/bool/string, List<T>, Map/Set of scalars, \
+                                 only i32/i64/f32/f64/bool/string, List<T>, Map/Set of scalars, \
                                  Option/Result, product tuples, and Record types with serializable fields are supported",
                                 crate::core::helpers::fmt_type(&arg_ty)
                             ),

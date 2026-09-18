@@ -62,6 +62,10 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
         Some(MirFfiScalarKind::F64)
     );
     assert_eq!(
+        MirAbiClass::Float { bits: 32 }.canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::F32)
+    );
+    assert_eq!(
         MirAbiClass::Unit.canonical_ffi_scalar_kind(),
         Some(MirFfiScalarKind::Unit)
     );
@@ -70,7 +74,6 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
             bits: 32,
             signed: false,
         },
-        MirAbiClass::Float { bits: 32 },
         MirAbiClass::Char,
         MirAbiClass::StringHandle,
         MirAbiClass::Aggregate,
@@ -82,6 +85,7 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
         MirFfiScalarKind::I32,
         MirFfiScalarKind::I64,
         MirFfiScalarKind::Bool,
+        MirFfiScalarKind::F32,
         MirFfiScalarKind::F64,
         MirFfiScalarKind::Unit,
     ] {

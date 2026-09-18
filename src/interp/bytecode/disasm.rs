@@ -31,6 +31,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::DivFloat { .. } => "DIV_FLOAT",
         Op::NegFloat { .. } => "NEG_FLOAT",
         Op::IntToFloat { .. } => "INT_TO_FLOAT",
+        Op::FloatNarrow { .. } => "FLOAT_NARROW",
         Op::EqInt { .. } => "EQ_INT",
         Op::NeInt { .. } => "NE_INT",
         Op::LtInt { .. } => "LT_INT",
@@ -273,6 +274,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::NegInt { rd, ra }
         | Op::NegFloat { rd, ra }
         | Op::IntToFloat { rd, ra }
+        | Op::FloatNarrow { rd, ra }
         | Op::BitNot { rd, ra }
         | Op::Not { rd, ra }
         | Op::ToString { rd, ra }

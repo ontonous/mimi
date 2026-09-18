@@ -365,7 +365,7 @@ pub(crate) fn is_numeric(t: &Type) -> bool {
 
 /// CG-H2 (audit): predicates whether the codegen for `to_json` can serialize
 /// the given type. The codegen supports:
-/// - Primitive scalars: i32, i64, f64, bool, string, unit
+/// - Primitive scalars: i32, i64, f32, f64, bool, string, unit
 /// - List<T> where T is a primitive or a Record (via mimi_list_*_to_json
 ///   and mimi_list_record_to_json)
 /// - Record types (field-by-field sprintf serialization)
@@ -390,7 +390,7 @@ pub(crate) fn is_json_serializable(t: &Type) -> bool {
             // Primitive scalars
             if matches!(
                 n.as_str(),
-                "i32" | "i64" | "f64" | "bool" | "string" | "unit" | "Any"
+                "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit" | "Any"
             ) {
                 return true;
             }

@@ -494,6 +494,18 @@ impl CanonicalMirFfiRuntime {
                         .ok_or_else(|| "canonical MIR FFI f64 storage lost its type".to_owned())?;
                     ffi_args.push(ffi_arg(typed));
                 }
+                CanonicalFfiScalarType::F32 => {
+                    let number = match value {
+                        Value::Float(number) => *number as f32,
+                        other => return Err(format!("expected f32 FFI argument, got {other:?}")),
+                    };
+                    storage.push(Box::new(number));
+                    let typed = storage
+                        .last()
+                        .and_then(|value| value.downcast_ref::<f32>())
+                        .ok_or_else(|| "canonical MIR FFI f32 storage lost its type".to_owned())?;
+                    ffi_args.push(ffi_arg(typed));
+                }
                 CanonicalFfiScalarType::Unit => {
                     return Err("unit is not a canonical scalar FFI argument".into());
                 }
@@ -555,6 +567,7 @@ fn apply_argument_conversion(
             }
             (MirAbiClass::Integer { bits: 32 | 64, .. }, Value::Int(_))
             | (MirAbiClass::Bool, Value::Bool(_))
+            | (MirAbiClass::Float { bits: 32 }, Value::Float(_))
             | (MirAbiClass::Float { bits: 64 }, Value::Float(_)) => Ok(value.clone()),
             (MirAbiClass::Integer { bits: 32, .. }, other) => {
                 Err(format!("expected i32 FFI argument, got {other:?}"))
@@ -565,6 +578,9 @@ fn apply_argument_conversion(
             (MirAbiClass::Bool, other) => Err(format!("expected bool FFI argument, got {other:?}")),
             (MirAbiClass::Float { bits: 64 }, other) => {
                 Err(format!("expected f64 FFI argument, got {other:?}"))
+            }
+            (MirAbiClass::Float { bits: 32 }, other) => {
+                Err(format!("expected f32 FFI argument, got {other:?}"))
             }
             (abi, value) => Err(format!(
                 "identity conversion for {abi:?} received {value:?}"
@@ -651,6 +667,7 @@ fn ffi_type(scalar: &CanonicalFfiScalarType) -> Result<FfiType, String> {
         CanonicalFfiScalarType::I32 => FfiType::i32(),
         CanonicalFfiScalarType::I64 => FfiType::i64(),
         CanonicalFfiScalarType::Bool => FfiType::u8(),
+        CanonicalFfiScalarType::F32 => FfiType::f32(),
         CanonicalFfiScalarType::F64 => FfiType::f64(),
         CanonicalFfiScalarType::Unit => FfiType::void(),
     })
@@ -672,6 +689,7 @@ unsafe fn call_typed(
         CanonicalFfiScalarType::I32 => Value::Int(cif.call::<i32>(code_ptr, args) as i64),
         CanonicalFfiScalarType::I64 => Value::Int(cif.call::<i64>(code_ptr, args)),
         CanonicalFfiScalarType::Bool => Value::Bool(cif.call::<u8>(code_ptr, args) != 0),
+        CanonicalFfiScalarType::F32 => Value::Float(cif.call::<f32>(code_ptr, args) as f64),
         CanonicalFfiScalarType::F64 => Value::Float(cif.call::<f64>(code_ptr, args)),
         CanonicalFfiScalarType::Unit => {
             cif.call::<()>(code_ptr, args);
@@ -770,6 +788,7 @@ mod tests {
             (MirFfiScalarKind::I32, CanonicalFfiScalarType::I32),
             (MirFfiScalarKind::I64, CanonicalFfiScalarType::I64),
             (MirFfiScalarKind::Bool, CanonicalFfiScalarType::Bool),
+            (MirFfiScalarKind::F32, CanonicalFfiScalarType::F32),
             (MirFfiScalarKind::F64, CanonicalFfiScalarType::F64),
             (MirFfiScalarKind::Unit, CanonicalFfiScalarType::Unit),
         ] {
@@ -825,6 +844,7 @@ mod tests {
                 signed: true,
             },
             CanonicalFfiScalarType::Bool => crate::core::mir::types::MirAbiClass::Bool,
+            CanonicalFfiScalarType::F32 => crate::core::mir::types::MirAbiClass::Float { bits: 32 },
             CanonicalFfiScalarType::F64 => crate::core::mir::types::MirAbiClass::Float { bits: 64 },
             CanonicalFfiScalarType::Unit => crate::core::mir::types::MirAbiClass::Unit,
         };

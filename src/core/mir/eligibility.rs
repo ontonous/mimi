@@ -26,6 +26,7 @@ fn is_scalar_ffi_decl_type(program: &CheckedProgram, ty: &Type, result: bool) ->
         Some(crate::core::ir::PrimitiveType::I32)
         | Some(crate::core::ir::PrimitiveType::I64)
         | Some(crate::core::ir::PrimitiveType::Bool)
+        | Some(crate::core::ir::PrimitiveType::F32)
         | Some(crate::core::ir::PrimitiveType::F64) => true,
         Some(crate::core::ir::PrimitiveType::Unit) if result => true,
         _ if result => matches!(ty.unlocated(), Type::Tuple(elements) if elements.is_empty()),

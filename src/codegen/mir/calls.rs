@@ -1650,13 +1650,16 @@ mod tests {
             native_ffi_scalar_shape(MirAbiClass::Float { bits: 64 }),
             Some(NativeFfiScalarShape::Float(64))
         );
+        assert_eq!(
+            native_ffi_scalar_shape(MirAbiClass::Float { bits: 32 }),
+            Some(NativeFfiScalarShape::Float(32))
+        );
         for abi in [
             MirAbiClass::Unit,
             MirAbiClass::Integer {
                 bits: 32,
                 signed: false,
             },
-            MirAbiClass::Float { bits: 32 },
             MirAbiClass::Char,
             MirAbiClass::StringHandle,
         ] {
@@ -1681,6 +1684,10 @@ mod tests {
         assert_eq!(
             NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::F64),
             Some(NativeFfiScalarShape::Float(64))
+        );
+        assert_eq!(
+            NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::F32),
+            Some(NativeFfiScalarShape::Float(32))
         );
         assert_eq!(
             NativeFfiScalarShape::from_mir_kind(MirFfiScalarKind::Unit),
@@ -1715,6 +1722,12 @@ mod tests {
                 .expect("valid native f64 FFI shape"),
             BasicTypeEnum::FloatType(value) if value.get_bit_width() == 64
         ));
+        assert!(matches!(
+            NativeFfiScalarShape::Float(32)
+                .llvm_type(&context)
+                .expect("valid native f32 FFI shape"),
+            BasicTypeEnum::FloatType(value) if value.get_bit_width() == 32
+        ));
     }
 
     #[test]
@@ -1723,6 +1736,7 @@ mod tests {
         let i32_value: BasicValueEnum<'_> = context.i32_type().const_zero().into();
         let i64_value: BasicValueEnum<'_> = context.i64_type().const_zero().into();
         let bool_value: BasicValueEnum<'_> = context.bool_type().const_zero().into();
+        let f32_value: BasicValueEnum<'_> = context.f32_type().const_zero().into();
         let f64_value: BasicValueEnum<'_> = context.f64_type().const_zero().into();
 
         assert!(native_ffi_value_matches(
@@ -1748,6 +1762,10 @@ mod tests {
         ));
         assert!(native_ffi_value_matches(&bool_value, MirAbiClass::Bool));
         assert!(native_ffi_value_matches(
+            &f32_value,
+            MirAbiClass::Float { bits: 32 }
+        ));
+        assert!(native_ffi_value_matches(
             &f64_value,
             MirAbiClass::Float { bits: 64 }
         ));
@@ -1760,6 +1778,7 @@ mod tests {
         let i32_type: BasicMetadataTypeEnum<'_> = context.i32_type().into();
         let i64_type: BasicMetadataTypeEnum<'_> = context.i64_type().into();
         let bool_type: BasicMetadataTypeEnum<'_> = context.bool_type().into();
+        let f32_type: BasicMetadataTypeEnum<'_> = context.f32_type().into();
         let f64_type: BasicMetadataTypeEnum<'_> = context.f64_type().into();
         assert!(native_ffi_metadata_type_matches(
             i32_type,
@@ -1771,6 +1790,10 @@ mod tests {
         assert!(native_ffi_metadata_type_matches(
             bool_type,
             MirAbiClass::Bool
+        ));
+        assert!(native_ffi_metadata_type_matches(
+            f32_type,
+            MirAbiClass::Float { bits: 32 }
         ));
         assert!(native_ffi_metadata_type_matches(
             f64_type,

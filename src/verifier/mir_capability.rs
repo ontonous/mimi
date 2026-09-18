@@ -1498,6 +1498,7 @@ impl<'a> CapabilityGate<'a> {
                             contract.kind,
                             crate::core::mir::types::MirConversionKind::ScalarIdentity
                                 | crate::core::mir::types::MirConversionKind::SignedI32ToI64
+                                | crate::core::mir::types::MirConversionKind::Float64ToFloat32
                         ) => {}
                     Ok(_) => self.error(format!(
                         "{subject} conversion is outside the verifier capability"

@@ -470,6 +470,7 @@ impl NativeFfiScalarShape {
             crate::core::mir::types::MirFfiScalarKind::I32 => Some(Self::SignedInteger(32)),
             crate::core::mir::types::MirFfiScalarKind::I64 => Some(Self::SignedInteger(64)),
             crate::core::mir::types::MirFfiScalarKind::Bool => Some(Self::Bool),
+            crate::core::mir::types::MirFfiScalarKind::F32 => Some(Self::Float(32)),
             crate::core::mir::types::MirFfiScalarKind::F64 => Some(Self::Float(64)),
             crate::core::mir::types::MirFfiScalarKind::Unit => None,
         }
@@ -481,6 +482,7 @@ impl NativeFfiScalarShape {
             Self::SignedInteger(64) => Some(context.i64_type().into()),
             Self::Bool => Some(context.bool_type().into()),
             Self::Float(64) => Some(context.f64_type().into()),
+            Self::Float(32) => Some(context.f32_type().into()),
             // `native_ffi_scalar_shape` is the sole constructor and admits
             // only the widths above. Keep this total so a future shape-map
             // edit fails closed instead of inventing an LLVM ABI.
@@ -708,6 +710,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                                 source,
                                 self.generator.context.i64_type(),
                                 "mir_i32_to_i64",
+                            )
+                            .map(BasicValueEnum::from)
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    }
+                    MirConversionKind::Float64ToFloat32 => {
+                        let source = source_value.into_float_value();
+                        self.generator
+                            .builder
+                            .build_float_trunc(
+                                source,
+                                self.generator.context.f32_type(),
+                                "mir_f64_to_f32",
                             )
                             .map(BasicValueEnum::from)
                             .map_err(|error| NativeMirError::new(subject, error.to_string()))?

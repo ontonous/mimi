@@ -97,7 +97,7 @@ impl<'a> Checker<'a> {
             Type::Name(name, _) => {
                 matches!(
                     name.as_str(),
-                    "i32" | "i64" | "f64" | "bool" | "string" | "unit"
+                    "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit"
                 ) || (self
                     .types
                     .get(name)
@@ -164,6 +164,7 @@ impl<'a> Checker<'a> {
         vec![
             "i32".into(),
             "i64".into(),
+            "f32".into(),
             "f64".into(),
             "bool".into(),
             "string".into(),
@@ -495,10 +496,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check if a type is a primitive scalar (i32, i64, f64, bool, unit)
+    /// Check if a type is a primitive scalar (i32, i64, f32, f64, bool, unit)
     fn type_is_primitive_scalar(&self, ty: &Type) -> bool {
         match ty.unlocated() {
-            Type::Name(name, _) => matches!(name.as_str(), "i32" | "i64" | "f64" | "bool" | "unit"),
+            Type::Name(name, _) => {
+                matches!(
+                    name.as_str(),
+                    "i32" | "i64" | "f32" | "f64" | "bool" | "unit"
+                )
+            }
             _ => false,
         }
     }
@@ -509,7 +515,7 @@ impl<'a> Checker<'a> {
             Type::Name(name, args) => {
                 if matches!(
                     name.as_str(),
-                    "i32" | "i64" | "f64" | "bool" | "string" | "unit"
+                    "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit"
                 ) {
                     return true;
                 }
@@ -533,7 +539,7 @@ impl<'a> Checker<'a> {
         match ty.unlocated() {
             Type::Name(name, _) => matches!(
                 name.as_str(),
-                "i32" | "i64" | "f64" | "bool" | "string" | "unit"
+                "i32" | "i64" | "f32" | "f64" | "bool" | "string" | "unit"
             ),
             Type::Tuple(elems) => elems.iter().all(|e| self.type_is_eq_comparable(e)),
             _ => false,

@@ -247,27 +247,27 @@ fn dlopen_reprc_sse16_roundtrip() {
     dlopen_roundtrip(mimi_src, c_probe, "2.5 4.0 10.0", "sse16");
 }
 
-/// 0.34.35b (M-006): f32 缺位负测试——f32 未注册（M-008），checker 必须
-/// fail-loud 拒绝（E0407），不允许静默按 f64/i64 编组产生错误 ABI。
+/// R6-962: f32 is admitted only as a typed scalar C-FFI endpoint.  The
+/// declaration must survive checking so the canonical MIR/native and bytecode
+/// adapters can own the physical ABI shape; arithmetic remains outside this
+/// slice and is covered by separate fail-closed tests.
 #[test]
-fn dlopen_f32_unsupported_rejected() {
-    let src = "extern \"C\" func f32_identity(x: f32) -> f32 { x }";
+fn dlopen_f32_imported_scalar_is_typed() {
+    let src = r#"
+extern "C" {
+    func f32_identity(x: f32) -> f32;
+}
+func main() -> i32 { 0 }
+"#;
     let tokens = lexer::Lexer::new(src).tokenize().expect("f32 test: lex");
     let file = parser::Parser::new(tokens)
         .parse_file()
         .expect("f32 test: parse");
     let check = crate::core::check(&file);
-    assert!(check.is_err(), "f32 export must be rejected at check time");
-    let diags = check.expect_err("f32 diags");
-    let msg = diags
-        .iter()
-        .map(|d| format!("{}", d))
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
-        msg.contains("E0407"),
-        "f32 rejection should carry E0407, got: {}",
-        msg
+        check.is_ok(),
+        "typed f32 import must check: {:?}",
+        check.err()
     );
 }
 

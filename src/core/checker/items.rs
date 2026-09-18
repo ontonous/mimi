@@ -975,7 +975,7 @@ impl<'a> Checker<'a> {
                                     Use a plain type or a pointer (*T).", type_str)
                             } else {
                                 format!("type '{}' is not allowed across the C ABI boundary. \
-                                    Use scalar types (i32, i64, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.", type_str)
+                                    Use scalar types (i32, i64, f32, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.", type_str)
                             };
                             self.emit_code(crate::diagnostic::codes::E0231, format!(
                                 "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. {}",
