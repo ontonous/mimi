@@ -382,40 +382,95 @@ impl FfiRuntime {
         // making identical programs diverge across backends (VM E0800 vs
         // native success). Default to the system libc when the variable is
         // unset; custom libraries still set MIMI_FFI_LIB explicitly.
-        let lib_path = match std::env::var("MIMI_FFI_LIB") {
-            Ok(p) => p,
-            Err(_) => Self::default_libc_candidates()
-                .into_iter()
-                .find(|candidate| Self::is_discoverable_libc_candidate(candidate))
-                .map(|candidate| candidate.to_string())
-                .ok_or_else(|| {
-                    Errno::Generic(
-                        "MIMI_FFI_LIB environment variable not set for extern function call.\n\
-                         Set MIMI_FFI_LIB to the path of the shared library containing the extern function.\n\
-                         Example: MIMI_FFI_LIB=/path/to/libfoo.so cargo run".to_string()
-                    )
-                })?,
-        };
-
-        // Load library if not already loaded
-        let lib_idx = if let Some(idx) = self
-            .loaded_libs
-            .iter()
-            .position(|(path, _)| path == &lib_path)
-        {
-            idx
-        } else {
-            // SAFETY: libloading::Library::new loads a shared library via FFI; the path is guaranteed valid by environment variable check above.
-            unsafe {
-                let lib = libloading::Library::new(&lib_path).map_err(|e| {
-                    Errno::Generic(format!("failed to load library '{}': {}", lib_path, e))
-                })?;
-                self.loaded_libs.push((lib_path.clone(), lib));
-                self.loaded_libs.len() - 1
-            }
-        };
-
         let func_name = extern_func.name.clone();
+
+        let configured_path = std::env::var("MIMI_FFI_LIB").ok();
+        let configured = configured_path.is_some();
+        let candidate_paths = match configured_path {
+            Some(path) => vec![path],
+            None => Self::default_libc_candidates()
+                .into_iter()
+                .filter(|candidate| Self::is_discoverable_libc_candidate(candidate))
+                .map(str::to_owned)
+                .collect(),
+        };
+        if candidate_paths.is_empty() {
+            return Err(Errno::Generic(
+                "MIMI_FFI_LIB environment variable not set for extern function call.\n\
+                 Set MIMI_FFI_LIB to the path of the shared library containing the extern function.\n\
+                 Example: MIMI_FFI_LIB=/path/to/libfoo.so cargo run".to_string(),
+            ));
+        }
+
+        // Probe every no-env candidate until both loading and symbol lookup
+        // succeed.  A regular file can exist while being the wrong ABI or an
+        // unusable linker script; selecting it by metadata alone made the
+        // compatibility runtime diverge from canonical MIR's fallback order.
+        let mut selected_lib_idx = None;
+        let mut last_load_error = None;
+        let mut last_symbol_error = None;
+        for lib_path in candidate_paths {
+            if lib_path.trim().is_empty() {
+                return Err(Errno::Generic(
+                    "failed to load: FFI library path is empty".to_string(),
+                ));
+            }
+            let lib_idx = if let Some(idx) = self
+                .loaded_libs
+                .iter()
+                .position(|(path, _)| path == &lib_path)
+            {
+                idx
+            } else {
+                // SAFETY: libloading keeps the handle alive in `loaded_libs`
+                // for every symbol call made below.
+                let library = unsafe {
+                    match libloading::Library::new(&lib_path) {
+                        Ok(library) => library,
+                        Err(error) if !configured => {
+                            last_load_error =
+                                Some(format!("failed to load library '{}': {}", lib_path, error));
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(Errno::Generic(format!(
+                                "failed to load library '{}': {}",
+                                lib_path, error
+                            )));
+                        }
+                    }
+                };
+                self.loaded_libs.push((lib_path.clone(), library));
+                self.loaded_libs.len() - 1
+            };
+            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
+                return Err(Errno::Generic(format!(
+                    "FFI library cache index {lib_idx} is out of range"
+                )));
+            };
+            // SAFETY: `library` remains alive in `loaded_libs` while the
+            // symbol is borrowed and used by the synchronous libffi call.
+            match unsafe { library.get::<*mut std::ffi::c_void>(func_name.as_bytes()) } {
+                Ok(_) => {
+                    selected_lib_idx = Some(lib_idx);
+                    break;
+                }
+                Err(error) => {
+                    last_symbol_error =
+                        Some(format!("failed to find symbol '{}': {}", func_name, error));
+                    if configured {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(lib_idx) = selected_lib_idx else {
+            return Err(Errno::Generic(
+                last_symbol_error
+                    .or(last_load_error)
+                    .unwrap_or_else(|| format!("failed to find symbol '{}'", func_name)),
+            ));
+        };
 
         // Use libffi CIF for correct ABI handling (proper register routing for float/GP args)
         let result = {
