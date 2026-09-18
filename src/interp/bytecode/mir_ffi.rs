@@ -66,8 +66,6 @@ fn default_libc_candidates() -> Vec<&'static str> {
     ];
     #[cfg(target_os = "macos")]
     candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
-    #[cfg(target_os = "windows")]
-    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
     candidates
 }
 
@@ -821,6 +819,17 @@ unsafe fn call_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_ffi_system_candidates_are_unique() {
+        let candidates = default_system_library_candidates();
+        let unique = candidates.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            candidates.len(),
+            "system FFI candidates duplicated"
+        );
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
