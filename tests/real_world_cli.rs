@@ -2049,6 +2049,128 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_direct_missing_symbol_recovers_without_legacy() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_direct_recovery_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create direct f32 recovery directory");
+    let source = dir.join("recovery.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func mir_ffi_f32_seed(value: f32) -> f32;
+    func mir_ffi_f32_check(value: f32) -> i64;
+}
+func main() -> i64 {
+    println(8 as i64)
+    let value = mir_ffi_f32_seed(7.5 as f32)
+    println(mir_ffi_f32_check(value))
+    0
+}
+"#,
+    )
+    .expect("write direct f32 recovery source");
+
+    let compile_library = |name: &str, body: &str| {
+        let c_path = dir.join(format!("{name}.c"));
+        let library = dir.join(format!("{name}.so"));
+        fs::write(&c_path, body).expect("write direct f32 recovery C fixture");
+        let compile_c = Command::new("cc")
+            .args(["-shared", "-fPIC", "-O2"])
+            .arg(&c_path)
+            .arg("-o")
+            .arg(&library)
+            .output()
+            .expect("compile direct f32 recovery C fixture");
+        assert!(
+            compile_c.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile_c.stderr)
+        );
+        library
+    };
+    let partial_library = compile_library(
+        "partial",
+        "float mir_ffi_f32_seed(float value) { return value + 0.25f; }\n",
+    );
+    let complete_library = compile_library(
+        "complete",
+        "#include <stdint.h>\nfloat mir_ffi_f32_seed(float value) { return value + 0.25f; }\nint64_t mir_ffi_f32_check(float value) { return value == 7.75f ? 42 : -1; }\n",
+    );
+
+    let run = |explicit_mir: bool, library: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", library)
+            .output()
+            .unwrap_or_else(|error| panic!("direct f32 recovery run {explicit_mir}: {error}"))
+    };
+
+    let missing_library = dir.join("missing.so");
+    let missing_library_runs = [run(false, &missing_library), run(true, &missing_library)];
+    assert_eq!(
+        missing_library_runs[0].stderr, missing_library_runs[1].stderr,
+        "default and --mir direct f32 missing-library diagnostics must match"
+    );
+    for output in &missing_library_runs {
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"8\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(stderr.contains("failed to load"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
+    let missing_symbol_runs = [run(false, &partial_library), run(true, &partial_library)];
+    assert_eq!(
+        missing_symbol_runs[0].stderr, missing_symbol_runs[1].stderr,
+        "default and --mir direct f32 missing-symbol diagnostics must match"
+    );
+    for output in &missing_symbol_runs {
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"8\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(
+            stderr.contains("failed to find canonical MIR FFI symbol"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("mir_ffi_f32_check"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
+    let recovered_runs = [run(false, &complete_library), run(true, &complete_library)];
+    for output in &recovered_runs {
+        assert!(
+            output.status.success(),
+            "direct f32 recovery failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"8\n42\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f64_contract_boundary_rejects_all_cli_routes_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f64_contract_boundary_{}_{}",
