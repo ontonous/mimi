@@ -1791,6 +1791,138 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_direct_auxiliary_cli_success_without_legacy() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_direct_auxiliary_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create direct f32 auxiliary directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "float mir_ffi_f32(float value) { return value; }\n",
+    )
+    .expect("write direct f32 auxiliary C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile direct f32 auxiliary C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func mir_ffi_f32(value: f32) -> f32;
+}
+func test_boundary() -> bool {
+    mir_ffi_f32(1.5 as f32);
+    true
+}
+func main() -> i64 { 0 }
+"#,
+    )
+    .expect("write direct f32 auxiliary source");
+
+    let test = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["test"])
+        .arg(&source)
+        .env("MIMI_FFI_LIB", &library)
+        .output()
+        .expect("spawn direct f32 auxiliary test");
+    assert!(
+        test.status.success(),
+        "direct f32 auxiliary test failed:\n{}\n{}",
+        String::from_utf8_lossy(&test.stdout),
+        String::from_utf8_lossy(&test.stderr)
+    );
+    assert!(String::from_utf8_lossy(&test.stdout).contains("✓ test_boundary"));
+    assert!(!String::from_utf8_lossy(&test.stderr).contains("canonical route disposition: legacy"));
+
+    let disasm = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["disasm"])
+        .arg(&source)
+        .output()
+        .expect("spawn direct f32 auxiliary disasm");
+    assert!(
+        disasm.status.success(),
+        "direct f32 auxiliary disasm failed:\n{}\n{}",
+        String::from_utf8_lossy(&disasm.stdout),
+        String::from_utf8_lossy(&disasm.stderr)
+    );
+    let disasm_stdout = String::from_utf8_lossy(&disasm.stdout);
+    assert!(disasm_stdout.contains("function:test_boundary"));
+    assert!(disasm_stdout.contains("CALL_CANONICAL_EXTERN"));
+    assert!(
+        !String::from_utf8_lossy(&disasm.stderr).contains("canonical route disposition: legacy")
+    );
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all"])
+        .arg(&source)
+        .output()
+        .expect("spawn direct f32 auxiliary MIR");
+    assert!(
+        mir.status.success(),
+        "direct f32 auxiliary MIR failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir.stdout),
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    assert!(String::from_utf8_lossy(&mir.stdout).contains("function:test_boundary"));
+    assert!(!String::from_utf8_lossy(&mir.stderr).contains("canonical route disposition: legacy"));
+
+    let receipt = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all", "--receipt"])
+        .arg(&source)
+        .output()
+        .expect("spawn direct f32 auxiliary receipt");
+    assert!(
+        receipt.status.success(),
+        "direct f32 auxiliary receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&receipt.stdout),
+        String::from_utf8_lossy(&receipt.stderr)
+    );
+    let manifest = parse_route_receipt_manifest(&receipt.stdout);
+    assert_eq!(
+        manifest.get("profile").map(String::as_str),
+        Some("cli-mir-v1")
+    );
+    let ffi_digest = manifest.get("ffi_digest").expect("direct f32 FFI digest");
+    assert_eq!(ffi_digest.len(), 64);
+    assert!(ffi_digest
+        .chars()
+        .all(|character| character.is_ascii_hexdigit()));
+    let root_owners = manifest.get("root_owners").expect("direct f32 root owners");
+    assert!(root_owners.contains("function:test_boundary"));
+    assert!(root_owners.contains("function:main"));
+    assert!(
+        !String::from_utf8_lossy(&receipt.stderr).contains("canonical route disposition: legacy")
+    );
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f64_contract_boundary_rejects_all_cli_routes_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f64_contract_boundary_{}_{}",
