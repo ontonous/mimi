@@ -19024,6 +19024,227 @@ int64_t generated_f32_check(float x) { return (int64_t)x; }
 }
 
 #[test]
+fn scalar_ffi_f32_seeded_receipt_forgery_matrix_rejects_before_host() {
+    struct GeneratedF32Oracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for GeneratedF32Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            match (receipt.symbol.as_str(), args) {
+                ("generated_f32", [MirRuntimeValue::FloatBits(bits)]) => {
+                    Ok(MirRuntimeValue::FloatBits(*bits))
+                }
+                ("generated_f32_check", [MirRuntimeValue::FloatBits(bits)]) => {
+                    Ok(MirRuntimeValue::Int((f64::from_bits(*bits) as f32) as i64))
+                }
+                _ => Err(format!(
+                    "unexpected generated f32 receipt call: {} {:?}",
+                    receipt.symbol, args
+                )),
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+float generated_f32(float x) { return x; }
+int64_t generated_f32_check(float x) { return (int64_t)x; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_f32(value: f32) -> f32;
+    func generated_f32_check(value: f32) -> i64;
+}
+func main() -> i64 {
+    let value = generated_f32(7.0 as f32)
+    println(generated_f32_check(value))
+    0
+}
+"#;
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    let checked = crate::core::check_program(&super::parse_prod(SOURCE))
+        .expect("generated f32 receipt forgery fixture check");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("generated f32 receipt forgery fixture materialization");
+    let canonical = route.program;
+    let entries = canonical.ffi_call_entries_in_source_order();
+    assert_eq!(entries.len(), 2, "fixture must carry two f32 FFI receipts");
+    let first_id = entries[0].0.clone();
+    let second_id = entries[1].0.clone();
+    assert_eq!(entries[0].1.symbol, "generated_f32");
+    assert_eq!(entries[1].1.symbol, "generated_f32_check");
+    assert_eq!(entries[0].1.abi, "C");
+    assert_eq!(entries[0].1.parameter_types.len(), 1);
+    assert_eq!(entries[0].1.parameter_conversions.len(), 1);
+
+    let oracle = GeneratedF32Oracle {
+        calls: Cell::new(0),
+    };
+    let baseline = MirReferenceInterpreter::new(&canonical)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("valid generated f32 reference execution");
+    assert_eq!(baseline.value, MirRuntimeValue::Int(0));
+    assert_eq!(baseline.output, "7\n");
+    assert_eq!(oracle.calls.get(), 2);
+
+    let bytecode = compile_mir_program(&canonical).expect("valid generated f32 bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("valid generated f32 bytecode execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_forgery");
+    generator
+        .compile_mir_native(&canonical)
+        .expect("valid generated f32 native lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid generated f32 native module");
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("valid generated f32 native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n");
+    assert_eq!(native.stderr, "");
+
+    #[derive(Clone, Copy)]
+    enum Forgery {
+        Caller,
+        Instruction,
+        Callee,
+        Symbol,
+        Abi,
+        Arguments,
+        ParameterTypes,
+        ParameterConversions,
+        FirstResult,
+        SecondResult,
+    }
+    const CASES: &[(Forgery, &str)] = &[
+        (Forgery::Caller, "caller"),
+        (Forgery::Instruction, "instruction"),
+        (Forgery::Callee, "callee"),
+        (Forgery::Symbol, "symbol"),
+        (Forgery::Abi, "abi"),
+        (Forgery::Arguments, "arguments"),
+        (Forgery::ParameterTypes, "parameter-types"),
+        (Forgery::ParameterConversions, "parameter-conversions"),
+        (Forgery::FirstResult, "first-result"),
+        (Forgery::SecondResult, "second-result"),
+    ];
+
+    fn apply_forgery(
+        forgery: Forgery,
+        first_id: &crate::core::mir::MirInstructionId,
+        second_id: &crate::core::mir::MirInstructionId,
+        receipts: &mut std::collections::BTreeMap<
+            crate::core::mir::MirInstructionId,
+            crate::core::mir::MirFfiCallContract,
+        >,
+    ) {
+        let target_id = match forgery {
+            Forgery::SecondResult => second_id,
+            _ => first_id,
+        };
+        let receipt = receipts.get_mut(target_id).expect("generated f32 receipt");
+        match forgery {
+            Forgery::Caller => receipt.caller = crate::core::NodeId("function:forged".into()),
+            Forgery::Instruction => {
+                receipt.instruction = crate::core::mir::MirInstructionId::new("inst:forged")
+                    .expect("forged instruction id");
+            }
+            Forgery::Callee => receipt.callee = crate::core::NodeId("extern:forged".into()),
+            Forgery::Symbol => receipt.symbol = "generated_f32_forged".into(),
+            Forgery::Abi => receipt.abi = "Rust".into(),
+            Forgery::Arguments => receipt.arguments.clear(),
+            Forgery::ParameterTypes => receipt.parameter_types.clear(),
+            Forgery::ParameterConversions => receipt.parameter_conversions.clear(),
+            Forgery::FirstResult | Forgery::SecondResult => receipt.result = None,
+        }
+    }
+
+    let baseline_route = canonical.route_receipt("scalar-ffi-f32-forgery-v1");
+    let mut seed = 0x7f32_fade_u64;
+    let mut seen = [false; CASES.len()];
+    for round in 0..(CASES.len() * 2) {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let index = if round < CASES.len() {
+            round
+        } else {
+            (seed as usize) % CASES.len()
+        };
+        seen[index] = true;
+        let (forgery, label) = CASES[index];
+        let mut receipts = canonical.ffi_calls().clone();
+        apply_forgery(forgery, &first_id, &second_id, &mut receipts);
+        let mut forged = canonical.clone();
+        forged.replace_ffi_calls_for_test_only(receipts);
+        let forged_route = forged.route_receipt("scalar-ffi-f32-forgery-v1");
+        assert_ne!(
+            forged_route.ffi_digest, baseline_route.ffi_digest,
+            "round {round} {label}: forgery must change FFI digest"
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
+        let reference_error = forged_reference
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject forged generated f32 receipt before host");
+        assert!(
+            reference_error.to_string().contains("FFI")
+                || reference_error.to_string().contains("extern"),
+            "round {round} {label}: {reference_error}"
+        );
+        assert_eq!(forged_reference.captured_output(), "");
+        assert_eq!(oracle.calls.get(), 2, "round {round} {label} reached host");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        let bytecode_error = compile_mir_program(&forged)
+            .expect_err("bytecode must reject forged generated f32 receipt");
+        assert!(!bytecode_error.is_empty(), "round {round} {label}");
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native must reject forged generated f32 receipt");
+        assert!(!native_error.is_empty(), "round {round} {label}");
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject forged generated f32 receipt");
+        assert!(!capability_error.is_empty(), "round {round} {label}");
+        let verifier_error =
+            crate::verifier::verify_mir(&forged, format!("generated-f32-receipt-forgery-{round}"))
+                .expect_err("verifier must reject forged generated f32 receipt");
+        assert!(!verifier_error.is_empty(), "round {round} {label}");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+    assert!(seen.into_iter().all(|was_seen| was_seen));
+}
+
+#[test]
 fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
     if !crate::verifier::is_z3_available() {
         eprintln!("SKIP: Z3 unavailable");
