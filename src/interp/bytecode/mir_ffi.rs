@@ -56,21 +56,26 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
 }
 
 /// Candidate system libc paths used by tests that need a libc symbol.
-fn default_libc_candidates() -> [&'static str; 5] {
-    [
+fn default_libc_candidates() -> Vec<&'static str> {
+    let mut candidates = vec![
         "/lib/x86_64-linux-gnu/libc.so.6",
         "/usr/lib/x86_64-linux-gnu/libc.so.6",
         "/lib64/libc.so.6",
         "/usr/lib/libc.so.6",
         "/lib/libc.so.6",
-    ]
+    ];
+    #[cfg(target_os = "macos")]
+    candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
+    #[cfg(target_os = "windows")]
+    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
+    candidates
 }
 
 /// Candidate system libraries for the no-configuration scalar FFI profile.
 /// Native builds already link both libc and libm; the canonical bytecode
 /// runtime must search the same system surface when `MIMI_FFI_LIB` is absent.
 fn default_system_library_candidates() -> Vec<&'static str> {
-    let mut candidates = default_libc_candidates().to_vec();
+    let mut candidates = default_libc_candidates();
     candidates.extend([
         "/lib/x86_64-linux-gnu/libm.so.6",
         "/usr/lib/x86_64-linux-gnu/libm.so.6",
@@ -1509,7 +1514,7 @@ mod tests {
 
         let libc = default_libc_candidates()
             .into_iter()
-            .find(|candidate| std::path::Path::new(candidate).exists())
+            .find(|candidate| is_discoverable_system_library_candidate(candidate))
             .expect("a discoverable libc is required for the scalar FFI runtime test");
         guard.set_path(std::path::Path::new(libc));
         assert_eq!(
@@ -1550,7 +1555,7 @@ mod tests {
         let mut guard = crate::tests::FfiEnvGuard::lock();
         let libc = default_libc_candidates()
             .into_iter()
-            .find(|candidate| std::path::Path::new(candidate).exists())
+            .find(|candidate| is_discoverable_system_library_candidate(candidate))
             .expect("a discoverable libc is required for the scalar FFI runtime test");
         guard.set_path(std::path::Path::new(libc));
 
