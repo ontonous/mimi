@@ -290,6 +290,12 @@ impl MirReferenceFfiResolver for Oracle {
                 Ok(MirRuntimeValue::Int(*x))
             }
             ("mir_ffi_bool", [MirRuntimeValue::Bool(x)]) => Ok(MirRuntimeValue::Bool(!x)),
+            ("mir_ffi_f32", [MirRuntimeValue::FloatBits(bits)]) => {
+                Ok(MirRuntimeValue::FloatBits(*bits))
+            }
+            ("mir_ffi_f32_code", [MirRuntimeValue::FloatBits(bits)]) => Ok(MirRuntimeValue::Int(
+                i64::from(*bits == (1.5_f32 as f64).to_bits()),
+            )),
             ("mir_ffi_f64", [MirRuntimeValue::FloatBits(bits)]) => {
                 Ok(MirRuntimeValue::FloatBits(*bits))
             }
@@ -390,7 +396,7 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let digest = mir.canonical_digest();
-    let expected = "-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n";
+    let expected = "-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n1\n42\n";
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&oracle)

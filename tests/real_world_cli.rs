@@ -1715,7 +1715,7 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
                 String::from_utf8_lossy(&run.stderr)
             );
             assert_eq!(
-                run.stdout, b"-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n",
+                run.stdout, b"-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n1\n42\n",
                 "contracts={contracts} explicit_mir={explicit_mir}"
             );
             let run_stderr = String::from_utf8_lossy(&run.stderr);
@@ -1746,11 +1746,21 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
                 "mir_ffi_i32",
                 "mir_ffi_i64",
                 "mir_ffi_bool",
+                "mir_ffi_f32",
+                "mir_ffi_f32_code",
                 "mir_ffi_f64",
                 "mir_ffi_store",
             ] {
                 assert!(ir.contains(symbol), "missing emitted ABI {symbol}");
             }
+            assert!(
+                ir.contains("declare float @mir_ffi_f32(float)"),
+                "f32 endpoint lost its physical float ABI"
+            );
+            assert!(
+                ir.contains("declare i64 @mir_ffi_f32_code(float)"),
+                "f32 result-check endpoint lost its float parameter ABI"
+            );
             assert!(!String::from_utf8_lossy(&build.stderr)
                 .contains("canonical route disposition: legacy"));
             let mut verify = Command::new(mimi_bin());
