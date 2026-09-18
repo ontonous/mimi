@@ -76,6 +76,7 @@ fn default_libc_candidates() -> Vec<&'static str> {
 /// runtime must search the same system surface when `MIMI_FFI_LIB` is absent.
 fn default_system_library_candidates() -> Vec<&'static str> {
     let mut candidates = default_libc_candidates();
+    #[cfg(target_os = "linux")]
     candidates.extend([
         "/lib/x86_64-linux-gnu/libm.so.6",
         "/usr/lib/x86_64-linux-gnu/libm.so.6",
@@ -89,7 +90,7 @@ fn default_system_library_candidates() -> Vec<&'static str> {
     #[cfg(target_os = "linux")]
     candidates.extend(["libc.so.6", "libm.so.6"]);
     #[cfg(target_os = "macos")]
-    candidates.extend(["libSystem.B.dylib", "libm.dylib"]);
+    candidates.extend(["/usr/lib/libm.dylib", "libm.dylib"]);
     #[cfg(target_os = "windows")]
     candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
     candidates
