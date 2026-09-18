@@ -76,13 +76,55 @@ impl FfiRuntime {
     /// Candidate system libc paths for the MIMI_FFI_LIB-less default.
     /// First match wins; all misses preserve the original explicit error.
     fn default_libc_candidates() -> Vec<&'static str> {
-        vec![
+        let mut candidates = Vec::new();
+        #[cfg(target_os = "linux")]
+        candidates.extend([
             "/lib/x86_64-linux-gnu/libc.so.6",
             "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "/lib64/libc.so.6",
             "/usr/lib/libc.so.6",
             "/lib/libc.so.6",
-        ]
+            "libc.so.6",
+        ]);
+        #[cfg(target_os = "android")]
+        candidates.extend(["/system/lib64/libc.so", "/system/lib/libc.so", "libc.so"]);
+        #[cfg(target_os = "macos")]
+        candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
+        #[cfg(target_os = "windows")]
+        candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
+        candidates
+    }
+
+    fn is_discoverable_libc_candidate(candidate: &str) -> bool {
+        let path = std::path::Path::new(candidate);
+        if path.is_absolute() {
+            return path.is_file();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return candidate == "libc.so.6";
+        }
+        #[cfg(target_os = "android")]
+        {
+            return candidate == "libc.so";
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return candidate == "libSystem.B.dylib";
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return matches!(candidate, "ucrtbase.dll" | "msvcrt.dll");
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        )))]
+        {
+            false
+        }
     }
 
     /// Build the FFI tables from a parsed program file.
@@ -344,7 +386,7 @@ impl FfiRuntime {
             Ok(p) => p,
             Err(_) => Self::default_libc_candidates()
                 .into_iter()
-                .find(|candidate| std::path::Path::new(candidate).exists())
+                .find(|candidate| Self::is_discoverable_libc_candidate(candidate))
                 .map(|candidate| candidate.to_string())
                 .ok_or_else(|| {
                     Errno::Generic(
@@ -1172,6 +1214,58 @@ impl FfiRuntime {
 
         // valid CIF, code pointer, and argument slice passed by call_extern.
         unsafe { Ok(Self::call_ffi_raw(cif, code_ptr, ffi_args, ret_contract)) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FfiRuntime;
+
+    #[test]
+    fn default_libc_candidates_are_partitioned_by_target() {
+        let candidates = FfiRuntime::default_libc_candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate.contains("x86_64-linux-gnu")
+                    || cfg!(target_os = "linux")),
+            "non-Linux targets must not inherit host Linux multiarch paths"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(candidates.contains(&"libc.so.6"));
+            assert!(FfiRuntime::is_discoverable_libc_candidate("libc.so.6"));
+        }
+        #[cfg(target_os = "android")]
+        {
+            assert!(candidates.contains(&"/system/lib64/libc.so"));
+            assert!(candidates.contains(&"/system/lib/libc.so"));
+            assert!(candidates.contains(&"libc.so"));
+            assert!(FfiRuntime::is_discoverable_libc_candidate("libc.so"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(candidates.contains(&"/usr/lib/libSystem.B.dylib"));
+            assert!(candidates.contains(&"libSystem.B.dylib"));
+            assert!(FfiRuntime::is_discoverable_libc_candidate(
+                "libSystem.B.dylib"
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(candidates.contains(&"ucrtbase.dll"));
+            assert!(candidates.contains(&"msvcrt.dll"));
+            assert!(FfiRuntime::is_discoverable_libc_candidate("ucrtbase.dll"));
+        }
+    }
+
+    #[test]
+    fn non_allowlisted_relative_libc_candidate_is_rejected() {
+        assert!(!FfiRuntime::is_discoverable_libc_candidate("./libc.so.6"));
+        assert!(!FfiRuntime::is_discoverable_libc_candidate(
+            "missing-libc.so"
+        ));
     }
 }
 
