@@ -2052,6 +2052,39 @@ fn generic_option_unwrap_f64_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_option_unwrap_f32_has_canonical_verifier_capability() {
+    let source = include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_f32.mimi");
+    let file = parse_memory_source(source, "mir-generic-option-unwrap-f32").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Option<f32> unwrap MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                    && contract.projection.ownership
+                        == crate::core::mir::types::MirOwnership::Copy
+            )
+        })
+        .expect("generic Option<f32> projection instance");
+    assert_eq!(
+        canonical
+            .type_catalog()
+            .get(&instance.arguments[0])
+            .unwrap()
+            .abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 32 }
+    );
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Option<f32> verifier capability");
+}
+
+#[test]
 fn generic_option_unwrap_owned_string_is_verified_from_canonical_mir() {
     require_z3!();
     let source =

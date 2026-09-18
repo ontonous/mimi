@@ -4344,9 +4344,10 @@ impl MirTypeCatalog {
     }
 
     /// Validate the Copy payload family opened by the generic Option
-    /// projection slice: signed i32/i64/bool plus the canonical native f64
-    /// ABI. f32 stays outside this named S199 envelope until it receives its
-    /// own differential/route contract.
+    /// projection slice: signed i32/i64/bool plus the canonical native f32/f64
+    /// ABIs. Float payloads are admitted only for this receipt-bearing
+    /// projection family; generic scalar/list/record contracts keep their
+    /// narrower historical boundary.
     pub fn validate_generic_option_projection_argument(
         &self,
         ty: &ResolvedTypeId,
@@ -4358,11 +4359,11 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
-        if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
+        if matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }) {
             Ok(())
         } else {
             Err(format!(
-                "type '{}' is not a Copy f64 scalar with no-op glue",
+                "type '{}' is not a Copy f32/f64 scalar with no-op glue",
                 ty.as_str()
             ))
         }

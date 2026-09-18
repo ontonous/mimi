@@ -2158,11 +2158,35 @@ fn eval_instruction(
                 .insert(hi.clone(), SymbolicValue::Opaque { ty: hi_ty });
         }
         MirInstructionKind::Convert { result, source } => {
+            let source_ty = instruction_value_type(function, source, "conversion source")?;
+            let result_ty = instruction_value_type(function, result, "conversion result")?;
+            let contract = catalog.validate_conversion(&source_ty, &result_ty)?;
             let value = state
                 .values
                 .get(source)
                 .cloned()
                 .ok_or_else(|| format!("MIR conversion source '{}' is not defined", source))?;
+            let value = match contract.kind {
+                crate::core::mir::types::MirConversionKind::ScalarIdentity => value,
+                crate::core::mir::types::MirConversionKind::SignedI32ToI64 => match value {
+                    SymbolicValue::Int(value) => SymbolicValue::Int(value),
+                    _ => {
+                        return Err(format!(
+                            "MIR conversion '{}' received a non-integer symbolic value",
+                            contract.name
+                        ));
+                    }
+                },
+                crate::core::mir::types::MirConversionKind::Float64ToFloat32 => match value {
+                    SymbolicValue::Opaque { .. } => SymbolicValue::Opaque { ty: result_ty },
+                    _ => {
+                        return Err(format!(
+                            "MIR conversion '{}' received a non-float symbolic value",
+                            contract.name
+                        ));
+                    }
+                },
+            };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }

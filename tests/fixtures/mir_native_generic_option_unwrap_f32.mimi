@@ -1,0 +1,10 @@
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i64 {
+    ensures: result == 42
+    let value: Option<f32> = Some(41.5 as f32)
+    let out = unwrap(value)
+    42
+}
