@@ -83,6 +83,10 @@ fn default_system_library_candidates() -> Vec<&'static str> {
     // are not knowable from this host's absolute path table.
     #[cfg(target_os = "linux")]
     candidates.extend(["libc.so.6", "libm.so.6"]);
+    #[cfg(target_os = "macos")]
+    candidates.extend(["libSystem.B.dylib", "libm.dylib"]);
+    #[cfg(target_os = "windows")]
+    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
     candidates
 }
 
@@ -95,7 +99,15 @@ fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
     {
         return matches!(candidate, "libc.so.6" | "libm.so.6");
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        return matches!(candidate, "libSystem.B.dylib" | "libm.dylib");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return matches!(candidate, "ucrtbase.dll" | "msvcrt.dll");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         false
     }
@@ -842,6 +854,42 @@ mod tests {
             }),
             "at least one absolute libc/libm candidate must be a regular file on Linux"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn scalar_ffi_system_candidates_retain_macos_loader_names() {
+        let candidates = default_system_library_candidates();
+        let system = candidates
+            .iter()
+            .position(|candidate| *candidate == "libSystem.B.dylib")
+            .expect("macOS scalar FFI must retain the libSystem loader name");
+        let math = candidates
+            .iter()
+            .position(|candidate| *candidate == "libm.dylib")
+            .expect("macOS scalar FFI must retain the libm loader name");
+        assert!(math > system);
+        assert!(is_discoverable_system_library_candidate(
+            "libSystem.B.dylib"
+        ));
+        assert!(is_discoverable_system_library_candidate("libm.dylib"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn scalar_ffi_system_candidates_retain_windows_loader_names() {
+        let candidates = default_system_library_candidates();
+        let ucrt = candidates
+            .iter()
+            .position(|candidate| *candidate == "ucrtbase.dll")
+            .expect("Windows scalar FFI must retain the UCRT loader name");
+        let msvcrt = candidates
+            .iter()
+            .position(|candidate| *candidate == "msvcrt.dll")
+            .expect("Windows scalar FFI must retain the MSVCRT loader name");
+        assert!(msvcrt > ucrt);
+        assert!(is_discoverable_system_library_candidate("ucrtbase.dll"));
+        assert!(is_discoverable_system_library_candidate("msvcrt.dll"));
     }
 
     #[test]
