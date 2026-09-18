@@ -17921,6 +17921,74 @@ fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
 }
 
 #[test]
+fn scalar_ffi_seeded_cross_abi_default_verifier_matrix_preserves_receipts() {
+    if !crate::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 unavailable");
+        return;
+    }
+    let cases = [
+        ("i32", "i32", "i32", "7 as i32", "-8 as i32"),
+        ("bool", "bool", "bool", "true", "false"),
+        ("f64", "f64", "f64", "7.5", "-8.25"),
+    ];
+    for (case_index, (label, ty, ret_ty, positive, negative)) in cases.into_iter().enumerate() {
+        let symbol = format!("seeded_cross_abi_{label}");
+        let predicate = if label == "bool" {
+            "value == true"
+        } else if label == "f64" {
+            "value > 0.0"
+        } else {
+            "value >= 0"
+        };
+        let source = format!(
+            r#"extern "C" {{ func {symbol}(value: {ty}) -> {ret_ty} requires: {predicate} ensures: true; }}
+            func main() -> i64 {{ {symbol}({positive}); {symbol}({negative}); 0 }}"#
+        );
+        let checked = crate::core::check_program(&super::parse(&source)).unwrap_or_else(|error| {
+            panic!("cross-ABI verifier case {case_index} ({label}) check: {error:?}")
+        });
+        let mir = match MirProgram::from_checked_program(&checked) {
+            Ok(mir) => mir,
+            Err(error) if label == "f64" => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("extern contract expression is outside scalar MIR"),
+                    "cross-ABI f64 boundary drifted: {message}"
+                );
+                crate::core::CheckedProgram::reset_test_legacy_body_access();
+                assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
+                assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
+                assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
+                assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+                continue;
+            }
+            Err(error) => {
+                panic!("cross-ABI verifier case {case_index} ({label}) materialization: {error}")
+            }
+        };
+        assert_eq!(mir.ffi_calls().len(), 2, "cross-ABI verifier case {label}");
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let expected_receipt = mir.route_receipt("verifier-mir-v1");
+        let results = crate::verifier::verify_ffi_mir_with_source_hash(&mir, source_hash.clone())
+            .unwrap_or_else(|error| {
+                panic!("cross-ABI verifier case {case_index} ({label}): {error}")
+            });
+        assert_eq!(results.len(), 2, "one result per {label} FFI call-site");
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.source_hash == source_hash
+                    && artifact.mir_hash == mir.canonical_digest()
+                    && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
+            })
+        }));
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
 fn scalar_ffi_multi_argument_abi_shares_one_mir_across_consumers() {
     struct MultiArgumentOracle;
     impl MirReferenceFfiResolver for MultiArgumentOracle {
