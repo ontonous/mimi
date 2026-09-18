@@ -96,6 +96,72 @@ func main() -> i64 {
     0
 }
 "#;
+const F32_EXTREME_C_SOURCE: &str = r#"
+#include <stdint.h>
+
+float mir_ffi_f32_pos_inf(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x7f800000u };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_check_pos_inf(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x7f800000u ? 51 : -1;
+}
+
+float mir_ffi_f32_neg_inf(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0xff800000u };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_check_neg_inf(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0xff800000u ? 52 : -1;
+}
+
+float mir_ffi_f32_max(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x7f7fffffu };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_check_max(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x7f7fffffu ? 53 : -1;
+}
+
+float mir_ffi_f32_min_subnormal(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 1u };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_check_min_subnormal(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 1u ? 54 : -1;
+}
+"#;
+const F32_EXTREME_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f32_pos_inf() -> f32;
+    func mir_ffi_f32_check_pos_inf(x: f32) -> i64;
+    func mir_ffi_f32_neg_inf() -> f32;
+    func mir_ffi_f32_check_neg_inf(x: f32) -> i64;
+    func mir_ffi_f32_max() -> f32;
+    func mir_ffi_f32_check_max(x: f32) -> i64;
+    func mir_ffi_f32_min_subnormal() -> f32;
+    func mir_ffi_f32_check_min_subnormal(x: f32) -> i64;
+}
+func main() -> i64 {
+    let pos_inf = mir_ffi_f32_pos_inf()
+    println(mir_ffi_f32_check_pos_inf(pos_inf))
+    let neg_inf = mir_ffi_f32_neg_inf()
+    println(mir_ffi_f32_check_neg_inf(neg_inf))
+    let max = mir_ffi_f32_max()
+    println(mir_ffi_f32_check_max(max))
+    let min_subnormal = mir_ffi_f32_min_subnormal()
+    println(mir_ffi_f32_check_min_subnormal(min_subnormal))
+    0
+}
+"#;
 const F32_LITERAL_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_f32_literal(float x) { return x == 1.5f ? 42 : -1; }
@@ -789,6 +855,120 @@ fn scalar_ffi_f32_special_values_match_three_consumers() {
         .expect("native f32 special-value FFI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n43\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_f32_extreme_values_match_three_consumers() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_EXTREME_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let tokens = crate::lexer::Lexer::new(F32_EXTREME_SOURCE)
+        .tokenize()
+        .expect("lex f32 extreme-value FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse f32 extreme-value FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check f32 extreme-value fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize f32 extreme-value MIR");
+    assert_eq!(mir.ffi_calls().len(), 8);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-extreme-values".into())
+        .expect("verify f32 extreme-value MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    struct F32ExtremeOracle;
+    impl MirReferenceFfiResolver for F32ExtremeOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_f32_pos_inf", []) => {
+                    Ok(MirRuntimeValue::FloatBits(f64::INFINITY.to_bits()))
+                }
+                ("mir_ffi_f32_check_pos_inf", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits).is_infinite()
+                        && f64::from_bits(*bits).is_sign_positive() =>
+                {
+                    Ok(MirRuntimeValue::Int(51))
+                }
+                ("mir_ffi_f32_neg_inf", []) => {
+                    Ok(MirRuntimeValue::FloatBits(f64::NEG_INFINITY.to_bits()))
+                }
+                ("mir_ffi_f32_check_neg_inf", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits).is_infinite()
+                        && f64::from_bits(*bits).is_sign_negative() =>
+                {
+                    Ok(MirRuntimeValue::Int(52))
+                }
+                ("mir_ffi_f32_max", []) => {
+                    Ok(MirRuntimeValue::FloatBits((f32::MAX as f64).to_bits()))
+                }
+                ("mir_ffi_f32_check_max", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == f32::MAX as f64 =>
+                {
+                    Ok(MirRuntimeValue::Int(53))
+                }
+                ("mir_ffi_f32_min_subnormal", []) => Ok(MirRuntimeValue::FloatBits(
+                    (f32::from_bits(1) as f64).to_bits(),
+                )),
+                ("mir_ffi_f32_check_min_subnormal", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == f32::from_bits(1) as f64 =>
+                {
+                    Ok(MirRuntimeValue::Int(54))
+                }
+                _ => Err(format!(
+                    "unexpected f32 extreme-value call: {} {:?}",
+                    receipt.symbol, arguments
+                )),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&F32ExtremeOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference f32 extreme-value FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "51\n52\n53\n54\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free f32 extreme-value bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode f32 extreme-value execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "51\n52\n53\n54\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_extreme_values");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native f32 extreme-value FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native f32 extreme-value LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_EXTREME_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native f32 extreme-value FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "51\n52\n53\n54\n");
     assert_eq!(native.stderr, "");
 }
 
