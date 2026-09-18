@@ -17972,6 +17972,8 @@ fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
     for source in [
         r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
             func main() -> f64 { foreign(42.5) }"#,
+        r#"extern "C" { func foreign(x: f32) -> f32 requires: x > 0.0; }
+            func main() -> f32 { foreign(42.5 as f32) }"#,
         r#"extern "C" { func foreign(x: i64) -> i64; }
             func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
     ] {
