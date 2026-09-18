@@ -1079,6 +1079,161 @@ fn scalar_ffi_f32_reference_rejects_noncanonical_host_result() {
 }
 
 #[test]
+fn scalar_ffi_f32_host_failure_preserves_prefix_and_recovers_three_consumers() {
+    use std::cell::RefCell;
+
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f32_seed(value: f32) -> f32;
+    func mir_ffi_f32_check(value: f32) -> i64;
+}
+func main() -> i64 {
+    println(1 as i64);
+    let value = mir_ffi_f32_seed(1.5 as f32);
+    println(mir_ffi_f32_check(value));
+    0
+}
+"#;
+
+    struct FailingThenRecoveringF32Host {
+        calls: Cell<u8>,
+        symbols: RefCell<Vec<String>>,
+    }
+
+    impl MirReferenceFfiResolver for FailingThenRecoveringF32Host {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            self.symbols.borrow_mut().push(receipt.symbol.clone());
+            match (call, receipt.symbol.as_str(), arguments) {
+                (0, "mir_ffi_f32_seed", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 1.5 =>
+                {
+                    Err("explicit f32 host binding failed".into())
+                }
+                (_, "mir_ffi_f32_seed", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 1.5 =>
+                {
+                    Ok(MirRuntimeValue::FloatBits((1.75_f32 as f64).to_bits()))
+                }
+                (_, "mir_ffi_f32_check", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 1.75_f32 as f64 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err(format!(
+                    "unexpected f32 recovery call #{}: {} {:?}",
+                    call, receipt.symbol, arguments
+                )),
+            }
+        }
+    }
+
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("f32 host-failure fixture check");
+    let mir = MirProgram::from_checked_program(&checked).expect("f32 host-failure fixture MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let host = FailingThenRecoveringF32Host {
+        calls: Cell::new(0),
+        symbols: RefCell::new(Vec::new()),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&host);
+    let first_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference f32 host failure must stop after the prefix");
+    assert!(first_reference
+        .to_string()
+        .contains("explicit f32 host binding failed"));
+    assert_eq!(reference.captured_output(), "1\n");
+    assert_eq!(host.calls.get(), 1);
+    assert_eq!(host.symbols.borrow().as_slice(), ["mir_ffi_f32_seed"]);
+
+    let recovered_reference = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference f32 host binding must recover on reentry");
+    assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(recovered_reference.output, "1\n42\n");
+    assert_eq!(reference.captured_output(), "1\n42\n");
+    assert_eq!(host.calls.get(), 3);
+    assert_eq!(
+        host.symbols.borrow().as_slice(),
+        ["mir_ffi_f32_seed", "mir_ffi_f32_seed", "mir_ffi_f32_check"]
+    );
+
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let missing_fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let good_fixture = library_fixture(counter + 1, F32_CHAIN_C_SOURCE);
+    let missing_path = missing_fixture.dir.join("ffi.so");
+    let good_path = good_fixture.dir.join("ffi.so");
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&missing_path);
+
+    let bytecode = compile_mir_program(&mir).expect("f32 host-failure AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    let missing_error = vm
+        .run_value()
+        .expect_err("bytecode f32 call must fail when the symbol is absent");
+    assert_eq!(missing_error.code(), "E0800");
+    assert!(missing_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol"));
+    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.set_canonical_ffi_library_path(good_path.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode f32 call must recover with the symbol present"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "1\n42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_f32_recovery");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native f32 host-failure lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native f32 host-failure module");
+    let bad_config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let bad_native = super::link_and_observe_module(
+        &generator,
+        &bad_config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect_err("native f32 call must fail to link when the symbol is absent");
+    assert!(bad_native.contains("linker failed"), "{bad_native}");
+
+    let good_config = super::E2EConfig {
+        extra_c_src: Some(F32_CHAIN_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let good_native = super::link_and_observe_module(
+        &generator,
+        &good_config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native f32 call must recover with the symbol present");
+    assert_eq!(good_native.exit_code, Some(0));
+    assert_eq!(good_native.stdout, "1\n42\n");
+    assert!(good_native.stderr.is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_f32_forged_result_conversion_rejects_all_consumers() {
     let tokens = crate::lexer::Lexer::new(F32_CHAIN_SOURCE)
         .tokenize()
