@@ -18839,6 +18839,191 @@ int64_t generated_foreign(int64_t x) { return x; }
 }
 
 #[test]
+fn scalar_ffi_f32_seeded_composition_matrix_shares_one_mir_across_consumers() {
+    struct GeneratedF32Oracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for GeneratedF32Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let ordinal = self.calls.get();
+            self.calls.set(ordinal + 1);
+            let [MirRuntimeValue::FloatBits(bits)] = args else {
+                return Err(format!(
+                    "generated f32 FFI call #{} expected one float argument: {:?}",
+                    ordinal, args
+                ));
+            };
+            match receipt.symbol.as_str() {
+                "generated_f32" => Ok(MirRuntimeValue::FloatBits(*bits)),
+                "generated_f32_check" => {
+                    Ok(MirRuntimeValue::Int((f64::from_bits(*bits) as f32) as i64))
+                }
+                symbol => {
+                    return Err(format!(
+                        "generated f32 FFI call #{} used unexpected symbol {}",
+                        ordinal, symbol
+                    ));
+                }
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+float generated_f32(float x) { return x; }
+int64_t generated_f32_check(float x) { return (int64_t)x; }
+"#;
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    // Keep the generator deterministic: the seed, recurrence, and six shapes
+    // are part of the regression contract and identify every failing case.
+    let mut seed = 0xf32c_0ffe_u64;
+    for case_index in 0..18_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let shape = (seed % 6) as usize;
+        let value = ((seed >> 13) % 4096) as i64 + 1;
+        let alternate = value + 1;
+        let condition = (seed & 1) == 0;
+        let value_expr = format!("{value}.0 as f32");
+        let alternate_expr = format!("{alternate}.0 as f32");
+        let expected = match shape {
+            2 | 5 if condition => value,
+            2 | 5 => alternate,
+            _ => value,
+        };
+        let (helper, body, expected_ffi_calls, runtime_ffi_calls) = match shape {
+            0 => (
+                "",
+                format!(
+                    "let result = generated_f32({value_expr}); println(generated_f32_check(result)); 0"
+                ),
+                2,
+                2,
+            ),
+            1 => (
+                "",
+                format!(
+                    "let first = generated_f32({value_expr}); let result = generated_f32(first); println(generated_f32_check(result)); 0"
+                ),
+                3,
+                3,
+            ),
+            2 => (
+                "",
+                format!(
+                    "let result = if {condition} {{ generated_f32({value_expr}) }} else {{ generated_f32({alternate_expr}) }}; println(generated_f32_check(result)); 0"
+                ),
+                3,
+                2,
+            ),
+            3 => (
+                "func relay(value: f32) -> f32 { generated_f32(value) }",
+                format!(
+                    "let result = relay({value_expr}); println(generated_f32_check(result)); 0"
+                ),
+                2,
+                2,
+            ),
+            4 => (
+                "func relay(value: f32) -> f32 { generated_f32(value) }",
+                format!(
+                    "let first = relay({value_expr}); let result = generated_f32(first); println(generated_f32_check(result)); 0"
+                ),
+                3,
+                3,
+            ),
+            _ => (
+                "func relay(value: f32) -> f32 { generated_f32(value) }",
+                format!(
+                    "let result = if {condition} {{ let first = relay({value_expr}); generated_f32(first) }} else {{ generated_f32({alternate_expr}) }}; println(generated_f32_check(result)); 0"
+                ),
+                4,
+                if condition { 3 } else { 2 },
+            ),
+        };
+        let source = format!(
+            r#"extern "C" {{
+                func generated_f32(value: f32) -> f32;
+                func generated_f32_check(value: f32) -> i64;
+            }}
+            {helper}
+            func main() -> i64 {{ {body} }}"#
+        );
+        let checked = crate::core::check_program(&super::parse_prod(&source))
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} rejected: {error:?}"));
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(
+            admission.scalar_ffi,
+            "seeded f32 case {case_index}: {source}"
+        );
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .unwrap_or_else(|error| {
+                panic!("seeded f32 case {case_index} materialization: {error}")
+            });
+        assert!(
+            crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+            "seeded f32 case {case_index}: {route:?}"
+        );
+        let mir = route.program;
+        assert_eq!(mir.ffi_calls().len(), expected_ffi_calls);
+
+        let oracle = GeneratedF32Oracle {
+            calls: Cell::new(0),
+        };
+        let reference = MirReferenceInterpreter::new(&mir)
+            .with_ffi_resolver(&oracle)
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} reference: {error}"));
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, format!("{expected}\n"));
+        assert_eq!(oracle.calls.get(), runtime_ffi_calls);
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} bytecode: {error:?}"));
+        assert!(bytecode.ast.is_none());
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value()
+                .unwrap_or_else(|error| panic!("seeded f32 case {case_index} VM: {error}")),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.stdout(), format!("{expected}\n"));
+
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(
+            &context,
+            &format!("seeded_scalar_ffi_f32_{case_index}"),
+        );
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} native: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} LLVM: {error}"));
+        let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let native = super::link_and_observe_module(&generator, &config, native_counter)
+            .unwrap_or_else(|error| panic!("seeded f32 case {case_index} link: {error}"));
+        assert_eq!(native.exit_code, Some(0));
+        assert_eq!(native.stdout, format!("{expected}\n"));
+        assert_eq!(native.stderr, "");
+    }
+}
+
+#[test]
 fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
     if !crate::verifier::is_z3_available() {
         eprintln!("SKIP: Z3 unavailable");
