@@ -55,7 +55,7 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
     }
 }
 
-/// Candidate system libc paths for the no-configuration scalar FFI profile.
+/// Candidate system libc paths used by tests that need a libc symbol.
 fn default_libc_candidates() -> [&'static str; 5] {
     [
         "/lib/x86_64-linux-gnu/libc.so.6",
@@ -66,11 +66,28 @@ fn default_libc_candidates() -> [&'static str; 5] {
     ]
 }
 
+/// Candidate system libraries for the no-configuration scalar FFI profile.
+/// Native builds already link both libc and libm; the canonical bytecode
+/// runtime must search the same system surface when `MIMI_FFI_LIB` is absent.
+fn default_system_library_candidates() -> Vec<&'static str> {
+    default_libc_candidates()
+        .into_iter()
+        .chain([
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            "/lib64/libm.so.6",
+            "/usr/lib64/libm.so.6",
+            "/usr/lib/libm.so.6",
+        ])
+        .collect()
+}
+
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
     loaded_libs: Vec<(String, Library)>,
     /// Optional VM-local host binding. When absent, the compatibility
-    /// environment contract (`MIMI_FFI_LIB` or discoverable libc) remains the
+    /// environment contract (`MIMI_FFI_LIB` or discoverable system libraries)
+    /// remains the
     /// default. Keeping this override on the runtime instance lets embedders
     /// run multiple VMs against different libraries without racing a
     /// process-global environment variable.
@@ -388,45 +405,6 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         converted_args: &[Value],
     ) -> Result<Value, String> {
-        let lib_path = match self.library_path.clone() {
-            Some(path) => path,
-            None => match std::env::var_os("MIMI_FFI_LIB") {
-                Some(path) => path.into_string().map_err(|_| {
-                    "failed to load 'MIMI_FFI_LIB': path is not valid UTF-8".to_owned()
-                })?,
-                None => default_libc_candidates()
-                    .into_iter()
-                    .find(|candidate| std::path::Path::new(candidate).exists())
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc"
-                            .to_owned()
-                    })?,
-            },
-        };
-        if lib_path.trim().is_empty() {
-            return Err(format!(
-                "failed to load '{}': canonical MIR FFI library path is empty",
-                lib_path
-            ));
-        }
-        let lib_idx = if let Some(index) = self
-            .loaded_libs
-            .iter()
-            .position(|(path, _)| path == &lib_path)
-        {
-            index
-        } else {
-            // SAFETY: libloading keeps the library handle alive in
-            // `loaded_libs` for every symbol call made below.
-            let library = unsafe {
-                Library::new(&lib_path)
-                    .map_err(|error| format!("failed to load '{}': {error}", lib_path))?
-            };
-            self.loaded_libs.push((lib_path.clone(), library));
-            self.loaded_libs.len() - 1
-        };
-
         let argument_types = descriptor
             .arguments
             .iter()
@@ -511,6 +489,97 @@ impl CanonicalMirFfiRuntime {
                 }
             }
         }
+
+        let configured_path = match self.library_path.clone() {
+            Some(path) => Some(path),
+            None => match std::env::var_os("MIMI_FFI_LIB") {
+                Some(path) => Some(path.into_string().map_err(|_| {
+                    "failed to load 'MIMI_FFI_LIB': path is not valid UTF-8".to_owned()
+                })?),
+                None => None,
+            },
+        };
+        let configured = configured_path.is_some();
+        let candidate_paths = match configured_path {
+            Some(path) => vec![path],
+            None => default_system_library_candidates()
+                .into_iter()
+                .filter(|candidate| std::path::Path::new(candidate).exists())
+                .map(str::to_owned)
+                .collect(),
+        };
+        if candidate_paths.is_empty() {
+            return Err(
+                "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc/libm"
+                    .to_owned(),
+            );
+        }
+
+        let mut selected = None;
+        let mut last_symbol_error = None;
+        for lib_path in candidate_paths {
+            if lib_path.trim().is_empty() {
+                return Err(format!(
+                    "failed to load '{}': canonical MIR FFI library path is empty",
+                    lib_path
+                ));
+            }
+            let lib_idx = if let Some(index) = self
+                .loaded_libs
+                .iter()
+                .position(|(path, _)| path == &lib_path)
+            {
+                index
+            } else {
+                // SAFETY: libloading keeps the library handle alive in
+                // `loaded_libs` for every symbol call made below.
+                let library = unsafe {
+                    match Library::new(&lib_path) {
+                        Ok(library) => library,
+                        Err(_error) if !configured => continue,
+                        Err(error) => {
+                            return Err(format!("failed to load '{}': {error}", lib_path));
+                        }
+                    }
+                };
+                self.loaded_libs.push((lib_path.clone(), library));
+                self.loaded_libs.len() - 1
+            };
+            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
+                return Err(format!(
+                    "canonical MIR FFI library cache index {lib_idx} is out of range"
+                ));
+            };
+            // Probe the symbol before choosing the library.  This keeps the
+            // libc-first order for ordinary calls while allowing libm symbols
+            // to resolve without a process-global environment override.
+            // SAFETY: `library` remains alive in `loaded_libs`; `libloading`
+            // only borrows the handle while probing the NUL-free symbol name.
+            let symbol = unsafe { library.get::<*mut c_void>(descriptor.symbol.as_bytes()) };
+            match symbol {
+                Ok(_) => {
+                    selected = Some(lib_idx);
+                    break;
+                }
+                Err(error) => {
+                    last_symbol_error = Some(format!(
+                        "failed to find canonical MIR FFI symbol '{}': {error}",
+                        descriptor.symbol
+                    ));
+                    if configured {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(lib_idx) = selected else {
+            return Err(last_symbol_error.unwrap_or_else(|| {
+                format!(
+                    "failed to find canonical MIR FFI symbol '{}'",
+                    descriptor.symbol
+                )
+            }));
+        };
 
         // SAFETY: `cif` matches the typed argument/return storage above;
         // `symbol` is looked up in the live library handle and the call is

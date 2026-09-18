@@ -2138,6 +2138,72 @@ func main() -> i64 {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_f32_direct_libm_fallback_matches_explicit_mir() {
+    let libm_available = [
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib64/libm.so.6",
+        "/usr/lib/libm.so.6",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file());
+    if !libm_available {
+        eprintln!("SKIP: libm.so.6 not found");
+        return;
+    }
+    let source = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_libm_fallback_{}_{}.mimi",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func cosf(value: f32) -> f32;
+    func llrintf(value: f32) -> i64;
+}
+func main() -> i64 {
+    println(llrintf(cosf(0.0 as f32)));
+    0
+}
+"#,
+    )
+    .expect("write direct f32 libm fallback source");
+
+    let mut outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| panic!("direct f32 libm fallback {explicit_mir}: {error}"));
+        assert!(
+            output.status.success(),
+            "direct f32 libm fallback {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"1\n");
+        assert!(output.stderr.is_empty());
+        outputs.push(output);
+    }
+    assert_eq!(outputs[0].stdout, outputs[1].stdout);
+    assert_eq!(outputs[0].stderr, outputs[1].stderr);
+    fs::remove_file(source).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f32_direct_contract_rejects_all_cli_routes_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f32_contract_direct_{}_{}",
