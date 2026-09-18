@@ -2052,6 +2052,92 @@ func main() -> i64 { 0 }
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_direct_native_build_matches_explicit_mir() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_direct_native_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create direct f32 native directory");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func ldexpf(value: f32, exponent: i32) -> f32;
+    func llrintf(value: f32) -> i64;
+}
+func main() -> i64 {
+    println(llrintf(ldexpf(1.5 as f32, 3)));
+    0
+}
+"#,
+    )
+    .expect("write direct f32 native source");
+
+    let mut native_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "direct-f32-mir"
+        } else {
+            "direct-f32-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env("MIMI_VERBOSE", "1")
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| panic!("direct f32 native build {explicit_mir}: {error}"));
+        assert!(
+            build.status.success(),
+            "direct f32 native build {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(!build_stderr.contains("canonical route disposition: legacy"));
+        assert!(!build_stderr.contains("flow_ast"));
+
+        let native = Command::new(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("run direct f32 native {explicit_mir}: {error}"));
+        assert!(
+            native.status.success(),
+            "direct f32 native {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&native.stdout),
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(native.stdout, b"12\n");
+        assert!(native.stderr.is_empty());
+        native_outputs.push(native);
+    }
+    assert_eq!(
+        native_outputs[0].stdout, native_outputs[1].stdout,
+        "direct f32 native output drifted between default and explicit MIR routes"
+    );
+    assert_eq!(
+        native_outputs[0].stderr, native_outputs[1].stderr,
+        "direct f32 native diagnostics drifted between default and explicit MIR routes"
+    );
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f32_direct_contract_rejects_all_cli_routes_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f32_contract_direct_{}_{}",
