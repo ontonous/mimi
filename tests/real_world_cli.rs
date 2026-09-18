@@ -1933,116 +1933,124 @@ fn canonical_scalar_ffi_f32_direct_contract_rejects_all_cli_routes_without_legac
             .as_nanos()
     ));
     fs::create_dir_all(&dir).expect("create direct f32 contract boundary directory");
-    let source = dir.join("f32-contract.mimi");
-    fs::write(
-        &source,
-        r#"
+    for (contract_kind, contract_clause) in [
+        ("requires", "requires: value > 0.0"),
+        ("ensures", "ensures: result > 0.0"),
+    ] {
+        let source = dir.join(format!("f32-contract-{contract_kind}.mimi"));
+        let source_text = r#"
 extern "C" {
-    func mir_ffi_f32_contract(value: f32) -> f32 requires: value > 0.0;
+    func mir_ffi_f32_contract(value: f32) -> f32 {CONTRACT_CLAUSE};
 }
 func test_boundary() -> bool { true }
 func main() -> i64 {
     mir_ffi_f32_contract(7.5 as f32);
     0
 }
-"#,
-    )
-    .expect("write direct f32 contract boundary source");
+"#
+        .replace("{CONTRACT_CLAUSE}", contract_clause);
+        fs::write(&source, source_text).expect("write direct f32 contract boundary source");
 
-    for command in ["run", "build", "verify"] {
-        for explicit_mir in [false, true] {
-            let mut invocation = Command::new(mimi_bin());
-            invocation.current_dir(project_root()).arg(command);
-            if explicit_mir {
-                invocation.arg("--mir");
+        for command in ["run", "build", "verify"] {
+            for explicit_mir in [false, true] {
+                let mut invocation = Command::new(mimi_bin());
+                invocation.current_dir(project_root()).arg(command);
+                if explicit_mir {
+                    invocation.arg("--mir");
+                }
+                if command == "build" {
+                    invocation.arg("--emit-ir");
+                }
+                let output = invocation.arg(&source).output().unwrap_or_else(|error| {
+                    panic!(
+                        "spawn direct f32 {contract_kind} contract {command} {explicit_mir}: {error}"
+                    )
+                });
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    !output.status.success(),
+                    "direct f32 {contract_kind} contract must reject {command} explicit_mir={explicit_mir}"
+                );
+                assert!(
+                    stdout.is_empty(),
+                    "direct f32 {contract_kind} contract emitted output before {command} rejection: {stdout}"
+                );
+                assert!(
+                    stderr.contains("mir_ffi_f32_contract")
+                        && stderr.contains("extern contract expression is outside scalar MIR"),
+                    "direct f32 {contract_kind} boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("canonical route disposition: legacy"),
+                    "direct f32 {contract_kind} {command} entered legacy: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("flow_ast"),
+                    "direct f32 {contract_kind} {command}: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("Validation(["),
+                    "direct f32 {contract_kind} {command} leaked debug-shaped MIR error: {stderr}"
+                );
             }
-            if command == "build" {
-                invocation.arg("--emit-ir");
-            }
-            let output = invocation.arg(&source).output().unwrap_or_else(|error| {
-                panic!("spawn direct f32 contract {command} {explicit_mir}: {error}")
-            });
+        }
+
+        let invocations = [
+            ("test", vec!["test"]),
+            ("disasm", vec!["disasm"]),
+            ("mir --all", vec!["mir", "--all"]),
+            ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
+        ];
+        for (label, args) in invocations {
+            let output = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .args(&args)
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| {
+                    panic!("spawn direct f32 {contract_kind} auxiliary CLI {label}: {error}")
+                });
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 !output.status.success(),
-                "direct f32 contract must reject {command} explicit_mir={explicit_mir}"
-            );
-            assert!(
-                stdout.is_empty(),
-                "direct f32 contract emitted output before {command} rejection: {stdout}"
+                "direct f32 {contract_kind} contract must reject auxiliary CLI {label}"
             );
             assert!(
                 stderr.contains("mir_ffi_f32_contract")
                     && stderr.contains("extern contract expression is outside scalar MIR"),
-                "direct f32 boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+                "direct f32 {contract_kind} auxiliary CLI {label} lost the contract boundary: {stderr}"
             );
             assert!(
                 !stderr.contains("canonical route disposition: legacy"),
-                "direct f32 {command} entered legacy: {stderr}"
+                "direct f32 {contract_kind} auxiliary CLI {label} entered legacy: {stderr}"
             );
             assert!(
                 !stderr.contains("flow_ast"),
-                "direct f32 {command}: {stderr}"
+                "direct f32 {contract_kind} auxiliary CLI {label}: {stderr}"
             );
             assert!(
                 !stderr.contains("Validation(["),
-                "direct f32 {command} leaked debug-shaped MIR error: {stderr}"
+                "direct f32 {contract_kind} auxiliary CLI {label} leaked debug-shaped MIR error: {stderr}"
             );
+            if label == "test" {
+                assert!(
+                    stdout.contains("Running 1 test(s)..."),
+                    "direct f32 {contract_kind} auxiliary test discovery disappeared before rejection: {stdout}"
+                );
+                assert!(
+                    !stdout.contains("✓"),
+                    "rejected direct f32 {contract_kind} test body was executed: {stdout}"
+                );
+            } else {
+                assert!(
+                    stdout.is_empty(),
+                    "direct f32 {contract_kind} auxiliary CLI {label} emitted output before rejection: {stdout}"
+                );
+            }
         }
-    }
-
-    let invocations = [
-        ("test", vec!["test"]),
-        ("disasm", vec!["disasm"]),
-        ("mir --all", vec!["mir", "--all"]),
-        ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
-    ];
-    for (label, args) in invocations {
-        let output = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .args(&args)
-            .arg(&source)
-            .output()
-            .unwrap_or_else(|error| panic!("spawn direct f32 auxiliary CLI {label}: {error}"));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "direct f32 contract must reject auxiliary CLI {label}"
-        );
-        assert!(
-            stderr.contains("mir_ffi_f32_contract")
-                && stderr.contains("extern contract expression is outside scalar MIR"),
-            "direct f32 auxiliary CLI {label} lost the contract boundary: {stderr}"
-        );
-        assert!(
-            !stderr.contains("canonical route disposition: legacy"),
-            "direct f32 auxiliary CLI {label} entered legacy: {stderr}"
-        );
-        assert!(
-            !stderr.contains("flow_ast"),
-            "direct f32 auxiliary CLI {label}: {stderr}"
-        );
-        assert!(
-            !stderr.contains("Validation(["),
-            "direct f32 auxiliary CLI {label} leaked debug-shaped MIR error: {stderr}"
-        );
-        if label == "test" {
-            assert!(
-                stdout.contains("Running 1 test(s)..."),
-                "direct f32 auxiliary test discovery disappeared before rejection: {stdout}"
-            );
-            assert!(
-                !stdout.contains("✓"),
-                "rejected direct f32 test body was executed: {stdout}"
-            );
-        } else {
-            assert!(
-                stdout.is_empty(),
-                "direct f32 auxiliary CLI {label} emitted output before rejection: {stdout}"
-            );
-        }
+        fs::remove_file(source).ok();
     }
 
     fs::remove_dir_all(dir).ok();
