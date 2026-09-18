@@ -1958,6 +1958,54 @@ func main() -> i64 { 0 }
         !String::from_utf8_lossy(&receipt.stderr).contains("canonical route disposition: legacy")
     );
 
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("verify")
+            .env("MIMI_VERBOSE", "1");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .expect("spawn direct f32 verifier")
+    };
+    let default_verify = verify(false);
+    let explicit_verify = verify(true);
+    for (label, output) in [
+        ("default", &default_verify),
+        ("explicit MIR", &explicit_verify),
+    ] {
+        assert!(
+            output.status.success(),
+            "direct f32 {label} verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("No contracts to verify"),
+            "direct f32 {label} verifier must expose the no-contract boundary: {text}"
+        );
+        assert!(
+            !text.contains("canonical MIR verifier provenance:"),
+            "direct f32 {label} verifier must not fabricate proof provenance without contracts: {text}"
+        );
+    }
+    assert_eq!(
+        default_verify.stdout, explicit_verify.stdout,
+        "direct f32 default and explicit MIR no-contract verifier output drifted"
+    );
+    assert_eq!(default_verify.stderr, explicit_verify.stderr);
+
     fs::remove_dir_all(dir).ok();
 }
 
