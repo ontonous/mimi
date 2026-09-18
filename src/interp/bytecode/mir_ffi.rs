@@ -57,13 +57,15 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
 
 /// Candidate system libc paths used by tests that need a libc symbol.
 fn default_libc_candidates() -> Vec<&'static str> {
-    let mut candidates = vec![
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "linux")]
+    candidates.extend([
         "/lib/x86_64-linux-gnu/libc.so.6",
         "/usr/lib/x86_64-linux-gnu/libc.so.6",
         "/lib64/libc.so.6",
         "/usr/lib/libc.so.6",
         "/lib/libc.so.6",
-    ];
+    ]);
     #[cfg(target_os = "macos")]
     candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
     #[cfg(target_os = "windows")]
@@ -888,6 +890,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn scalar_ffi_system_candidates_retain_macos_loader_names() {
         let candidates = default_system_library_candidates();
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.contains("x86_64-linux-gnu")),
+            "macOS candidates must not carry Linux multiarch paths"
+        );
         let system = candidates
             .iter()
             .position(|candidate| *candidate == "libSystem.B.dylib")
@@ -907,6 +915,12 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn scalar_ffi_system_candidates_retain_windows_loader_names() {
         let candidates = default_system_library_candidates();
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.contains("x86_64-linux-gnu")),
+            "Windows candidates must not carry Linux multiarch paths"
+        );
         let ucrt = candidates
             .iter()
             .position(|candidate| *candidate == "ucrtbase.dll")
@@ -924,6 +938,12 @@ mod tests {
     #[cfg(target_os = "android")]
     fn scalar_ffi_system_candidates_retain_android_loader_names() {
         let candidates = default_system_library_candidates();
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.contains("x86_64-linux-gnu")),
+            "Android candidates must not carry host Linux multiarch paths"
+        );
         let libc = candidates
             .iter()
             .position(|candidate| *candidate == "libc.so")
