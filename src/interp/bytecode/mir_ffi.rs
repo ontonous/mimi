@@ -101,6 +101,16 @@ fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
     }
 }
 
+fn ffi_lookup_failure(
+    symbol: &str,
+    last_symbol_error: Option<String>,
+    last_load_error: Option<String>,
+) -> String {
+    last_symbol_error
+        .or(last_load_error)
+        .unwrap_or_else(|| format!("failed to find canonical MIR FFI symbol '{symbol}'"))
+}
+
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
     loaded_libs: Vec<(String, Library)>,
@@ -536,6 +546,7 @@ impl CanonicalMirFfiRuntime {
 
         let mut selected = None;
         let mut last_symbol_error = None;
+        let mut last_load_error = None;
         for lib_path in candidate_paths {
             if lib_path.trim().is_empty() {
                 return Err(format!(
@@ -555,7 +566,11 @@ impl CanonicalMirFfiRuntime {
                 let library = unsafe {
                     match Library::new(&lib_path) {
                         Ok(library) => library,
-                        Err(_error) if !configured => continue,
+                        Err(error) if !configured => {
+                            last_load_error =
+                                Some(format!("failed to load '{}': {error}", lib_path));
+                            continue;
+                        }
                         Err(error) => {
                             return Err(format!("failed to load '{}': {error}", lib_path));
                         }
@@ -592,12 +607,11 @@ impl CanonicalMirFfiRuntime {
             }
         }
         let Some(lib_idx) = selected else {
-            return Err(last_symbol_error.unwrap_or_else(|| {
-                format!(
-                    "failed to find canonical MIR FFI symbol '{}'",
-                    descriptor.symbol
-                )
-            }));
+            return Err(ffi_lookup_failure(
+                &descriptor.symbol,
+                last_symbol_error,
+                last_load_error,
+            ));
         };
 
         // SAFETY: `cif` matches the typed argument/return storage above;
@@ -824,6 +838,31 @@ mod tests {
                 )
                 .expect("Linux loader soname must resolve libc"),
             Value::Int(41)
+        );
+    }
+
+    #[test]
+    fn scalar_ffi_lookup_failure_preserves_load_vs_symbol_diagnostic() {
+        let load = ffi_lookup_failure(
+            "missing",
+            None,
+            Some("failed to load 'libm.so.6': loader rejected it".into()),
+        );
+        assert!(load.contains("failed to load"), "{load}");
+
+        let symbol = ffi_lookup_failure(
+            "missing",
+            Some("failed to find canonical MIR FFI symbol 'missing'".into()),
+            Some("failed to load 'libm.so.6': loader rejected it".into()),
+        );
+        assert!(
+            symbol.contains("failed to find canonical MIR FFI symbol"),
+            "{symbol}"
+        );
+
+        assert_eq!(
+            ffi_lookup_failure("missing", None, None),
+            "failed to find canonical MIR FFI symbol 'missing'"
         );
     }
 
