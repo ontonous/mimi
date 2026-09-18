@@ -2428,6 +2428,136 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_imported_module_missing_symbol_preserves_prefix_and_recovers() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_imported_missing_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 missing-symbol directory");
+
+    let good_c = dir.join("good.c");
+    let good_library = dir.join("good.so");
+    fs::write(
+        &good_c,
+        "#include <stdint.h>\ndouble imported_f64(double value) { return value < 0.0 ? -value : value; }\nint64_t imported_f64_check(double value) { return value == 7.5 ? 42 : -1; }\n",
+    )
+    .expect("write complete imported f64 host fixture");
+    let compile_good = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&good_c)
+        .arg("-o")
+        .arg(&good_library)
+        .output()
+        .expect("compile complete imported f64 host fixture");
+    assert!(
+        compile_good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_good.stderr)
+    );
+
+    let bad_c = dir.join("bad.c");
+    let bad_library = dir.join("bad.so");
+    fs::write(
+        &bad_c,
+        "double imported_f64(double value) { return value < 0.0 ? -value : value; }\n",
+    )
+    .expect("write incomplete imported f64 host fixture");
+    let compile_bad = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&bad_c)
+        .arg("-o")
+        .arg(&bad_library)
+        .output()
+        .expect("compile incomplete imported f64 host fixture");
+    assert!(
+        compile_bad.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_bad.stderr)
+    );
+
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func imported_f64(value: Scalar) -> Scalar;
+    func imported_f64_check(value: Scalar) -> i64;
+}
+pub func call(value: Scalar) -> Scalar { imported_f64(value) }
+pub func check(value: Scalar) -> i64 { imported_f64_check(value) }
+"#,
+    )
+    .expect("write imported f64 missing-symbol module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(8 as i64)
+    println(check(call(-7.5)))
+    0
+}
+"#,
+    )
+    .expect("write imported f64 missing-symbol entry");
+
+    let run = |explicit_mir: bool, library: &Path| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", library)
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 missing run {explicit_mir}: {error}"))
+    };
+
+    let missing_symbol_runs = [run(false, &bad_library), run(true, &bad_library)];
+    assert_eq!(
+        missing_symbol_runs[0].stderr, missing_symbol_runs[1].stderr,
+        "default and --mir imported f64 missing-symbol diagnostics must match"
+    );
+    for output in &missing_symbol_runs {
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"8\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(
+            stderr.contains("failed to find canonical MIR FFI symbol"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("imported_f64_check"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
+    let recovered_runs = [run(false, &good_library), run(true, &good_library)];
+    for output in &recovered_runs {
+        assert!(
+            output.status.success(),
+            "imported f64 recovery failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"8\n42\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
