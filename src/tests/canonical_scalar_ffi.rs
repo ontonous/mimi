@@ -19024,6 +19024,184 @@ int64_t generated_f32_check(float x) { return (int64_t)x; }
 }
 
 #[test]
+fn scalar_ffi_f32_route_manifest_replay_preserves_abi_and_rejects_forgery() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+float generated_manifest_f32(float value) { return value + 0.25f; }
+int64_t generated_manifest_f32_check(float value) { return value == 3.75f ? 42 : -1; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_manifest_f32(value: f32) -> f32;
+    func generated_manifest_f32_check(value: f32) -> i64;
+}
+func main() -> i64 {
+    let value = generated_manifest_f32(3.5 as f32)
+    println(generated_manifest_f32_check(value))
+    0
+}
+"#;
+
+    struct ManifestF32Oracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for ManifestF32Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let ordinal = self.calls.get();
+            self.calls.set(ordinal + 1);
+            match (ordinal, receipt.symbol.as_str(), arguments) {
+                (0, "generated_manifest_f32", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 3.5 =>
+                {
+                    Ok(MirRuntimeValue::FloatBits((3.75_f32 as f64).to_bits()))
+                }
+                (1, "generated_manifest_f32_check", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits) == 3.75_f32 as f64 =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                _ => Err(format!(
+                    "unexpected generated f32 manifest call #{}: {} {:?}",
+                    ordinal, receipt.symbol, arguments
+                )),
+            }
+        }
+    }
+
+    let checked = crate::core::check_program(&super::parse_prod(SOURCE))
+        .expect("generated f32 manifest fixture check");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("generated f32 manifest fixture materialization");
+    let mir = route.program;
+    let entries = mir.ffi_call_entries_in_source_order();
+    assert_eq!(
+        entries.len(),
+        2,
+        "manifest fixture must carry two FFI calls"
+    );
+    assert_eq!(entries[0].1.symbol, "generated_manifest_f32");
+    assert_eq!(entries[1].1.symbol, "generated_manifest_f32_check");
+    assert!(entries.iter().all(|(_, receipt)| {
+        receipt.parameter_conversions.iter().any(|conversion| {
+            matches!(
+                conversion.to,
+                crate::core::mir::types::MirAbiClass::Float { bits: 32 }
+            )
+        })
+    }));
+
+    let receipt = mir.route_receipt("r6-993-f32-manifest-v1");
+    let manifest = receipt
+        .manifest_text()
+        .expect("generated f32 manifest rendering");
+    let parsed = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&manifest)
+        .expect("generated f32 manifest parsing");
+    assert_eq!(parsed, receipt, "f32 manifest round-trip must be lossless");
+
+    let oracle = ManifestF32Oracle {
+        calls: Cell::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir)
+        .try_with_route_manifest(&manifest)
+        .expect("generated f32 reference must accept the manifest")
+        .with_ffi_resolver(&oracle);
+    let result = reference
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("generated f32 manifest reference execution");
+    assert_eq!(result.value, MirRuntimeValue::Int(0));
+    assert_eq!(result.output, "42\n");
+    assert_eq!(oracle.calls.get(), 2);
+
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let mut guard = super::FfiEnvGuard::lock();
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    let bytecode = compile_mir_program_with_route_manifest(&mir, &manifest)
+        .expect("generated f32 manifest bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("generated f32 manifest bytecode run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "42\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "r6_993_f32_manifest");
+    generator
+        .compile_mir_native_with_route_manifest(&mir, &manifest)
+        .expect("generated f32 manifest native lowering");
+    generator
+        .module
+        .verify()
+        .expect("generated f32 manifest native module");
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("generated f32 manifest native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert!(native.stderr.is_empty());
+
+    let source_hash = blake3::hash(SOURCE.as_bytes()).to_hex().to_string();
+    crate::verifier::verify_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+        .expect("generated f32 manifest general verifier");
+    crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &manifest, source_hash.clone())
+        .expect("generated f32 manifest FFI verifier");
+
+    let forged_manifest = manifest.replacen(&receipt.ffi_digest, &"0".repeat(64), 1);
+    let forged = crate::core::mir::CanonicalMirRouteReceipt::from_manifest(&forged_manifest)
+        .expect("forged f32 manifest remains structurally parseable");
+    let forged_reference = MirReferenceInterpreter::new(&mir)
+        .try_with_route_manifest(&forged_manifest)
+        .expect("forged f32 manifest must remain parseable")
+        .with_ffi_resolver(&oracle);
+    let reference_error = forged_reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("forged f32 manifest must fail before reference host binding");
+    assert!(reference_error.to_string().contains("ffi_digest"));
+    assert!(forged_reference.captured_output().is_empty());
+    assert_eq!(
+        oracle.calls.get(),
+        2,
+        "forged manifest reached the f32 host"
+    );
+
+    let bytecode_error = compile_mir_program_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("bytecode must reject forged f32 manifest");
+    assert!(bytecode_error
+        .iter()
+        .any(|error| error.message.contains("ffi_digest")));
+    let forged_context = inkwell::context::Context::create();
+    let mut forged_native =
+        crate::codegen::CodeGenerator::new(&forged_context, "r6_993_forged_f32_manifest");
+    let native_error = forged_native
+        .compile_mir_native_with_route_manifest(&mir, &forged_manifest)
+        .expect_err("native must reject forged f32 manifest");
+    assert!(native_error
+        .iter()
+        .any(|error| error.message.contains("ffi_digest")));
+    let verifier_error =
+        crate::verifier::verify_ffi_mir_with_route_manifest(&mir, &forged_manifest, source_hash)
+            .expect_err("FFI verifier must reject forged f32 manifest");
+    assert!(verifier_error.contains("ffi_digest"));
+    assert_eq!(forged.profile, receipt.profile);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_f32_seeded_receipt_forgery_matrix_rejects_before_host() {
     struct GeneratedF32Oracle {
         calls: Cell<u32>,
