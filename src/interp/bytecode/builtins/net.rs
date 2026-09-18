@@ -408,8 +408,11 @@ fn send_all(fd: i32, buf: *const libc::c_void, len: usize) -> Result<(), InterpE
             ));
         }
         if n < 0 {
-            // SAFETY: libc::__errno_location 返回线程局部 errno 的有效非空指针。
-            let err = unsafe { *libc::__errno_location() };
+            // `last_os_error` reads the platform's thread-local errno/OS error
+            // without assuming glibc's Linux-only `__errno_location` symbol.
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
             if err == libc::EINTR {
                 continue;
             }
@@ -432,8 +435,11 @@ fn recv_all_into(fd: i32, result: &mut Vec<u8>) -> Result<(), InterpError> {
         // SAFETY: chunk 为 vec![0u8; 32768]，指针与长度匹配。
         let n = unsafe { libc::recv(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len(), 0) };
         if n < 0 {
-            // SAFETY: 同上——线程局部 errno。
-            let err = unsafe { *libc::__errno_location() };
+            // Keep the error lookup target-neutral (Android uses `__errno`,
+            // while glibc uses `__errno_location`).
+            let err = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default();
             if err == libc::EINTR {
                 continue;
             }

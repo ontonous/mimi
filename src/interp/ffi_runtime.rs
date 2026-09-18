@@ -382,11 +382,17 @@ impl FfiRuntime {
             // __errno_location on Linux, __error on macOS).
             // Capturing side reads errno via std::io::Error::last_os_error().
             if contract.check_errno {
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                // SAFETY: __errno_location returns a valid thread-local pointer
-                // to the current errno variable on Linux/Android.
+                #[cfg(target_os = "linux")]
+                // SAFETY: glibc's __errno_location returns a valid thread-local
+                // pointer to the current errno variable.
                 unsafe {
                     *libc::__errno_location() = 0;
+                }
+                #[cfg(target_os = "android")]
+                // SAFETY: Bionic's __errno returns a valid thread-local pointer
+                // to the current errno variable.
+                unsafe {
+                    *libc::__errno() = 0;
                 }
                 #[cfg(target_os = "macos")]
                 // SAFETY: __error returns a valid thread-local pointer to the
@@ -1550,7 +1556,13 @@ impl FfiRuntime {
                     // The FfiRetContract::String contract asserts the C function returns
                     // a valid null-terminated C string (borrowed, Mimi does NOT free).
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
+                        // SAFETY: result is non-null and NUL-terminated under the
+                        // FfiRetContract::String contract; CStr only borrows it.
+                        unsafe {
+                            std::ffi::CStr::from_ptr(
+                                result as *const std::ffi::c_char,
+                            )
+                        }
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
@@ -1579,7 +1591,14 @@ impl FfiRuntime {
                     // a valid, null-terminated string that Mimi will free. catch_unwind
                     // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
+                        // SAFETY: result is non-null and NUL-terminated under the
+                        // FfiRetContract::StringOwned contract; CStr only borrows
+                        // it before Mimi frees the owned allocation below.
+                        unsafe {
+                            std::ffi::CStr::from_ptr(
+                                result as *const std::ffi::c_char,
+                            )
+                        }
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid string pointer (address {:#x})", result
                     ))?;
@@ -1598,7 +1617,14 @@ impl FfiRuntime {
                     // valid, null-terminated string that Mimi will free. catch_unwind
                     // only catches Rust panics, not SIGSEGV from an invalid pointer.
                     let c_str = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        unsafe { std::ffi::CStr::from_ptr(result as *const i8) } // SAFETY: result 为 FFI 返回的非空指针（String/StringOwned 契约保证 NUL 结尾），CStr 仅借用不释放。
+                        // SAFETY: result is non-null and NUL-terminated under the
+                        // FfiRetContract::Json contract; CStr only borrows it before
+                        // Mimi frees the owned allocation below.
+                        unsafe {
+                            std::ffi::CStr::from_ptr(
+                                result as *const std::ffi::c_char,
+                            )
+                        }
                     })).map_err(|_| format!(
                         "FFI safety: C function returned invalid JSON string pointer (address {:#x})", result
                     ))?;
