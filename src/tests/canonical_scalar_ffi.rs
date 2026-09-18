@@ -59,6 +59,17 @@ func main() -> i64 {
     mir_ffi_f32_check(value)
 }
 "#;
+const F32_LITERAL_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_f32_literal(float x) { return x == 1.5f ? 42 : -1; }
+"#;
+const F32_LITERAL_SOURCE: &str = r#"
+extern "C" { func mir_ffi_f32_literal(x: f32) -> i64; }
+func main() -> i64 {
+    let value = 1.5 as f32
+    mir_ffi_f32_literal(value)
+}
+"#;
 const RESULT_CONVERSION_F64_C_SOURCE: &str = r#"
 #include <stdint.h>
 double mir_ffi_result_f64(int64_t x) { return x == 7 ? 42.75 : -1.0; }
@@ -696,6 +707,115 @@ fn scalar_ffi_f32_reference_rejects_noncanonical_host_result() {
         1,
         "second host binding must stay unreachable"
     );
+}
+
+#[test]
+fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_LITERAL_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let tokens = crate::lexer::Lexer::new(F32_LITERAL_SOURCE)
+        .tokenize()
+        .expect("lex direct f32 literal FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse direct f32 literal FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check direct f32 literal FFI fixture");
+    let mut mir =
+        MirProgram::from_checked_program(&checked).expect("materialize direct f32 literal FFI MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut function = mir
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("direct f32 literal main MIR");
+    let mut replaced = false;
+    for block in function.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            let crate::core::mir::MirInstructionKind::Convert { result, .. } = &instruction.kind
+            else {
+                continue;
+            };
+            let result = result.clone();
+            instruction.kind = crate::core::mir::MirInstructionKind::Const {
+                result,
+                literal: crate::core::ir::ResolvedLiteral::float(1.5),
+            };
+            replaced = true;
+            break;
+        }
+        if replaced {
+            break;
+        }
+    }
+    assert!(
+        replaced,
+        "direct f32 literal fixture must contain a narrowing conversion"
+    );
+    // Keep the checker-owned FFI receipt table intact while replacing only the
+    // test-owned instruction shape.
+    mir.replace_function_for_test_only(function);
+
+    struct DirectF32LiteralOracle;
+    impl MirReferenceFfiResolver for DirectF32LiteralOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol == "mir_ffi_f32_literal"
+                && matches!(arguments, [MirRuntimeValue::FloatBits(bits)] if f64::from_bits(*bits) == 1.5)
+            {
+                Ok(MirRuntimeValue::Int(42))
+            } else {
+                Err(format!(
+                    "unexpected direct f32 literal call: {} {:?}",
+                    receipt.symbol, arguments
+                ))
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&DirectF32LiteralOracle)
+        .execute_with_output(&owner, &[])
+        .expect("reference direct f32 literal FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(42));
+    assert_eq!(reference.output, "");
+
+    let bytecode = compile_mir_program(&mir).expect("direct f32 literal bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode direct f32 literal"),
+        Value::Int(42)
+    );
+    assert_eq!(vm.stdout(), "");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_literal");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native direct f32 literal FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native direct f32 literal FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_LITERAL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native direct f32 literal FFI execution");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
 }
 
 #[test]

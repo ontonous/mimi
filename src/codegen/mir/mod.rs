@@ -1075,6 +1075,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 #[cfg(test)]
 mod tests {
     use super::CodeGenerator;
+    use crate::core::ir::ResolvedLiteral;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout, MirTypeKind};
     use crate::core::mir::MirInstructionKind;
@@ -2720,6 +2721,69 @@ func main() -> i32 {
             .verify()
             .expect("native f64 negate module verifies");
         assert!(generator.module.get_function("negate").is_some());
+    }
+
+    #[test]
+    fn native_f32_const_decodes_shared_f64_literal_bits() {
+        // `ResolvedLiteral::FloatBits` is always the shared semantic f64 slot.
+        // Forge the direct f32-constant shape that surface lowering normally
+        // spells as f64 Const + Float64ToFloat32 Convert, then require all
+        // three MIR consumers to preserve the same value. This protects the
+        // physical f32 ABI path used by canonical scalar FFI arguments.
+        let program = canonical_program(
+            "func consume(value: f32) -> i32 { 42 }\nfunc main() -> i32 { let value = 1.5 as f32; consume(value) }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let mut functions = program.functions().clone();
+        let main = functions.get_mut(&owner).expect("main MIR");
+        let mut replaced = false;
+        for block in main.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                let MirInstructionKind::Convert { result, .. } = &instruction.kind else {
+                    continue;
+                };
+                let result = result.clone();
+                instruction.kind = MirInstructionKind::Const {
+                    result,
+                    literal: ResolvedLiteral::float(1.5),
+                };
+                replaced = true;
+                break;
+            }
+            if replaced {
+                break;
+            }
+        }
+        assert!(replaced, "f32 fixture must contain a narrowing conversion");
+        let forged = MirProgram::with_type_catalog(functions, program.type_catalog().clone())
+            .expect("direct f32 constant remains a valid canonical MIR shape");
+
+        let reference = MirReferenceInterpreter::new(&forged)
+            .execute(&owner, &[])
+            .expect("reference direct f32 constant execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&forged).expect("bytecode direct f32 constant lowering"),
+        )
+        .run_value()
+        .expect("bytecode direct f32 constant execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_f32_const_bits_test");
+        generator
+            .compile_mir_native(&forged)
+            .expect("native direct f32 constant lowering");
+        generator
+            .module
+            .verify()
+            .expect("native direct f32 constant module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native direct f32 constant execution");
+        assert_eq!(native.exit_code, Some(42));
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
     }
 
     #[test]

@@ -1537,6 +1537,14 @@ impl MirProgram {
         self.ffi_calls = ffi_calls;
     }
 
+    /// Replace one validated function body in a test-owned MIR fixture while
+    /// preserving the program's checker-owned type, receipt, and route tables.
+    /// Production consumers never mutate a `MirProgram` after construction.
+    #[cfg(test)]
+    pub(crate) fn replace_function_for_test_only(&mut self, function: MirFunction) {
+        self.functions.insert(function.owner.clone(), function);
+    }
+
     /// Adjust one already-materialized call result for a backend conversion
     /// fixture.  The production checker normally gives an extern call the
     /// declaration result type directly, so a non-identity result conversion

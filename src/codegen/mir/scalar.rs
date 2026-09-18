@@ -30,14 +30,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .const_int(u64::from(*value), false)
                 .into()),
             (MirAbiClass::Float { bits: 32 | 64 }, ResolvedLiteral::FloatBits(value)) => {
+                // ResolvedLiteral::FloatBits is the shared semantic f64 slot,
+                // including when the MIR value's physical ABI is f32. The
+                // f32 consumer must round the decoded f64 value through Rust
+                // f32, just like reference and bytecode, rather than treating
+                // the low 32 bits of the f64 bit pattern as an f32 payload.
                 let value = if matches!(desc.abi, MirAbiClass::Float { bits: 32 }) {
-                    let bits = u32::try_from(*value).map_err(|_| {
-                        NativeMirError::new(
-                            subject,
-                            "f32 literal bits exceed the native u32 representation",
-                        )
-                    })?;
-                    f32::from_bits(bits) as f64
+                    f64::from_bits(*value) as f32 as f64
                 } else {
                     f64::from_bits(*value)
                 };
