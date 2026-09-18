@@ -59,6 +59,43 @@ func main() -> i64 {
     mir_ffi_f32_check(value)
 }
 "#;
+const F32_SPECIAL_C_SOURCE: &str = r#"
+#include <stdint.h>
+
+float mir_ffi_f32_nan(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x7fc00000u };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_is_nan(float value) {
+    return value != value ? 42 : -1;
+}
+
+float mir_ffi_f32_negative_zero(void) {
+    union { uint32_t bits; float value; } payload = { .bits = 0x80000000u };
+    return payload.value;
+}
+
+int64_t mir_ffi_f32_is_negative_zero(float value) {
+    union { uint32_t bits; float value; } payload = { .value = value };
+    return payload.bits == 0x80000000u ? 43 : -2;
+}
+"#;
+const F32_SPECIAL_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_f32_nan() -> f32;
+    func mir_ffi_f32_is_nan(x: f32) -> i64;
+    func mir_ffi_f32_negative_zero() -> f32;
+    func mir_ffi_f32_is_negative_zero(x: f32) -> i64;
+}
+func main() -> i64 {
+    let nan = mir_ffi_f32_nan()
+    println(mir_ffi_f32_is_nan(nan))
+    let negative_zero = mir_ffi_f32_negative_zero()
+    println(mir_ffi_f32_is_negative_zero(negative_zero))
+    0
+}
+"#;
 const F32_LITERAL_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_f32_literal(float x) { return x == 1.5f ? 42 : -1; }
@@ -652,6 +689,100 @@ fn scalar_ffi_f32_reference_bytecode_native_chain_matches() {
         .expect("native f32 chain FFI execution");
     assert_eq!(native.exit_code, Some(42));
     assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn scalar_ffi_f32_special_values_match_three_consumers() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_SPECIAL_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let tokens = crate::lexer::Lexer::new(F32_SPECIAL_SOURCE)
+        .tokenize()
+        .expect("lex f32 special-value FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse f32 special-value FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check f32 special-value fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize f32 special-value MIR");
+    assert_eq!(mir.ffi_calls().len(), 4);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-special-values".into())
+        .expect("verify f32 special-value MIR");
+    assert!(verification.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    struct F32SpecialOracle;
+    impl MirReferenceFfiResolver for F32SpecialOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), arguments) {
+                ("mir_ffi_f32_nan", []) => Ok(MirRuntimeValue::FloatBits(f64::NAN.to_bits())),
+                ("mir_ffi_f32_is_nan", [MirRuntimeValue::FloatBits(bits)])
+                    if f64::from_bits(*bits).is_nan() =>
+                {
+                    Ok(MirRuntimeValue::Int(42))
+                }
+                ("mir_ffi_f32_negative_zero", []) => {
+                    Ok(MirRuntimeValue::FloatBits((-0.0_f64).to_bits()))
+                }
+                ("mir_ffi_f32_is_negative_zero", [MirRuntimeValue::FloatBits(bits)])
+                    if *bits == (-0.0_f64).to_bits() =>
+                {
+                    Ok(MirRuntimeValue::Int(43))
+                }
+                _ => Err(format!(
+                    "unexpected f32 special-value call: {} {:?}",
+                    receipt.symbol, arguments
+                )),
+            }
+        }
+    }
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&F32SpecialOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference f32 special-value FFI execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n43\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free f32 special-value bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("bytecode f32 special-value execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "42\n43\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_special_values");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native f32 special-value FFI lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native f32 special-value LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_SPECIAL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native f32 special-value FFI execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n43\n");
     assert_eq!(native.stderr, "");
 }
 
