@@ -127,6 +127,85 @@ impl FfiRuntime {
         }
     }
 
+    /// Select a loaded library whose symbol can actually be called.
+    ///
+    /// No-environment candidates are best-effort: an existing file may still
+    /// be a linker script, the wrong architecture, or simply lack the symbol.
+    /// Explicit bindings remain strict and stop at the first load/symbol
+    /// failure, matching the historical `MIMI_FFI_LIB` contract.
+    fn select_library_for_symbol(
+        &mut self,
+        candidate_paths: Vec<String>,
+        configured: bool,
+        symbol: &str,
+    ) -> Result<usize, Errno> {
+        let mut selected_lib_idx = None;
+        let mut last_load_error = None;
+        let mut last_symbol_error = None;
+        for lib_path in candidate_paths {
+            if lib_path.trim().is_empty() {
+                return Err(Errno::Generic(
+                    "failed to load: FFI library path is empty".to_string(),
+                ));
+            }
+            let lib_idx = if let Some(idx) = self
+                .loaded_libs
+                .iter()
+                .position(|(path, _)| path == &lib_path)
+            {
+                idx
+            } else {
+                // SAFETY: libloading keeps the handle alive in `loaded_libs`
+                // for every symbol call made below.
+                let library = unsafe {
+                    match libloading::Library::new(&lib_path) {
+                        Ok(library) => library,
+                        Err(error) if !configured => {
+                            last_load_error =
+                                Some(format!("failed to load library '{}': {}", lib_path, error));
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(Errno::Generic(format!(
+                                "failed to load library '{}': {}",
+                                lib_path, error
+                            )));
+                        }
+                    }
+                };
+                self.loaded_libs.push((lib_path.clone(), library));
+                self.loaded_libs.len() - 1
+            };
+            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
+                return Err(Errno::Generic(format!(
+                    "FFI library cache index {lib_idx} is out of range"
+                )));
+            };
+            // SAFETY: `library` remains alive in `loaded_libs` while the
+            // symbol is borrowed and used by the synchronous libffi call.
+            match unsafe { library.get::<*mut std::ffi::c_void>(symbol.as_bytes()) } {
+                Ok(_) => {
+                    selected_lib_idx = Some(lib_idx);
+                    break;
+                }
+                Err(error) => {
+                    last_symbol_error =
+                        Some(format!("failed to find symbol '{}': {}", symbol, error));
+                    if configured {
+                        break;
+                    }
+                }
+            }
+        }
+        selected_lib_idx.ok_or_else(|| {
+            Errno::Generic(
+                last_symbol_error
+                    .or(last_load_error)
+                    .unwrap_or_else(|| format!("failed to find symbol '{}'", symbol)),
+            )
+        })
+    }
+
     /// Build the FFI tables from a parsed program file.
     pub(in crate::interp) fn from_file(file: &File) -> Self {
         let mut type_defs = HashMap::new();
@@ -402,75 +481,7 @@ impl FfiRuntime {
             ));
         }
 
-        // Probe every no-env candidate until both loading and symbol lookup
-        // succeed.  A regular file can exist while being the wrong ABI or an
-        // unusable linker script; selecting it by metadata alone made the
-        // compatibility runtime diverge from canonical MIR's fallback order.
-        let mut selected_lib_idx = None;
-        let mut last_load_error = None;
-        let mut last_symbol_error = None;
-        for lib_path in candidate_paths {
-            if lib_path.trim().is_empty() {
-                return Err(Errno::Generic(
-                    "failed to load: FFI library path is empty".to_string(),
-                ));
-            }
-            let lib_idx = if let Some(idx) = self
-                .loaded_libs
-                .iter()
-                .position(|(path, _)| path == &lib_path)
-            {
-                idx
-            } else {
-                // SAFETY: libloading keeps the handle alive in `loaded_libs`
-                // for every symbol call made below.
-                let library = unsafe {
-                    match libloading::Library::new(&lib_path) {
-                        Ok(library) => library,
-                        Err(error) if !configured => {
-                            last_load_error =
-                                Some(format!("failed to load library '{}': {}", lib_path, error));
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(Errno::Generic(format!(
-                                "failed to load library '{}': {}",
-                                lib_path, error
-                            )));
-                        }
-                    }
-                };
-                self.loaded_libs.push((lib_path.clone(), library));
-                self.loaded_libs.len() - 1
-            };
-            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
-                return Err(Errno::Generic(format!(
-                    "FFI library cache index {lib_idx} is out of range"
-                )));
-            };
-            // SAFETY: `library` remains alive in `loaded_libs` while the
-            // symbol is borrowed and used by the synchronous libffi call.
-            match unsafe { library.get::<*mut std::ffi::c_void>(func_name.as_bytes()) } {
-                Ok(_) => {
-                    selected_lib_idx = Some(lib_idx);
-                    break;
-                }
-                Err(error) => {
-                    last_symbol_error =
-                        Some(format!("failed to find symbol '{}': {}", func_name, error));
-                    if configured {
-                        break;
-                    }
-                }
-            }
-        }
-        let Some(lib_idx) = selected_lib_idx else {
-            return Err(Errno::Generic(
-                last_symbol_error
-                    .or(last_load_error)
-                    .unwrap_or_else(|| format!("failed to find symbol '{}'", func_name)),
-            ));
-        };
+        let lib_idx = self.select_library_for_symbol(candidate_paths, configured, &func_name)?;
 
         // Use libffi CIF for correct ABI handling (proper register routing for float/GP args)
         let result = {
@@ -1321,6 +1332,53 @@ mod tests {
         assert!(!FfiRuntime::is_discoverable_libc_candidate(
             "missing-libc.so"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compatibility_candidate_probe_skips_unloadable_regular_file() {
+        let bad_path = std::env::temp_dir().join(format!(
+            "mimi-ffi-not-a-library-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&bad_path, b"this is not an ELF shared object")
+            .expect("create an unloadable regular file");
+
+        let mut runtime = FfiRuntime::from_parts(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let selected = runtime
+            .select_library_for_symbol(
+                vec![bad_path.to_string_lossy().into_owned(), "libc.so.6".into()],
+                false,
+                "labs",
+            )
+            .expect("the loader must continue to libc after the bad file");
+        assert_eq!(runtime.loaded_libs[selected].0, "libc.so.6");
+        let _ = std::fs::remove_file(bad_path);
+    }
+
+    #[test]
+    fn compatibility_candidate_probe_reports_all_load_failures() {
+        let mut runtime = FfiRuntime::from_parts(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let error = runtime
+            .select_library_for_symbol(
+                vec!["/definitely/missing/mimi-ffi-library.so".into()],
+                false,
+                "labs",
+            )
+            .expect_err("missing candidates must fail before symbol execution");
+        assert!(error.to_string().contains("failed to load library"));
     }
 }
 
