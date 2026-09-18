@@ -1955,6 +1955,87 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_contract_imported_module_preserves_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_contract_imported_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 boundary directory");
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func imported_f64_contract(value: Scalar) -> Scalar requires: value > 0.0;
+}
+pub func call(value: Scalar) -> Scalar { imported_f64_contract(value) }
+"#,
+    )
+    .expect("write imported f64 boundary module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    call(7.5);
+    0
+}
+"#,
+    )
+    .expect("write imported f64 boundary entry");
+
+    for command in ["run", "build", "verify"] {
+        for explicit_mir in [false, true] {
+            let mut invocation = Command::new(mimi_bin());
+            invocation.current_dir(project_root()).arg(command);
+            if explicit_mir {
+                invocation.arg("--mir");
+            }
+            if command == "build" {
+                invocation.arg("--emit-ir");
+            }
+            let output = invocation.arg(&source).output().unwrap_or_else(|error| {
+                panic!("spawn imported f64 boundary {command} {explicit_mir}: {error}")
+            });
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "imported f64 contract must reject {command} explicit_mir={explicit_mir}"
+            );
+            assert!(
+                stdout.is_empty(),
+                "imported f64 contract emitted output before {command} rejection: {stdout}"
+            );
+            assert!(
+                stderr.contains("imported_f64_contract")
+                    && stderr.contains("extern contract expression is outside scalar MIR"),
+                "imported f64 boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "imported f64 {command} entered legacy: {stderr}"
+            );
+            assert!(
+                !stderr.contains("flow_ast"),
+                "imported f64 {command}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("Validation(["),
+                "imported f64 {command} leaked debug-shaped MIR error: {stderr}"
+            );
+        }
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
