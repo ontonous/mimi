@@ -272,6 +272,31 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn f32_arithmetic_remains_fail_closed() {
+    let src = r#"
+func main() -> i32 {
+    let x = 1.0 as f32;
+    let y = x + x;
+    println(y);
+    0
+}
+"#;
+    let tokens = lexer::Lexer::new(src)
+        .tokenize()
+        .expect("f32 arithmetic: lex");
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .expect("f32 arithmetic: parse");
+    let diagnostics = crate::core::check(&file).expect_err("f32 arithmetic must remain closed");
+    let message = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(message.contains("E0202"), "expected E0202, got: {message}");
+}
+
+#[test]
 fn parse_exported_func() {
     let src = "extern \"C\" func add(a: i64, b: i64) -> i64 { a + b }";
     let file = parse_and_check(src);
