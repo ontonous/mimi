@@ -22206,6 +22206,109 @@ func main() -> i64 { f32_result(1.5 as f32) as i64 }
 }
 
 #[test]
+fn scalar_ffi_f32_bytecode_index_forgery_rejects_and_recovers() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, F32_SPECIAL_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+
+    let checked = crate::core::check_program(&super::parse(F32_SPECIAL_SOURCE))
+        .expect("direct f32 index-forgery fixture check");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("direct f32 index-forgery fixture MIR");
+    assert_eq!(mir.ffi_calls().len(), 4);
+
+    let bytecode = compile_mir_program(&mir).expect("direct f32 index-forgery bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 4);
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.call_named("function:main", Vec::new())
+            .expect("initial direct f32 special-value execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "42\n43\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let first_binding = vm
+        .program()
+        .canonical_ffi_bindings
+        .iter()
+        .find(|binding| binding.extern_idx == 0)
+        .cloned()
+        .expect("first direct f32 descriptor binding");
+    let second_binding = vm
+        .program()
+        .canonical_ffi_bindings
+        .iter()
+        .find(|binding| binding.extern_idx == 1)
+        .cloned()
+        .expect("second direct f32 descriptor binding");
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        first_binding.extern_idx,
+    );
+
+    let index_error = vm
+        .run_value()
+        .expect_err("forged direct f32 descriptor index must fail before execution");
+    assert!(
+        index_error
+            .to_string()
+            .contains("descriptor index 0 disagrees with compiler binding index 1"),
+        "{index_error}"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let wrapped_error = vm
+        .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
+        .expect_err("wrapped direct f32 entry must reject the same forged index");
+    assert_eq!(wrapped_error.to_string(), index_error.to_string());
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    vm.replace_canonical_ffi_call_extern_index_for_test_only(
+        second_binding.function,
+        second_binding.pc,
+        second_binding.extern_idx,
+    );
+    assert_eq!(
+        vm.call_function(vm.program().entry, &[])
+            .expect("restored direct f32 descriptor index must recover"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "42\n43\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_f32_index_forgery");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native direct f32 index-forgery lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid native direct f32 index-forgery module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(F32_SPECIAL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("native direct f32 index-forgery execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n43\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_deterministic_receipt_forgery_matrix_rejects_every_consumer() {
     const SOURCE: &str = r#"
 extern "C" { func matrix_guard(value: i64) -> i64 requires: value >= 0; }
