@@ -66,6 +66,8 @@ fn default_libc_candidates() -> Vec<&'static str> {
     ];
     #[cfg(target_os = "macos")]
     candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
+    #[cfg(target_os = "windows")]
+    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
     candidates
 }
 
@@ -89,8 +91,6 @@ fn default_system_library_candidates() -> Vec<&'static str> {
     candidates.extend(["libc.so.6", "libm.so.6"]);
     #[cfg(target_os = "macos")]
     candidates.extend(["/usr/lib/libm.dylib", "libm.dylib"]);
-    #[cfg(target_os = "windows")]
-    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
     candidates
 }
 
