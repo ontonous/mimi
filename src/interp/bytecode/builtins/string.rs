@@ -459,10 +459,10 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
             // the raw `s.repeat(n)` panics inside std on a capacity overflow
             // ("a".repeat(i64::MAX)) and OOMs the process for large counts.
             // Clamp to the same 8 GiB cap so both backends agree.
-            let count = *n as usize;
-            const MAX_TOTAL: usize = 1usize << 33; // 8 GiB, mirrors codegen
-            let total = s
-                .len()
+            let count = u64::try_from(*n)
+                .map_err(|_| InterpError::new("repeat count must be non-negative"))?;
+            const MAX_TOTAL: u64 = 1u64 << 33; // 8 GiB, mirrors codegen
+            let total = (s.len() as u64)
                 .checked_mul(count)
                 .ok_or_else(|| InterpError::new("str_repeat: total size overflow"))?;
             if total > MAX_TOTAL {
@@ -470,6 +470,8 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
                     "str_repeat: result exceeds 8 GiB cap (refusing unbounded allocation)",
                 ));
             }
+            let count = usize::try_from(count)
+                .map_err(|_| InterpError::new("str_repeat: count overflows target usize"))?;
             Ok(Value::String(Arc::new(s.repeat(count))))
         }
         _ => Err(InterpError::new("repeat expects (string, int)")),

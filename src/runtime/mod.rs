@@ -23793,8 +23793,8 @@ mod audit_wave1_tests {
         // Outer struct IS mapped (this box), but the inner ptr points at an
         // unmapped userspace hole. Old code dereferenced it blind (SIGSEGV);
         // new code must mincore-probe and return the sentinel "".
-        let unmapped: usize = 0x0000_7000_0000_0000; // canonical, unmapped hole
-        let s = Box::new([unmapped as i64, 16i64]);
+        let unmapped: i64 = 0x0000_7000_0000_0000; // canonical, unmapped hole
+        let s = Box::new([unmapped, 16i64]);
         let addr = Box::into_raw(s) as *mut [i64; 2];
         let got = decode_result_err_string(addr as usize as i64);
         assert_eq!(got, "\"\"");

@@ -232,7 +232,7 @@ fn builtin_bind(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
         libc::bind(
             fd,
             &addr as *const _ as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as u32,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         )
     };
     if ret < 0 {
@@ -272,7 +272,7 @@ fn builtin_accept(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
         .ok_or_else(|| InterpError::new("accept: fd must be i32"))? as i32;
     // SAFETY: zeroed 初始化 POD sockaddr_in；addr_len 携带缓冲区大小。
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_in>() as u32;
+    let mut addr_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
     // SAFETY: fd 为 socket() 返回的有效描述符；&mut addr 指向栈上缓冲。
     let client_fd = unsafe {
         libc::accept(
