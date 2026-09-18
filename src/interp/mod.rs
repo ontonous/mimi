@@ -4,6 +4,7 @@ pub mod bytecode;
 pub mod error;
 pub(crate) mod ffi;
 pub(crate) mod ffi_runtime;
+pub(crate) mod ffi_system_libraries;
 mod value;
 
 pub use error::InterpError;

@@ -13,6 +13,7 @@ use libffi::middle::{arg as ffi_arg, Cif, CodePtr, Type as FfiType};
 use libloading::Library;
 
 use super::instr::{CanonicalFfiDescriptor, CanonicalFfiScalarType};
+use crate::interp::ffi_system_libraries::{discover_no_env_candidates, resolve_explicit_binding};
 use crate::interp::value::Value;
 
 fn ffi_contract_runtime_error(
@@ -55,82 +56,11 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
     }
 }
 
-/// Candidate system libc paths used by tests that need a libc symbol.
-fn default_libc_candidates() -> Vec<&'static str> {
-    let mut candidates = Vec::new();
-    #[cfg(target_os = "linux")]
-    candidates.extend([
-        "/lib/x86_64-linux-gnu/libc.so.6",
-        "/usr/lib/x86_64-linux-gnu/libc.so.6",
-        "/lib64/libc.so.6",
-        "/usr/lib/libc.so.6",
-        "/lib/libc.so.6",
-    ]);
-    #[cfg(target_os = "macos")]
-    candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
-    #[cfg(target_os = "windows")]
-    candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
-    #[cfg(target_os = "android")]
-    candidates.extend(["/system/lib64/libc.so", "/system/lib/libc.so", "libc.so"]);
-    candidates
-}
-
-/// Candidate system libraries for the no-configuration scalar FFI profile.
-/// Native builds already link both libc and libm; the canonical bytecode
-/// runtime must search the same system surface when `MIMI_FFI_LIB` is absent.
-fn default_system_library_candidates() -> Vec<&'static str> {
-    let mut candidates = default_libc_candidates();
-    #[cfg(target_os = "linux")]
-    candidates.extend([
-        "/lib/x86_64-linux-gnu/libm.so.6",
-        "/usr/lib/x86_64-linux-gnu/libm.so.6",
-        "/lib64/libm.so.6",
-        "/usr/lib64/libm.so.6",
-        "/usr/lib/libm.so.6",
-    ]);
-    // Keep the loader's soname search as the final fallback.  Cross-target
-    // Linux installs (for example aarch64) use multiarch directories that
-    // are not knowable from this host's absolute path table.
-    #[cfg(target_os = "linux")]
-    candidates.extend(["libc.so.6", "libm.so.6"]);
-    #[cfg(target_os = "macos")]
-    candidates.extend(["/usr/lib/libm.dylib", "libm.dylib"]);
-    #[cfg(target_os = "android")]
-    candidates.extend(["/system/lib64/libm.so", "/system/lib/libm.so", "libm.so"]);
-    candidates
-}
-
-fn is_discoverable_system_library_candidate(candidate: &str) -> bool {
-    let path = std::path::Path::new(candidate);
-    if path.is_absolute() {
-        return path.is_file();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return matches!(candidate, "libc.so.6" | "libm.so.6");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return matches!(candidate, "libSystem.B.dylib" | "libm.dylib");
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return matches!(candidate, "ucrtbase.dll" | "msvcrt.dll");
-    }
-    #[cfg(target_os = "android")]
-    {
-        return matches!(candidate, "libc.so" | "libm.so");
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android"
-    )))]
-    {
-        false
-    }
-}
+// Candidate tables, the discovery allowlist, and the explicit `MIMI_FFI_LIB`
+// binding resolution live in `crate::interp::ffi_system_libraries` so the
+// canonical and compatibility runtimes cannot drift apart on host-binding
+// decisions. Only the selector below stays local: it works on this runtime's
+// own library cache and error type.
 
 fn ffi_lookup_failure(
     symbol: &str,
@@ -624,21 +554,12 @@ impl CanonicalMirFfiRuntime {
 
         let configured_path = match self.library_path.clone() {
             Some(path) => Some(path),
-            None => match std::env::var_os("MIMI_FFI_LIB") {
-                Some(path) => Some(path.into_string().map_err(|_| {
-                    "failed to load 'MIMI_FFI_LIB': path is not valid UTF-8".to_owned()
-                })?),
-                None => None,
-            },
+            None => resolve_explicit_binding()?,
         };
         let configured = configured_path.is_some();
         let candidate_paths = match configured_path {
             Some(path) => vec![path],
-            None => default_system_library_candidates()
-                .into_iter()
-                .filter(|candidate| is_discoverable_system_library_candidate(candidate))
-                .map(str::to_owned)
-                .collect(),
+            None => discover_no_env_candidates(),
         };
         if candidate_paths.is_empty() {
             return Err(
@@ -839,6 +760,10 @@ unsafe fn call_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interp::ffi_system_libraries::{
+        default_libc_candidates, default_system_library_candidates,
+        is_discoverable_system_library_candidate,
+    };
 
     #[test]
     fn scalar_ffi_system_candidates_are_unique() {

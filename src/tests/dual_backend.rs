@@ -10516,6 +10516,8 @@ fn dual_ffi_libc_symbols_default_resolution_parity() {
     if !can_link() {
         return;
     }
+    let _guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
     let src = r#"
         extern "C" {
             func abs(x: i32) -> i32;
@@ -10533,6 +10535,79 @@ fn dual_ffi_libc_symbols_default_resolution_parity() {
     // VM side: must resolve via the default-libc fallback, no env var.
     let (_, vm) = run_source_bytecode_with_stdout(src);
     assert_eq!(vm.trim(), "42\n5", "vm default libc resolution");
+}
+
+#[test]
+fn dual_ffi_libm_symbols_default_resolution_parity() {
+    // R6-1029 (L1): native binaries link both libc and libm, and the
+    // canonical MIR runtime falls back to libm, but the compatibility runtime
+    // only discovered libc candidates — identical `cos` programs succeeded
+    // natively and on the canonical route while the compatibility route
+    // failed with a libc symbol miss. Both VM runtimes now share the same
+    // system-library discovery contract.
+    if !can_link() {
+        return;
+    }
+    let _guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let src = r#"
+        extern "C" {
+            func cos(x: f64) -> f64;
+        }
+        func main() -> i32 {
+            println(cos(0.0))
+            0
+        }
+    "#;
+    let native = checked_codegen_compile_and_run(src).expect("native libm extern");
+    let native_value: f64 = native
+        .trim()
+        .parse()
+        .expect("native cos output must be numeric");
+    assert!(
+        (native_value - 1.0).abs() < 1e-9,
+        "native cos(0.0): {native_value}"
+    );
+    let (_, vm) = run_source_bytecode_with_stdout(src);
+    let vm_value: f64 = vm.trim().parse().expect("vm cos output must be numeric");
+    assert!((vm_value - 1.0).abs() < 1e-9, "vm cos(0.0): {vm_value}");
+}
+
+#[cfg(unix)]
+#[test]
+fn compatibility_ffi_non_utf8_binding_fails_closed() {
+    // R6-1029: the compatibility runtime read MIMI_FFI_LIB with
+    // `std::env::var`, silently treating a non-UTF-8 binding as unset and
+    // falling back to system-library discovery. It now shares the canonical
+    // fail-closed contract: the program asked for one specific library, and
+    // silently running against a different one would violate the binding.
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let _guard = super::FfiEnvGuard::lock();
+    std::env::set_var(
+        "MIMI_FFI_LIB",
+        OsString::from_vec(vec![b'/', b't', b'm', b'p', 0xff, b'.', b's', b'o']),
+    );
+    // A symbol that is neither a builtin nor present in any discovered
+    // system library, so the test proves the binding check fires before any
+    // discovery or symbol lookup.
+    let src = r#"
+        extern "C" {
+            func mimi_ffi_binding_probe(x: i32) -> i32;
+        }
+        func main() -> i32 {
+            println(mimi_ffi_binding_probe(1))
+            0
+        }
+    "#;
+    let error = run_source_bytecode_result(src)
+        .expect_err("a non-UTF-8 binding must fail closed before any discovery");
+    assert!(error.contains("not valid UTF-8"), "{error}");
+    assert!(
+        !error.contains("not set for extern function call"),
+        "a non-UTF-8 binding must not silently fall back to discovery: {error}"
+    );
 }
 
 #[test]

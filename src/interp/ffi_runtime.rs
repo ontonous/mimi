@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use super::ffi::helpers::{ffi_guard_new_read, ffi_guard_new_write, FfiGuard, FfiSharedGuard};
+use super::ffi_system_libraries::{discover_no_env_candidates, resolve_explicit_binding};
 use super::Value;
 
 /// Abstraction over an execution engine that can run a Mimi closure.
@@ -73,60 +74,6 @@ pub(crate) struct FfiRuntime {
 }
 
 impl FfiRuntime {
-    /// Candidate system libc paths for the MIMI_FFI_LIB-less default.
-    /// First match wins; all misses preserve the original explicit error.
-    fn default_libc_candidates() -> Vec<&'static str> {
-        let mut candidates = Vec::new();
-        #[cfg(target_os = "linux")]
-        candidates.extend([
-            "/lib/x86_64-linux-gnu/libc.so.6",
-            "/usr/lib/x86_64-linux-gnu/libc.so.6",
-            "/lib64/libc.so.6",
-            "/usr/lib/libc.so.6",
-            "/lib/libc.so.6",
-            "libc.so.6",
-        ]);
-        #[cfg(target_os = "android")]
-        candidates.extend(["/system/lib64/libc.so", "/system/lib/libc.so", "libc.so"]);
-        #[cfg(target_os = "macos")]
-        candidates.extend(["/usr/lib/libSystem.B.dylib", "libSystem.B.dylib"]);
-        #[cfg(target_os = "windows")]
-        candidates.extend(["ucrtbase.dll", "msvcrt.dll"]);
-        candidates
-    }
-
-    fn is_discoverable_libc_candidate(candidate: &str) -> bool {
-        let path = std::path::Path::new(candidate);
-        if path.is_absolute() {
-            return path.is_file();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            return candidate == "libc.so.6";
-        }
-        #[cfg(target_os = "android")]
-        {
-            return candidate == "libc.so";
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return candidate == "libSystem.B.dylib";
-        }
-        #[cfg(target_os = "windows")]
-        {
-            return matches!(candidate, "ucrtbase.dll" | "msvcrt.dll");
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "windows"
-        )))]
-        {
-            false
-        }
-    }
-
     /// Select a loaded library whose symbol can actually be called.
     ///
     /// No-environment candidates are best-effort: an existing file may still
@@ -459,19 +406,18 @@ impl FfiRuntime {
         // plain `extern "C" { func abs(...) }` call works with no environment
         // setup — while the VM demanded MIMI_FFI_LIB even for libc symbols,
         // making identical programs diverge across backends (VM E0800 vs
-        // native success). Default to the system libc when the variable is
-        // unset; custom libraries still set MIMI_FFI_LIB explicitly.
+        // native success). Native binaries also link libm, so discovery uses
+        // the same shared libc+libm candidate contract as the canonical MIR
+        // runtime (R6-1029). Custom libraries still set MIMI_FFI_LIB
+        // explicitly, and a non-UTF-8 binding fails closed instead of being
+        // silently treated as unset.
         let func_name = extern_func.name.clone();
 
-        let configured_path = std::env::var("MIMI_FFI_LIB").ok();
+        let configured_path = resolve_explicit_binding().map_err(Errno::Generic)?;
         let configured = configured_path.is_some();
         let candidate_paths = match configured_path {
             Some(path) => vec![path],
-            None => Self::default_libc_candidates()
-                .into_iter()
-                .filter(|candidate| Self::is_discoverable_libc_candidate(candidate))
-                .map(str::to_owned)
-                .collect(),
+            None => discover_no_env_candidates(),
         };
         if candidate_paths.is_empty() {
             return Err(Errno::Generic(
@@ -1286,10 +1232,14 @@ impl FfiRuntime {
 #[cfg(test)]
 mod tests {
     use super::FfiRuntime;
+    use crate::interp::ffi_system_libraries::{
+        default_system_library_candidates, discover_no_env_candidates,
+        is_discoverable_system_library_candidate,
+    };
 
     #[test]
-    fn default_libc_candidates_are_partitioned_by_target() {
-        let candidates = FfiRuntime::default_libc_candidates();
+    fn system_library_candidates_are_partitioned_by_target() {
+        let candidates = default_system_library_candidates();
         assert!(
             candidates
                 .iter()
@@ -1301,37 +1251,99 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             assert!(candidates.contains(&"libc.so.6"));
-            assert!(FfiRuntime::is_discoverable_libc_candidate("libc.so.6"));
+            assert!(candidates.contains(&"libm.so.6"));
+            assert!(is_discoverable_system_library_candidate("libc.so.6"));
+            assert!(is_discoverable_system_library_candidate("libm.so.6"));
         }
         #[cfg(target_os = "android")]
         {
             assert!(candidates.contains(&"/system/lib64/libc.so"));
             assert!(candidates.contains(&"/system/lib/libc.so"));
             assert!(candidates.contains(&"libc.so"));
-            assert!(FfiRuntime::is_discoverable_libc_candidate("libc.so"));
+            assert!(candidates.contains(&"libm.so"));
+            assert!(is_discoverable_system_library_candidate("libc.so"));
+            assert!(is_discoverable_system_library_candidate("libm.so"));
         }
         #[cfg(target_os = "macos")]
         {
             assert!(candidates.contains(&"/usr/lib/libSystem.B.dylib"));
             assert!(candidates.contains(&"libSystem.B.dylib"));
-            assert!(FfiRuntime::is_discoverable_libc_candidate(
+            assert!(candidates.contains(&"libm.dylib"));
+            assert!(is_discoverable_system_library_candidate(
                 "libSystem.B.dylib"
             ));
+            assert!(is_discoverable_system_library_candidate("libm.dylib"));
         }
         #[cfg(target_os = "windows")]
         {
             assert!(candidates.contains(&"ucrtbase.dll"));
             assert!(candidates.contains(&"msvcrt.dll"));
-            assert!(FfiRuntime::is_discoverable_libc_candidate("ucrtbase.dll"));
+            assert!(is_discoverable_system_library_candidate("ucrtbase.dll"));
         }
     }
 
     #[test]
     fn non_allowlisted_relative_libc_candidate_is_rejected() {
-        assert!(!FfiRuntime::is_discoverable_libc_candidate("./libc.so.6"));
-        assert!(!FfiRuntime::is_discoverable_libc_candidate(
-            "missing-libc.so"
-        ));
+        assert!(!is_discoverable_system_library_candidate("./libc.so.6"));
+        assert!(!is_discoverable_system_library_candidate("missing-libc.so"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compatibility_no_env_discovery_resolves_libm_and_libc_symbols() {
+        // R6-1029 (L1): native binaries link libm, and the canonical MIR
+        // runtime falls back to it, so the compatibility runtime must resolve
+        // the same libm symbol for identical programs instead of failing with
+        // a libc-only symbol miss.
+        let mut runtime = FfiRuntime::from_parts(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let candidates = discover_no_env_candidates();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("libm")),
+            "no-env discovery must expose libm candidates: {candidates:?}"
+        );
+
+        let math_idx = runtime
+            .select_library_for_symbol(candidates.clone(), false, "cos")
+            .expect("compatibility no-env discovery must reach libm for cos");
+        assert!(
+            runtime.loaded_libs[math_idx].0.contains("libm"),
+            "cos must resolve through a libm candidate, got {}",
+            runtime.loaded_libs[math_idx].0
+        );
+
+        let libc_idx = runtime
+            .select_library_for_symbol(candidates.clone(), false, "labs")
+            .expect("compatibility no-env discovery must keep libc symbols");
+        assert!(
+            runtime.loaded_libs[libc_idx].0.contains("libc"),
+            "labs must resolve through a libc candidate, got {}",
+            runtime.loaded_libs[libc_idx].0
+        );
+        assert!(
+            runtime
+                .loaded_libs
+                .iter()
+                .any(|(path, _)| path.contains("libm")),
+            "the probed libm library must stay cached: {:?}",
+            runtime
+                .loaded_libs
+                .iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        );
+        let labs_again = runtime
+            .select_library_for_symbol(candidates, false, "labs")
+            .expect("a repeat selection must reuse the runtime cache");
+        assert_eq!(
+            labs_again, libc_idx,
+            "cached libc selection must be reused without reloading"
+        );
     }
 
     #[cfg(target_os = "linux")]
