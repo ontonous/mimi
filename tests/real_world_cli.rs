@@ -2795,6 +2795,137 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_imported_module_mixed_integer_abi_matches_cli_consumers() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_imported_mixed_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f64 mixed ABI directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\ndouble imported_mix(int32_t marker, double value, int64_t offset) { return value + (double)marker + (double)offset; }\nint64_t imported_mix_check(int32_t marker, double value, int64_t offset) { return (marker == 5 && value == 22.5 && offset == 10) ? 42 : -1; }\n",
+    )
+    .expect("write imported f64 mixed ABI C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported f64 mixed ABI C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f64
+pub extern "C" {
+    func imported_mix(marker: i32, value: Scalar, offset: i64) -> Scalar;
+    func imported_mix_check(marker: i32, value: Scalar, offset: i64) -> i64;
+}
+pub func mix(marker: i32, value: Scalar, offset: i64) -> Scalar {
+    imported_mix(marker, value, offset)
+}
+pub func check(marker: i32, value: Scalar, offset: i64) -> i64 {
+    imported_mix_check(marker, value, offset)
+}
+"#,
+    )
+    .expect("write imported f64 mixed ABI module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    let value = mix(5, 7.5, 10 as i64);
+    println(check(5, value, 10 as i64));
+    0
+}
+"#,
+    )
+    .expect("write imported f64 mixed ABI entry");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 mixed run {explicit_mir}: {error}"));
+        assert!(
+            run.status.success(),
+            "imported f64 mixed run {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"42\n");
+        assert!(String::from_utf8_lossy(&run.stderr).is_empty());
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 mixed verify {explicit_mir}: {error}"));
+        assert!(
+            verify.status.success(),
+            "imported f64 mixed verify {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(String::from_utf8_lossy(&verify.stdout).contains("No contracts to verify"));
+        assert!(String::from_utf8_lossy(&verify.stderr).is_empty());
+
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .args(["--emit-ir"])
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("imported f64 mixed IR {explicit_mir}: {error}"));
+        assert!(
+            build.status.success(),
+            "imported f64 mixed IR {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let ir = String::from_utf8_lossy(&build.stdout);
+        assert!(ir.contains("imported_mix"));
+        assert!(ir.contains("imported_mix_check"));
+        assert!(ir.contains("double"));
+        assert!(String::from_utf8_lossy(&build.stderr).is_empty());
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
