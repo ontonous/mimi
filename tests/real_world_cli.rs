@@ -4032,6 +4032,21 @@ func main() -> i64 {
             .unwrap_or_else(|error| panic!("imported f32 missing run {explicit_mir}: {error}"))
     };
 
+    let missing_library = dir.join("missing.so");
+    let missing_library_runs = [run(false, &missing_library), run(true, &missing_library)];
+    assert_eq!(
+        missing_library_runs[0].stderr, missing_library_runs[1].stderr,
+        "default and --mir imported f32 missing-library diagnostics must match"
+    );
+    for output in &missing_library_runs {
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"8\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0800"), "{stderr}");
+        assert!(stderr.contains("failed to load"), "{stderr}");
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+
     let missing_symbol_runs = [run(false, &bad_library), run(true, &bad_library)];
     assert_eq!(
         missing_symbol_runs[0].stderr, missing_symbol_runs[1].stderr,
