@@ -3240,6 +3240,91 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f32_imported_module_zero_arg_return_matches_explicit_mir() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f32_imported_zero_arg_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create imported f32 zero-arg directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nfloat imported_f32_seed(void) { return 7.5f; }\nint64_t imported_f32_check(float value) { return value == 7.5f ? 42 : -1; }\n",
+    )
+    .expect("write imported f32 zero-arg C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile imported f32 zero-arg C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    fs::write(
+        dir.join("ffi_types.mimi"),
+        r#"
+pub type Scalar = f32
+pub extern "C" {
+    func imported_f32_seed() -> Scalar;
+    func imported_f32_check(value: Scalar) -> i64;
+}
+pub func seed() -> Scalar { imported_f32_seed() }
+pub func check(value: Scalar) -> i64 { imported_f32_check(value) }
+"#,
+    )
+    .expect("write imported f32 zero-arg module");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+use ffi_types
+func main() -> i64 {
+    println(8 as i64)
+    println(check(seed()))
+    0
+}
+"#,
+    )
+    .expect("write imported f32 zero-arg entry");
+
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| panic!("imported f32 zero-arg {explicit_mir}: {error}"));
+        assert!(
+            output.status.success(),
+            "imported f32 zero-arg {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"8\n42\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
