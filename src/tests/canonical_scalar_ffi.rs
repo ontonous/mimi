@@ -913,6 +913,75 @@ fn scalar_ffi_f32_forged_result_conversion_rejects_all_consumers() {
 }
 
 #[test]
+fn scalar_ffi_f32_forged_result_descriptor_rejects_all_consumers() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let tokens = crate::lexer::Lexer::new(F32_CHAIN_SOURCE)
+        .tokenize()
+        .expect("lex forged f32 result descriptor fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse forged f32 result descriptor fixture");
+    let checked = crate::core::check_program(&file).expect("check forged f32 result descriptor");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize forged f32 result descriptor MIR");
+    let (instruction, _) = mir
+        .ffi_calls()
+        .iter()
+        .find(|(_, receipt)| receipt.symbol == "mir_ffi_f32_seed")
+        .expect("f32 seed descriptor receipt");
+    let i64_type = mir
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("i64 descriptor for f32 result forgery");
+
+    let mut forged_receipts = mir.ffi_calls().clone();
+    forged_receipts
+        .get_mut(instruction)
+        .expect("f32 seed receipt for result descriptor forgery")
+        .result_type = i64_type;
+    let mut forged = mir.clone();
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject forged f32 result descriptor");
+    assert!(
+        reference_error.to_string().contains("result")
+            || reference_error.to_string().contains("descriptor")
+            || reference_error.to_string().contains("ABI"),
+        "{reference_error}"
+    );
+
+    let bytecode_error = compile_mir_program(&forged)
+        .expect_err("bytecode must reject forged f32 result descriptor");
+    assert!(!bytecode_error.is_empty());
+
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native validator must reject forged f32 result descriptor");
+    assert!(!native_error.is_empty());
+
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject forged f32 result descriptor");
+    assert!(!capability_error.is_empty());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verifier_error =
+        crate::verifier::verify_mir(&forged, "forged-f32-result-descriptor".into())
+            .expect_err("verifier must reject forged f32 result descriptor");
+    assert!(!verifier_error.is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
