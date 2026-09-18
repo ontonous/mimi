@@ -2204,6 +2204,111 @@ func main() -> i64 {
 }
 
 #[test]
+#[cfg(unix)]
+fn canonical_scalar_ffi_f64_direct_libm_fallback_and_native_match_explicit_mir() {
+    let libm_available = [
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib64/libm.so.6",
+        "/usr/lib/libm.so.6",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file());
+    if !libm_available {
+        eprintln!("SKIP: libm.so.6 not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_libm_fallback_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create direct f64 libm fallback directory");
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func ldexp(value: f64, exponent: i32) -> f64;
+    func llrint(value: f64) -> i64;
+}
+func main() -> i64 {
+    println(llrint(ldexp(1.5 as f64, 3)));
+    0
+}
+"#,
+    )
+    .expect("write direct f64 libm fallback source");
+
+    let mut run_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| panic!("direct f64 libm fallback {explicit_mir}: {error}"));
+        assert!(
+            output.status.success(),
+            "direct f64 libm fallback {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"12\n");
+        assert!(output.stderr.is_empty());
+        run_outputs.push(output);
+    }
+    assert_eq!(run_outputs[0].stdout, run_outputs[1].stdout);
+    assert_eq!(run_outputs[0].stderr, run_outputs[1].stderr);
+
+    let mut native_outputs = Vec::new();
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "direct-f64-mir"
+        } else {
+            "direct-f64-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap_or_else(|error| panic!("direct f64 native build {explicit_mir}: {error}"));
+        assert!(
+            build.status.success(),
+            "direct f64 native build {explicit_mir} failed:\n{}\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(build.stderr.is_empty());
+        let native = Command::new(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("run direct f64 native {explicit_mir}: {error}"));
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"12\n");
+        assert!(native.stderr.is_empty());
+        native_outputs.push(native);
+    }
+    assert_eq!(native_outputs[0].stdout, native_outputs[1].stdout);
+    assert_eq!(native_outputs[0].stderr, native_outputs[1].stderr);
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_f32_direct_contract_rejects_all_cli_routes_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f32_contract_direct_{}_{}",
