@@ -22171,6 +22171,41 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
 }
 
 #[test]
+fn scalar_ffi_f32_result_integer_cast_stays_outside_migrated_contract() {
+    const SOURCE: &str = r#"
+extern "C" { func f32_result(value: f32) -> f32; }
+func main() -> i64 { f32_result(1.5 as f32) as i64 }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("direct f32 result-cast fixture check");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(
+        admission.scalar_ffi,
+        "direct f32 result cast must remain classified for the scalar FFI boundary"
+    );
+    let materialization_error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("f32-to-integer result cast must remain outside the migrated contract");
+    assert!(
+        materialization_error
+            .to_string()
+            .contains("outside the canonical contract"),
+        "{materialization_error}"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
+    assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
+    assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_f32_cast");
+    assert!(generator.compile_checked(&checked).is_err());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct f32 result cast reached a compatibility owner"
+    );
+}
+
+#[test]
 fn scalar_ffi_deterministic_receipt_forgery_matrix_rejects_every_consumer() {
     const SOURCE: &str = r#"
 extern "C" { func matrix_guard(value: i64) -> i64 requires: value >= 0; }
