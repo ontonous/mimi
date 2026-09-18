@@ -4286,21 +4286,28 @@ fn canonical_scalar_ffi_f32_contract_imported_module_rejects_before_legacy() {
             .as_nanos()
     ));
     fs::create_dir_all(&dir).expect("create imported f32 contract boundary directory");
-    fs::write(
-        dir.join("ffi_types.mimi"),
-        r#"
+    for (_contract_kind, contract_clause) in [
+        ("requires", "requires: value > 0.0"),
+        ("ensures", "ensures: result > 0.0"),
+    ] {
+        fs::write(
+            dir.join("ffi_types.mimi"),
+            format!(
+                r#"
 pub type Scalar = f32
-pub extern "C" {
-    func imported_f32_contract(value: Scalar) -> Scalar requires: value > 0.0;
-}
-pub func call(value: Scalar) -> Scalar { imported_f32_contract(value) }
-"#,
-    )
-    .expect("write imported f32 contract boundary module");
-    let source = dir.join("main.mimi");
-    fs::write(
-        &source,
-        r#"
+pub extern "C" {{
+    func imported_f32_contract(value: Scalar) -> Scalar {{CONTRACT_CLAUSE}};
+}}
+pub func call(value: Scalar) -> Scalar {{ imported_f32_contract(value) }}
+"#
+            )
+            .replace("{CONTRACT_CLAUSE}", contract_clause),
+        )
+        .expect("write imported f32 contract boundary module");
+        let source = dir.join("main.mimi");
+        fs::write(
+            &source,
+            r#"
 use ffi_types
 func test_boundary() -> bool { true }
 func main() -> i64 {
@@ -4308,103 +4315,108 @@ func main() -> i64 {
     0
 }
 "#,
-    )
-    .expect("write imported f32 contract boundary entry");
+        )
+        .expect("write imported f32 contract boundary entry");
 
-    for command in ["run", "build", "verify"] {
-        for explicit_mir in [false, true] {
-            let mut invocation = Command::new(mimi_bin());
-            invocation.current_dir(project_root()).arg(command);
-            if explicit_mir {
-                invocation.arg("--mir");
+        for command in ["run", "build", "verify"] {
+            for explicit_mir in [false, true] {
+                let mut invocation = Command::new(mimi_bin());
+                invocation.current_dir(project_root()).arg(command);
+                if explicit_mir {
+                    invocation.arg("--mir");
+                }
+                if command == "build" {
+                    invocation.arg("--emit-ir");
+                }
+                let output = invocation.arg(&source).output().unwrap_or_else(|error| {
+                    panic!("spawn imported f32 contract {command} {explicit_mir}: {error}")
+                });
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    !output.status.success(),
+                    "imported f32 contract must reject {command} explicit_mir={explicit_mir}"
+                );
+                assert!(
+                    stdout.is_empty(),
+                    "imported f32 contract emitted output before {command} rejection: {stdout}"
+                );
+                assert!(
+                    stderr.contains("imported_f32_contract")
+                        && stderr.contains("extern contract expression is outside scalar MIR"),
+                    "imported f32 boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("canonical route disposition: legacy"),
+                    "imported f32 {command} entered legacy: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("flow_ast"),
+                    "imported f32 {command}: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("Validation(["),
+                    "imported f32 {command} leaked debug-shaped MIR error: {stderr}"
+                );
             }
-            if command == "build" {
-                invocation.arg("--emit-ir");
-            }
-            let output = invocation.arg(&source).output().unwrap_or_else(|error| {
-                panic!("spawn imported f32 contract {command} {explicit_mir}: {error}")
-            });
+        }
+
+        let invocations = [
+            ("test", vec!["test"]),
+            ("disasm", vec!["disasm"]),
+            ("mir --all", vec!["mir", "--all"]),
+            ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
+        ];
+        for (label, args) in invocations {
+            let output = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .args(&args)
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| {
+                    panic!("spawn imported f32 auxiliary CLI {label}: {error}")
+                });
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 !output.status.success(),
-                "imported f32 contract must reject {command} explicit_mir={explicit_mir}"
-            );
-            assert!(
-                stdout.is_empty(),
-                "imported f32 contract emitted output before {command} rejection: {stdout}"
+                "imported f32 contract must reject auxiliary CLI {label}"
             );
             assert!(
                 stderr.contains("imported_f32_contract")
                     && stderr.contains("extern contract expression is outside scalar MIR"),
-                "imported f32 boundary drifted for {command} explicit_mir={explicit_mir}: {stderr}"
+                "imported f32 auxiliary CLI {label} lost the contract boundary: {stderr}"
             );
             assert!(
                 !stderr.contains("canonical route disposition: legacy"),
-                "imported f32 {command} entered legacy: {stderr}"
+                "imported f32 auxiliary CLI {label} entered legacy: {stderr}"
             );
             assert!(
                 !stderr.contains("flow_ast"),
-                "imported f32 {command}: {stderr}"
+                "imported f32 auxiliary CLI {label}: {stderr}"
             );
             assert!(
                 !stderr.contains("Validation(["),
-                "imported f32 {command} leaked debug-shaped MIR error: {stderr}"
+                "imported f32 auxiliary CLI {label} leaked debug-shaped MIR error: {stderr}"
             );
+            if label == "test" {
+                assert!(
+                    stdout.contains("Running 1 test(s)..."),
+                    "imported f32 auxiliary test discovery disappeared before rejection: {stdout}"
+                );
+                assert!(
+                    !stdout.contains("✓"),
+                    "rejected imported f32 test body was executed: {stdout}"
+                );
+            } else {
+                assert!(
+                    stdout.is_empty(),
+                    "imported f32 auxiliary CLI {label} emitted output before rejection: {stdout}"
+                );
+            }
         }
-    }
 
-    let invocations = [
-        ("test", vec!["test"]),
-        ("disasm", vec!["disasm"]),
-        ("mir --all", vec!["mir", "--all"]),
-        ("mir --all --receipt", vec!["mir", "--all", "--receipt"]),
-    ];
-    for (label, args) in invocations {
-        let output = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .args(&args)
-            .arg(&source)
-            .output()
-            .unwrap_or_else(|error| panic!("spawn imported f32 auxiliary CLI {label}: {error}"));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "imported f32 contract must reject auxiliary CLI {label}"
-        );
-        assert!(
-            stderr.contains("imported_f32_contract")
-                && stderr.contains("extern contract expression is outside scalar MIR"),
-            "imported f32 auxiliary CLI {label} lost the contract boundary: {stderr}"
-        );
-        assert!(
-            !stderr.contains("canonical route disposition: legacy"),
-            "imported f32 auxiliary CLI {label} entered legacy: {stderr}"
-        );
-        assert!(
-            !stderr.contains("flow_ast"),
-            "imported f32 auxiliary CLI {label}: {stderr}"
-        );
-        assert!(
-            !stderr.contains("Validation(["),
-            "imported f32 auxiliary CLI {label} leaked debug-shaped MIR error: {stderr}"
-        );
-        if label == "test" {
-            assert!(
-                stdout.contains("Running 1 test(s)..."),
-                "imported f32 auxiliary test discovery disappeared before rejection: {stdout}"
-            );
-            assert!(
-                !stdout.contains("✓"),
-                "rejected imported f32 test body was executed: {stdout}"
-            );
-        } else {
-            assert!(
-                stdout.is_empty(),
-                "imported f32 auxiliary CLI {label} emitted output before rejection: {stdout}"
-            );
-        }
+        fs::remove_file(dir.join("ffi_types.mimi")).ok();
     }
 
     fs::remove_dir_all(dir).ok();
