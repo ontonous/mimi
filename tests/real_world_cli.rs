@@ -1873,6 +1873,88 @@ func main() -> i64 {
 }
 
 #[test]
+fn canonical_scalar_ffi_f64_contract_boundary_rejects_auxiliary_cli_without_legacy() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_f64_contract_auxiliary_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create f64 auxiliary boundary directory");
+    let source = dir.join("f64-contract-auxiliary.mimi");
+    fs::write(
+        &source,
+        r#"
+extern "C" {
+    func mir_ffi_f64_contract(value: f64) -> f64 requires: value > 0.0;
+}
+func test_boundary() -> bool { true }
+func main() -> i64 {
+    mir_ffi_f64_contract(7.5);
+    0
+}
+"#,
+    )
+    .expect("write f64 auxiliary boundary source");
+
+    let invocations = [
+        ("test", vec!["test"]),
+        ("disasm", vec!["disasm"]),
+        ("mir", vec!["mir"]),
+        ("mir --receipt", vec!["mir", "--receipt"]),
+    ];
+    for (label, args) in invocations {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(&args)
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn f64 auxiliary CLI {label}: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "f64 contract boundary must reject auxiliary CLI {label}"
+        );
+        assert!(
+            stderr.contains("extern contract expression is outside scalar MIR"),
+            "auxiliary CLI {label} lost the explicit f64 contract boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "auxiliary CLI {label} entered legacy: {stderr}"
+        );
+        assert!(
+            !stderr.contains("flow_ast"),
+            "auxiliary CLI {label}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Validation(["),
+            "auxiliary CLI {label}: {stderr}"
+        );
+        if label == "test" {
+            assert!(
+                stdout.contains("Running 1 test(s)..."),
+                "test discovery output disappeared before f64 rejection: {stdout}"
+            );
+            assert!(
+                !stdout.contains("✓"),
+                "rejected test body was executed: {stdout}"
+            );
+        } else {
+            assert!(
+                stdout.is_empty(),
+                "auxiliary CLI {label} emitted output before rejection: {stdout}"
+            );
+        }
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transparent_alias_default_cli_matches_explicit_mir() {
     if !can_link() {
         return;
