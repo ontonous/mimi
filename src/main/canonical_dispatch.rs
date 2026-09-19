@@ -3523,6 +3523,56 @@ mod tests {
     }
 
     #[test]
+    fn three_target_union_mixed_width_operands_route_canonical() {
+        // R6-1042: a >2-target union (S | Big | Fault) whose body mixes
+        // scalar widths through the checker's numeric coercion (constant-
+        // first comparison `100 < self.v`, arithmetic `self.v + 1`) used to
+        // fail the whole-program capability gate on stale pre-coercion
+        // operand identities and hard-reject the default route (exit 1 —
+        // no legacy fallback once a union candidate exists).  The narrowed
+        // operand must be materialized so the route stays canonical.
+        let source = r#"
+            flow F {
+                state S { v: i64 }
+                state Big { w: i64 }
+                transition go(S) -> S | Big | Fault {
+                    if 100 < self.v {
+                        let bumped = self.v + 1
+                        return Big { w: bumped }
+                    }
+                    return S { v: self.v }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 150 }
+                let r = F::go(s)
+                let v = match r {
+                    S { v } => v
+                    Big { w } => w
+                    Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+                }
+                println(v)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Canonical(program) = route else {
+            panic!(
+                "a three-target union with mixed-width binary operands must route canonical: {route:?}"
+            );
+        };
+        assert!(mimi::core::mir::contains_multi_target_flow_union_candidate(
+            &program
+        ));
+        assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+            &program
+        ));
+        assert!(mimi::verifier::validate_mir_capabilities(&program).is_ok());
+    }
+
+    #[test]
     fn out_of_contract_union_is_checker_rejected_before_route_selection() {
         // R6-1039: user-declared out-of-contract union payload shapes are
         // rejected by the checker (E0446) at the declaration site, so

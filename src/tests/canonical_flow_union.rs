@@ -206,6 +206,125 @@ fn bare_integer_literal_call_argument_closes_the_union_face() {
     assert_eq!(native.stderr, "");
 }
 
+// R6-1042: the >2-target union differential — three targets (S | Big |
+// Fault) with a Big branch actually taken, plus mixed-width scalar operands
+// in the transition body (constant-first comparison `100 < self.v` and
+// arithmetic `self.v + 1`).  The checker legalizes both through its numeric
+// coercion rule without re-recording the operand identity, so the canonical
+// binary contract (which requires operand TypeDesc equality) fail-closed
+// the whole default route until the narrower side is materialized as an
+// explicit Convert — the same disease R6-1041 fixed for call arguments, at
+// the binary-operand site.
+const THREE_TARGET_MIXED_WIDTH_UNION_SOURCE: &str = r#"
+    flow F {
+        state S { v: i64 }
+        state Big { w: i64 }
+        transition go(S) -> S | Big | Fault {
+            if 100 < self.v {
+                let bumped = self.v + 1
+                return Big { w: bumped }
+            }
+            return S { v: self.v }
+        }
+    }
+
+    func main() -> i64 {
+        let s = S { v: 150 }
+        let r = F::go(s)
+        let v = match r {
+            S { v } => v
+            Big { w } => w
+            Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+        }
+        println(v)
+        0
+    }
+"#;
+
+const THREE_TARGET_MIXED_WIDTH_UNION_STDOUT: &str = "151\n";
+
+#[test]
+fn three_target_union_mixed_width_operands_execute_on_all_consumers() {
+    let mir = materialize(
+        THREE_TARGET_MIXED_WIDTH_UNION_SOURCE,
+        "three-target mixed-width union fixture",
+    );
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "a three-target union with mixed-width binary operands must stay on the promoted contract"
+    );
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor three-target union");
+    assert_eq!(reference.output, THREE_TARGET_MIXED_WIDTH_UNION_STDOUT);
+
+    let bytecode = compile_mir_program(&mir).expect("three-target union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(vm.run_value().is_ok(), "bytecode three-target union runs");
+    assert_eq!(vm.stdout(), THREE_TARGET_MIXED_WIDTH_UNION_STDOUT);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_flow_union_three_target");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native three-target union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM three-target union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, THREE_TARGET_MIXED_WIDTH_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn binary_float_widening_stays_outside_the_canonical_binary_contract() {
+    // Known boundary (honest fail-closed, NOT a promotion): the checker
+    // legalizes int-vs-float comparisons through the (f64,i64)/(f64,i32)
+    // numeric-coercion pairs, but the canonical conversion contract admits
+    // only signed i32 -> i64 widening (plus f64 -> f32) between Copy
+    // scalars, so a float-widening binary operand keeps its stale identity
+    // and the capability gate must keep rejecting the whole program rather
+    // than silently comparing across widths.  Widening this face requires
+    // extending MirConversionContract together with all five consumers.
+    let source = r#"
+        flow F {
+            state S { v: i64 }
+            transition go(S) -> S | Fault {
+                if self.v > 1.5 {
+                    return S { v: 1 }
+                }
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 7 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+            }
+            println(v)
+            0
+        }
+    "#;
+    let mir = materialize(source, "float-widening boundary fixture");
+    let capability_error = crate::verifier::validate_mir_capabilities(&mir)
+        .expect_err("capability gate must keep rejecting mixed float-width binary operands");
+    assert!(capability_error
+        .iter()
+        .any(|error| error.contains("binary operands have different TypeDesc identities")));
+}
+
 #[test]
 fn fault_absorption_union_promotes_to_canonical_mir() {
     // R6-1040: the compiler-owned Fault sink (0.36.9 verdict 6 — absorption

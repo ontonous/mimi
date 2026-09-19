@@ -7350,6 +7350,80 @@ impl<'a> Lowerer<'a> {
         self.values.insert(id.clone(), MirValue { id, ty });
     }
 
+    /// The checker legalizes mixed-width scalar binary operands through its
+    /// numeric-coercion rule (core/helpers.rs `is_numeric_coercion`) without
+    /// re-recording the operand identity, so the narrower operand keeps its
+    /// stale pre-coercion TypeDesc and the canonical binary contract — which
+    /// requires operand identity equality — fail-closes the whole program at
+    /// the capability gate.  Materialize the signed i32 -> i64 widening as an
+    /// explicit Convert; this is exactly the pair the canonical conversion
+    /// contract admits (`MirConversionContract::accepted_description`), so
+    /// every other mixed identity — including the checker's float-widening
+    /// pairs, which the conversion contract does not admit yet — stays
+    /// fail-closed by design.
+    fn materialize_signed_binary_widening(
+        &mut self,
+        node_id: &NodeId,
+        left: MirValueId,
+        right: MirValueId,
+    ) -> (MirValueId, MirValueId) {
+        let Some(catalog) = self.type_catalog else {
+            return (left, right);
+        };
+        let (Some(left_ty), Some(right_ty)) = (
+            self.values.get(&left).map(|value| value.ty.clone()),
+            self.values.get(&right).map(|value| value.ty.clone()),
+        ) else {
+            return (left, right);
+        };
+        if left_ty == right_ty {
+            return (left, right);
+        }
+        let (Some(left_desc), Some(right_desc)) = (catalog.get(&left_ty), catalog.get(&right_ty))
+        else {
+            return (left, right);
+        };
+        let signed_i32 = super::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        };
+        let signed_i64 = super::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        };
+        if right_desc.abi == signed_i32 && left_desc.abi == signed_i64 {
+            let converted = self.widen_binary_operand(node_id, right, left_ty);
+            (left, converted)
+        } else if left_desc.abi == signed_i32 && right_desc.abi == signed_i64 {
+            let converted = self.widen_binary_operand(node_id, left, right_ty);
+            (converted, right)
+        } else {
+            (left, right)
+        }
+    }
+
+    fn widen_binary_operand(
+        &mut self,
+        node_id: &NodeId,
+        operand: MirValueId,
+        target: crate::core::ResolvedTypeId,
+    ) -> MirValueId {
+        let conversion_node = NodeId(format!("{}/numeric-binary-conversion", node_id.0));
+        let Some(converted) = self.id("convert", &conversion_node) else {
+            return operand;
+        };
+        self.insert_value(converted.clone(), target, &conversion_node);
+        self.emit(
+            &conversion_node,
+            "numeric_operand_convert",
+            MirInstructionKind::Convert {
+                result: converted.clone(),
+                source: operand,
+            },
+        );
+        converted
+    }
+
     fn local_value(
         &mut self,
         local: &ResolvedLocalId,
@@ -8028,6 +8102,8 @@ impl<'a> Lowerer<'a> {
             ResolvedExprKind::Binary { op, left, right } => {
                 let left = self.lower_expr(left);
                 let right = self.lower_expr(right);
+                let (left, right) =
+                    self.materialize_signed_binary_widening(&expression.node_id, left, right);
                 self.emit(
                     &expression.node_id,
                     "binary",
