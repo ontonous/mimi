@@ -658,3 +658,64 @@ fn union_transition_with_failure_stays_checker_rejected() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn out_of_contract_union_still_executes_on_the_legacy_compatibility_route() {
+    // R6-1037A deletion-audit reachability pin (R6-1034③): the promoted
+    // tagged-union contract admits exactly one Copy-scalar or owned-String
+    // payload per variant, so a multi-field variant union keeps the explicit
+    // Legacy compatibility route — and that route is *reachable*, not
+    // vestigial: the default-run legacy bytecode engine (the pipeline
+    // `mimi run` falls to after the "canonical route disposition: legacy"
+    // notice) compiles and executes the union graph with correct results.
+    // This execution dependency is what blocks deleting the legacy union
+    // path until those shapes are promoted or checker-rejected.
+    let source = r#"
+        flow P {
+            state A { v: i32, w: i32 }
+            state B { v: i32, w: i32 }
+            transition go(A, d: i32) -> A | B {
+                if d > 0 {
+                    return B { v: d, w: 1 }
+                } else {
+                    return A { v: d, w: 2 }
+                }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 10, w: 20 }
+            let r = P::go(a, 5)
+            let t = match r {
+                A { v, w } => v + w
+                B { v, w } => v + w
+            }
+            println(t)
+            0
+        }
+    "#;
+    let mir = materialize(source, "multi-field union legacy fixture");
+    assert!(
+        !crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "a multi-field variant union is outside the promoted one-field contract"
+    );
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check legacy union fixture");
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&checked);
+    let prog = compiler
+        .compile_file(&file)
+        .expect("legacy route compiles the out-of-contract union graph");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(prog);
+    vm.enable_stdout_capture();
+    let exit = vm.run().expect("legacy route executes the union graph");
+    assert_eq!(exit, 0);
+    assert_eq!(
+        vm.take_stdout().trim(),
+        "6",
+        "5 + 1 must arrive through the B variant payload"
+    );
+}

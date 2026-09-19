@@ -922,10 +922,11 @@ pub(crate) fn select_default_route(
         );
     }
     // Multi-target Flow union compatibility boundary.  A graph whose union
-    // face has not fully closed onto the flat Copy native contract keeps the
-    // explicit compatibility route: the legacy union path is still alive, and
-    // admitting the graph would hard-reject working union programs on the
-    // default entries before the non-Copy union native contract is promoted.
+    // face has not closed onto the promoted tagged-union contract (one
+    // Copy-scalar or owned-String payload field per variant) keeps the
+    // explicit compatibility route: the legacy union path is still alive and
+    // reachable for those shapes (R6-1037A audit pins), and admitting the
+    // graph would hard-reject working union programs on the default entries.
     if mimi::core::mir::contains_multi_target_flow_union_candidate(canonical)
         && !mimi::core::mir::multi_target_flow_union_face_closed(canonical)
     {
@@ -3360,6 +3361,54 @@ mod tests {
             &program
         ));
         assert_eq!(program.transitions().len(), 2);
+    }
+
+    #[test]
+    fn out_of_contract_union_keeps_explicit_legacy_route() {
+        // R6-1037A deletion-audit pin (R6-1034③): the union legacy path is
+        // reachable, and the route layer keeps an out-of-contract union
+        // (here a multi-field variant, which the promoted one-field contract
+        // rejects) on the explicit compatibility disposition instead of
+        // hard-rejecting a working program or silently downgrading a
+        // recognized island.  Deleting the legacy union path requires
+        // promoting or checker-rejecting these shapes first (see the
+        // reachability pin in tests::canonical_flow_union).
+        let source = r#"
+            flow P {
+                state A { v: i32, w: i32 }
+                state B { v: i32, w: i32 }
+                transition go(A, d: i32) -> A | B {
+                    if d > 0 {
+                        return B { v: d, w: 1 }
+                    } else {
+                        return A { v: d, w: 2 }
+                    }
+                }
+            }
+
+            func main() -> i32 {
+                let a = A { v: 10, w: 20 }
+                let r = P::go(a, 5)
+                let t = match r {
+                    A { v, w } => v + w
+                    B { v, w } => v + w
+                }
+                println(t)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+            panic!("an out-of-contract union must keep the explicit compatibility route");
+        };
+        assert_eq!(
+            reason,
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+        );
+        assert_eq!(
+            reason.as_str(),
+            "mixed-coverage-without-materialized-candidate"
+        );
     }
 
     #[test]

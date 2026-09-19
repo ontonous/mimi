@@ -3385,9 +3385,9 @@ pub fn contains_multi_target_flow_union_candidate(program: &MirProgram) -> bool 
     })
 }
 
-/// Whether every multi-target Flow union in the graph carries the flat Copy
-/// variant contract admitted by all four consumers (bytecode, native, the
-/// capability gate and the symbolic verifier boundary).  A graph whose union
+/// Whether every multi-target Flow union in the graph carries the promoted
+/// tagged-union contract (one Copy-scalar or owned-String payload field per
+/// variant, `validate_multi_target_union_variant`).  A graph whose union
 /// face is not fully closed keeps the explicit compatibility route; admitting
 /// it would hard-reject working legacy union programs on the default entries.
 pub fn multi_target_flow_union_face_closed(program: &MirProgram) -> bool {

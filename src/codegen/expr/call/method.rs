@@ -1060,10 +1060,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///   state is a runtime error in both backends).
     ///
     /// The checker only reaches here for same-flow faultable result vars
-    /// (cross-flow values are rejected statically), and multi-target bodies
-    /// always compile through the legacy path — the resolved emitter has no
-    /// `FlowStateSet` slice entry — so the IR-level identity conversion in
-    /// `lower.rs` is never consulted by an emitter.
+    /// (cross-flow values are rejected statically).  Multi-target transition
+    /// bodies still have no resolved-emitter body path: route-Legacy graphs
+    /// (out-of-contract unions keep that compatibility disposition) compile
+    /// them as synthetic `{flow}__{verb}__from_{state}` functions, so this
+    /// dispatch only executes under that route; Canonical-route graphs
+    /// compile the same bodies from MIR, which owns the union identity
+    /// conversion in `core/mir/lower.rs` (R6-1037A audit: the pre-R6-1034
+    /// "multi-target bodies always compile through the legacy path" claim is
+    /// scoped to the compatibility route since the promoted tagged-union
+    /// contract routed in-contract unions Canonical).
     fn compile_flow_union_dispatch(
         &mut self,
         flow_name: &str,
