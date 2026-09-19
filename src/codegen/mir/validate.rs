@@ -298,6 +298,18 @@ impl<'a> NativeMirValidator<'a> {
                             false
                         }
                     }
+                } else if self
+                    .program
+                    .type_catalog()
+                    .is_zero_payload_flow_state_id_enum(ty)
+                {
+                    // Checker-owned flow state-id enum: the whole value is
+                    // its i8 tag (R6-1040).
+                    true
+                } else if self.program.type_catalog().is_flow_event_id_enum(ty) {
+                    // Checker-owned flow event-id enum: one i8 tag plus one
+                    // owned-String slot (R6-1040).
+                    true
                 } else if desc.ownership == MirOwnership::Copy {
                     self.validate_flat_copy_variant(ty, subject, desc)
                 } else {

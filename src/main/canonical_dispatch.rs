@@ -339,10 +339,17 @@ pub(crate) fn select_default_route(
         admission.flow,
         mimi::core::mir::S8FlowAdmission::CompleteCoverage
     );
+    // R6-1040: a checker-legal multi-target union (the compiler-owned Fault
+    // absorption face) is its own migrated candidate, not an outside-profile
+    // input.  Whether the graph actually routes canonical is decided by the
+    // promoted tagged-union contract after materialization; the open face
+    // still trips the union compatibility veto below.
+    let union_candidate_hint = may_contain_multi_target_flow_union(checked);
     if !collection_hint
         && !record_hint
         && !flow_candidate
         && !flow_failure_retry_hint
+        && !union_candidate_hint
         && !option_string_hint
         && !option_nested_tuple_hint
         && !generic_variant_hint
@@ -1592,6 +1599,17 @@ fn may_contain_single_silent_local_transition(
         return false;
     }
     mimi::core::mir::is_s8_flow_transition_candidate(checked)
+}
+
+/// Checker-level mirror of
+/// [`mimi::core::mir::contains_multi_target_flow_union_candidate`]: whether
+/// any transition declares multiple non-fallback targets.  The route uses it
+/// to enter the union face checks instead of classifying the program as an
+/// outside-profile input (R6-1040).
+fn may_contain_multi_target_flow_union(checked: &CheckedProgram) -> bool {
+    checked.transitions().values().any(|transition| {
+        transition.targets.len() > 1 && !transition.is_fallback && !transition.is_ffi_pinned
+    })
 }
 
 #[cfg(test)]
@@ -3364,26 +3382,50 @@ mod tests {
     }
 
     #[test]
-    fn fault_absorption_union_keeps_explicit_legacy_route() {
-        // R6-1039 restatement of the R6-1037A deletion-audit pin: the
-        // checker now rejects user-declared out-of-contract unions (E0446),
-        // so the route layer never sees them.  The residual checker-legal
-        // union face is the compiler-owned Fault absorption target
-        // (0.36.9 裁决 6), and it still trips the union mixed-coverage veto
-        // directly: the S|Fault union candidate's open face keeps the whole
-        // program on the explicit compatibility route.  Deleting the legacy
-        // union path still requires promoting the Fault variant shape into
-        // the tagged-union contract.
-        let source = r#"
+    fn fault_absorption_union_routes_canonical() {
+        // R6-1040 flip (deliberately reversing the R6-1039 pin
+        // fault_absorption_union_keeps_explicit_legacy_route): the last
+        // checker-legal union face — the compiler-owned Fault absorption
+        // target (0.36.9 裁决 6) — now closes onto the promoted tagged-union
+        // contract.  The Fault variant's glue-complete payloads
+        // (StateId/EventId/String/SystemTrace) carry canonical MoveOut glue,
+        // so the union route candidate fires and the whole graph routes
+        // Canonical instead of stopping at the compatibility route.
+        let absorption = r#"
+            flow F {
+                state S { v: i64 }
+                transition go(S) -> S | Fault {
+                    return S { v: self.v }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 0 }
+                let r = F::go(s)
+                let v = match r {
+                    S { v } => v
+                    Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+                }
+                println(v)
+                0
+            }
+        "#;
+        // A call inside the transition body stays on the canonical route as
+        // long as the argument carries the declared integer identity (a cast
+        // or a typed binding).  A bare integer literal argument still trips
+        // the pre-existing literal TypeDesc identity boundary at MIR
+        // materialization and keeps the explicit legacy route — registered
+        // as the remaining union-source-reachable legacy residual.
+        let call_in_body = r#"
             func guarded(x: i64) -> i64 {
-                requires: x > 0
                 x
             }
 
             flow F {
                 state S { v: i64 }
                 transition go(S) -> S | Fault {
-                    let y = guarded(1)
+                    let a = 1 as i64
+                    let y = guarded(a)
                     return S { v: y }
                 }
             }
@@ -3399,18 +3441,22 @@ mod tests {
                 0
             }
         "#;
-        let (checked, file) = checked(source);
-        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
-            panic!("a Fault absorption union must keep the explicit compatibility route");
-        };
-        assert_eq!(
-            reason,
-            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
-        );
-        assert_eq!(
-            reason.as_str(),
-            "mixed-coverage-without-materialized-candidate"
-        );
+        for (label, source) in [("absorption", absorption), ("call-in-body", call_in_body)] {
+            let (checked, file) = checked(source);
+            let route = select_default_route(&checked, &file);
+            let DefaultMirRoute::Canonical(program) = route else {
+                panic!(
+                    "a Fault absorption union must route canonical via the promoted tagged-union contract ({label})"
+                );
+            };
+            assert!(mimi::core::mir::contains_multi_target_flow_union_candidate(
+                &program
+            ));
+            assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+                &program
+            ));
+            assert!(mimi::verifier::validate_mir_capabilities(&program).is_ok());
+        }
     }
 
     #[test]

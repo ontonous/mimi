@@ -132,7 +132,9 @@ pub(super) fn validate_native_non_copy_record_type(
             || is_owned_list
             || is_owned_set
             || (matches!(field_desc.layout, MirLayout::Tuple(_))
-                && validate_native_recursive_tuple_type(catalog, &field.ty).is_ok());
+                && validate_native_recursive_tuple_type(catalog, &field.ty).is_ok())
+            || (matches!(field_desc.layout, MirLayout::Record { .. })
+                && validate_native_non_copy_record_type(catalog, &field.ty).is_ok());
         if !supported {
             return Err(format!(
                 "record '{}' field '{}' type '{}' is outside the scalar/String/List<Copy scalar>/Set<Copy scalar>/tuple ABI",
@@ -429,7 +431,21 @@ pub(super) fn native_variant_abi_with_generic_result(
             "Copy variant TypeDesc is outside the complete no-op metadata contract",
         ));
     }
-    let payload_types = if matches!(descriptor.layout, MirLayout::Enum { .. })
+    let payload_types = if catalog.is_flow_event_id_enum(ty) {
+        // The checker-owned flow event-id enum (R6-1040): one i8 tag plus a
+        // single owned-String slot for the compiler-generated Panic payload;
+        // zero-payload variants carry no slot.
+        let MirLayout::Enum { variants, .. } = &descriptor.layout else {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                "event-id enum TypeDesc layout changed during native ABI materialization",
+            ));
+        };
+        variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| field.ty.clone()))
+            .collect()
+    } else if matches!(descriptor.layout, MirLayout::Enum { .. })
         && descriptor.kind == MirTypeKind::FlowStateSet
         && catalog.validate_multi_target_union_variant(ty).is_ok()
     {
@@ -697,6 +713,8 @@ pub(super) fn native_basic_type<'ctx>(
                                     .validate_set_glue(&field.ty, MirGlueOperation::MoveOut)
                                     .is_ok())
                             || matches!(field_desc.layout, MirLayout::Tuple(_))
+                            || (matches!(field_desc.layout, MirLayout::Record { .. })
+                                && validate_native_non_copy_record_type(catalog, &field.ty).is_ok())
                     } else {
                         is_native_scalar_descriptor(field_desc)
                     };
@@ -711,6 +729,14 @@ pub(super) fn native_basic_type<'ctx>(
                 Ok(context.struct_type(&field_types, false).into())
             }
             MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. } => {
+                // The checker-owned flow state-id enum is a pure tag: every
+                // variant is zero-payload, so the native value is the i8 tag
+                // alone (R6-1040).
+                if catalog.is_zero_payload_flow_state_id_enum(ty) {
+                    return Ok(context
+                        .struct_type(&[BasicTypeEnum::IntType(context.i8_type())], false)
+                        .into());
+                }
                 // A materialized generic Copy Result carries independent Ok
                 // and Err payload slots.  The ordinary variant helper keeps
                 // the historical one-payload shape for direct variants, but

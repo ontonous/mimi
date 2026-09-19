@@ -2668,6 +2668,77 @@ impl MirTypeCatalog {
                 };
             }
         }
+        // R6-1040: builtin trace/fault records (SystemTrace, MemoryDump,
+        // PanicPayload, PeerFault, ExecResult, StatResult) are checker-owned
+        // TypeDefs without resolved TypeDef entries, so the lookup above
+        // skips them and their descriptor stays an opaque Move nominal with
+        // no glue. Materialize their record layout from the shared
+        // builtin_record_schema — the same field identities the resolver
+        // already interned — so any union carrying the compiler-owned Fault
+        // sink sees the same ABI class and glue graph as user records.
+        for (id, ty) in program.resolved_types().iter() {
+            let ResolvedType::Nominal { item, .. } = ty else {
+                continue;
+            };
+            let Some(schema) = crate::core::resolved::builtin_record_schema(item.as_str()) else {
+                continue;
+            };
+            if catalog
+                .get(id)
+                .is_none_or(|descriptor| !matches!(descriptor.layout, MirLayout::Opaque))
+            {
+                continue;
+            }
+            let mut fields = Vec::with_capacity(schema.len());
+            let mut failed = false;
+            for (name, _) in schema {
+                let field_id = NodeId(format!("{}/field:{name}", item.as_str()));
+                let Some(field_ty) = program.resolved_field_type(&field_id) else {
+                    errors.push(format!(
+                        "builtin record '{}' field '{}' has no resolved type",
+                        item.as_str(),
+                        name
+                    ));
+                    failed = true;
+                    break;
+                };
+                if catalog.get(field_ty).is_none() {
+                    errors.push(format!(
+                        "builtin record '{}' field '{}' references a type absent from MIR catalog",
+                        item.as_str(),
+                        name
+                    ));
+                    failed = true;
+                    break;
+                }
+                fields.push(MirFieldDesc {
+                    id: field_id,
+                    name: (*name).to_string(),
+                    ty: field_ty.clone(),
+                });
+            }
+            if failed {
+                continue;
+            }
+            let ownership = fields.iter().fold(MirOwnership::Copy, |current, field| {
+                let field_ownership = catalog
+                    .get(&field.ty)
+                    .map(|field| field.ownership)
+                    .unwrap_or(MirOwnership::Move);
+                combine_ownership(current, field_ownership)
+            });
+            if let Some(descriptor) = catalog.entries.get_mut(id) {
+                descriptor.abi = MirAbiClass::Aggregate;
+                descriptor.ownership = ownership;
+                descriptor.needs_drop_glue = ownership.needs_drop();
+                descriptor.needs_clone_glue = ownership.needs_clone();
+                descriptor.glue = MirGlueContract::for_type(&descriptor.kind, ownership);
+                descriptor.layout = MirLayout::Record {
+                    nominal: item.clone(),
+                    fields,
+                };
+            }
+        }
         // Flow states are checker-owned nominal records, but they are not
         // ordinary `type` declarations. Materialize their payload layout here
         // so every consumer sees the same field identities, ABI class, and
@@ -3140,6 +3211,104 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Whether this TypeDesc is the checker-owned flow-scoped state-id enum
+    /// (`type:flow::*::StateId`, 0.36.4 verdict 1). Every variant is
+    /// zero-payload, so the whole value is its i8 tag: the native ABI needs
+    /// no payload slot and no glue. The `::StateId` name scope keeps
+    /// arbitrary user enums on the flat Copy variant contract, which still
+    /// rejects all-zero-payload enums (R6-1040).
+    pub fn is_zero_payload_flow_state_id_enum(&self, ty: &ResolvedTypeId) -> bool {
+        let Some(descriptor) = self.get(ty) else {
+            return false;
+        };
+        if !matches!(descriptor.kind, MirTypeKind::Nominal) {
+            return false;
+        }
+        let MirLayout::Enum { nominal, variants } = &descriptor.layout else {
+            return false;
+        };
+        if !nominal.as_str().ends_with("::StateId") {
+            return false;
+        }
+        if descriptor.ownership != MirOwnership::Copy
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return false;
+        }
+        let mut discriminants = BTreeSet::new();
+        variants.iter().all(|variant| {
+            variant.fields.is_empty()
+                && variant.discriminant <= u8::MAX as u16
+                && discriminants.insert(variant.discriminant)
+        })
+    }
+
+    /// Whether this TypeDesc is the checker-owned flow-scoped event-id enum
+    /// (`type:flow::*::EventId`, 0.36.4 verdict 1): every variant is
+    /// zero-payload except at most one variant whose single payload field is
+    /// an owned String (the compiler-generated `Panic` payload). The native
+    /// ABI is one i8 tag plus one String slot; zero-payload variants carry
+    /// no slot. The `::EventId` name scope keeps user enums fail-closed.
+    pub fn is_flow_event_id_enum(&self, ty: &ResolvedTypeId) -> bool {
+        let Some(descriptor) = self.get(ty) else {
+            return false;
+        };
+        if !matches!(descriptor.kind, MirTypeKind::Nominal) {
+            return false;
+        }
+        let MirLayout::Enum { nominal, variants } = &descriptor.layout else {
+            return false;
+        };
+        if !nominal.as_str().ends_with("::EventId") {
+            return false;
+        }
+        if descriptor.ownership != MirOwnership::Move
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || descriptor.variant_drop_plan.is_none()
+        {
+            return false;
+        }
+        let mut discriminants = BTreeSet::new();
+        let mut payload_admitted = false;
+        for variant in variants {
+            if variant.discriminant > u8::MAX as u16 || !discriminants.insert(variant.discriminant)
+            {
+                return false;
+            }
+            match variant.fields.as_slice() {
+                [] => {}
+                [field] => {
+                    if payload_admitted {
+                        return false;
+                    }
+                    let Some(field_desc) = self.get(&field.ty) else {
+                        return false;
+                    };
+                    if !matches!(
+                        &field_desc.kind,
+                        MirTypeKind::Primitive(PrimitiveType::String)
+                    ) || self.validate_owned_string(&field.ty).is_err()
+                    {
+                        return false;
+                    }
+                    payload_admitted = true;
+                }
+                [_, _, ..] => return false,
+            }
+        }
+        true
+    }
+
     /// Validate the checker-materialized multi-target Flow union for the
     /// native tagged-union contract (R6-1035 promotion of the non-Copy face).
     ///
@@ -3258,6 +3427,28 @@ impl MirTypeCatalog {
                         "union payload field identity '{}' is duplicated in the multi-target union contract",
                         field.id.0
                     ));
+                }
+                // R6-1040: the compiler-owned Fault sink (0.36.9 verdict 6 —
+                // absorption requires a DECLARED Fault target; CK-C5 pins its
+                // payload shape) admits glue-complete payloads: its
+                // StateId/EventId/trace fields are outside the Copy-scalar /
+                // owned-String leaf families, but each carries a canonical
+                // MoveOut/Clone/Drop schedule, so every consumer can settle
+                // the obligation mechanically. User-declared variants keep
+                // the R6-1039 leaf admission unchanged.
+                if variant.name == "Fault" {
+                    let glue_complete = self.get(&field.ty).is_some_and(|payload| {
+                        payload.glue.supports_move_out()
+                            && payload.glue.supports_clone()
+                            && payload.glue.supports_drop()
+                    });
+                    if !glue_complete {
+                        return Err(format!(
+                            "union variant '{}' payload field '{}' has no canonical glue schedule; the compiler-owned Fault sink admits only glue-complete payloads",
+                            variant.name, field.name
+                        ));
+                    }
+                    continue;
                 }
                 let scalar = self.validate_copy_scalar(&field.ty).is_ok();
                 let owned_string = self.validate_owned_string(&field.ty).is_ok();

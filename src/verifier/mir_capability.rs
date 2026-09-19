@@ -645,6 +645,20 @@ impl<'a> CapabilityGate<'a> {
                                 "multi-target union TypeDesc is outside the verifier capability: {message}"
                             )
                         })?;
+                    // R6-1040: the compiler-owned Fault sink's payload fields
+                    // (StateId/EventId/SystemTrace) sit outside the flat leaf
+                    // families, but the union contract already proved each of
+                    // them glue-complete; recursing into them as standalone
+                    // enums would re-litigate shapes the sink owns.
+                    for variant in variants {
+                        if variant.name == "Fault" {
+                            continue;
+                        }
+                        for field in &variant.fields {
+                            self.validate_type(&field.ty, "variant field");
+                        }
+                    }
+                    return Ok(());
                 } else if descriptor.ownership != MirOwnership::Copy {
                     return Err(
                         "non-Copy enum TypeDesc is outside the verifier capability: only the flat Copy variant contract is admitted"

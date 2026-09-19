@@ -103,6 +103,182 @@ const MIXED_MULTI_FIELD_UNION_SOURCE: &str = r#"
 
 const MIXED_MULTI_FIELD_UNION_STDOUT: &str = "5\n";
 
+const FAULT_ABSORPTION_UNION_SOURCE: &str = r#"
+    flow F {
+        state S { v: i64 }
+        transition go(S) -> S | Fault {
+            return S { v: self.v }
+        }
+    }
+
+    func main() -> i64 {
+        let s = S { v: 7 }
+        let r = F::go(s)
+        let v = match r {
+            S { v } => v
+            Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+        }
+        println(v)
+        0
+    }
+"#;
+
+const FAULT_ABSORPTION_UNION_STDOUT: &str = "7\n";
+
+#[test]
+fn fault_absorption_union_promotes_to_canonical_mir() {
+    // R6-1040: the compiler-owned Fault sink (0.36.9 verdict 6 — absorption
+    // requires a DECLARED Fault target) is the last source-reachable union
+    // legacy face. Promotion is surgical: (1) builtin trace records
+    // (SystemTrace/MemoryDump/PanicPayload) materialize Record layouts from
+    // the shared builtin_record_schema so product glue covers them; (2) the
+    // Fault variant admits glue-complete payloads in the union contract —
+    // user-declared variants keep the R6-1039 scalar/owned-String admission.
+    let mir = materialize(FAULT_ABSORPTION_UNION_SOURCE, "fault absorption fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "the Fault-absorption union must close onto the promoted contract"
+    );
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor fault absorption union");
+    assert_eq!(reference.output, FAULT_ABSORPTION_UNION_STDOUT);
+
+    let bytecode = compile_mir_program(&mir).expect("fault absorption union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(
+        vm.run_value().is_ok(),
+        "bytecode fault absorption union runs"
+    );
+    assert_eq!(vm.stdout(), FAULT_ABSORPTION_UNION_STDOUT);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_fault_absorption");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native fault absorption union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM fault absorption union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, FAULT_ABSORPTION_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn user_zero_payload_enum_stays_outside_the_native_flow_id_contracts() {
+    // R6-1040 negative: the flow StateId/EventId native admissions are
+    // scoped to the checker-owned `type:flow::*::StateId`/`::EventId`
+    // names. A user-declared all-zero-payload enum keeps failing the flat
+    // Copy variant contract on the native consumer, and neither new
+    // predicate claims it.
+    let source = r#"
+        type Gate { Open | Shut }
+
+        func pick() -> Gate {
+            Open()
+        }
+
+        func main() -> i64 {
+            let gate = pick()
+            match gate {
+                Open => 1 as i64
+                Shut => 2 as i64
+            }
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check user enum fixture");
+    let catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+        .expect("catalog user enum fixture");
+    let user_enum_id = checked
+        .resolved_types()
+        .iter()
+        .find(|(_, ty)| {
+            matches!(ty, crate::core::ResolvedType::Nominal { item, .. } if item.as_str().contains("Gate"))
+        })
+        .map(|(id, _)| id.clone())
+        .expect("user enum TypeDesc");
+    assert!(
+        !catalog.is_zero_payload_flow_state_id_enum(&user_enum_id),
+        "the ::StateId admission must not claim user zero-payload enums"
+    );
+    assert!(
+        !catalog.is_flow_event_id_enum(&user_enum_id),
+        "the ::EventId admission must not claim user zero-payload enums"
+    );
+    // The MIR structural validator is the outer guard: the program cannot
+    // even materialize, let alone reach the native emitter.
+    let error = MirProgram::from_checked_program(&checked)
+        .expect_err("user all-zero-payload enum must stay fail-closed");
+    assert!(
+        format!("{error:?}").contains("all-zero-payload enum"),
+        "the flat Copy variant contract must keep rejecting all-zero-payload user enums: {error:?}"
+    );
+}
+
+#[test]
+fn fault_sink_union_rejects_glue_incomplete_payload() {
+    // R6-1040 negative: the Fault carve-out admits only payloads whose
+    // canonical glue schedule is complete. Corrupting the trace record's
+    // drop glue re-opens the union contract rejection, so a non-checker
+    // producer cannot smuggle an opaque payload into the Fault variant.
+    let mir = materialize(FAULT_ABSORPTION_UNION_SOURCE, "fault absorption fixture");
+    let union_id = mir
+        .transitions()
+        .values()
+        .find(|contract| contract.targets.len() > 1)
+        .map(|contract| contract.result.clone())
+        .expect("multi-target union transition");
+    let trace_id = mir
+        .type_catalog()
+        .variant_layout(&union_id)
+        .and_then(|(_, variants)| {
+            variants
+                .iter()
+                .find(|variant| variant.name == "Fault")
+                .and_then(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .find(|field| field.name == "trace")
+                        .map(|field| field.ty.clone())
+                })
+        })
+        .expect("Fault variant trace payload");
+    let mut forged_catalog = mir.type_catalog().clone();
+    let mut forged_trace = forged_catalog
+        .get(&trace_id)
+        .cloned()
+        .expect("SystemTrace TypeDesc");
+    forged_trace.glue.drop = crate::core::mir::types::MirGlueKind::Unsupported;
+    forged_catalog.replace_for_test_only(trace_id, forged_trace);
+    let error = forged_catalog
+        .validate_multi_target_union_variant(&union_id)
+        .expect_err("glue-incomplete Fault payload must leave the union contract");
+    // The union's variant-glue plan validation is the outer guard and fires
+    // first: corrupting the trace record's glue re-opens the whole glue
+    // plan, so the fail-closed message names the plan; the per-field
+    // carve-out beneath it stays defense-in-depth.
+    assert!(
+        error.contains("glue plan is incomplete"),
+        "the union contract must fail closed on glue-incomplete payloads: {error}"
+    );
+}
+
 #[test]
 fn mixed_multi_field_union_three_consumers_match() {
     // R6-1038: one variant may carry Copy and owned payloads side by side.
