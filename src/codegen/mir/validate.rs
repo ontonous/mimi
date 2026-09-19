@@ -2441,9 +2441,11 @@ impl<'a> NativeMirValidator<'a> {
             }
         );
         let valid = match op {
-            ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract => {
-                same_operands && integer && result.ty == left.ty
-            }
+            ResolvedBinaryOp::Add
+            | ResolvedBinaryOp::Subtract
+            | ResolvedBinaryOp::Multiply
+            | ResolvedBinaryOp::Divide
+            | ResolvedBinaryOp::Remainder => same_operands && integer && result.ty == left.ty,
             ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
                 same_operands
                     && matches!(

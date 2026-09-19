@@ -238,6 +238,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ResolvedBinaryOp::Subtract => self
                 .emit_checked_add_sub(left_value, right_value, true, subject)
                 .map(BasicValueEnum::from),
+            ResolvedBinaryOp::Multiply => self
+                .emit_checked_mul(left_value, right_value, subject)
+                .map(BasicValueEnum::from),
+            ResolvedBinaryOp::Divide => self
+                .emit_checked_div_rem(left_value, right_value, true, subject)
+                .map(BasicValueEnum::from),
+            ResolvedBinaryOp::Remainder => self
+                .emit_checked_div_rem(left_value, right_value, false, subject)
+                .map(BasicValueEnum::from),
             ResolvedBinaryOp::Equal => {
                 self.compare(IntPredicate::EQ, left_value, right_value, subject)
             }
@@ -504,5 +513,191 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         self.emit_overflow_trap(trap, if subtract { "sub" } else { "add" }, subject)?;
         self.generator.builder.position_at_end(ok);
         Ok(result)
+    }
+
+    /// SD-7 checked signed multiply: the overflow intrinsic feeds the same
+    /// E0802 trap as add/subtract, matching the reference oracle and the
+    /// bytecode VM (`Op::CheckI32` kind 2 at i32 width).
+    pub(super) fn emit_checked_mul(
+        &mut self,
+        left: inkwell::values::IntValue<'ctx>,
+        right: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        use crate::codegen::CallSiteValueExt;
+        let int_ty = left.get_type();
+        let intrinsic_name = format!("llvm.smul.with.overflow.i{}", int_ty.get_bit_width());
+        let struct_ty = self.generator.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(int_ty),
+                BasicTypeEnum::IntType(self.generator.context.bool_type()),
+            ],
+            false,
+        );
+        let fn_type = struct_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(int_ty),
+                BasicMetadataTypeEnum::IntType(int_ty),
+            ],
+            false,
+        );
+        let intrinsic_fn = self
+            .generator
+            .module
+            .get_function(&intrinsic_name)
+            .unwrap_or_else(|| {
+                self.generator.module.add_function(
+                    &intrinsic_name,
+                    fn_type,
+                    Some(Linkage::External),
+                )
+            });
+        let call = self
+            .generator
+            .builder
+            .build_call(
+                intrinsic_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ],
+                "mir_checked_mul",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let result_struct = call
+            .try_as_basic_value_opt()
+            .ok_or_else(|| NativeMirError::new(subject, "checked multiply returned void"))?
+            .into_struct_value();
+        let result = self
+            .generator
+            .builder
+            .build_extract_value(result_struct, 0, "mir_mul_result")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let overflow = self
+            .generator
+            .builder
+            .build_extract_value(result_struct, 1, "mir_mul_overflow")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let function = self.llvm_function;
+        let trap = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_mul_overflow");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_mul_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(overflow, trap, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_overflow_trap(trap, "mul", subject)?;
+        self.generator.builder.position_at_end(ok);
+        Ok(result)
+    }
+
+    /// SD-8 checked signed division/remainder: a zero divisor traps E0801
+    /// and `MIN / -1` traps E0802 before the `sdiv`/`srem` can poison, so
+    /// the trap faces agree with the reference oracle and the bytecode VM.
+    pub(super) fn emit_checked_div_rem(
+        &mut self,
+        left: inkwell::values::IntValue<'ctx>,
+        right: inkwell::values::IntValue<'ctx>,
+        divide: bool,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        let int_ty = left.get_type();
+        let bit_width = int_ty.get_bit_width();
+        let zero = int_ty.const_zero();
+        let is_zero = self
+            .generator
+            .builder
+            .build_int_compare(IntPredicate::EQ, right, zero, "mir_div_zero_check")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let function = self.llvm_function;
+        let zero_trap = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_div_zero_trap");
+        let zero_ok = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_div_zero_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(is_zero, zero_trap, zero_ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(zero_trap);
+        let trap_fn = self
+            .generator
+            .get_runtime_fn("mimi_trap_div_by_zero")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(trap_fn, &[], "mir_div_zero_trap_call")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(zero_ok);
+        let min_val = int_ty
+            .const_int(1, false)
+            .const_shl(int_ty.const_int((bit_width - 1) as u64, false));
+        let neg_one = int_ty.const_all_ones();
+        let left_is_min = self
+            .generator
+            .builder
+            .build_int_compare(IntPredicate::EQ, left, min_val, "mir_div_left_is_min")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let right_is_neg_one = self
+            .generator
+            .builder
+            .build_int_compare(IntPredicate::EQ, right, neg_one, "mir_div_right_is_neg_one")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let min_over_neg_one = self
+            .generator
+            .builder
+            .build_and(left_is_min, right_is_neg_one, "mir_div_min_over_neg_one")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let overflow_trap = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_div_overflow_trap");
+        let safe = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_div_safe");
+        self.generator
+            .builder
+            .build_conditional_branch(min_over_neg_one, overflow_trap, safe)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(overflow_trap);
+        let overflow_fn = self
+            .generator
+            .get_runtime_fn("mimi_trap_div_overflow")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(overflow_fn, &[], "mir_div_overflow_trap_call")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(safe);
+        if divide {
+            self.generator
+                .builder
+                .build_int_signed_div(left, right, "mir_sdiv")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))
+        } else {
+            self.generator
+                .builder
+                .build_int_signed_rem(left, right, "mir_srem")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))
+        }
     }
 }

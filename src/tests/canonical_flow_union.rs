@@ -1867,3 +1867,380 @@ fn fault_absorption_union_stays_checker_legal_and_legacy_executable() {
         "the legacy union route must reach the end of main"
     );
 }
+
+// R6-1044: generative combinatorial sweep over the union candidate profile.
+// The aggressive probe matrix (guard shapes × payload operators × operand
+// widths × taken branch) surfaced one real contract asymmetry: the verifier
+// capability gate already admits integer Multiply/Divide/Remainder, but the
+// native scalar binary contract only admitted Add|Subtract, so any `*`, `/`,
+// or `%` inside a canonical flow transition hard-rejected the whole default
+// route at native preflight. The matrix below is written as data, the
+// expected stdout of every case is computed at generation time from the case
+// parameters (never by executing a backend), and every case shares one
+// `MirProgram` across reference, bytecode, and native.
+
+struct GeneratedUnionArithmeticCase {
+    name: &'static str,
+    state_ty: &'static str,
+    guard: &'static str,
+    payload: &'static str,
+    param_value: i64,
+    initial: i64,
+    expected: i64,
+}
+
+fn generated_union_arithmetic_source(case: &GeneratedUnionArithmeticCase) -> String {
+    format!(
+        r#"
+flow F {{
+    state S {{ v: {ty} }}
+    state Big {{ w: {ty} }}
+    transition go(S, d: i32) -> S | Big | Fault {{
+        if {guard} {{
+            let bumped = {payload}
+            return Big {{ w: bumped }}
+        }}
+        return S {{ v: self.v }}
+    }}
+}}
+
+func main() -> {ty} {{
+    let s = S {{ v: {initial} }}
+    let r = F::go(s, {param})
+    let v = match r {{
+        S {{ v }} => v
+        Big {{ w }} => w
+        Fault {{ last_state: _, unexpected_event: _, snapshot: _, trace: _ }} => 9999 as {ty}
+    }}
+    println(v)
+    0
+}}
+"#,
+        ty = case.state_ty,
+        guard = case.guard,
+        payload = case.payload,
+        initial = case.initial,
+        param = case.param_value,
+    )
+}
+
+const GENERATED_UNION_ARITHMETIC_CASES: &[GeneratedUnionArithmeticCase] = &[
+    GeneratedUnionArithmeticCase {
+        name: "add_anchor_big_branch",
+        state_ty: "i64",
+        guard: "100 < self.v",
+        payload: "self.v + 1",
+        param_value: 0,
+        initial: 150,
+        expected: 151,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "subtract_state_first_guard",
+        state_ty: "i64",
+        guard: "self.v > 100",
+        payload: "self.v - 2",
+        param_value: 0,
+        initial: 150,
+        expected: 148,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "multiply_guard_and_payload",
+        state_ty: "i64",
+        guard: "100 < self.v * 2",
+        payload: "self.v * 3",
+        param_value: 0,
+        initial: 90,
+        expected: 270,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "mixed_width_multiply_chain_via_param",
+        state_ty: "i64",
+        guard: "100 < self.v + d * 2",
+        payload: "self.v + d * 2",
+        param_value: 6,
+        initial: 90,
+        expected: 102,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "divide_guard_and_payload",
+        state_ty: "i64",
+        guard: "100 < self.v / 2",
+        payload: "self.v / 2",
+        param_value: 0,
+        initial: 300,
+        expected: 150,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "remainder_guard_and_payload",
+        state_ty: "i64",
+        guard: "40 < self.v % 64",
+        payload: "self.v % 64",
+        param_value: 0,
+        initial: 300,
+        expected: 44,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "mixed_width_subtract_via_param",
+        state_ty: "i64",
+        guard: "100 < self.v - d",
+        payload: "self.v - d",
+        param_value: 20,
+        initial: 150,
+        expected: 130,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "small_state_takes_the_s_branch",
+        state_ty: "i64",
+        guard: "100 < self.v",
+        payload: "self.v + 1",
+        param_value: 0,
+        initial: 42,
+        expected: 42,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "multiply_guard_with_divide_payload",
+        state_ty: "i64",
+        guard: "100 < self.v * 3",
+        payload: "self.v / 4",
+        param_value: 0,
+        initial: 60,
+        expected: 15,
+    },
+    GeneratedUnionArithmeticCase {
+        name: "i32_state_multiply",
+        state_ty: "i32",
+        guard: "100 < self.v * 2",
+        payload: "self.v * 3",
+        param_value: 0,
+        initial: 90,
+        expected: 270,
+    },
+];
+
+#[test]
+fn generated_union_arithmetic_matrix_executes_on_all_consumers() {
+    for case in GENERATED_UNION_ARITHMETIC_CASES {
+        let source = generated_union_arithmetic_source(case);
+        let label = format!("generated union arithmetic case {}", case.name);
+        let mir = materialize(&source, &label);
+        assert!(
+            crate::core::mir::contains_multi_target_flow_union_candidate(&mir),
+            "{label} must materialize a union candidate"
+        );
+        assert!(
+            crate::core::mir::multi_target_flow_union_face_closed(&mir),
+            "{label} must stay on the promoted union contract"
+        );
+        assert!(
+            crate::verifier::validate_mir_capabilities(&mir).is_ok(),
+            "{label} must pass the capability gate"
+        );
+        let digest = mir.canonical_digest();
+
+        let expected_stdout = format!("{}\n", case.expected);
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("{label} reference execution failed: {error}"));
+        assert_eq!(reference.output, expected_stdout, "{label} reference");
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+        assert!(bytecode.ast.is_none(), "{label} bytecode must be AST-free");
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(vm.run_value().is_ok(), "{label} bytecode runs");
+        assert_eq!(vm.stdout(), expected_stdout, "{label} bytecode");
+
+        if !can_link() {
+            continue;
+        }
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(
+            &context,
+            &format!("mir_union_generated_{}", case.name),
+        );
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("{label} native module verifies: {error}"));
+        let native = link_and_observe_canonical_mir(&generator)
+            .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+        assert_eq!(native.exit_code, Some(0), "{label} native exit");
+        assert_eq!(native.stdout, expected_stdout, "{label} native stdout");
+        assert_eq!(native.stderr, "", "{label} native stderr");
+        assert_eq!(mir.canonical_digest(), digest, "{label} digest stability");
+    }
+}
+
+// The trap faces of the same profile: SD-7/SD-8 ruling is Trap ≠ Fault, so
+// arithmetic overflow and division violations must fail closed on every
+// consumer — the reference oracle and the bytecode VM with the E0801/E0802
+// diagnostic, and the native binary with an orderly nonzero exit carrying the
+// same code. A fault-shaped union must not silently absorb these traps.
+#[test]
+fn generated_union_arithmetic_trap_faces_agree_across_consumers() {
+    struct GeneratedUnionTrapCase {
+        name: &'static str,
+        guard: &'static str,
+        payload: &'static str,
+        initial: i64,
+        divisor: i64,
+        expected_code: &'static str,
+        expected_fragment: &'static str,
+    }
+    const TRAP_CASES: &[GeneratedUnionTrapCase] = &[
+        GeneratedUnionTrapCase {
+            name: "multiply_overflow",
+            guard: "100 < self.v",
+            payload: "self.v * self.v",
+            initial: 3037000500,
+            divisor: 0,
+            expected_code: "E0802",
+            expected_fragment: "multiplication overflow",
+        },
+        GeneratedUnionTrapCase {
+            name: "division_by_zero",
+            guard: "100 < self.v",
+            payload: "self.v / d",
+            initial: 150,
+            divisor: 0,
+            expected_code: "E0801",
+            expected_fragment: "division by zero",
+        },
+        GeneratedUnionTrapCase {
+            name: "division_min_over_negative_one",
+            guard: "0 > self.v",
+            payload: "self.v / d",
+            initial: i64::MIN,
+            divisor: -1,
+            expected_code: "E0802",
+            expected_fragment: "division overflow",
+        },
+    ];
+    for case in TRAP_CASES {
+        let source = format!(
+            r#"
+flow F {{
+    state S {{ v: i64 }}
+    state Big {{ w: i64 }}
+    transition go(S, d: i64) -> S | Big | Fault {{
+        if {guard} {{
+            let bumped = {payload}
+            return Big {{ w: bumped }}
+        }}
+        return S {{ v: self.v }}
+    }}
+}}
+
+func main() -> i64 {{
+    let s = S {{ v: {initial} }}
+    let r = F::go(s, {divisor})
+    let v = match r {{
+        S {{ v }} => v
+        Big {{ w }} => w
+        Fault {{ last_state: _, unexpected_event: _, snapshot: _, trace: _ }} => 9999 as i64
+    }}
+    println(v)
+    0
+}}
+"#,
+            guard = case.guard,
+            payload = case.payload,
+            initial = case.initial,
+            divisor = case.divisor,
+        );
+        let label = format!("generated union trap case {}", case.name);
+        let mir = materialize(&source, &label);
+
+        let reference_outcome = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&NodeId("function:main".into()), &[]);
+        let reference_error = match reference_outcome {
+            Ok(observation) => panic!(
+                "{label} reference must trap, executed to completion with {:?}",
+                observation
+            ),
+            Err(error) => error,
+        };
+        let reference_text = reference_error.to_string();
+        assert!(
+            reference_text.contains(case.expected_fragment),
+            "{label} reference trap names the violation: {reference_text}"
+        );
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+        let mut vm = BytecodeVM::new(bytecode);
+        let vm_error = vm.run_value().expect_err("{label} bytecode must trap");
+        let vm_text = vm_error.to_string();
+        assert!(
+            vm_text.contains(case.expected_code),
+            "{label} bytecode trap carries the diagnostic code: {vm_text}"
+        );
+
+        if !can_link() {
+            continue;
+        }
+        let context = inkwell::context::Context::create();
+        let mut generator =
+            crate::codegen::CodeGenerator::new(&context, &format!("mir_union_trap_{}", case.name));
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("{label} native module verifies: {error}"));
+        let native = link_and_observe_canonical_mir(&generator)
+            .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+        assert_ne!(native.exit_code, Some(0), "{label} native must not exit 0");
+        let native_text = format!("{}{}", native.stdout, native.stderr);
+        assert!(
+            native_text.contains(case.expected_code),
+            "{label} native trap carries the diagnostic code: {native_text}"
+        );
+    }
+}
+
+// The float equality guard is still outside the canonical finite-only Copy
+// f64 binary contract (Add|Subtract only). The mixed-width operand now
+// materializes as an explicit Convert, so the rejection must name the
+// operator — Equal here, complementing the Greater pin above — and never the
+// stale operand-identity message.
+#[test]
+fn float_equality_comparison_stays_outside_the_canonical_binary_contract() {
+    let source = r#"
+        flow F {
+            state S { v: i64 }
+            state Big { w: i64 }
+            transition go(S) -> S | Big | Fault {
+                if self.v == 2.5 {
+                    return Big { w: 1 }
+                }
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 7 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Big { w } => w
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+            }
+            println(v)
+            0
+        }
+    "#;
+    let mir = materialize(source, "float-equality boundary fixture");
+    let capability_error = crate::verifier::validate_mir_capabilities(&mir)
+        .expect_err("capability gate must keep rejecting float equality");
+    assert!(
+        capability_error.iter().any(|error| error.contains(
+            "float binary operator Equal is outside the canonical finite-only Copy f64 contract"
+        )),
+        "the rejection must name the float operator: {capability_error:?}"
+    );
+}
