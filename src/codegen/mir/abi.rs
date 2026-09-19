@@ -379,6 +379,19 @@ impl NativeVariantAbi {
             .iter()
             .find(|slot| slot.variant == *variant)
     }
+
+    /// Every payload slot carried by one variant.  The promoted multi-target
+    /// union contract admits multi-field variants, so consumers bind and drop
+    /// per field instead of assuming the single historical slot.
+    pub(super) fn payload_slots(
+        &self,
+        variant: &crate::core::NodeId,
+    ) -> impl Iterator<Item = &NativeVariantPayloadSlot> + '_ {
+        let variant = variant.clone();
+        self.payload_fields
+            .iter()
+            .filter(move |slot| slot.variant == variant)
+    }
 }
 
 /// Materialize the target-facing field contract for a native variant value.

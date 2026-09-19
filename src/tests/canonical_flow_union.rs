@@ -50,6 +50,209 @@ fn flow_union_instruction_mut(
     })
 }
 
+const MULTI_FIELD_UNION_SOURCE: &str = r#"
+    flow P {
+        state A { v: i32, w: i32 }
+        state B { v: i32, w: i32 }
+        transition go(A, d: i32) -> A | B {
+            if d > 0 {
+                return B { v: d, w: 1 }
+            } else {
+                return A { v: d, w: 2 }
+            }
+        }
+    }
+
+    func main() -> i32 {
+        let a = A { v: 10, w: 20 }
+        let r = P::go(a, 5)
+        let t = match r {
+            A { v, w } => v + w
+            B { v, w } => v + w
+        }
+        println(t)
+        0
+    }
+"#;
+
+const MULTI_FIELD_UNION_STDOUT: &str = "6\n";
+
+const MIXED_MULTI_FIELD_UNION_SOURCE: &str = r#"
+    flow P {
+        state A { v: i32 }
+        state B { name: string, score: i32 }
+        transition go(A, d: i32) -> A | B {
+            if d > 0 {
+                return B { name: "hit", score: d }
+            }
+            return A { v: d }
+        }
+    }
+
+    func main() -> i32 {
+        let a = A { v: 10 }
+        let r = P::go(a, 5)
+        let t = match r {
+            A { v } => v
+            B { name, score } => score
+        }
+        println(t)
+        0
+    }
+"#;
+
+const MIXED_MULTI_FIELD_UNION_STDOUT: &str = "5\n";
+
+#[test]
+fn mixed_multi_field_union_three_consumers_match() {
+    // R6-1038: one variant may carry Copy and owned payloads side by side.
+    // The consuming match moves the owned String through its own native
+    // slot, and the arm-less faces (drop) settle every field obligation of
+    // the active variant.
+    let mir = materialize(
+        MIXED_MULTI_FIELD_UNION_SOURCE,
+        "mixed multi-field union fixture",
+    );
+    assert!(crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor mixed multi-field union");
+    assert_eq!(reference.output, MIXED_MULTI_FIELD_UNION_STDOUT);
+
+    let bytecode = compile_mir_program(&mir).expect("mixed multi-field union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(
+        vm.run_value().is_ok(),
+        "bytecode mixed multi-field union runs"
+    );
+    assert_eq!(vm.stdout(), MIXED_MULTI_FIELD_UNION_STDOUT);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_mixed_multi_field");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native mixed multi-field union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM mixed multi-field union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, MIXED_MULTI_FIELD_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn multi_field_union_three_consumers_match() {
+    // R6-1038: the promoted multi-target union tagged-union contract widens
+    // from one payload field per variant to a multi-field Copy/owned payload
+    // union.  The same MirProgram must execute identically on reference,
+    // bytecode, and native, with per-field native ABI slots in name-sorted
+    // variant order.
+    let mir = materialize(MULTI_FIELD_UNION_SOURCE, "multi-field union fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "a multi-field Copy union must close onto the widened contract"
+    );
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    // Consumer 1: AST-free reference executor on the shared MirProgram.
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor multi-field union");
+    assert_eq!(reference.output, MULTI_FIELD_UNION_STDOUT);
+
+    // Consumer 2: bytecode compiled from the same MirProgram (no AST).
+    let bytecode = compile_mir_program(&mir).expect("multi-field union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(vm.run_value().is_ok(), "bytecode multi-field union runs");
+    assert_eq!(vm.stdout(), MULTI_FIELD_UNION_STDOUT);
+
+    // Consumer 3: native LLVM emission from the same MirProgram.
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_flow_union_multi_field");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native multi-field union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM multi-field union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, MULTI_FIELD_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn multi_field_union_contract_symbolic_proven() {
+    // R6-1038: the symbolic verifier domain merges one return path per target
+    // state into a multi-field symbolic union and discharges the contract
+    // through the caller's multi-field SwitchMove distribution.
+    let source = r#"
+        flow Gate {
+            state Shut { v: i32, w: i32 }
+            state Opened { v: i32, w: i32 }
+            transition toggle(Shut, flag: bool) -> Opened | Shut {
+                requires: flag == true
+                ensures: flag == true
+                if flag {
+                    return Opened { v: 1, w: 2 }
+                } else {
+                    return Shut { v: 3, w: 4 }
+                }
+            }
+        }
+
+        func main() -> i32 {
+            ensures: result == 0
+            let g = Shut { v: 40, w: 50 }
+            let next = Gate::toggle(g, true)
+            let t = match next {
+                Opened { v, w } => v + w
+                Shut { v, w } => v + w
+            }
+            println(t)
+            0
+        }
+    "#;
+    let mir = materialize(source, "multi-field union verifier fixture");
+    let results = crate::verifier::verify_mir(&mir, "multi-field-union-proven".into())
+        .expect("MIR verifier runs the multi-field union program");
+    let toggle = results
+        .iter()
+        .find(|result| result.func_name.contains("toggle"))
+        .expect("toggle verification result");
+    assert_eq!(
+        toggle.status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        toggle.message
+    );
+    let main = results
+        .iter()
+        .find(|result| result.func_name.contains("main"))
+        .expect("main verification result");
+    assert_eq!(
+        main.status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        main.message
+    );
+}
+
 #[test]
 fn flat_copy_union_three_consumers_match() {
     let mir = materialize(FLAT_COPY_UNION_SOURCE, "flat Copy union fixture");
@@ -261,10 +464,12 @@ fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
 
 #[test]
 fn union_outside_promoted_payload_contract_stays_fail_closed() {
-    // The promoted contract admits exactly one Copy-scalar or owned-String
-    // payload per variant.  List payloads and multi-field variants stay
-    // fail-closed on the native and capability consumers, and an
-    // out-of-contract union keeps the whole graph off the canonical route.
+    // The promoted contract admits Copy-scalar or owned-String payload
+    // fields per variant (R6-1038 widened the one-field face to multi-field
+    // variants, so the formerly-rejected wide variant is pinned as
+    // converged).  Aggregate payloads — List and record — stay fail-closed
+    // on the native and capability consumers, and an out-of-contract union
+    // keeps the whole graph off the canonical route.
     let list_payload = r#"
         flow P {
             state A { v: i32 }
@@ -315,19 +520,50 @@ fn union_outside_promoted_payload_contract_stays_fail_closed() {
         }
     "#;
     let wide_mir = materialize(wide_variant, "wide variant union fixture");
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&wide_mir),
+        "the multi-field variant face is promoted since R6-1038"
+    );
+    crate::codegen::mir::validate_mir_native(&wide_mir)
+        .expect("native must admit the promoted multi-field union variant");
+    crate::verifier::validate_mir_capabilities(&wide_mir)
+        .expect("capability gate must admit the promoted multi-field union variant");
+
+    let record_payload = r#"
+        type Stats { hits: i32, misses: i32 }
+
+        flow R {
+            state A { v: i32 }
+            state S { s: Stats }
+            transition go(A, d: i32) -> A | S {
+                return S { s: Stats { hits: d, misses: 0 } }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = R::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let record_mir = materialize(record_payload, "record payload union fixture");
     assert!(!crate::core::mir::multi_target_flow_union_face_closed(
-        &wide_mir
+        &record_mir
     ));
-    let wide_native = crate::codegen::mir::validate_mir_native(&wide_mir)
-        .expect_err("native must reject a multi-field union variant");
-    assert!(wide_native
+    let record_native = crate::codegen::mir::validate_mir_native(&record_mir)
+        .expect_err("native must reject a record payload union");
+    assert!(
+        record_native
+            .iter()
+            .any(|error| error.message.contains("not Copy with canonical no-op glue")),
+        "unexpected record-payload rejection set: {record_native:?}"
+    );
+    let record_capability = crate::verifier::validate_mir_capabilities(&record_mir)
+        .expect_err("capability gate must reject a record payload union");
+    assert!(record_capability
         .iter()
-        .any(|error| { error.message.contains("admits exactly one") }));
-    let wide_capability = crate::verifier::validate_mir_capabilities(&wide_mir)
-        .expect_err("capability gate must reject a multi-field union variant");
-    assert!(wide_capability
-        .iter()
-        .any(|error| error.contains("admits exactly one")));
+        .any(|error| error.contains("not Copy with canonical no-op glue")));
 }
 
 #[test]
@@ -661,9 +897,10 @@ fn union_transition_with_failure_stays_checker_rejected() {
 
 #[test]
 fn out_of_contract_union_still_executes_on_the_legacy_compatibility_route() {
-    // R6-1037A deletion-audit reachability pin (R6-1034③): the promoted
-    // tagged-union contract admits exactly one Copy-scalar or owned-String
-    // payload per variant, so a multi-field variant union keeps the explicit
+    // R6-1037A deletion-audit reachability pin (R6-1034③), restated by
+    // R6-1038: the promoted tagged-union contract now admits multi-field
+    // Copy/owned-String variants, so the reachable out-of-contract face is
+    // an aggregate payload (List<i32>).  That shape keeps the explicit
     // Legacy compatibility route — and that route is *reachable*, not
     // vestigial: the default-run legacy bytecode engine (the pipeline
     // `mimi run` falls to after the "canonical route disposition: legacy"
@@ -672,32 +909,29 @@ fn out_of_contract_union_still_executes_on_the_legacy_compatibility_route() {
     // path until those shapes are promoted or checker-rejected.
     let source = r#"
         flow P {
-            state A { v: i32, w: i32 }
-            state B { v: i32, w: i32 }
+            state A { v: i32 }
+            state B { xs: List<i32> }
             transition go(A, d: i32) -> A | B {
                 if d > 0 {
-                    return B { v: d, w: 1 }
+                    return B { xs: [d, d] }
                 } else {
-                    return A { v: d, w: 2 }
+                    return A { v: d }
                 }
             }
         }
 
         func main() -> i32 {
-            let a = A { v: 10, w: 20 }
+            let a = A { v: 10 }
             let r = P::go(a, 5)
-            let t = match r {
-                A { v, w } => v + w
-                B { v, w } => v + w
-            }
-            println(t)
+            drop(r)
+            println(6)
             0
         }
     "#;
-    let mir = materialize(source, "multi-field union legacy fixture");
+    let mir = materialize(source, "aggregate payload union legacy fixture");
     assert!(
         !crate::core::mir::multi_target_flow_union_face_closed(&mir),
-        "a multi-field variant union is outside the promoted one-field contract"
+        "an aggregate payload union is outside the promoted multi-field contract"
     );
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -716,6 +950,6 @@ fn out_of_contract_union_still_executes_on_the_legacy_compatibility_route() {
     assert_eq!(
         vm.take_stdout().trim(),
         "6",
-        "5 + 1 must arrive through the B variant payload"
+        "the legacy union route must reach the end of main"
     );
 }

@@ -501,7 +501,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_conditional_branch(condition, active, next)
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
             self.generator.builder.position_at_end(active);
-            if let Some(payload_slot) = variant_abi.payload_slot(&variant.id) {
+            // Multi-field variants own one payload obligation per slot; the
+            // drop glue settles every field of the active variant.
+            for payload_slot in variant_abi.payload_slots(&variant.id) {
                 let physical_field = payload_slot.physical_field;
                 let payload_ty = payload_slot.ty.clone();
                 let payload = self

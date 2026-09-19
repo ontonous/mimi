@@ -3365,35 +3365,33 @@ mod tests {
 
     #[test]
     fn out_of_contract_union_keeps_explicit_legacy_route() {
-        // R6-1037A deletion-audit pin (R6-1034③): the union legacy path is
-        // reachable, and the route layer keeps an out-of-contract union
-        // (here a multi-field variant, which the promoted one-field contract
-        // rejects) on the explicit compatibility disposition instead of
-        // hard-rejecting a working program or silently downgrading a
-        // recognized island.  Deleting the legacy union path requires
-        // promoting or checker-rejecting these shapes first (see the
-        // reachability pin in tests::canonical_flow_union).
+        // R6-1037A deletion-audit pin (R6-1034③), restated by R6-1038: the
+        // union legacy path is reachable, and the route layer keeps an
+        // out-of-contract union on the explicit compatibility disposition
+        // instead of hard-rejecting a working program or silently
+        // downgrading a recognized island.  R6-1038 promoted multi-field
+        // Copy/owned-String variants, so the out-of-contract shape here is
+        // an aggregate payload (List<i32>).  Deleting the legacy union path
+        // requires promoting or checker-rejecting these shapes first (see
+        // the reachability pin in tests::canonical_flow_union).
         let source = r#"
             flow P {
-                state A { v: i32, w: i32 }
-                state B { v: i32, w: i32 }
+                state A { v: i32 }
+                state B { xs: List<i32> }
                 transition go(A, d: i32) -> A | B {
                     if d > 0 {
-                        return B { v: d, w: 1 }
+                        return B { xs: [d, d] }
                     } else {
-                        return A { v: d, w: 2 }
+                        return A { v: d }
                     }
                 }
             }
 
             func main() -> i32 {
-                let a = A { v: 10, w: 20 }
+                let a = A { v: 10 }
                 let r = P::go(a, 5)
-                let t = match r {
-                    A { v, w } => v + w
-                    B { v, w } => v + w
-                }
-                println(t)
+                drop(r)
+                println(6)
                 0
             }
         "#;

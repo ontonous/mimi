@@ -132,8 +132,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|message| NativeMirError::new(subject.to_string(), message))?
                 .1
                 .clone();
-            let payload_slot = variant_abi.payload_slot(&variant.id);
-            let has_payload = payload_slot.is_some();
+            let payload_slots: Vec<_> = variant_abi.payload_slots(&variant.id).cloned().collect();
+            let has_payload = !payload_slots.is_empty();
             let condition = self
                 .generator
                 .builder
@@ -164,12 +164,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             };
 
             if has_payload && arm.bindings.is_empty() {
-                let payload_slot = payload_slot.as_ref().ok_or_else(|| {
-                    NativeMirError::new(
+                if payload_slots.is_empty() {
+                    return Err(NativeMirError::new(
                         subject.to_string(),
                         "payload variant has no native ABI payload slot",
-                    )
-                })?;
+                    ));
+                }
                 let drop_payload = self
                     .generator
                     .context
@@ -184,16 +184,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .build_conditional_branch(condition, drop_payload, false_target)
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
                 self.generator.builder.position_at_end(drop_payload);
-                let payload = self
-                    .generator
-                    .builder
-                    .build_extract_value(
-                        scrutinee_value.into_struct_value(),
-                        payload_slot.physical_field,
-                        "mir_variant_move_drop_payload",
-                    )
-                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
-                self.emit_drop_value(payload, &payload_slot.ty, &subject.to_string())?;
+                // Multi-field variants own one obligation per payload slot;
+                // the consuming arm without bindings settles all of them.
+                for payload_slot in &payload_slots {
+                    let payload = self
+                        .generator
+                        .builder
+                        .build_extract_value(
+                            scrutinee_value.into_struct_value(),
+                            payload_slot.physical_field,
+                            "mir_variant_move_drop_payload",
+                        )
+                        .map_err(|error| {
+                            NativeMirError::new(subject.to_string(), error.to_string())
+                        })?;
+                    self.emit_drop_value(payload, &payload_slot.ty, &subject.to_string())?;
+                }
                 let drop_predecessor =
                     self.generator.builder.get_insert_block().ok_or_else(|| {
                         NativeMirError::new(
@@ -337,12 +343,32 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "native variant switch arm lost its variant case",
                 ));
             };
-            let variant = self
-                .program
-                .type_catalog()
-                .validated_flat_copy_variant(&scrutinee_ty, variant_id)
-                .map_err(|message| NativeMirError::new(subject.to_string(), message))?
-                .clone();
+            // The promoted multi-target union contract resolves its cases by
+            // layout identity; payload-shape proof already happened at the
+            // TypeDesc instruction gate. Flat Copy variants keep their own
+            // per-case resolver.
+            let union_tagged =
+                self.program
+                    .type_catalog()
+                    .get(&scrutinee_ty)
+                    .is_some_and(|descriptor| {
+                        matches!(descriptor.layout, MirLayout::Enum { .. })
+                            && descriptor.kind == MirTypeKind::FlowStateSet
+                    });
+            let variant = if union_tagged {
+                self.program
+                    .type_catalog()
+                    .validated_variant_switch_case(&scrutinee_ty, variant_id)
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+                    .1
+                    .clone()
+            } else {
+                self.program
+                    .type_catalog()
+                    .validated_flat_copy_variant(&scrutinee_ty, variant_id)
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+                    .clone()
+            };
             let condition = self
                 .generator
                 .builder
@@ -573,23 +599,44 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             return Ok(());
         }
-        let payload = if bindings.is_empty() {
-            None
-        } else {
-            let binding = bindings.first().ok_or_else(|| {
-                NativeMirError::new(subject.to_string(), "variant payload binding is absent")
+        // Each binding transports its own payload field; the promoted
+        // multi-target union contract admits multi-field variants, so the
+        // edge resolves one physical slot per binding instead of assuming
+        // the single historical payload slot.  A union scrutinee proves its
+        // bindings through the promoted payload receipts even on a read-only
+        // Switch, where flat Copy variants keep the historical receipt.
+        let union_tagged =
+            self.program
+                .type_catalog()
+                .get(scrutinee_ty)
+                .is_some_and(|descriptor| {
+                    matches!(descriptor.layout, MirLayout::Enum { .. })
+                        && descriptor.kind == MirTypeKind::FlowStateSet
+                });
+        for (index, binding) in bindings.iter().enumerate() {
+            let parameter_index = arguments.len().checked_add(index).ok_or_else(|| {
+                NativeMirError::new(
+                    subject.to_string(),
+                    "variant payload binding parameter index overflows",
+                )
             })?;
-            let parameter = block
-                .parameters
-                .get(arguments.len())
-                .and_then(|parameter| self.function.values.get(&parameter.value))
+            let block_parameter = block.parameters.get(parameter_index).ok_or_else(|| {
+                NativeMirError::new(
+                    subject.to_string(),
+                    "variant payload binding target parameter is absent",
+                )
+            })?;
+            let parameter = self
+                .function
+                .values
+                .get(&block_parameter.value)
                 .ok_or_else(|| {
                     NativeMirError::new(
                         subject.to_string(),
                         "variant payload binding target type is absent",
                     )
                 })?;
-            if flat_copy {
+            if flat_copy && !union_tagged {
                 self.program
                     .type_catalog()
                     .validate_flat_copy_payload_projection_receipt(
@@ -609,59 +656,36 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         &binding.projection,
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
-            };
-            // The projection helper proves the field receipt; the caller has
-            // already passed the complete TypeDesc ABI gate. Keep only the
-            // edge's own single-binding physical-shape check here.
-            if bindings.len() != 1 {
+            }
+            if binding.parameter != block_parameter.value {
                 return Err(NativeMirError::new(
                     subject.to_string(),
-                    "variant payload binding is outside the single-payload native contract",
+                    "variant payload binding parameter disagrees with target block parameter",
                 ));
             }
-            let payload_slot = variant_abi.payload_slot(&variant.id).ok_or_else(|| {
-                NativeMirError::new(
-                    subject.to_string(),
-                    "variant payload binding has no native ABI payload slot",
+            let payload_slot = variant_abi
+                .payload_slots(&variant.id)
+                .find(|slot| slot.field == binding.projection.field)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        "variant payload binding has no native ABI payload slot",
+                    )
+                })?;
+            let payload = self
+                .generator
+                .builder
+                .build_extract_value(
+                    scrutinee.into_struct_value(),
+                    payload_slot.physical_field,
+                    "mir_variant_payload_load",
                 )
-            })?;
-            Some(
-                self.generator
-                    .builder
-                    .build_extract_value(
-                        scrutinee.into_struct_value(),
-                        payload_slot.physical_field,
-                        "mir_variant_payload_load",
-                    )
-                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?,
-            )
-        };
-        if let Some(payload) = payload {
-            for (index, binding) in bindings.iter().enumerate() {
-                let parameter_index = arguments.len().checked_add(index).ok_or_else(|| {
-                    NativeMirError::new(
-                        subject.to_string(),
-                        "variant payload binding parameter index overflows",
-                    )
-                })?;
-                let parameter = block.parameters.get(parameter_index).ok_or_else(|| {
-                    NativeMirError::new(
-                        subject.to_string(),
-                        "variant payload binding target parameter is absent",
-                    )
-                })?;
-                if index != 0 || binding.parameter != parameter.value {
-                    return Err(NativeMirError::new(
-                        subject.to_string(),
-                        "variant payload binding parameter disagrees with target block parameter",
-                    ));
-                }
-                self.pending_incoming.push((
-                    parameter.value.clone(),
-                    NativePhiSource::Value(payload),
-                    predecessor,
-                ));
-            }
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            self.pending_incoming.push((
+                block_parameter.value.clone(),
+                NativePhiSource::Value(payload),
+                predecessor,
+            ));
         }
         Ok(())
     }

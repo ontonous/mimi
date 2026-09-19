@@ -3186,7 +3186,7 @@ impl MirTypeCatalog {
             ));
         }
         let has_owned_payload = variants.iter().any(|variant| {
-            variant.fields.first().is_some_and(|field| {
+            variant.fields.iter().any(|field| {
                 self.get(&field.ty)
                     .is_some_and(|payload| payload.ownership != MirOwnership::Copy)
             })
@@ -3246,27 +3246,27 @@ impl MirTypeCatalog {
                     variant.id.0
                 ));
             }
-            if variant.fields.len() != 1 {
+            if variant.fields.is_empty() {
                 return Err(format!(
-                    "union variant '{}' has {} payload fields; the multi-target union contract admits exactly one",
-                    variant.name,
-                    variant.fields.len()
-                ));
-            }
-            let field = &variant.fields[0];
-            if !field_ids.insert(field.id.clone()) {
-                return Err(format!(
-                    "union payload field identity '{}' is duplicated in the multi-target union contract",
-                    field.id.0
-                ));
-            }
-            let scalar = self.validate_copy_scalar(&field.ty).is_ok();
-            let owned_string = self.validate_owned_string(&field.ty).is_ok();
-            if !scalar && !owned_string {
-                return Err(format!(
-                    "union variant '{}' payload is outside the multi-target union contract: only Copy scalars and owned Strings are admitted",
+                    "union variant '{}' has no payload fields; the multi-target union contract admits at least one field per variant",
                     variant.name
                 ));
+            }
+            for field in &variant.fields {
+                if !field_ids.insert(field.id.clone()) {
+                    return Err(format!(
+                        "union payload field identity '{}' is duplicated in the multi-target union contract",
+                        field.id.0
+                    ));
+                }
+                let scalar = self.validate_copy_scalar(&field.ty).is_ok();
+                let owned_string = self.validate_owned_string(&field.ty).is_ok();
+                if !scalar && !owned_string {
+                    return Err(format!(
+                        "union variant '{}' payload field '{}' is outside the multi-target union contract: only Copy scalars and owned Strings are admitted",
+                        variant.name, field.name
+                    ));
+                }
             }
         }
         Ok(())

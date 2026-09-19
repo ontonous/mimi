@@ -617,6 +617,15 @@ impl<'a> NativeMirValidator<'a> {
         self.validate_flat_copy_variant(ty, subject, desc)
     }
 
+    /// Whether the type is the checker-owned multi-target Flow union.  Such
+    /// scrutinees prove their shape through the promoted tagged-union contract
+    /// instead of the flat Copy variant gate.
+    fn union_tagged_scrutinee(&self, ty: &crate::core::ResolvedTypeId) -> bool {
+        self.program.type_catalog().get(ty).is_some_and(|desc| {
+            matches!(desc.layout, MirLayout::Enum { .. }) && desc.kind == MirTypeKind::FlowStateSet
+        })
+    }
+
     fn validate_instruction(
         &mut self,
         function: &MirFunction,
@@ -1925,7 +1934,20 @@ impl<'a> NativeMirValidator<'a> {
         ) {
             self.errors.push(NativeMirError::new(subject, message));
         }
-        self.validate_copy_variant_type(&result_value.ty, subject);
+        if self.union_tagged_scrutinee(&result_value.ty) {
+            match self
+                .program
+                .type_catalog()
+                .validate_multi_target_union_variant(&result_value.ty)
+            {
+                Ok(()) => {}
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+        } else {
+            self.validate_copy_variant_type(&result_value.ty, subject);
+        }
     }
 
     fn validate_construct_variant_move(
@@ -1984,7 +2006,16 @@ impl<'a> NativeMirValidator<'a> {
         let Some(scrutinee_value) = function.values.get(scrutinee) else {
             return;
         };
-        if !self.validate_copy_variant_type(&scrutinee_value.ty, subject) {
+        if self.union_tagged_scrutinee(&scrutinee_value.ty) {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_multi_target_union_variant(&scrutinee_value.ty)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+                return;
+            }
+        } else if !self.validate_copy_variant_type(&scrutinee_value.ty, subject) {
             return;
         }
         if let Err(message) = self
@@ -2067,16 +2098,25 @@ impl<'a> NativeMirValidator<'a> {
                         "switch binding parameter disagrees with target block parameter",
                     ));
                 }
-                if let Err(message) = self
-                    .program
-                    .type_catalog()
-                    .validate_flat_copy_payload_projection_receipt(
-                        &scrutinee_value.ty,
-                        variant_id,
-                        &parameter.ty,
-                        &binding.projection,
-                    )
-                {
+                if let Err(message) = if self.union_tagged_scrutinee(&scrutinee_value.ty) {
+                    self.program
+                        .type_catalog()
+                        .validate_variant_payload_projection_receipt(
+                            &scrutinee_value.ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                        )
+                } else {
+                    self.program
+                        .type_catalog()
+                        .validate_flat_copy_payload_projection_receipt(
+                            &scrutinee_value.ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                        )
+                } {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
@@ -2197,8 +2237,9 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
             // The native non-Copy TypeDesc gate has already proved the
-            // complete admitted variant shape. Only this edge's own
-            // single-binding physical shape remains to be checked here.
+            // complete admitted variant shape. A multi-field union arm binds
+            // one distinct field per direct binding; the nested tuple group
+            // keeps its own complete-group shape.
             let nested_group = arm.bindings.first().is_some_and(|first| {
                 arm.bindings.len() > 1
                     && arm.bindings.iter().all(|binding| {
@@ -2206,10 +2247,15 @@ impl<'a> NativeMirValidator<'a> {
                             && binding.projection.field == first.projection.field
                     })
             });
-            if arm.bindings.len() > 1 && !nested_group {
+            let direct_multi_binding = self.union_tagged_scrutinee(&scrutinee_value.ty)
+                && arm
+                    .bindings
+                    .iter()
+                    .all(|binding| binding.nested_tuple.is_none());
+            if arm.bindings.len() > 1 && !nested_group && !direct_multi_binding {
                 self.errors.push(NativeMirError::new(
                     subject,
-                    "native non-Copy SwitchMove supports one direct binding or one complete nested tuple binding group",
+                    "native non-Copy SwitchMove supports one direct binding, one complete nested tuple binding group, or one direct binding per union payload field",
                 ));
             }
             let mut binding_fields = BTreeSet::new();

@@ -352,7 +352,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_struct_value();
-        if let Some(payload_slot) = variant_abi.payload_slot(variant) {
+        for payload_slot in variant_abi.payload_slots(variant) {
             let (_, value) = fields
                 .iter()
                 .find(|(field, _)| field == &payload_slot.field)
