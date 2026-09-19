@@ -640,30 +640,11 @@ fn verify_function(
         ));
     }
 
-    // A contract-bearing callable whose canonical values include the
-    // multi-target Flow union TypeDesc has no symbolic domain for its union
-    // construction or match distribution.  Report the explicit runtime-only
-    // boundary identity (execution consumers still run this shape) instead of
-    // a generic walk failure, so the route layer can scope its tolerance.
-    let touches_flow_union = catalog.get(&function.result).is_some_and(|descriptor| {
-        descriptor.kind == crate::core::mir::types::MirTypeKind::FlowStateSet
-    }) || function.values.values().any(|value| {
-        catalog.get(&value.ty).is_some_and(|descriptor| {
-            descriptor.kind == crate::core::mir::types::MirTypeKind::FlowStateSet
-        })
-    });
-    if touches_flow_union {
-        return Ok((
-            VerifStatus::NotInTrustedSubset,
-            format!(
-                "{}: contract-bearing function '{}' touches the multi-target Flow union; it has no symbolic domain and MIR execution remains NotInTrustedSubset for this shape",
-                crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE,
-                function.owner.0
-            ),
-            0,
-            Some(TrustedSubsetDomain::Body),
-        ));
-    }
+    // R6-1036: the multi-target Flow union no longer rejects the whole
+    // callable.  Union construction and match distribution have a symbolic
+    // domain (tag + per-field payload under the promoted union contract), and
+    // shapes the domain cannot express still fail closed per-instruction
+    // below instead of being refused before exploration.
 
     // The verifier admits an owned String result only through the same
     // canonical one-block Move/Clone/Drop ledger used by MIR construction and
@@ -1038,6 +1019,54 @@ fn symbolic_value_for_type(
                 SymbolicValue::Variant {
                     nominal: crate::core::ir::NominalTypeId::new(expected_nominal)
                         .map_err(|error| error.to_string())?,
+                    tag,
+                    payload,
+                    active_variant: None,
+                },
+                constraints,
+            ))
+        }
+        MirLayout::Enum { nominal, variants } if descriptor.kind == MirTypeKind::FlowStateSet => {
+            // A promoted multi-target Flow union input: the tag is a fresh
+            // symbol constrained to the canonical discriminants and the
+            // payload holds the union of every variant field under its
+            // stable field identity (variant field ids inherit the source
+            // state field NodeIds, so same-named fields never collide).
+            catalog.validate_multi_target_union_variant(ty)?;
+            let tag = Int::new_const(format!("{name}.tag"));
+            let mut constraints = Vec::new();
+            let allowed = variants
+                .iter()
+                .map(|variant| tag.eq(Int::from_i64(variant.discriminant as i64)))
+                .collect::<Vec<_>>();
+            if !allowed.is_empty() {
+                let allowed_refs = allowed.iter().collect::<Vec<_>>();
+                constraints.push(Bool::or(&allowed_refs));
+            }
+            let mut payload = BTreeMap::new();
+            for variant in variants {
+                for field in &variant.fields {
+                    let (value, nested) = symbolic_value_for_type(
+                        catalog,
+                        &field.ty,
+                        &format!(
+                            "{name}.variant.{}.field.{}",
+                            variant.id.0.as_str(),
+                            field.id.0.as_str()
+                        ),
+                    )?;
+                    if payload.insert(field.id.clone(), value).is_some() {
+                        return Err(format!(
+                            "MIR verifier variant payload field '{}' is duplicated",
+                            field.id.0
+                        ));
+                    }
+                    constraints.extend(nested);
+                }
+            }
+            Ok((
+                SymbolicValue::Variant {
+                    nominal: nominal.clone(),
                     tag,
                     payload,
                     active_variant: None,
@@ -3386,15 +3415,20 @@ fn ensure_copy_value(
             value
         ));
     }
+    let union_layout_admitted = matches!(descriptor.layout, MirLayout::Enum { .. })
+        && descriptor.kind == crate::core::mir::types::MirTypeKind::FlowStateSet
+        && catalog
+            .validate_multi_target_union_variant(&info.ty)
+            .is_ok();
     if !descriptor.has_canonical_copy_noop_metadata()
-        || !matches!(
+        || !(matches!(
             descriptor.layout,
             MirLayout::Scalar
                 | MirLayout::Tuple(_)
                 | MirLayout::Record { .. }
                 | MirLayout::Option { .. }
                 | MirLayout::Result { .. }
-        )
+        ) || union_layout_admitted)
     {
         return Err(format!(
             "MIR value '{}' is outside the Copy/no-op contract",
@@ -3449,26 +3483,37 @@ fn eval_flow_transition(
             transition.0
         )
     })?;
-    if crate::core::mir::multi_target_union_shape(contract, catalog) {
-        return Err(format!(
-            "{}: multi-target Flow union transition '{}' has no symbolic domain; MIR execution remains NotInTrustedSubset for this shape",
-            crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE,
-            transition.0
-        ));
+    // R6-1036: a multi-target union transition is symbolically executed like
+    // any other callable — its return paths are merged into one symbolic
+    // union value below.  The shape predicate already excludes failure,
+    // fallback, and FFI-pinned contracts, so those still fall through to the
+    // single-target guards and reject.
+    let union_shape = crate::core::mir::multi_target_union_shape(contract, catalog);
+    if union_shape {
+        catalog
+            .validate_multi_target_union_variant(&contract.result)
+            .map_err(|message| {
+                format!(
+                    "{}: multi-target Flow union transition '{}' is outside the promoted union contract: {message}",
+                    crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE,
+                    transition.0
+                )
+            })?;
     }
     let recoverable = contract.effect.is_recoverable();
-    if (!recoverable
+    if (!union_shape
+        && !recoverable
         && !matches!(
             contract.effect,
             crate::core::mir::MirTransitionEffect::SilentLocal
                 | crate::core::mir::MirTransitionEffect::Boundary
         ))
-        || contract.targets.len() != 1
+        || (!union_shape && contract.targets.len() != 1)
         || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
         || contract.is_ffi_pinned
         || (recoverable && contract.failure.is_none())
-        || (!recoverable && contract.targets.first() != Some(&contract.result))
+        || (!recoverable && !union_shape && contract.targets.first() != Some(&contract.result))
     {
         return Err(format!(
             "MIR verifier transition '{}' is outside the silent-local contract",
@@ -3608,6 +3653,16 @@ fn eval_flow_transition(
         // the enclosing verifier obligation for satisfiability checking.
         state.traps.extend(traps);
         let returned = merge_recoverable_result_return_paths(catalog, &contract.result, &returns)?;
+        state.constraints = caller_constraints;
+        ensure_result_shape(function, catalog, result, &returned)?;
+        state.values.insert(result.clone(), returned);
+    } else if union_shape {
+        // A multi-target union transition is likewise total over one return
+        // path per target state; merge them into a single symbolic union so
+        // the caller's SwitchMove distributes over the tag under the path
+        // conditions instead of picking one target eagerly.
+        state.traps.extend(traps);
+        let returned = merge_multi_target_union_return_paths(catalog, &contract.result, &returns)?;
         state.constraints = caller_constraints;
         ensure_result_shape(function, catalog, result, &returned)?;
         state.values.insert(result.clone(), returned);
@@ -4973,6 +5028,48 @@ fn merge_recoverable_result_return_paths(
     let (_, last) = normalized
         .pop()
         .expect("validated non-empty recoverable return paths");
+    let mut merged = last;
+    for (condition, value) in normalized.into_iter().rev() {
+        merged = merge_symbolic_variants(&condition, value, merged)?;
+    }
+    Ok(merged)
+}
+
+fn merge_multi_target_union_return_paths(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ir::ResolvedTypeId,
+    returns: &[ReturnPath],
+) -> Result<SymbolicValue, String> {
+    if returns.is_empty() {
+        return Err(
+            "MIR verifier multi-target union transition has no return paths to merge".into(),
+        );
+    }
+    catalog.validate_multi_target_union_variant(result_ty)?;
+    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
+        return Err("MIR verifier multi-target union transition has no Enum layout".into());
+    };
+    let nominal =
+        crate::core::ir::NominalTypeId::new(expected_nominal).map_err(|error| error.to_string())?;
+    let all_fields = variants
+        .iter()
+        .flat_map(|variant| variant.fields.iter())
+        .map(|field| (field.id.clone(), field.ty.clone()))
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(returns.len());
+    for path in returns {
+        let value = normalize_direct_variant_return(
+            catalog,
+            result_ty,
+            &nominal,
+            &all_fields,
+            &path.value,
+        )?;
+        normalized.push((conjunction(&path.constraints), value));
+    }
+    let (_, last) = normalized
+        .pop()
+        .expect("validated non-empty union return paths");
     let mut merged = last;
     for (condition, value) in normalized.into_iter().rev() {
         merged = merge_symbolic_variants(&condition, value, merged)?;
@@ -6462,7 +6559,9 @@ fn symbolic_matches_type(
             .validate_list_glue(ty, MirGlueOperation::MoveOut)
             .is_ok(),
         (
-            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. },
+            MirLayout::Option { variants, .. }
+            | MirLayout::Result { variants, .. }
+            | MirLayout::Enum { variants, .. },
             MirAbiClass::Aggregate,
             SymbolicValue::Variant {
                 nominal: actual_nominal,
@@ -6471,10 +6570,21 @@ fn symbolic_matches_type(
                 active_variant,
             },
         ) => {
-            let expected_nominal = if matches!(&descriptor.layout, MirLayout::Option { .. }) {
-                "builtin:type:Option"
-            } else {
-                "builtin:type:Result"
+            let expected_nominal = match &descriptor.layout {
+                MirLayout::Option { .. } => "builtin:type:Option".to_string(),
+                MirLayout::Result { .. } => "builtin:type:Result".to_string(),
+                MirLayout::Enum { nominal, .. } => {
+                    // Only the promoted multi-target union contract admits a
+                    // symbolic Enum variant; checker-materialized user enums
+                    // have no verifier capability to match against.
+                    if descriptor.kind != MirTypeKind::FlowStateSet
+                        || catalog.validate_multi_target_union_variant(ty).is_err()
+                    {
+                        return false;
+                    }
+                    nominal.as_str().to_string()
+                }
+                _ => return false,
             };
             let fields_match = if let Some(active_variant) = active_variant {
                 variants

@@ -432,29 +432,35 @@ fn forged_union_receipt_target_rejects_all_consumers() {
 }
 
 #[test]
-fn union_verifier_boundary_is_scoped_to_contract_bearing_callables() {
-    // No-contract functions stay NoObligations; the boundary identity only
-    // appears for a callable whose contract pass actually walks the union.
+fn union_contract_disproven_is_real_and_no_contract_stays_no_obligations() {
+    // R6-1036B flip of the R6-1034 boundary pin
+    // (union_verifier_boundary_is_scoped_to_contract_bearing_callables): an
+    // ensures-only union transition now gets a real verdict.  `flag == false`
+    // has no requires constraining the parameter, so Z3 finds the
+    // counterexample and returns Disproven — not a boundary observation and
+    // not a vacuous green.  Contract-free functions emit no verification
+    // obligation at all, and definitive verdicts are route-compatible
+    // without the runtime-only boundary opt-in flags.
     let source = r#"
-        flow Gauge {
-            state Cold { v: i32 }
-            state Hot { v: i32 }
-            transition heat(Cold, delta: i32) -> Hot | Cold {
-                ensures: delta != 0
-                if self.v + delta > 50 {
-                    return Hot { v: self.v + delta }
+        flow Gate {
+            state Shut { v: i32 }
+            state Opened { v: i32 }
+            transition toggle(Shut, flag: bool) -> Opened | Shut {
+                ensures: flag == false
+                if flag {
+                    return Opened { v: 1 }
                 } else {
-                    return Cold { v: self.v + delta }
+                    return Shut { v: 0 }
                 }
             }
         }
 
         func main() -> i32 {
-            let g = Cold { v: 40 }
-            let next = Gauge::heat(g, 20)
+            let g = Shut { v: 40 }
+            let next = Gate::toggle(g, true)
             let t = match next {
-                Hot { v } => v
-                Cold { v } => v
+                Opened { v } => v
+                Shut { v } => v
             }
             println(t)
             0
@@ -466,134 +472,146 @@ fn union_verifier_boundary_is_scoped_to_contract_bearing_callables() {
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check union contract fixture");
     let mir = MirProgram::from_checked_program(&checked).expect("materialize");
-    let results = crate::verifier::verify_mir(&mir, "flow-union-boundary".into())
+    let results = crate::verifier::verify_mir(&mir, "flow-union-disproven".into())
         .expect("MIR verifier runs the union program");
-    let heat = results
+    let toggle = results
         .iter()
-        .find(|result| result.func_name.contains("heat"))
-        .expect("heat verification result");
+        .find(|result| result.func_name.contains("toggle"))
+        .expect("toggle verification result");
     assert_eq!(
-        heat.status,
-        crate::verifier::VerifStatus::NotInTrustedSubset
-    );
-    assert!(
-        heat.message
-            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
+        toggle.status,
+        crate::verifier::VerifStatus::Disproven,
         "{}",
-        heat.message
-    );
-    // The boundary is an observation, not a route failure: the ready-check
-    // accepts it only when the route layer opted into the runtime-only union
-    // face, and never turns it into a proof.
-    assert!(
-        !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false),
-        "without the opt-in flag the boundary stays ineligible"
+        toggle.message
     );
     assert!(
-        crate::verifier::canonical_execution_route_verifier_ready(&results, false, true),
-        "the runtime-only union opt-in admits the boundary observation"
+        !toggle
+            .message
+            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
+        "a real verdict must not carry the runtime-only boundary identity: {}",
+        toggle.message
+    );
+    // Contract-free functions (main here) are outside the verifier's
+    // obligation set: verify_mir emits no result for them, so the single
+    // definitive toggle verdict keeps the route ready without any boundary
+    // opt-in.
+    assert!(
+        results
+            .iter()
+            .all(|result| !result.func_name.contains("main")),
+        "contract-free functions emit no verification result: {results:?}"
+    );
+    assert!(
+        crate::verifier::canonical_execution_route_verifier_ready(&results, false, false),
+        "a Disproven union verdict is definitive and route-compatible"
     );
 }
 
 #[test]
-fn union_contract_verifier_trusted_subset_baseline() {
-    // R6-1036A baseline pin (test-first for the symbolic-domain promotion):
-    // contract-bearing union callables are today rejected wholesale by the
-    // MIR-VERIFIER-FLOW-UNION-001 boundary in `verify_function` before any
-    // symbolic exploration, so no real verdict (Proven/Disproven) is ever
-    // produced for a union body.  R6-1036B replaces this pin:
-    //   provable transition -> Proven on the same obligations,
-    //   contract-bearing caller -> Proven through a union-aware transition
-    //   call plus the generic variant SwitchMove,
-    // and the ensures-only sibling pinned by
-    // union_verifier_boundary_is_scoped_to_contract_bearing_callables flips
-    // to a real Disproven.
-
-    // 1. Provable transition: requires + ensures constrain the same
-    //    parameter, so the obligation discharges on both union return paths.
-    let provable = materialize(
-        r#"
-        flow Gauge {
-            state Cold { v: i32 }
-            state Hot { v: i32 }
-            transition heat(Cold, delta: i32) -> Hot | Cold {
-                requires: delta != 0
-                ensures: delta != 0
-                if self.v + delta > 50 {
-                    return Hot { v: self.v + delta }
+fn union_contract_symbolic_pre_post_proven() {
+    // R6-1036B flip of union_contract_verifier_trusted_subset_baseline
+    // (821bb80f pinned the wholesale MIR-VERIFIER-FLOW-UNION-001 rejection):
+    // contract-bearing union callables now get real verdicts.  The
+    // transition's requires/ensures are discharged on both union return
+    // paths, and a contract-bearing caller is verified through the
+    // union-aware transition call plus the generic variant SwitchMove.
+    let source = r#"
+        flow Gate {
+            state Shut { v: i32 }
+            state Opened { v: i32 }
+            transition toggle(Shut, flag: bool) -> Opened | Shut {
+                requires: flag == true
+                ensures: flag == true
+                if flag {
+                    return Opened { v: 1 }
                 } else {
-                    return Cold { v: self.v + delta }
-                }
-            }
-        }
-
-        func main() -> i32 {
-            let g = Cold { v: 40 }
-            let next = Gauge::heat(g, 20)
-            let t = match next {
-                Hot { v } => v
-                Cold { v } => v
-            }
-            println(t)
-            0
-        }
-    "#,
-        "provable union transition",
-    );
-    let results = crate::verifier::verify_mir(&provable, "union-baseline-provable".into())
-        .expect("MIR verifier runs the provable union program");
-    let heat = results
-        .iter()
-        .find(|result| result.func_name.contains("heat"))
-        .expect("heat verification result");
-    assert_eq!(
-        heat.status,
-        crate::verifier::VerifStatus::NotInTrustedSubset
-    );
-    assert!(
-        heat
-            .message
-            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
-        "{}",
-        heat.message
-    );
-
-    // 2. Contract-bearing caller: main's own `ensures` forces the verifier
-    //    into its body, whose values include the union scrutinee — the
-    //    boundary currently rejects the whole function before the transition
-    //    call or the SwitchMove is ever interpreted.
-    let caller = materialize(
-        r#"
-        flow Gauge {
-            state Cold { v: i32 }
-            state Hot { v: i32 }
-            transition heat(Cold, delta: i32) -> Hot | Cold {
-                requires: delta != 0
-                ensures: delta != 0
-                if self.v + delta > 50 {
-                    return Hot { v: self.v + delta }
-                } else {
-                    return Cold { v: self.v + delta }
+                    return Shut { v: 0 }
                 }
             }
         }
 
         func main() -> i32 {
             ensures: result == 0
-            let g = Cold { v: 40 }
-            let next = Gauge::heat(g, 20)
+            let g = Shut { v: 40 }
+            let next = Gate::toggle(g, true)
             let t = match next {
-                Hot { v } => v
-                Cold { v } => v
+                Opened { v } => v
+                Shut { v } => v
             }
             println(t)
             0
         }
-    "#,
-        "contract-bearing union caller",
+    "#;
+    let mir = materialize(source, "verified union contract program");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    let results = crate::verifier::verify_mir(&mir, "union-symbolic-proven".into())
+        .expect("MIR verifier runs the union program");
+    let toggle = results
+        .iter()
+        .find(|result| result.func_name.contains("toggle"))
+        .expect("toggle verification result");
+    assert_eq!(
+        toggle.status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        toggle.message
     );
-    let results = crate::verifier::verify_mir(&caller, "union-baseline-caller".into())
-        .expect("MIR verifier runs the caller program");
+    assert!(!toggle
+        .message
+        .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE));
+    let main = results
+        .iter()
+        .find(|result| result.func_name.contains("main"))
+        .expect("main verification result");
+    assert_eq!(
+        main.status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        main.message
+    );
+    assert!(!main
+        .message
+        .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE));
+}
+
+#[test]
+fn union_outside_symbolic_payload_contract_keeps_boundary() {
+    // Fail-closed identity survives the promotion: a union whose payload
+    // escapes the promoted contract (List<i32>) never reaches a verdict for
+    // contract-bearing callables — the transition body construct and the
+    // caller's transition call both reject, and the caller keeps the
+    // explicit MIR-VERIFIER-FLOW-UNION-001 boundary identity.
+    let source = r#"
+        flow P {
+            state A { v: i32 }
+            state B { xs: List<i32> }
+            transition go(A, d: i32) -> A | B {
+                requires: d > 0
+                ensures: d > 0
+                if d > 0 {
+                    return B { xs: [d] }
+                } else {
+                    return A { v: d }
+                }
+            }
+        }
+
+        func main() -> i32 {
+            ensures: result == 0
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let mir = materialize(source, "list payload union verifier fixture");
+    let results = crate::verifier::verify_mir(&mir, "union-symbolic-negative".into())
+        .expect("MIR verifier runs the out-of-contract union program");
+    let go = results
+        .iter()
+        .find(|result| result.func_name.contains("go"))
+        .expect("go verification result");
+    assert_eq!(go.status, crate::verifier::VerifStatus::NotInTrustedSubset);
     let main = results
         .iter()
         .find(|result| result.func_name.contains("main"))
@@ -603,8 +621,7 @@ fn union_contract_verifier_trusted_subset_baseline() {
         crate::verifier::VerifStatus::NotInTrustedSubset
     );
     assert!(
-        main
-            .message
+        main.message
             .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
         "{}",
         main.message
