@@ -2082,6 +2082,62 @@ impl<'a> Checker<'a> {
                             );
                         }
                     }
+                    // R6-1039 fail-close ruling: every checker-legal multi-target
+                    // union must close the promoted tagged-union contract face.
+                    // Out-of-contract payload shapes (aggregates, floats,
+                    // payload-less variants) are rejected at the declaration site
+                    // instead of keeping the legacy union route reachable from
+                    // default run/build.  The compiler-owned Fault sink stays
+                    // exempt (0.36.9 裁决 6: absorption requires a DECLARED Fault
+                    // target), mirroring the E0404 loop above; fallback and
+                    // FFI-pinned multi-targets are compiler-injected shapes that
+                    // the MIR union candidate detector never counts.
+                    if t.to_states.len() > 1 && !t.is_fallback && !t.is_ffi_pinned {
+                        for to_state in &t.to_states {
+                            if to_state == "Fault" {
+                                continue;
+                            }
+                            let Some(state_def) = f.states.iter().find(|s| &s.name == to_state)
+                            else {
+                                // Undefined target: E0404 already fired above.
+                                continue;
+                            };
+                            match &state_def.payload {
+                                Some(fields) if !fields.is_empty() => {
+                                    for field in fields {
+                                        let resolved = self.resolve_type(&field.ty);
+                                        if !union_payload_field_admitted(&resolved) {
+                                            // Unknown type names already carry
+                                            // their own E0407 diagnostic; don't
+                                            // cascade the union ruling onto them.
+                                            if union_payload_type_is_known(self, &resolved) {
+                                                self.emit_code(
+                                                    crate::diagnostic::codes::E0446,
+                                                    format!(
+                                                        "union variant payload field '{}: {}' in target state '{}' of transition '{}' (flow '{}') is outside the promoted multi-target union contract: only i32/i64/bool/string payload fields are admitted; aggregate payloads keep the legacy union route reachable (R6-1039 fail-close ruling)",
+                                                        field.name,
+                                                        union_payload_type_label(&resolved),
+                                                        to_state,
+                                                        t.name,
+                                                        f.name
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0446,
+                                        format!(
+                                            "multi-target union target state '{}' in transition '{}' of flow '{}' declares no payload fields; every union variant must carry at least one payload field (R6-1039 fail-close ruling)",
+                                            to_state, t.name, f.name
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // v0.34.15 (ADR-002, golden §1.2): multi-target results are a
                     // runtime-tagged union — payload layouts MAY differ across
                     // targets ("payload layout differences cannot substitute for
@@ -2323,5 +2379,66 @@ impl<'a> Checker<'a> {
                 unreachable!("SessionType::unlocated returned Located")
             }
         }
+    }
+}
+
+/// R6-1039: whether a resolved union payload field type is admitted by the
+/// promoted multi-target tagged-union contract.  This mirrors the MIR-level
+/// gate exactly — `validate_copy_scalar` (i32/i64/bool, Copy no-op glue) XOR
+/// `validate_owned_string` (the canonical StringHandle) — so every
+/// checker-legal multi-target union closes the contract face.  Transparent
+/// type aliases are already unfolded by `resolve_type`.
+fn union_payload_field_admitted(ty: &Type) -> bool {
+    match ty {
+        Type::Located { ty, .. } => union_payload_field_admitted(ty),
+        Type::Name(name, args) => {
+            args.is_empty() && matches!(name.as_str(), "i32" | "i64" | "bool" | "string")
+        }
+        _ => false,
+    }
+}
+
+/// R6-1039: suppress the union ruling on unknown type names — they already
+/// carry their own E0407 diagnostic from `check_type_well_formed`.
+fn union_payload_type_is_known(checker: &Checker<'_>, ty: &Type) -> bool {
+    match ty {
+        Type::Located { ty, .. } => union_payload_type_is_known(checker, ty),
+        Type::Name(name, _) => {
+            Checker::is_builtin_type(name)
+                || checker.types.contains_key(name)
+                || checker.generic_scope.contains(name)
+        }
+        _ => true,
+    }
+}
+
+/// R6-1039: compact source-level label for a rejected union payload type.
+fn union_payload_type_label(ty: &Type) -> String {
+    match ty {
+        Type::Located { ty, .. } => union_payload_type_label(ty),
+        Type::Name(name, args) if args.is_empty() => name.clone(),
+        Type::Name(name, args) => format!(
+            "{}<{}>",
+            name,
+            args.iter()
+                .map(union_payload_type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Option(inner) => format!("Option<{}>", union_payload_type_label(inner)),
+        Type::Result(ok, err) => format!(
+            "Result<{}, {}>",
+            union_payload_type_label(ok),
+            union_payload_type_label(err)
+        ),
+        Type::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(union_payload_type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => format!("{other:?}"),
     }
 }

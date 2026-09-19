@@ -5613,15 +5613,18 @@ func main() -> i32 {
 }
 
 #[test]
-fn multi_target_nested_record_payload_box_sized_dual_backend() {
-    // C2 (MEM-C8, L1): wrap_multi_target_value must size the payload box from
-    // the actual LLVM type size (size_of), NOT field_count × 8. A target state
-    // with a NESTED record field (Done { inner: Inner }, Inner = {i32,i32,i32})
-    // lowers to { { i32, i32, i32 } }: count_fields() == 1 but the struct is
-    // 12 bytes, so field_count × 8 == 8 undersized the box and the store
-    // overflowed the heap. The bytecode data round-trip reads the nested
-    // fields back (sum == 6); codegen binds the nested record whole and
-    // dispatches by tag (100) — both backends agree, no heap corruption.
+fn multi_target_nested_record_payload_union_rejected_at_checker() {
+    // C2 (MEM-C8) — R6-1039 restatement: the nested-record union payload
+    // (Done { inner: Inner }, Inner = {i32,i32,i32}) that used to exercise
+    // wrap_multi_target_value's size_of box-sizing (field_count × 8
+    // undersized the 12-byte struct and overflowed the heap) is now
+    // checker-rejected: aggregate payloads sit outside the promoted
+    // tagged-union contract (E0446), so that shape is unreachable from
+    // source. The size_of box-sizing fix stays as defense-in-depth for
+    // non-checker MIR producers; the MIR native/capability gates reject the
+    // aggregate face (pinned in canonical_flow_union), and the run-level
+    // box-reuse face keeps dual-backend coverage with in-contract payloads
+    // (multi_target_payload_box_reuse_no_double_free_dual_backend).
     let src = r#"
 type Inner { a: i32, b: i32, c: i32 }
 flow F {
@@ -5646,44 +5649,17 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(check_source(src).is_ok(), "{:?}", check_source(src));
-    // Bytecode round-trips the nested payload correctly.
-    let (_, bytecode_out) = run_source_bytecode_with_stdout(src);
-    assert_eq!(
-        bytecode_out.trim(),
-        "6",
-        "bytecode nested-record round-trip"
+    let diagnostics =
+        check_source(src).expect_err("nested-record union payload must be checker-rejected");
+    let rendered = diagnostics
+        .iter()
+        .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("E0446"),
+        "expected the E0446 fail-close ruling for the nested-record payload, got:\n{rendered}"
     );
-    // Codegen must box the 12-byte nested struct without overflow and
-    // dispatch the correct tag. (Nested field access in the match arm is a
-    // separate native-emitter capability, so the codegen assertion uses a
-    // tag-only variant below.)
-    let src_tag = r#"
-type Inner { a: i32, b: i32, c: i32 }
-flow F {
-    state Start { v: i32 }
-    state Done { inner: Inner }
-    state Skip { v: i32 }
-    transition go(Start) -> Done | Skip {
-        if self.v > 0 {
-            return Done { inner: Inner { a: 1, b: 2, c: 3 } }
-        }
-        return Skip { v: 0 }
-    }
-}
-func main() -> i32 {
-    let s = Start { v: 5 }
-    let r = F::go(s)
-    let tag = match r {
-        Done { inner } => 100,
-        Skip { v } => v
-    }
-    println(tag)
-    0
-}
-"#;
-    let native = compile_and_run(src_tag).expect("codegen nested-record box must not overflow");
-    assert_eq!(native.trim(), "100", "codegen nested-record tag dispatch");
 }
 
 #[test]

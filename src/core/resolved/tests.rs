@@ -366,13 +366,20 @@ fn native_capability_gate_accepts_multi_target_after_tagged_abi() {
     // v0.34.16 (ADR-002): Native gained the tagged-state-union ABI
     // (synthetic __MultiTarget enum + boxed payload) — validate_backend must
     // now ACCEPT multi-target flows (was: FLOW-MULTI-001 rejection).
+    // R6-1039 restatement: the former payload-less `-> Yes | No` idiom is now
+    // checker-rejected (E0446 — every union target must carry at least one
+    // admitted payload field), so the acceptance face is pinned with an
+    // in-contract payloaded variant.
     let file = parse(
         r#"
 flow Decision {
-    state Pending
-    state Yes
-    state No
-    transition decide(Pending) -> Yes | No { return Yes {} }
+    state Pending { v: i32 }
+    state Yes { v: i32 }
+    state No { v: i32 }
+    transition decide(Pending, ok: bool) -> Yes | No {
+        if ok { return Yes { v: 1 } }
+        return No { v: 0 }
+    }
 }
 "#,
     );
@@ -389,13 +396,18 @@ flow Decision {
 fn verifier_capability_gate_allows_multi_target_for_contract_verification() {
     // Verifier proves function contracts; multi-target must not block
     // unrelated verification of the same CheckedProgram.
+    // R6-1039 restatement: payloaded in-contract union variant (E0446
+    // rejects the former payload-less `-> Yes | No` idiom at the checker).
     let file = parse(
         r#"
 flow Decision {
-    state Pending
-    state Yes
-    state No
-    transition decide(Pending) -> Yes | No { return Yes {} }
+    state Pending { v: i32 }
+    state Yes { v: i32 }
+    state No { v: i32 }
+    transition decide(Pending, ok: bool) -> Yes | No {
+        if ok { return Yes { v: 1 } }
+        return No { v: 0 }
+    }
 }
 func abs(x: i32) -> i32 {
     requires: x >= 0
@@ -507,14 +519,18 @@ func main() -> i32 { 0 }
 
 #[test]
 fn multi_target_transition_signature_uses_closed_state_set() {
+    // R6-1039 restatement: payloaded in-contract union variant (E0446
+    // rejects payload-less multi-target states at the checker); the closed
+    // FlowStateSet{2} signature face is unchanged.
     let file = parse(
         r#"
 flow Choice {
-    state Start
-    state Left
-    state Right
-    transition choose(Start) -> Left | Right {
-        return Left
+    state Start { v: i32 }
+    state Left { v: i32 }
+    state Right { v: i32 }
+    transition choose(Start, ok: bool) -> Left | Right {
+        if ok { return Left { v: 1 } }
+        return Right { v: 0 }
     }
 }
 func main() -> i32 { 0 }
@@ -1075,13 +1091,19 @@ func main() -> i32 { 0 }
 
 #[test]
 fn checked_program_exposes_backend_requirements() {
+    // R6-1039 restatement: payloaded in-contract union variant (E0446
+    // rejects the former payload-less `-> Yes | No` idiom at the checker);
+    // the capability-exposure assertions are unchanged.
     let file = parse(
         r#"
 flow Decision {
-    state Pending
-    state Yes
-    state No
-    transition decide(Pending) -> Yes | No { return Yes {} }
+    state Pending { v: i32 }
+    state Yes { v: i32 }
+    state No { v: i32 }
+    transition decide(Pending, ok: bool) -> Yes | No {
+        if ok { return Yes { v: 1 } }
+        return No { v: 0 }
+    }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1100,7 +1122,8 @@ func main() -> i32 { 0 }
     let _ = verifier.verify_checked(&program);
     assert!(verifier.requires_checked_capability("flow.multi_target"));
     assert!(verifier.checked_node_meta_count() > 0);
-    // Native codegen fail-closes multi-target; use a simple program for codegen install.
+    // Codegen install is asserted on a capability-free program so the
+    // negative capability query (`!flow.multi_target`) is meaningful.
     let simple = parse(
         r#"
 func main() -> i32 { 0 }

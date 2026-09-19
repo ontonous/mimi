@@ -198,6 +198,12 @@ extern "C" {
 
     #[test]
     fn component_input_rejects_unsupported_flow_capabilities() {
+        // R6-1039 restatement (Wave-1 K-fix6 precedent): payload-less
+        // multi-target unions are now checker-rejected (E0446) before the
+        // component input gate runs, so checker-valid input can no longer
+        // reach the component layer with this shape.  Pin the checker-level
+        // ruling; the component gate's flow.multi_target rejection remains
+        // as defense-in-depth for non-checker producers.
         let file = parse(
             r#"
 flow Choice {
@@ -210,7 +216,10 @@ func main() -> i32 { 0 }
 "#,
         );
         let error = checked_component_input(&file).expect_err("component must reject multi-target");
-        assert!(error.contains("flow.multi_target"));
+        assert!(
+            error.contains("declares no payload fields"),
+            "expected the E0446 payload-less union ruling, got: {error}"
+        );
     }
 
     #[test]

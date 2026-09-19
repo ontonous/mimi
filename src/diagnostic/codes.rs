@@ -144,6 +144,7 @@ pub const E0442: &str = "E0442"; // view/mutate/ref cannot cross a task boundary
 pub const E0443: &str = "E0443"; // bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch
 pub const E0444: &str = "E0444"; // session protocol payload must be an integer scalar (i32/i64)
 pub const E0445: &str = "E0445"; // inline `module` blocks are not part of the language (spec §6.14); use file modules with `use`
+pub const E0446: &str = "E0446"; // multi-target union payload outside the promoted tagged-union contract (R6-1039 fail-close ruling)
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
@@ -470,6 +471,7 @@ pub fn describe(code: &str) -> &'static str {
         E0443 => "bare Flow record cannot cross Channel, FFI, or an actor mailbox: pack a TransitionEpoch with flow_pack. Local self-loops strip the epoch (clause 5.1 silent stay)",
         E0444 => "session protocol payload must be an integer scalar (i32 or i64): the endpoint runtime transports values in i64 handle slots. Wider or heap-shaped payloads (f64/string/bool/records) cannot cross a send/recv; pack them out-of-band (e.g. via Channel) or encode as integers",
         E0445 => "inline `module` blocks are not part of the language (spec §6.14): the only module form is a file whose `pub` items merge into scope via `use`. Move the block's pub items into their own .mimi file and add `use <name>;`",
+        E0446 => "multi-target union target violates the promoted tagged-union contract (R6-1039 fail-close ruling): every checker-legal `-> A | B` transition must close the canonical union face, so each target state carries at least one payload field and every payload field is i32/i64/bool/string. Aggregate (List/record/Option/tuple), float, and payload-less union variants keep the legacy union route reachable and are rejected at the declaration site; the compiler-owned Fault sink stays exempt (0.36.9 verdict 6: absorption requires a DECLARED Fault target)",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
@@ -772,6 +774,7 @@ mod tests {
             super::E0443,
             super::E0444,
             super::E0445,
+            super::E0446,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,

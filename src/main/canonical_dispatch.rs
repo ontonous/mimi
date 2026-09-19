@@ -3364,16 +3364,62 @@ mod tests {
     }
 
     #[test]
-    fn out_of_contract_union_keeps_explicit_legacy_route() {
-        // R6-1037A deletion-audit pin (R6-1034③), restated by R6-1038: the
-        // union legacy path is reachable, and the route layer keeps an
-        // out-of-contract union on the explicit compatibility disposition
-        // instead of hard-rejecting a working program or silently
-        // downgrading a recognized island.  R6-1038 promoted multi-field
-        // Copy/owned-String variants, so the out-of-contract shape here is
-        // an aggregate payload (List<i32>).  Deleting the legacy union path
-        // requires promoting or checker-rejecting these shapes first (see
-        // the reachability pin in tests::canonical_flow_union).
+    fn fault_absorption_union_keeps_explicit_legacy_route() {
+        // R6-1039 restatement of the R6-1037A deletion-audit pin: the
+        // checker now rejects user-declared out-of-contract unions (E0446),
+        // so the route layer never sees them.  The residual checker-legal
+        // union face is the compiler-owned Fault absorption target
+        // (0.36.9 裁决 6), and it still trips the union mixed-coverage veto
+        // directly: the S|Fault union candidate's open face keeps the whole
+        // program on the explicit compatibility route.  Deleting the legacy
+        // union path still requires promoting the Fault variant shape into
+        // the tagged-union contract.
+        let source = r#"
+            func guarded(x: i64) -> i64 {
+                requires: x > 0
+                x
+            }
+
+            flow F {
+                state S { v: i64 }
+                transition go(S) -> S | Fault {
+                    let y = guarded(1)
+                    return S { v: y }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 0 }
+                let r = F::go(s)
+                let v = match r {
+                    S { v } => v
+                    Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+                }
+                println(v)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+            panic!("a Fault absorption union must keep the explicit compatibility route");
+        };
+        assert_eq!(
+            reason,
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+        );
+        assert_eq!(
+            reason.as_str(),
+            "mixed-coverage-without-materialized-candidate"
+        );
+    }
+
+    #[test]
+    fn out_of_contract_union_is_checker_rejected_before_route_selection() {
+        // R6-1039: user-declared out-of-contract union payload shapes are
+        // rejected by the checker (E0446) at the declaration site, so
+        // `select_default_route` is never reached for them — the union
+        // mixed-coverage veto remains as defense-in-depth for non-checker
+        // producers only.
         let source = r#"
             flow P {
                 state A { v: i32 }
@@ -3395,18 +3441,16 @@ mod tests {
                 0
             }
         "#;
-        let (checked, file) = checked(source);
-        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
-            panic!("an out-of-contract union must keep the explicit compatibility route");
-        };
-        assert_eq!(
-            reason,
-            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
-        );
-        assert_eq!(
-            reason.as_str(),
-            "mixed-coverage-without-materialized-candidate"
-        );
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let diagnostics = mimi::core::check_program(&file)
+            .err()
+            .unwrap_or_else(|| panic!("the checker must reject the List payload union"));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0446")));
     }
 
     #[test]

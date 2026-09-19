@@ -463,13 +463,13 @@ fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
 }
 
 #[test]
-fn union_outside_promoted_payload_contract_stays_fail_closed() {
-    // The promoted contract admits Copy-scalar or owned-String payload
-    // fields per variant (R6-1038 widened the one-field face to multi-field
-    // variants, so the formerly-rejected wide variant is pinned as
-    // converged).  Aggregate payloads — List and record — stay fail-closed
-    // on the native and capability consumers, and an out-of-contract union
-    // keeps the whole graph off the canonical route.
+fn aggregate_payload_union_rejected_at_checker() {
+    // R6-1039 fail-close ruling (RED first): out-of-contract multi-target
+    // union payload shapes — aggregate (List / user record / Option), float,
+    // and payload-less variants — are checker-legal today and keep the legacy
+    // union route reachable (mixed-coverage disposition).  The ruling rejects
+    // them at the declaration site with E0446 so every checker-legal
+    // multi-target union closes the promoted tagged-union contract face.
     let list_payload = r#"
         flow P {
             state A { v: i32 }
@@ -486,22 +486,235 @@ fn union_outside_promoted_payload_contract_stays_fail_closed() {
             0
         }
     "#;
-    let list_mir = materialize(list_payload, "list payload union fixture");
-    assert!(!crate::core::mir::multi_target_flow_union_face_closed(
-        &list_mir
-    ));
-    let list_native = crate::codegen::mir::validate_mir_native(&list_mir)
-        .expect_err("native must reject a List payload union");
-    assert!(list_native.iter().any(|error| {
-        error
-            .message
-            .contains("only Copy scalars and owned Strings")
-    }));
-    let list_capability = crate::verifier::validate_mir_capabilities(&list_mir)
-        .expect_err("capability gate must reject a List payload union");
-    assert!(list_capability
+    let record_payload = r#"
+        type Stats { hits: i32, misses: i32 }
+
+        flow P {
+            state A { v: i32 }
+            state B { s: Stats }
+            transition go(A, d: i32) -> A | B {
+                return B { s: Stats { hits: d, misses: 0 } }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let float_payload = r#"
+        flow P {
+            state A { v: i64 }
+            state B { v: f64 }
+            transition go(A, d: i64) -> A | B {
+                return B { v: 1.5 }
+            }
+        }
+
+        func main() -> i64 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let payloadless_variant = r#"
+        flow P {
+            state A
+            state B { v: i32 }
+            transition go(A, d: i32) -> A | B {
+                return B { v: d }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let option_payload = r#"
+        flow P {
+            state A { v: i32 }
+            state B { o: Option<i32> }
+            transition go(A, d: i32) -> A | B {
+                return B { o: Some(d) }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let fixtures = [
+        ("List payload", list_payload),
+        ("record payload", record_payload),
+        ("float payload", float_payload),
+        ("payload-less variant", payloadless_variant),
+        ("Option payload", option_payload),
+    ];
+    for (label, source) in fixtures {
+        let diagnostics = check_source(source)
+            .expect_err("out-of-contract union fixture unexpectedly passed the checker");
+        let rendered = diagnostics
+            .iter()
+            .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("E0446"),
+            "{label}: expected the E0446 fail-close ruling at the checker, got:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn multi_target_union_fail_close_keeps_admitted_faces_legal() {
+    // R6-1039 no-over-rejection pins: the E0446 ruling is scoped to
+    // multi-target payload shapes only.  Single-target aggregate states stay
+    // legal (the union contract never looks at them), transparent type
+    // aliases resolve to admitted scalars, and the compiler-owned Fault sink
+    // stays exempt as a multi-target target (0.36.9 裁决 6: absorption
+    // requires a DECLARED Fault target).
+    let single_target_aggregate = r#"
+        flow P {
+            state A { v: i32 }
+            state B { xs: List<i32> }
+            transition go(A, d: i32) -> B {
+                return B { xs: [d] }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let b = P::go(a, 2)
+            drop(b)
+            0
+        }
+    "#;
+    let alias_resolved_scalar = r#"
+        type Id = i64
+
+        flow P {
+            state A { v: i32 }
+            state B { v: Id }
+            transition go(A, d: i32) -> A | B {
+                if d > 0 {
+                    return B { v: 7 }
+                }
+                return A { v: d }
+            }
+        }
+
+        func main() -> i64 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            let t = match r {
+                A { v } => v as i64
+                B { v } => v
+            }
+            t
+        }
+    "#;
+    let fault_absorption_target = r#"
+        func guarded(x: i64) -> i64 {
+            requires: x > 0
+            x
+        }
+
+        flow F {
+            state S { v: i64 }
+            transition go(S) -> S | Fault {
+                let y = guarded(1)
+                return S { v: y }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 0 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+            }
+            v
+        }
+    "#;
+    for (label, source) in [
+        ("single-target aggregate state", single_target_aggregate),
+        ("alias-resolved scalar union field", alias_resolved_scalar),
+        ("Fault absorption target", fault_absorption_target),
+    ] {
+        if let Err(diagnostics) = check_source(source) {
+            let rendered = diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code.clone().unwrap_or_default(), d.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!("{label} must stay checker-legal, got:\n{rendered}");
+        }
+    }
+}
+
+#[test]
+fn union_outside_promoted_payload_contract_stays_fail_closed() {
+    // R6-1039 restatement: aggregate payloads (List, record) are rejected by
+    // the checker itself before any MIR consumer runs, so the MIR-level
+    // native/capability negatives are no longer source-buildable — those
+    // gates remain as defense-in-depth for non-checker producers only.  The
+    // formerly-rejected wide multi-field variant stays pinned as a converged
+    // positive across the native and capability consumers (R6-1038).
+    let list_payload = r#"
+        flow P {
+            state A { v: i32 }
+            state B { xs: List<i32> }
+            transition go(A, d: i32) -> A | B {
+                return B { xs: [d] }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let list_diagnostics = check_source(list_payload)
+        .expect_err("the checker rejects a List payload union before any MIR consumer runs");
+    assert!(list_diagnostics
         .iter()
-        .any(|error| error.contains("only Copy scalars and owned Strings")));
+        .any(|d| d.code.as_deref() == Some("E0446")));
+
+    let record_payload = r#"
+        type Stats { hits: i32, misses: i32 }
+
+        flow R {
+            state A { v: i32 }
+            state S { s: Stats }
+            transition go(A, d: i32) -> A | S {
+                return S { s: Stats { hits: d, misses: 0 } }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = R::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let record_diagnostics = check_source(record_payload)
+        .expect_err("the checker rejects a record payload union before any MIR consumer runs");
+    assert!(record_diagnostics
+        .iter()
+        .any(|d| d.code.as_deref() == Some("E0446")));
 
     let wide_variant = r#"
         flow Q {
@@ -528,42 +741,6 @@ fn union_outside_promoted_payload_contract_stays_fail_closed() {
         .expect("native must admit the promoted multi-field union variant");
     crate::verifier::validate_mir_capabilities(&wide_mir)
         .expect("capability gate must admit the promoted multi-field union variant");
-
-    let record_payload = r#"
-        type Stats { hits: i32, misses: i32 }
-
-        flow R {
-            state A { v: i32 }
-            state S { s: Stats }
-            transition go(A, d: i32) -> A | S {
-                return S { s: Stats { hits: d, misses: 0 } }
-            }
-        }
-
-        func main() -> i32 {
-            let a = A { v: 1 }
-            let r = R::go(a, 2)
-            drop(r)
-            0
-        }
-    "#;
-    let record_mir = materialize(record_payload, "record payload union fixture");
-    assert!(!crate::core::mir::multi_target_flow_union_face_closed(
-        &record_mir
-    ));
-    let record_native = crate::codegen::mir::validate_mir_native(&record_mir)
-        .expect_err("native must reject a record payload union");
-    assert!(
-        record_native
-            .iter()
-            .any(|error| error.message.contains("not Copy with canonical no-op glue")),
-        "unexpected record-payload rejection set: {record_native:?}"
-    );
-    let record_capability = crate::verifier::validate_mir_capabilities(&record_mir)
-        .expect_err("capability gate must reject a record payload union");
-    assert!(record_capability
-        .iter()
-        .any(|error| error.contains("not Copy with canonical no-op glue")));
 }
 
 #[test]
@@ -811,12 +988,14 @@ fn union_contract_symbolic_pre_post_proven() {
 }
 
 #[test]
-fn union_outside_symbolic_payload_contract_keeps_boundary() {
-    // Fail-closed identity survives the promotion: a union whose payload
-    // escapes the promoted contract (List<i32>) never reaches a verdict for
-    // contract-bearing callables — the transition body construct and the
-    // caller's transition call both reject, and the caller keeps the
-    // explicit MIR-VERIFIER-FLOW-UNION-001 boundary identity.
+fn union_outside_symbolic_payload_contract_rejected_upstream_of_verifier() {
+    // R6-1039 restatement: the MIR-VERIFIER-FLOW-UNION-001 NotInTrustedSubset
+    // boundary is no longer reachable from source — the checker rejects the
+    // out-of-contract union (List payload) at the declaration site with
+    // E0446, so the program never lowers to MIR and never reaches a verifier
+    // verdict.  The boundary code stays in the verifier as defense-in-depth
+    // for non-checker producers; its source-reachable pin retired with the
+    // checker ruling.
     let source = r#"
         flow P {
             state A { v: i32 }
@@ -840,27 +1019,13 @@ fn union_outside_symbolic_payload_contract_keeps_boundary() {
             0
         }
     "#;
-    let mir = materialize(source, "list payload union verifier fixture");
-    let results = crate::verifier::verify_mir(&mir, "union-symbolic-negative".into())
-        .expect("MIR verifier runs the out-of-contract union program");
-    let go = results
-        .iter()
-        .find(|result| result.func_name.contains("go"))
-        .expect("go verification result");
-    assert_eq!(go.status, crate::verifier::VerifStatus::NotInTrustedSubset);
-    let main = results
-        .iter()
-        .find(|result| result.func_name.contains("main"))
-        .expect("main verification result");
-    assert_eq!(
-        main.status,
-        crate::verifier::VerifStatus::NotInTrustedSubset
-    );
+    let diagnostics =
+        check_source(source).expect_err("the checker rejects the union before the verifier");
     assert!(
-        main.message
-            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
-        "{}",
-        main.message
+        diagnostics
+            .iter()
+            .any(|d| d.code.as_deref() == Some("E0446")),
+        "expected the E0446 fail-close ruling upstream of the verifier, got:\n{diagnostics:?}"
     );
 }
 
@@ -896,60 +1061,71 @@ fn union_transition_with_failure_stays_checker_rejected() {
 }
 
 #[test]
-fn out_of_contract_union_still_executes_on_the_legacy_compatibility_route() {
-    // R6-1037A deletion-audit reachability pin (R6-1034③), restated by
-    // R6-1038: the promoted tagged-union contract now admits multi-field
-    // Copy/owned-String variants, so the reachable out-of-contract face is
-    // an aggregate payload (List<i32>).  That shape keeps the explicit
-    // Legacy compatibility route — and that route is *reachable*, not
-    // vestigial: the default-run legacy bytecode engine (the pipeline
-    // `mimi run` falls to after the "canonical route disposition: legacy"
-    // notice) compiles and executes the union graph with correct results.
-    // This execution dependency is what blocks deleting the legacy union
-    // path until those shapes are promoted or checker-rejected.
+fn fault_absorption_union_stays_checker_legal_and_legacy_executable() {
+    // R6-1039 restatement of the R6-1037A deletion-audit reachability pin:
+    // user-declared out-of-contract unions are now checker-rejected (E0446),
+    // so the only checker-legal multi-target union face that stays off the
+    // canonical route is the compiler-owned Fault absorption target
+    // (0.36.9 裁决 6 — absorption requires a DECLARED Fault target).  That
+    // residual face is triple-bounded: (1) the checker admits it (the Fault
+    // sink is exempt from the ruling), (2) MirProgram materialization
+    // fail-closes on the Move-without-glue union result carrying the Fault
+    // sink's flow-scoped payload, so the MIR reference / bytecode / native
+    // consumers cannot execute it, and (3) the legacy AST bytecode engine —
+    // the default-run compatibility path — compiles and executes the union
+    // graph with correct results.  Deleting the legacy union path therefore
+    // still requires promoting the Fault variant shape into the
+    // tagged-union contract.
     let source = r#"
-        flow P {
-            state A { v: i32 }
-            state B { xs: List<i32> }
-            transition go(A, d: i32) -> A | B {
-                if d > 0 {
-                    return B { xs: [d, d] }
-                } else {
-                    return A { v: d }
-                }
+        func guarded(x: i64) -> i64 {
+            requires: x > 0
+            x
+        }
+
+        flow F {
+            state S { v: i64 }
+            transition go(S) -> S | Fault {
+                let y = guarded(1)
+                return S { v: y }
             }
         }
 
-        func main() -> i32 {
-            let a = A { v: 10 }
-            let r = P::go(a, 5)
-            drop(r)
-            println(6)
+        func main() -> i64 {
+            let s = S { v: 0 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+            }
+            println(v)
             0
         }
     "#;
-    let mir = materialize(source, "aggregate payload union legacy fixture");
     assert!(
-        !crate::core::mir::multi_target_flow_union_face_closed(&mir),
-        "an aggregate payload union is outside the promoted multi-field contract"
+        check_source(source).is_ok(),
+        "the Fault absorption target stays exempt from the E0446 ruling (0.36.9 裁决 6)"
     );
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
-    let checked = crate::core::check_program(&file).expect("check legacy union fixture");
+    let checked = crate::core::check_program(&file).expect("check Fault absorption fixture");
+    assert!(
+        MirProgram::from_checked_program(&checked).is_err(),
+        "the Fault absorption union graph stays outside the MIR envelope (Move-without-glue union result)"
+    );
     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
     compiler.install_checked_program(&checked);
     let prog = compiler
         .compile_file(&file)
-        .expect("legacy route compiles the out-of-contract union graph");
+        .expect("legacy route compiles the Fault absorption union graph");
     let mut vm = crate::interp::bytecode::BytecodeVM::new(prog);
     vm.enable_stdout_capture();
     let exit = vm.run().expect("legacy route executes the union graph");
     assert_eq!(exit, 0);
     assert_eq!(
         vm.take_stdout().trim(),
-        "6",
+        "1",
         "the legacy union route must reach the end of main"
     );
 }
