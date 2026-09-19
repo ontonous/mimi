@@ -25,7 +25,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use super::ffi::helpers::{ffi_guard_new_read, ffi_guard_new_write, FfiGuard, FfiSharedGuard};
-use super::ffi_system_libraries::{discover_no_env_candidates, resolve_explicit_binding};
+use super::ffi_system_libraries::{
+    discover_no_env_candidates, resolve_explicit_binding, select_library_index, SelectorDialect,
+    SelectorLibraryCache, SelectorRejection,
+};
 use super::Value;
 
 /// Abstraction over an execution engine that can run a Mimi closure.
@@ -73,84 +76,65 @@ pub(crate) struct FfiRuntime {
     runner: Option<*mut (dyn FfiClosureRunner + 'static)>,
 }
 
+/// Diagnostic wording for the compatibility selector. The texts are pinned
+/// byte-for-byte by this runtime's tests and must not drift toward the
+/// canonical dialect (the compat load text carries the word "library").
+const COMPATIBILITY_SELECTOR_DIALECT: SelectorDialect = SelectorDialect {
+    empty_path: "failed to load: FFI library path is empty",
+    load_failure: |path, error| format!("failed to load library '{path}': {error}"),
+    symbol_miss: |symbol, error| format!("failed to find symbol '{symbol}': {error}"),
+    cache_index_out_of_range: |index| format!("FFI library cache index {index} is out of range"),
+};
+
+impl SelectorLibraryCache for FfiRuntime {
+    fn loaded_libs(&self) -> &Vec<(String, libloading::Library)> {
+        &self.loaded_libs
+    }
+    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, libloading::Library)> {
+        &mut self.loaded_libs
+    }
+}
+
 impl FfiRuntime {
     /// Select a loaded library whose symbol can actually be called.
     ///
-    /// No-environment candidates are best-effort: an existing file may still
-    /// be a linker script, the wrong architecture, or simply lack the symbol.
-    /// Explicit bindings remain strict and stop at the first load/symbol
-    /// failure, matching the historical `MIMI_FFI_LIB` contract.
+    /// The strict/best-effort policy, cache handling, and load-vs-symbol
+    /// diagnostic precedence are shared with the canonical MIR runtime via
+    /// [`select_library_index`]; this adapter supplies the compatibility
+    /// dialect and maps rejections onto this runtime's `Errno` error type.
     fn select_library_for_symbol(
         &mut self,
         candidate_paths: Vec<String>,
         configured: bool,
         symbol: &str,
     ) -> Result<usize, Errno> {
-        let mut selected_lib_idx = None;
-        let mut last_load_error = None;
-        let mut last_symbol_error = None;
-        for lib_path in candidate_paths {
-            if lib_path.trim().is_empty() {
-                return Err(Errno::Generic(
-                    "failed to load: FFI library path is empty".to_string(),
-                ));
+        match select_library_index(
+            self,
+            &COMPATIBILITY_SELECTOR_DIALECT,
+            candidate_paths,
+            configured,
+            symbol,
+        ) {
+            Ok(index) => Ok(index),
+            Err(SelectorRejection::EmptyPath) => Err(Errno::Generic(
+                COMPATIBILITY_SELECTOR_DIALECT.empty_path.to_owned(),
+            )),
+            Err(SelectorRejection::LoadFailed(message)) => Err(Errno::Generic(message)),
+            Err(SelectorRejection::CacheIndexOutOfRange(index)) => {
+                Err(Errno::Generic((COMPATIBILITY_SELECTOR_DIALECT
+                    .cache_index_out_of_range)(
+                    index
+                )))
             }
-            let lib_idx = if let Some(idx) = self
-                .loaded_libs
-                .iter()
-                .position(|(path, _)| path == &lib_path)
-            {
-                idx
-            } else {
-                // SAFETY: libloading keeps the handle alive in `loaded_libs`
-                // for every symbol call made below.
-                let library = unsafe {
-                    match libloading::Library::new(&lib_path) {
-                        Ok(library) => library,
-                        Err(error) if !configured => {
-                            last_load_error =
-                                Some(format!("failed to load library '{}': {}", lib_path, error));
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(Errno::Generic(format!(
-                                "failed to load library '{}': {}",
-                                lib_path, error
-                            )));
-                        }
-                    }
-                };
-                self.loaded_libs.push((lib_path.clone(), library));
-                self.loaded_libs.len() - 1
-            };
-            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
-                return Err(Errno::Generic(format!(
-                    "FFI library cache index {lib_idx} is out of range"
-                )));
-            };
-            // SAFETY: `library` remains alive in `loaded_libs` while the
-            // symbol is borrowed and used by the synchronous libffi call.
-            match unsafe { library.get::<*mut std::ffi::c_void>(symbol.as_bytes()) } {
-                Ok(_) => {
-                    selected_lib_idx = Some(lib_idx);
-                    break;
-                }
-                Err(error) => {
-                    last_symbol_error =
-                        Some(format!("failed to find symbol '{}': {}", symbol, error));
-                    if configured {
-                        break;
-                    }
-                }
-            }
-        }
-        selected_lib_idx.ok_or_else(|| {
-            Errno::Generic(
+            Err(SelectorRejection::LookupFailed {
+                last_symbol_error,
+                last_load_error,
+            }) => Err(Errno::Generic(
                 last_symbol_error
                     .or(last_load_error)
                     .unwrap_or_else(|| format!("failed to find symbol '{}'", symbol)),
-            )
-        })
+            )),
+        }
     }
 
     /// Build the FFI tables from a parsed program file.

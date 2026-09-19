@@ -13,7 +13,10 @@ use libffi::middle::{arg as ffi_arg, Cif, CodePtr, Type as FfiType};
 use libloading::Library;
 
 use super::instr::{CanonicalFfiDescriptor, CanonicalFfiScalarType};
-use crate::interp::ffi_system_libraries::{discover_no_env_candidates, resolve_explicit_binding};
+use crate::interp::ffi_system_libraries::{
+    discover_no_env_candidates, resolve_explicit_binding, select_library_index, SelectorDialect,
+    SelectorLibraryCache, SelectorRejection,
+};
 use crate::interp::value::Value;
 
 fn ffi_contract_runtime_error(
@@ -56,11 +59,13 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
     }
 }
 
-// Candidate tables, the discovery allowlist, and the explicit `MIMI_FFI_LIB`
-// binding resolution live in `crate::interp::ffi_system_libraries` so the
-// canonical and compatibility runtimes cannot drift apart on host-binding
-// decisions. Only the selector below stays local: it works on this runtime's
-// own library cache and error type.
+// Candidate tables, the discovery allowlist, the explicit `MIMI_FFI_LIB`
+// binding resolution, and the selection policy (strict/best-effort, cache
+// handling, load-vs-symbol diagnostic precedence) live in
+// `crate::interp::ffi_system_libraries` so the canonical and compatibility
+// runtimes cannot drift apart on host-binding decisions. Only the canonical
+// dialect wording and the final fallback assembly below stay local: both are
+// pinned byte-for-byte by this runtime's tests.
 
 fn ffi_lookup_failure(
     symbol: &str,
@@ -71,6 +76,17 @@ fn ffi_lookup_failure(
         .or(last_load_error)
         .unwrap_or_else(|| format!("failed to find canonical MIR FFI symbol '{symbol}'"))
 }
+
+const CANONICAL_SELECTOR_DIALECT: SelectorDialect = SelectorDialect {
+    empty_path: "failed to load: canonical MIR FFI library path is empty",
+    load_failure: |path, error| format!("failed to load '{path}': {error}"),
+    symbol_miss: |symbol, error| {
+        format!("failed to find canonical MIR FFI symbol '{symbol}': {error}")
+    },
+    cache_index_out_of_range: |index| {
+        format!("canonical MIR FFI library cache index {index} is out of range")
+    },
+};
 
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
@@ -86,6 +102,15 @@ pub(crate) struct CanonicalMirFfiRuntime {
     /// The public switch is named `set_verify_ffi`; keep the storage name
     /// explicit so a future change cannot accidentally gate only one phase.
     pub(crate) verify_contracts: bool,
+}
+
+impl SelectorLibraryCache for CanonicalMirFfiRuntime {
+    fn loaded_libs(&self) -> &Vec<(String, Library)> {
+        &self.loaded_libs
+    }
+    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, Library)> {
+        &mut self.loaded_libs
+    }
 }
 
 impl CanonicalMirFfiRuntime {
@@ -258,74 +283,40 @@ impl CanonicalMirFfiRuntime {
 
     /// Select a loaded library whose symbol can actually be called.
     ///
-    /// No-environment candidates are best-effort: an existing file may still
-    /// be a linker script, the wrong architecture, or simply lack the symbol.
-    /// Explicit bindings remain strict and stop at the first load/symbol
-    /// failure, matching the `MIMI_FFI_LIB` contract used by the compatibility
-    /// runtime.  Keeping this decision in one helper also makes the canonical
-    /// bytecode path directly testable without executing a foreign call.
+    /// The strict/best-effort policy, cache handling, and load-vs-symbol
+    /// diagnostic precedence are shared with the compatibility runtime via
+    /// [`select_library_index`]; this adapter supplies the canonical dialect
+    /// and assembles the final pinned diagnostic.
     fn select_library_for_symbol(
         &mut self,
         candidate_paths: Vec<String>,
         configured: bool,
         symbol: &str,
     ) -> Result<usize, String> {
-        let mut selected = None;
-        let mut last_symbol_error = None;
-        let mut last_load_error = None;
-        for lib_path in candidate_paths {
-            if lib_path.trim().is_empty() {
-                return Err("failed to load: canonical MIR FFI library path is empty".into());
+        match select_library_index(
+            self,
+            &CANONICAL_SELECTOR_DIALECT,
+            candidate_paths,
+            configured,
+            symbol,
+        ) {
+            Ok(index) => Ok(index),
+            Err(SelectorRejection::EmptyPath) => {
+                Err(CANONICAL_SELECTOR_DIALECT.empty_path.to_owned())
             }
-            let lib_idx = if let Some(index) = self
-                .loaded_libs
-                .iter()
-                .position(|(path, _)| path == &lib_path)
-            {
-                index
-            } else {
-                // SAFETY: libloading keeps the library handle alive in
-                // `loaded_libs` for every symbol call made below.
-                let library = unsafe {
-                    match Library::new(&lib_path) {
-                        Ok(library) => library,
-                        Err(error) if !configured => {
-                            last_load_error =
-                                Some(format!("failed to load '{}': {error}", lib_path));
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(format!("failed to load '{}': {error}", lib_path));
-                        }
-                    }
-                };
-                self.loaded_libs.push((lib_path.clone(), library));
-                self.loaded_libs.len() - 1
-            };
-            let Some((_, library)) = self.loaded_libs.get(lib_idx) else {
-                return Err(format!(
-                    "canonical MIR FFI library cache index {lib_idx} is out of range"
-                ));
-            };
-            // SAFETY: `library` remains alive in `loaded_libs`; libloading
-            // only borrows the handle while probing the NUL-free symbol name.
-            match unsafe { library.get::<*mut c_void>(symbol.as_bytes()) } {
-                Ok(_) => {
-                    selected = Some(lib_idx);
-                    break;
-                }
-                Err(error) => {
-                    last_symbol_error = Some(format!(
-                        "failed to find canonical MIR FFI symbol '{}': {error}",
-                        symbol
-                    ));
-                    if configured {
-                        break;
-                    }
-                }
+            Err(SelectorRejection::LoadFailed(message)) => Err(message),
+            Err(SelectorRejection::CacheIndexOutOfRange(index)) => {
+                Err((CANONICAL_SELECTOR_DIALECT.cache_index_out_of_range)(index))
             }
+            Err(SelectorRejection::LookupFailed {
+                last_symbol_error,
+                last_load_error,
+            }) => Err(ffi_lookup_failure(
+                symbol,
+                last_symbol_error,
+                last_load_error,
+            )),
         }
-        selected.ok_or_else(|| ffi_lookup_failure(symbol, last_symbol_error, last_load_error))
     }
 
     /// Validate descriptor invariants before touching a dynamic library or
