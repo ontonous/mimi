@@ -8344,39 +8344,41 @@ impl<'a> Lowerer<'a> {
                         }
                     })
                     .collect();
-                // Builtin lowering normally receives checker-finalized values,
-                // but session_send's numeric literal widening is represented
-                // by the argument conversion receipt rather than a new
-                // ResolvedExpr node. Materialize that receipt before the
-                // SessionCall payload is validated so `21` for `!i64` cannot
-                // silently disagree with the residual ABI.
-                if session_send_call && session_call {
-                    if let (Some(argument), Some(source)) =
-                        (call.arguments.get(1), arguments.get(1).cloned())
-                    {
-                        if argument.conversion.kind != CheckedConversionKind::Identity {
-                            let conversion_node = NodeId(format!(
-                                "{}/session-send-payload-conversion",
-                                argument.value.node_id.0
-                            ));
-                            if let Some(converted) = self.id("convert", &conversion_node) {
-                                self.insert_value(
-                                    converted.clone(),
-                                    argument.conversion.to.clone(),
-                                    &conversion_node,
-                                );
-                                self.emit(
-                                    &conversion_node,
-                                    "session_send_payload_convert",
-                                    MirInstructionKind::Convert {
-                                        result: converted.clone(),
-                                        source,
-                                    },
-                                );
-                                if let Some(slot) = arguments.get_mut(1) {
-                                    *slot = converted;
-                                }
-                            }
+                // Checker-accepted numeric argument widening (e.g.
+                // `guarded(1)` into an `i64` parameter) is carried by the
+                // argument conversion receipt, not by the argument's recorded
+                // pre-coercion type (the stale i32 identity).  Materialize
+                // every numeric receipt here so downstream contracts — call
+                // validation, session payloads, variant field schemas — see
+                // the post-coercion identity the checker decided.  All other
+                // conversion kinds keep their dedicated lowering paths.
+                for (index, argument) in call.arguments.iter().enumerate() {
+                    if argument.conversion.kind != CheckedConversionKind::NumericWiden {
+                        continue;
+                    }
+                    let Some(source) = arguments.get(index).cloned() else {
+                        continue;
+                    };
+                    let conversion_node = NodeId(format!(
+                        "{}/numeric-argument-conversion:{index}",
+                        argument.value.node_id.0
+                    ));
+                    if let Some(converted) = self.id("convert", &conversion_node) {
+                        self.insert_value(
+                            converted.clone(),
+                            argument.conversion.to.clone(),
+                            &conversion_node,
+                        );
+                        self.emit(
+                            &conversion_node,
+                            "numeric_argument_convert",
+                            MirInstructionKind::Convert {
+                                result: converted.clone(),
+                                source,
+                            },
+                        );
+                        if let Some(slot) = arguments.get_mut(index) {
+                            *slot = converted;
                         }
                     }
                 }

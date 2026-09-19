@@ -3460,6 +3460,69 @@ mod tests {
     }
 
     #[test]
+    fn bare_integer_literal_call_arguments_route_canonical() {
+        // R6-1041: a bare integer literal argument (`guarded(1)`) is accepted
+        // by the checker via NumericWiden, but MIR call validation used to
+        // fail closed on the stale pre-coercion i32 identity and pushed the
+        // whole graph — including the union absorption residual — onto the
+        // explicit legacy route.  Once the conversion receipt is materialized,
+        // every flow-carrying shape with a bare literal call argument routes
+        // canonical.
+        let single_target = r#"
+            func guarded(x: i64) -> i64 {
+                x
+            }
+
+            flow F {
+                state S { v: i64 }
+                transition go(S) -> S {
+                    let y = guarded(1)
+                    return S { v: y }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 7 }
+                let r = F::go(s)
+                println(r.v)
+                0
+            }
+        "#;
+        let union = r#"
+            func guarded(x: i64) -> i64 {
+                x
+            }
+
+            flow F {
+                state S { v: i64 }
+                transition go(S) -> S | Fault {
+                    let y = guarded(1)
+                    return S { v: y }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 7 }
+                let r = F::go(s)
+                let v = match r {
+                    S { v } => v
+                    Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+                }
+                println(v)
+                0
+            }
+        "#;
+        for (label, source) in [("single-target", single_target), ("union", union)] {
+            let (checked, file) = checked(source);
+            let route = select_default_route(&checked, &file);
+            assert!(
+                matches!(route, DefaultMirRoute::Canonical(_)),
+                "a bare integer literal call argument must not force the legacy route ({label}): {route:?}"
+            );
+        }
+    }
+
+    #[test]
     fn out_of_contract_union_is_checker_rejected_before_route_selection() {
         // R6-1039: user-declared out-of-contract union payload shapes are
         // rejected by the checker (E0446) at the declaration site, so

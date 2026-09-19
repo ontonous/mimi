@@ -125,6 +125,87 @@ const FAULT_ABSORPTION_UNION_SOURCE: &str = r#"
 
 const FAULT_ABSORPTION_UNION_STDOUT: &str = "7\n";
 
+// R6-1041: the last union legacy source-reachable residual recorded by
+// R6-1040 — a checker-legal bare integer literal call argument inside the
+// transition body.  The checker accepts `guarded(1)` via NumericWiden, but
+// the resolved body records the pre-coercion i32 identity, so MIR call
+// validation fail-closed (`rt:1eb1…` i32 vs `rt:49fa…` i64) and the graph
+// kept the explicit legacy route.  Once the conversion receipt is
+// materialized, this face must close onto the canonical route with the
+// same three-consumer equivalence as every other promoted shape.
+const BARE_LITERAL_CALL_UNION_SOURCE: &str = r#"
+    func guarded(x: i64) -> i64 {
+        x
+    }
+
+    flow F {
+        state S { v: i64 }
+        transition go(S) -> S | Fault {
+            let y = guarded(1)
+            return S { v: y }
+        }
+    }
+
+    func main() -> i64 {
+        let s = S { v: 7 }
+        let r = F::go(s)
+        let v = match r {
+            S { v } => v
+            Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 1 as i64
+        }
+        println(v)
+        0
+    }
+"#;
+
+const BARE_LITERAL_CALL_UNION_STDOUT: &str = "1\n";
+
+#[test]
+fn bare_integer_literal_call_argument_closes_the_union_face() {
+    let mir = materialize(
+        BARE_LITERAL_CALL_UNION_SOURCE,
+        "bare literal call union fixture",
+    );
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "a NumericWiden call argument must not reopen the union face"
+    );
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor bare literal call union");
+    assert_eq!(reference.output, BARE_LITERAL_CALL_UNION_STDOUT);
+
+    let bytecode = compile_mir_program(&mir).expect("bare literal call union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(
+        vm.run_value().is_ok(),
+        "bytecode bare literal call union runs"
+    );
+    assert_eq!(vm.stdout(), BARE_LITERAL_CALL_UNION_STDOUT);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_bare_literal_call");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native bare literal call union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM bare literal call union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, BARE_LITERAL_CALL_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
+}
+
 #[test]
 fn fault_absorption_union_promotes_to_canonical_mir() {
     // R6-1040: the compiler-owned Fault sink (0.36.9 verdict 6 — absorption
@@ -1238,20 +1319,18 @@ fn union_transition_with_failure_stays_checker_rejected() {
 
 #[test]
 fn fault_absorption_union_stays_checker_legal_and_legacy_executable() {
-    // R6-1039 restatement of the R6-1037A deletion-audit reachability pin:
-    // user-declared out-of-contract unions are now checker-rejected (E0446),
-    // so the only checker-legal multi-target union face that stays off the
-    // canonical route is the compiler-owned Fault absorption target
-    // (0.36.9 裁决 6 — absorption requires a DECLARED Fault target).  That
-    // residual face is triple-bounded: (1) the checker admits it (the Fault
-    // sink is exempt from the ruling), (2) MirProgram materialization
-    // fail-closes on the Move-without-glue union result carrying the Fault
-    // sink's flow-scoped payload, so the MIR reference / bytecode / native
-    // consumers cannot execute it, and (3) the legacy AST bytecode engine —
-    // the default-run compatibility path — compiles and executes the union
-    // graph with correct results.  Deleting the legacy union path therefore
-    // still requires promoting the Fault variant shape into the
-    // tagged-union contract.
+    // R6-1041 restatement: the R6-1039 triple-bounded residual is erased.
+    // The stale pre-coercion literal identity that made this exact graph
+    // fail MIR materialization is fixed (the NumericWiden call-argument
+    // receipt is now materialized), so the checker-legal absorption union
+    // closes onto the canonical contract — pinned positively by
+    // `bare_integer_literal_call_argument_closes_the_union_face`.  What
+    // stays pinned here: (1) the Fault target remains exempt from the
+    // E0446 ruling (0.36.9 裁决 6 — checker legality), and (2) the legacy
+    // AST bytecode engine — the compatibility route for shapes still
+    // outside every migrated island — keeps compiling and executing the
+    // union graphs it always handled, until the M2 deletion gate removes
+    // that route for closed islands.
     let source = r#"
         func guarded(x: i64) -> i64 {
             requires: x > 0
@@ -1286,9 +1365,11 @@ fn fault_absorption_union_stays_checker_legal_and_legacy_executable() {
         .parse_file()
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check Fault absorption fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("the absorption graph materializes once the literal identity boundary is fixed");
     assert!(
-        MirProgram::from_checked_program(&checked).is_err(),
-        "the Fault absorption union graph stays outside the MIR envelope (Move-without-glue union result)"
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "the absorption union face is closed onto the promoted contract"
     );
     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
     compiler.install_checked_program(&checked);
