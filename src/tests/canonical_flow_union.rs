@@ -130,6 +130,122 @@ fn heterogeneous_union_keeps_native_and_capability_fail_closed() {
 }
 
 #[test]
+fn heterogeneous_union_tag_contract_is_name_sorted_with_payload_mirroring() {
+    // R6-1035A baseline pin: the union tag contract that the native
+    // tagged-union promotion must preserve.  Variants stay name-sorted with
+    // enumeration discriminants — the same ordering the legacy synthesized
+    // enum uses — so a promoted native tag dispatch cannot silently disagree
+    // with the reference/bytecode value model.  Each variant mirrors its
+    // target state payload: `Closed{v: i32}` (Copy integer) versus
+    // `Open{tag: string}` (owned Move) is the exact heterogeneous face the
+    // promotion must admit.
+    let mir = materialize(HETEROGENEOUS_UNION_SOURCE, "heterogeneous union fixture");
+    let contract = mir
+        .transitions()
+        .values()
+        .find(|contract| contract.owner.0.contains("Pipe::push"))
+        .expect("Pipe::push multi-target contract");
+    let union = mir
+        .type_catalog()
+        .get(&contract.result)
+        .expect("union TypeDesc materialized");
+    assert_eq!(
+        union.kind,
+        crate::core::mir::types::MirTypeKind::FlowStateSet
+    );
+    assert_eq!(union.ownership, crate::core::mir::types::MirOwnership::Move);
+    let variants = match &union.layout {
+        crate::core::mir::types::MirLayout::Enum { variants, .. } => variants,
+        other => panic!("expected Enum layout, got {other:?}"),
+    };
+    let names: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["Closed", "Open"], "variants stay name-sorted");
+    for (index, variant) in variants.iter().enumerate() {
+        assert_eq!(
+            variant.discriminant, index as u16,
+            "discriminants enumerate"
+        );
+    }
+    let closed = &variants[0];
+    assert_eq!(closed.fields.len(), 1);
+    assert_eq!(closed.fields[0].name, "v");
+    let closed_payload = mir
+        .type_catalog()
+        .get(&closed.fields[0].ty)
+        .expect("Closed payload TypeDesc");
+    assert!(matches!(
+        closed_payload.abi,
+        crate::core::mir::types::MirAbiClass::Integer { .. }
+    ));
+    let open = &variants[1];
+    assert_eq!(open.fields.len(), 1);
+    assert_eq!(open.fields[0].name, "tag");
+    let open_payload = mir
+        .type_catalog()
+        .get(&open.fields[0].ty)
+        .expect("Open payload TypeDesc");
+    assert_eq!(
+        open_payload.abi,
+        crate::core::mir::types::MirAbiClass::StringHandle
+    );
+    assert_eq!(
+        open_payload.ownership,
+        crate::core::mir::types::MirOwnership::Move
+    );
+}
+
+#[test]
+fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
+    // R6-1035A baseline pin: consuming a heterogeneous union value with an
+    // explicit `drop(...)` (no match projection) exercises the union drop
+    // face on the two currently executing consumers.  Native and the
+    // capability gate stay fail-closed on this shape until the tagged-union
+    // contract promotion lands; this pin records the exact behavior the
+    // promotion must preserve and then flip deliberately.
+    let source = r#"
+        flow Pipe {
+            state Open { tag: string }
+            state Closed { v: i32 }
+            transition push(Open) -> Closed | Open {
+                return Closed { v: 5 }
+            }
+        }
+
+        func main() -> i32 {
+            let o = Open { tag: "hello" }
+            let r = Pipe::push(o)
+            drop(r)
+            println(7)
+            0
+        }
+    "#;
+    let mir = materialize(source, "heterogeneous union drop fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(!crate::core::mir::multi_target_flow_union_face_closed(&mir));
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference union drop face");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "7\n");
+    let bytecode = compile_mir_program(&mir).expect("union drop bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(vm.run_value().is_ok(), "bytecode union drop runs");
+    assert_eq!(vm.stdout(), "7\n");
+
+    let native_error = crate::codegen::mir::validate_mir_native(&mir)
+        .expect_err("native must keep rejecting the unpromoted drop face");
+    assert!(native_error.iter().any(|error| {
+        error
+            .message
+            .contains("no native tagged-union ABI contract")
+    }));
+}
+
+#[test]
 fn missing_union_effect_receipt_rejects_all_consumers() {
     let mir = materialize(FLAT_COPY_UNION_SOURCE, "missing receipt fixture");
     let mut forged_main = mir
