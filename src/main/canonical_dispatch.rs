@@ -3231,6 +3231,29 @@ mod tests {
     }
 
     #[test]
+    fn multi_target_union_transition_stays_outside_the_migrated_profile() {
+        // R6-1033 baseline: a multi-target (`-> A | B`) transition is legacy
+        // ABI territory (stable tagged union since 0.34.15) and no canonical
+        // consumer has a union-return receipt yet. The layered admission
+        // carries the FlowStateSet-typed call through the collection hint,
+        // but no island receipt materializes a candidate, so the default
+        // route keeps the program on the legacy path instead of half-
+        // lowering a FlowStateSet without a variant layout; the future
+        // union-return slice flips this pin deliberately.
+        let source = include_str!("../../tests/real_world/flow_multi_target_union_match.mimi");
+        let (checked, file) = checked(source);
+        assert!(!mimi::core::mir::is_s8_flow_transition_candidate(&checked));
+        assert!(!mimi::core::mir::is_flow_failure_retry_candidate(&checked));
+        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+            panic!("multi-target union transitions must stay outside the migrated profile");
+        };
+        assert_eq!(
+            reason,
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+        );
+    }
+
+    #[test]
     fn silent_sibling_keeps_the_local_retry_profile_canonical() {
         // The M3 local-retry arm collects only failing implemented
         // transitions, so adding a silent sibling transition preserves the

@@ -1,0 +1,43 @@
+// Canonical MIR baseline pin (R6-1033 pre-research): a multi-target Flow
+// transition (`-> Closed | Open`, stable tagged-union ABI since 0.34.15)
+// still routes legacy on every default entry — every canonical consumer
+// fail-closes on targets.len() != 1. This fixture documents the status quo
+// and becomes the L1 target when the union-return receipt migrates.
+// Expected stdout: 110 then 5; main returns 0.
+flow Scale {
+    state Small { v: i32 }
+    state Large { v: i32 }
+    transition lift(Small, delta: i32) -> Small | Large {
+        if self.v + delta > 50 {
+            return Large { v: self.v + delta }
+        } else {
+            return Small { v: self.v + delta }
+        }
+    }
+}
+
+flow Pipe {
+    state Open { tag: string }
+    state Closed { v: i32 }
+    transition push(Open) -> Closed | Open {
+        return Closed { v: 5 }
+    }
+}
+
+func main() -> i32 {
+    let s1 = Small { v: 10 }
+    let r1 = Scale::lift(s1, 100)
+    let t1 = match r1 {
+        Small { v } => v
+        Large { v } => v
+    }
+    let o = Open { tag: "hello" }
+    let r2 = Pipe::push(o)
+    let t2 = match r2 {
+        Closed { v } => v
+        Open { tag } => 99
+    }
+    println(t1)
+    println(t2)
+    0
+}
