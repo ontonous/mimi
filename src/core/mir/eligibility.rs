@@ -1995,4 +1995,32 @@ mod tests {
         assert!(is_s8_flow_transition_candidate(&program));
         assert!(!is_exact_s8_flow_transition(&program));
     }
+
+    #[test]
+    fn keeps_multi_transition_flow_outside_the_strict_s8_candidate() {
+        // Two silent self-loops are deliberately outside the strict S8
+        // candidate: the whole-program route layer admits them through the
+        // materialized FlowTransition receipt plus the four-consumer gates,
+        // so widening this predicate would only re-route already-canonical
+        // programs into the mixed-coverage fail-closed rejection arm.
+        let program = checked(
+            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } transition dec(Zero) -> Zero { return Zero { n: self.n - 1 } } } func main() -> i32 { let c = Zero { n: 41 } let up = Counter::inc(c) let down = Counter::dec(up) println(down.n) 0 }",
+        );
+        assert!(!is_s8_flow_transition_candidate(&program));
+        assert!(!is_exact_s8_flow_transition(&program));
+    }
+
+    #[test]
+    fn silent_sibling_does_not_disqualify_the_local_retry_candidate() {
+        // The recoverable-candidate arm collects only failing implemented
+        // transitions before the M3 shape check, so a silent sibling
+        // transition neither satisfies nor disqualifies the local-retry
+        // profile; the route layer pins the whole graph with the shared
+        // consumer gates instead.
+        let program = checked(
+            "flow Account { state Active { balance: i32 } transition withdraw(Active, amount: i32) -> Active fails string { let checked: Result<i32, string> = if amount == 0 { Err(\"div0\") } else { Ok(self.balance - amount) } let new_balance = checked? return Active { balance: new_balance } } transition tick(Active) -> Active { return Active { balance: self.balance + 1 } } } func main() -> i32 { let source = Active { balance: 100 } let rejected = Account::withdraw(source, 0) match rejected { Ok(_) => 1000, Err(error) => { let retried = Account::withdraw(error.0, 5) match retried { Ok(success) => { drop(success) 0 }, Err(_) => 1001 } } } }",
+        );
+        assert!(is_flow_failure_retry_candidate(&program));
+        assert!(!is_s8_flow_transition_candidate(&program));
+    }
 }

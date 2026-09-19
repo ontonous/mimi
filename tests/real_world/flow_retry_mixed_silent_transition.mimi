@@ -1,0 +1,37 @@
+// Canonical MIR route pin: a failing transition outside every recoverable
+// profile shape (no extra parameter, so the M3 local-retry arm does not
+// recognize it) plus a silent sibling transition.  Neither flow hint fires;
+// the state record hint materializes the whole graph and the FlowTransition
+// containment receipt carries both transitions — including the `?` failure
+// path — through the shared consumer gates.  Default run/build must agree
+// with the explicit --mir entry.
+flow Machine {
+    state Idle { n: i32 }
+    transition step(Idle) -> Idle fails string {
+        let checked: Result<i32, string> = if self.n > 0 {
+            Ok(self.n - 1)
+        } else {
+            Err("exhausted")
+        }
+        let next = checked?
+        return Idle { n: next }
+    }
+    transition tick(Idle) -> Idle { return Idle { n: self.n + 1 } }
+}
+
+func main() -> i32 {
+    let m = Idle { n: 3 }
+    let stepped = Machine::step(m)
+    match stepped {
+        Ok(a) => {
+            let b = Machine::tick(a)
+            println(b.n)
+            drop(b)
+            0
+        },
+        Err(error) => {
+            drop(error)
+            1001
+        },
+    }
+}

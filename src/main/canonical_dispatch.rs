@@ -3178,11 +3178,71 @@ mod tests {
     #[test]
     fn rejected_flow_candidate_cannot_reenter_legacy_route() {
         let source = "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) println(c2.n) c2.n }";
-        let (checked, file) = checked(source);
+        let (checked, file) = checked(&source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("a recognized Flow candidate must fail closed instead of using legacy");
         };
         assert!(reason.contains("S8 Flow transition candidate"));
+    }
+
+    #[test]
+    fn multi_transition_silent_flow_routes_canonical_through_materialized_receipts() {
+        // A two-self-loop Flow is outside the strict S8 candidate
+        // (count == 1), so the flow hint does not fire.  The state record
+        // hint still materializes the whole graph, and the FlowTransition
+        // containment receipt carries both transitions through the shared
+        // capability/preflight/verifier gates instead of the legacy route.
+        let source = include_str!("../../tests/real_world/flow_multi_transition_selfloops.mimi");
+        let (checked, file) = checked(source);
+        assert!(
+            !mimi::core::mir::is_s8_flow_transition_candidate(&checked),
+            "two transitions must stay outside the strict S8 candidate"
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("multi-transition silent Flow must route canonical, not legacy");
+        };
+        assert_eq!(program.transitions().len(), 2);
+        assert!(mimi::core::mir::contains_s8_flow_transition_candidate(
+            &program
+        ));
+    }
+
+    #[test]
+    fn mixed_recoverable_and_silent_flow_routes_canonical() {
+        // A failing transition outside every recoverable shape (no extra
+        // parameter, so the M3 local-retry profile does not recognize it)
+        // plus a silent sibling: neither flow hint fires, but the state
+        // record hint materializes the whole graph and the FlowTransition
+        // containment receipt carries both transitions — including the
+        // `?` failure path — through the shared consumer gates.
+        let source = include_str!("../../tests/real_world/flow_retry_mixed_silent_transition.mimi");
+        let (checked, file) = checked(source);
+        assert!(
+            !mimi::core::mir::is_flow_failure_retry_candidate(&checked),
+            "a shapeless failing transition must stay outside the recoverable profile"
+        );
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Canonical(program) = route else {
+            panic!(
+                "failing + silent Flow transitions must route canonical via receipts: {route:?}"
+            );
+        };
+        assert_eq!(program.transitions().len(), 2);
+    }
+
+    #[test]
+    fn silent_sibling_keeps_the_local_retry_profile_canonical() {
+        // The M3 local-retry arm collects only failing implemented
+        // transitions, so adding a silent sibling transition preserves the
+        // recoverable-Flow hint while the shared consumer gates cover the
+        // whole two-transition graph.
+        let source = include_str!("../../tests/real_world/flow_retry_m3_with_silent_sibling.mimi");
+        let (checked, file) = checked(source);
+        assert!(mimi::core::mir::is_flow_failure_retry_candidate(&checked));
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("local-retry Flow with a silent sibling must route canonical");
+        };
+        assert_eq!(program.transitions().len(), 2);
     }
 
     #[test]

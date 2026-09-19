@@ -1,0 +1,53 @@
+// Canonical MIR route pin: the M3 local-retry profile (failing transition
+// with one i32 parameter and a `?` try in the body) plus a silent sibling
+// transition.  The recoverable-candidate arm collects only failing
+// implemented transitions, so the silent sibling neither satisfies nor
+// disqualifies the profile; the whole two-transition graph is covered by
+// the shared four-consumer gates.  Default run/build must agree with the
+// explicit --mir entry.  Expected stdout: 100 (pre-failure balance) then 96 (after retry + tick).
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked: Result<i32, string> = if amount == 0 {
+            println(self.balance)
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
+        return Active { balance: new_balance }
+    }
+
+    transition tick(Active) -> Active { return Active { balance: self.balance + 1 } }
+}
+
+// With-contract face: `mimi verify` must still verify plain-function
+// contracts on the same route that executes the two-transition Flow, while
+// no-contract execution (run/build) stays on the canonical MIR path.
+func retry_balance_contract(balance: i32, amount: i32) -> i32 {
+    requires: balance == 100
+    requires: amount == 5
+    ensures: result == 95
+    balance - amount
+}
+
+func main() -> i32 {
+    let source = Active { balance: 100 }
+    let rejected = Account::withdraw(source, 0)
+    match rejected {
+        Ok(_) => 1000,
+        Err(error) => {
+            let retried = Account::withdraw(error.0, 5)
+            match retried {
+                Ok(success) => {
+                    let advanced = Account::tick(success)
+                    println(advanced.balance)
+                    drop(advanced)
+                    0
+                },
+                Err(_) => 1001,
+            }
+        },
+    }
+}

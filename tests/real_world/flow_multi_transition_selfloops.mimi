@@ -1,0 +1,20 @@
+// Canonical MIR route pin: two silent self-loop transitions in one Flow.
+// The strict S8 candidate requires exactly one implemented transition, so
+// this program is admitted by the whole-program route layer through the
+// materialized FlowTransition receipt plus the shared four-consumer gates
+// (capability, bytecode preflight, native preflight, verifier contract
+// pass).  Both default entries (run/build) must stay canonical and agree
+// with the explicit --mir entry on stdout.
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+    transition dec(Zero) -> Zero { return Zero { n: self.n - 1 } }
+}
+
+func main() -> i32 {
+    let c = Zero { n: 41 }
+    let up = Counter::inc(c)
+    let down = Counter::dec(up)
+    println(down.n)
+    0
+}
