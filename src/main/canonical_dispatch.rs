@@ -3251,27 +3251,35 @@ mod tests {
     }
 
     #[test]
-    fn multi_target_union_transition_stays_outside_the_migrated_profile() {
-        // R6-1034 split: the flat Copy union face migrated (see
-        // flat_copy_multi_target_union_routes_canonical), but the heterogeneous
-        // face — a variant payload outside the flat Copy scalar contract — has
-        // no native tagged-union contract yet.  The compatibility veto keeps
-        // such graphs on the explicit legacy route (the union legacy path is
-        // alive) instead of admitting a half-closed face that would hard-reject
-        // working union programs on the default entries.
+    fn multi_target_union_transition_routes_canonical_with_receipts() {
+        // R6-1035B flip (deliberately reversing the R6-1033 pin
+        // multi_target_union_transition_stays_outside_the_migrated_profile):
+        // the heterogeneous face — a variant payload outside the flat Copy
+        // scalar contract — now closes onto the promoted multi-target union
+        // tagged-union contract (Copy scalars + owned Strings, exactly one
+        // field per variant), so the materialized receipts route the whole
+        // graph Canonical instead of vetoing it to the compatibility route.
         let source = include_str!("../../tests/real_world/flow_multi_target_union_match.mimi");
         let (checked, file) = checked(source);
         assert!(!mimi::core::mir::is_s8_flow_transition_candidate(&checked));
         assert!(!mimi::core::mir::is_flow_failure_retry_candidate(&checked));
-        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
             panic!(
-                "heterogeneous multi-target union transitions must stay on the compatibility route"
+                "heterogeneous multi-target union transitions must route canonical via the promoted tagged-union contract"
             );
         };
-        assert_eq!(
-            reason,
-            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
-        );
+        assert!(mimi::core::mir::contains_multi_target_flow_union_candidate(
+            &program
+        ));
+        assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+            &program
+        ));
+        let union_transition = program
+            .transitions()
+            .values()
+            .find(|contract| contract.targets.len() > 1)
+            .expect("multi-target transition contract");
+        assert_eq!(union_transition.targets.len(), 2);
     }
 
     #[test]
@@ -3302,10 +3310,14 @@ mod tests {
     }
 
     #[test]
-    fn heterogeneous_union_face_keeps_the_whole_graph_legacy() {
-        // The face-closed receipt is whole-graph: one heterogeneous union in
-        // an otherwise flat Copy program vetoes the migrated route for every
-        // face, so no consumer ever sees a half-admitted union graph.
+    fn heterogeneous_union_face_routes_the_whole_graph_canonical() {
+        // R6-1035B flip: the face-closed receipt stays whole-graph, but with
+        // the promoted tagged-union contract the heterogeneous Bag union
+        // closes onto it, so the mixed flat-Copy + heterogeneous graph routes
+        // Canonical for every face instead of being vetoed.  A union payload
+        // outside the contract (e.g. a List) keeps the whole-graph veto —
+        // pinned by the lib negative test
+        // union_outside_promoted_payload_contract_stays_fail_closed.
         let source = r#"
             flow Gauge {
                 state Cold { v: i32 }
@@ -3339,13 +3351,15 @@ mod tests {
             }
         "#;
         let (checked, file) = checked(source);
-        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
-            panic!("one heterogeneous union must veto the migrated route for the whole graph");
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!(
+                "the promoted union contract must close the whole mixed graph onto the canonical route"
+            );
         };
-        assert_eq!(
-            reason,
-            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
-        );
+        assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+            &program
+        ));
+        assert_eq!(program.transitions().len(), 2);
     }
 
     #[test]

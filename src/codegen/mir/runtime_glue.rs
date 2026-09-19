@@ -397,7 +397,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirGlueKind::List => self.emit_list_drop_value(value, ty, subject),
             MirGlueKind::Set => self.emit_set_drop_value(value, subject),
             MirGlueKind::Aggregate => {
-                if matches!(layout, MirLayout::Option { .. } | MirLayout::Result { .. }) {
+                if matches!(
+                    layout,
+                    MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. }
+                ) {
                     return self.emit_drop_variant_value(value, ty, subject);
                 }
                 validate_native_product_type(self.program.type_catalog(), ty)

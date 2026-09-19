@@ -98,35 +98,44 @@ fn flat_copy_union_three_consumers_match() {
 }
 
 #[test]
-fn heterogeneous_union_keeps_native_and_capability_fail_closed() {
+fn heterogeneous_union_three_consumers_match() {
+    // R6-1035B: the promoted multi-target union tagged-union contract admits
+    // the heterogeneous face (Copy integer versus owned Move string payloads)
+    // on every consumer.  The whole graph routes canonical and the same
+    // MirProgram executes identically on reference, bytecode, and native.
     let mir = materialize(HETEROGENEOUS_UNION_SOURCE, "heterogeneous union fixture");
     assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
-    assert!(!crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
 
-    // Reference and bytecode stay executable: the explicit `--mir` entry runs
-    // this fixture while the native contract is unpromoted.
+    // Consumer 1: AST-free reference executor on the shared MirProgram.
     let reference = MirReferenceInterpreter::new(&mir)
         .execute_with_output(&NodeId("function:main".into()), &[])
         .expect("reference executor heterogeneous union");
     assert_eq!(reference.output, HETEROGENEOUS_UNION_STDOUT);
+
+    // Consumer 2: bytecode compiled from the same MirProgram (no AST).
     let bytecode = compile_mir_program(&mir).expect("heterogeneous union bytecode");
+    assert!(bytecode.ast.is_none());
     let mut vm = BytecodeVM::new(bytecode);
     assert!(vm.run_value().is_ok(), "bytecode heterogeneous union runs");
     assert_eq!(vm.stdout(), HETEROGENEOUS_UNION_STDOUT);
 
-    // Native and capability consumers fail closed with the explicit boundary.
-    let native_error = crate::codegen::mir::validate_mir_native(&mir)
-        .expect_err("native must reject the non-Copy union tagged-union face");
-    assert!(native_error.iter().any(|error| {
-        error
-            .message
-            .contains("no native tagged-union ABI contract")
-    }));
-    let capability_error = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("capability gate must reject the non-Copy union face");
-    assert!(capability_error
-        .iter()
-        .any(|error| error.contains("non-Copy enum TypeDesc")));
+    // Consumer 3: native LLVM emission from the same MirProgram.
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_heterogeneous");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native heterogeneous union emission");
+    generator.module.verify().expect("valid LLVM union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, HETEROGENEOUS_UNION_STDOUT);
+    assert_eq!(native.stderr, "");
 }
 
 #[test]
@@ -199,12 +208,10 @@ fn heterogeneous_union_tag_contract_is_name_sorted_with_payload_mirroring() {
 
 #[test]
 fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
-    // R6-1035A baseline pin: consuming a heterogeneous union value with an
-    // explicit `drop(...)` (no match projection) exercises the union drop
-    // face on the two currently executing consumers.  Native and the
-    // capability gate stay fail-closed on this shape until the tagged-union
-    // contract promotion lands; this pin records the exact behavior the
-    // promotion must preserve and then flip deliberately.
+    // R6-1035B: consuming a heterogeneous union value with an explicit
+    // `drop(...)` (no match projection) exercises the union drop face — the
+    // tag-switched variant drop glue — on every consumer, including the
+    // native emitter's recursive payload drop.
     let source = r#"
         flow Pipe {
             state Open { tag: string }
@@ -224,7 +231,7 @@ fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
     "#;
     let mir = materialize(source, "heterogeneous union drop fixture");
     assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
-    assert!(!crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::core::mir::multi_target_flow_union_face_closed(&mir));
 
     let reference = MirReferenceInterpreter::new(&mir)
         .execute_with_output(&NodeId("function:main".into()), &[])
@@ -232,17 +239,95 @@ fn heterogeneous_union_drop_face_runs_on_reference_and_bytecode() {
     assert_eq!(reference.value, MirRuntimeValue::Int(0));
     assert_eq!(reference.output, "7\n");
     let bytecode = compile_mir_program(&mir).expect("union drop bytecode");
+    assert!(bytecode.ast.is_none());
     let mut vm = BytecodeVM::new(bytecode);
     assert!(vm.run_value().is_ok(), "bytecode union drop runs");
     assert_eq!(vm.stdout(), "7\n");
 
-    let native_error = crate::codegen::mir::validate_mir_native(&mir)
-        .expect_err("native must keep rejecting the unpromoted drop face");
-    assert!(native_error.iter().any(|error| {
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_flow_union_drop");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native union drop emission");
+    generator.module.verify().expect("valid LLVM union module");
+    let native = link_and_observe_canonical_mir(&generator).expect("native union drop execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn union_outside_promoted_payload_contract_stays_fail_closed() {
+    // The promoted contract admits exactly one Copy-scalar or owned-String
+    // payload per variant.  List payloads and multi-field variants stay
+    // fail-closed on the native and capability consumers, and an
+    // out-of-contract union keeps the whole graph off the canonical route.
+    let list_payload = r#"
+        flow P {
+            state A { v: i32 }
+            state B { xs: List<i32> }
+            transition go(A, d: i32) -> A | B {
+                return B { xs: [d] }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = P::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let list_mir = materialize(list_payload, "list payload union fixture");
+    assert!(!crate::core::mir::multi_target_flow_union_face_closed(
+        &list_mir
+    ));
+    let list_native = crate::codegen::mir::validate_mir_native(&list_mir)
+        .expect_err("native must reject a List payload union");
+    assert!(list_native.iter().any(|error| {
         error
             .message
-            .contains("no native tagged-union ABI contract")
+            .contains("only Copy scalars and owned Strings")
     }));
+    let list_capability = crate::verifier::validate_mir_capabilities(&list_mir)
+        .expect_err("capability gate must reject a List payload union");
+    assert!(list_capability
+        .iter()
+        .any(|error| error.contains("only Copy scalars and owned Strings")));
+
+    let wide_variant = r#"
+        flow Q {
+            state A { v: i32 }
+            state W { a: i32, b: i32 }
+            transition go(A, d: i32) -> A | W {
+                return W { a: d, b: d }
+            }
+        }
+
+        func main() -> i32 {
+            let a = A { v: 1 }
+            let r = Q::go(a, 2)
+            drop(r)
+            0
+        }
+    "#;
+    let wide_mir = materialize(wide_variant, "wide variant union fixture");
+    assert!(!crate::core::mir::multi_target_flow_union_face_closed(
+        &wide_mir
+    ));
+    let wide_native = crate::codegen::mir::validate_mir_native(&wide_mir)
+        .expect_err("native must reject a multi-field union variant");
+    assert!(wide_native
+        .iter()
+        .any(|error| { error.message.contains("admits exactly one") }));
+    let wide_capability = crate::verifier::validate_mir_capabilities(&wide_mir)
+        .expect_err("capability gate must reject a multi-field union variant");
+    assert!(wide_capability
+        .iter()
+        .any(|error| error.contains("admits exactly one")));
 }
 
 #[test]

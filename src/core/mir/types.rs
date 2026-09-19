@@ -3140,6 +3140,138 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Validate the checker-materialized multi-target Flow union for the
+    /// native tagged-union contract (R6-1035 promotion of the non-Copy face).
+    ///
+    /// The union result of a `-> A | B` transition is a canonical Enum whose
+    /// variants name-sort the target states; this contract admits one payload
+    /// field per variant with the payload type allowed to differ *across*
+    /// variants — every variant field must be either a Copy scalar or an
+    /// owned String.  A union whose payloads are all Copy keeps the no-op
+    /// metadata contract; a union carrying any owned payload must carry the
+    /// fully materialized Aggregate glue and a per-variant drop plan, which
+    /// the checker owns and every consumer reads from the same TypeDesc.
+    /// List/Set/tuple/nested-record payloads and multi-field variants remain
+    /// fail-closed until their own contracts are promoted.
+    pub fn validate_multi_target_union_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.kind != MirTypeKind::FlowStateSet {
+            return Err(format!(
+                "type '{}' kind {:?} is outside the multi-target union tagged-union contract",
+                ty.as_str(),
+                descriptor.kind
+            ));
+        }
+        let variants = match &descriptor.layout {
+            MirLayout::Enum { variants, .. } => variants,
+            layout => {
+                return Err(format!(
+                    "type '{}' layout {layout:?} is outside the multi-target union tagged-union contract",
+                    ty.as_str()
+                ));
+            }
+        };
+        if descriptor.abi != MirAbiClass::Aggregate {
+            return Err(format!(
+                "union TypeDesc '{}' is not Aggregate under the multi-target union tagged-union contract",
+                ty.as_str()
+            ));
+        }
+        if variants.is_empty() {
+            return Err(format!(
+                "union TypeDesc '{}' has no target variants",
+                ty.as_str()
+            ));
+        }
+        let has_owned_payload = variants.iter().any(|variant| {
+            variant.fields.first().is_some_and(|field| {
+                self.get(&field.ty)
+                    .is_some_and(|payload| payload.ownership != MirOwnership::Copy)
+            })
+        });
+        if has_owned_payload {
+            if descriptor.ownership != MirOwnership::Move {
+                return Err(format!(
+                    "union TypeDesc '{}' carries an owned payload without Move ownership",
+                    ty.as_str()
+                ));
+            }
+            if !descriptor.needs_drop_glue || !descriptor.needs_clone_glue {
+                return Err(format!(
+                    "union TypeDesc '{}' lacks materialized drop/clone glue flags",
+                    ty.as_str()
+                ));
+            }
+            for operation in [
+                MirGlueOperation::MoveOut,
+                MirGlueOperation::Clone,
+                MirGlueOperation::Drop,
+            ] {
+                self.validate_variant_glue(ty, operation)
+                    .map_err(|message| {
+                        format!(
+                            "union TypeDesc '{}' glue plan is incomplete: {message}",
+                            ty.as_str()
+                        )
+                    })?;
+            }
+        } else if !descriptor.has_canonical_copy_noop_metadata() {
+            return Err(format!(
+                "union TypeDesc '{}' is not Copy with canonical no-op glue",
+                ty.as_str()
+            ));
+        }
+
+        let mut discriminants = BTreeSet::new();
+        let mut variant_ids = BTreeSet::new();
+        let mut field_ids = BTreeSet::new();
+        for variant in variants {
+            if !discriminants.insert(variant.discriminant) {
+                return Err(format!(
+                    "union variant discriminant {} is duplicated in the multi-target union contract",
+                    variant.discriminant
+                ));
+            }
+            if variant.discriminant > u8::MAX as u16 {
+                return Err(format!(
+                    "union variant discriminant {} does not fit the multi-target union tag ABI",
+                    variant.discriminant
+                ));
+            }
+            if !variant_ids.insert(variant.id.clone()) {
+                return Err(format!(
+                    "union variant identity '{}' is duplicated in the multi-target union contract",
+                    variant.id.0
+                ));
+            }
+            if variant.fields.len() != 1 {
+                return Err(format!(
+                    "union variant '{}' has {} payload fields; the multi-target union contract admits exactly one",
+                    variant.name,
+                    variant.fields.len()
+                ));
+            }
+            let field = &variant.fields[0];
+            if !field_ids.insert(field.id.clone()) {
+                return Err(format!(
+                    "union payload field identity '{}' is duplicated in the multi-target union contract",
+                    field.id.0
+                ));
+            }
+            let scalar = self.validate_copy_scalar(&field.ty).is_ok();
+            let owned_string = self.validate_owned_string(&field.ty).is_ok();
+            if !scalar && !owned_string {
+                return Err(format!(
+                    "union variant '{}' payload is outside the multi-target union contract: only Copy scalars and owned Strings are admitted",
+                    variant.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the concrete default-route Copy `Option<i32>` projection
     /// shape. The broader flat-Copy variant contract intentionally accepts
     /// other scalar payloads; this narrower receipt distinguishes the
@@ -10147,6 +10279,14 @@ impl MirTypeCatalog {
                 .map_err(|message| {
                     format!(
                         "type '{}' is outside the canonical non-Copy Result<string, i32> variant contract (the managed Result<Copy/owned, i32> extension is equally TypeDesc-gated): {message}",
+                        ty.as_str()
+                    )
+                }),
+            MirLayout::Enum { .. } => self
+                .validate_multi_target_union_variant(ty)
+                .map_err(|message| {
+                    format!(
+                        "type '{}' is outside the canonical non-Copy multi-target union tagged-union contract: {message}",
                         ty.as_str()
                     )
                 }),

@@ -3401,7 +3401,7 @@ pub fn multi_target_flow_union_face_closed(program: &MirProgram) -> bool {
             super::multi_target_union_shape(contract, program.type_catalog())
                 && program
                     .type_catalog()
-                    .validate_flat_copy_variant(&contract.result)
+                    .validate_multi_target_union_variant(&contract.result)
                     .is_ok()
         })
 }

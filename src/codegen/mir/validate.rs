@@ -286,7 +286,19 @@ impl<'a> NativeMirValidator<'a> {
             }
         } else if is_variant {
             if is_user_enum {
-                if desc.ownership == MirOwnership::Copy {
+                if desc.kind == MirTypeKind::FlowStateSet {
+                    match self
+                        .program
+                        .type_catalog()
+                        .validate_multi_target_union_variant(ty)
+                    {
+                        Ok(()) => true,
+                        Err(message) => {
+                            self.errors.push(NativeMirError::new(subject, message));
+                            false
+                        }
+                    }
+                } else if desc.ownership == MirOwnership::Copy {
                     self.validate_flat_copy_variant(ty, subject, desc)
                 } else {
                     self.errors.push(NativeMirError::new(
@@ -349,6 +361,8 @@ impl<'a> NativeMirValidator<'a> {
                 if is_user_enum {
                     if desc.ownership == MirOwnership::Copy {
                         "checker-materialized flat Copy user-enum contract"
+                    } else if desc.kind == MirTypeKind::FlowStateSet {
+                        "checker-materialized multi-target union tagged-union contract"
                     } else {
                         "checker-materialized user-enum native tagged-union contract"
                     }
@@ -855,19 +869,24 @@ impl<'a> NativeMirValidator<'a> {
                         ) {
                             self.errors.push(NativeMirError::new(subject, message));
                         }
-                        if !matches!(desc.layout, MirLayout::List { .. })
-                            && !matches!(desc.layout, MirLayout::Set { .. })
-                            && !matches!(desc.layout, MirLayout::Tuple(_))
-                            && !matches!(desc.layout, MirLayout::Record { .. })
-                            && !matches!(
-                                desc.layout,
-                                MirLayout::Option { .. } | MirLayout::Result { .. }
-                            )
-                            && !matches!(
+                        let admitted = match &desc.layout {
+                            MirLayout::List { .. }
+                            | MirLayout::Set { .. }
+                            | MirLayout::Tuple(_)
+                            | MirLayout::Record { .. }
+                            | MirLayout::Option { .. }
+                            | MirLayout::Result { .. } => true,
+                            MirLayout::Enum { .. } if desc.kind == MirTypeKind::FlowStateSet => {
+                                catalog
+                                    .validate_multi_target_union_variant(&value.ty)
+                                    .is_ok()
+                            }
+                            _ => matches!(
                                 &desc.kind,
                                 MirTypeKind::Primitive(crate::core::PrimitiveType::String)
-                            )
-                        {
+                            ),
+                        };
+                        if !admitted {
                             self.errors.push(NativeMirError::new(
                                 subject,
                                 "only canonical owned String/List/Set/tuple/variant drop glue is emitted by this native slice",

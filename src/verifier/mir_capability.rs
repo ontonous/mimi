@@ -632,17 +632,29 @@ impl<'a> CapabilityGate<'a> {
             MirLayout::Enum { variants, .. } => {
                 // Checker-materialized enum layouts (user enum type defs and
                 // the multi-target Flow union) share the flat Copy variant
-                // contract; a non-Copy tagged union has no verifier capability
-                // until its own contract is promoted.
-                if descriptor.ownership != MirOwnership::Copy {
+                // contract; a multi-target union additionally proves the
+                // tagged-union contract (Copy scalars and owned Strings, one
+                // payload per variant, complete glue) from the same
+                // checker-owned TypeDesc regardless of combined ownership.
+                // User enums stay flat-only.
+                if descriptor.kind == MirTypeKind::FlowStateSet {
+                    catalog
+                        .validate_multi_target_union_variant(ty)
+                        .map_err(|message| {
+                            format!(
+                                "multi-target union TypeDesc is outside the verifier capability: {message}"
+                            )
+                        })?;
+                } else if descriptor.ownership != MirOwnership::Copy {
                     return Err(
                         "non-Copy enum TypeDesc is outside the verifier capability: only the flat Copy variant contract is admitted"
                             .into(),
                     );
+                } else {
+                    catalog.validate_flat_copy_variant(ty).map_err(|message| {
+                        format!("Copy enum TypeDesc is outside the verifier capability: {message}")
+                    })?;
                 }
-                catalog.validate_flat_copy_variant(ty).map_err(|message| {
-                    format!("Copy enum TypeDesc is outside the verifier capability: {message}")
-                })?;
                 for variant in variants {
                     for field in &variant.fields {
                         self.validate_type(&field.ty, "variant field");
@@ -1254,8 +1266,11 @@ impl<'a> CapabilityGate<'a> {
                     return;
                 };
                 let move_variant = catalog
-                    .validate_option_move_variant(&result_ty)
+                    .validate_multi_target_union_variant(&result_ty)
                     .map(|_| ())
+                    .or_else(|_| {
+                        catalog.validate_option_move_variant(&result_ty).map(|_| ())
+                    })
                     .or_else(|_| {
                         if self.allow_recoverable_flow_result {
                             catalog.validate_recoverable_result_variant(&result_ty)
@@ -2023,7 +2038,13 @@ impl<'a> CapabilityGate<'a> {
                 let switch_shape = self
                     .program
                     .type_catalog()
-                    .validate_option_string_variant(&scrutinee_ty)
+                    .validate_multi_target_union_variant(&scrutinee_ty)
+                    .map(|_| scrutinee_ty.clone())
+                    .or_else(|_| {
+                        self.program
+                            .type_catalog()
+                            .validate_option_string_variant(&scrutinee_ty)
+                    })
                     .or_else(|_| {
                         if self.allow_recoverable_flow_result {
                             self.program

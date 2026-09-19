@@ -305,6 +305,7 @@ fn native_non_copy_variant_payload_type_with_flow(
                 "Option<List<Copy scalar>>"
             }
             MirLayout::Option { .. } => "Option<string>",
+            MirLayout::Enum { .. } => "multi-target union",
             _ => "Option<string>",
         })
         .unwrap_or("Option/Result");
@@ -330,6 +331,16 @@ fn native_non_copy_variant_payload_type_with_flow(
     match &descriptor.layout {
         MirLayout::Option { inner, .. } => Ok(inner.clone()),
         MirLayout::Result { ok, .. } => Ok(ok.clone()),
+        MirLayout::Enum { variants, .. } => variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| field.ty.clone()))
+            .next()
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    ty.as_str(),
+                    "native non-Copy union variant contract has no payload slot",
+                )
+            }),
         layout => Err(NativeMirError::new(
             ty.as_str(),
             format!("native non-Copy variant layout {layout:?} is outside contract"),
@@ -405,7 +416,26 @@ pub(super) fn native_variant_abi_with_generic_result(
             "Copy variant TypeDesc is outside the complete no-op metadata contract",
         ));
     }
-    let payload_types = if moving {
+    let payload_types = if matches!(descriptor.layout, MirLayout::Enum { .. })
+        && descriptor.kind == MirTypeKind::FlowStateSet
+        && catalog.validate_multi_target_union_variant(ty).is_ok()
+    {
+        // The promoted multi-target union contract: one physical slot per
+        // variant payload, in name-sorted variant order.  The TypeDesc
+        // contract above proved every payload is a Copy scalar or an owned
+        // String with complete glue, so the flat struct below can inline
+        // each payload without a shared-type requirement.
+        let MirLayout::Enum { variants, .. } = &descriptor.layout else {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                "union TypeDesc layout changed during native ABI materialization",
+            ));
+        };
+        variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| field.ty.clone()))
+            .collect()
+    } else if moving {
         native_non_copy_variant_payload_type(catalog, ty)?;
         match &descriptor.layout {
             MirLayout::Option { inner, .. } => vec![inner.clone()],
@@ -443,6 +473,9 @@ pub(super) fn native_variant_abi_with_generic_result(
         }
     };
     let mut payload_fields = Vec::new();
+    let union_tagged = matches!(descriptor.layout, MirLayout::Enum { .. })
+        && descriptor.kind == MirTypeKind::FlowStateSet;
+    let mut union_slot = 1u32;
     for variant in variants {
         for field in &variant.fields {
             let physical_field =
@@ -460,6 +493,14 @@ pub(super) fn native_variant_abi_with_generic_result(
                             ))
                         }
                     }
+                } else if union_tagged {
+                    // One slot per variant payload in name-sorted order,
+                    // matching the payload_types ordering above.
+                    let slot = union_slot;
+                    union_slot = union_slot.checked_add(1).ok_or_else(|| {
+                        NativeMirError::new(ty.as_str(), "union slot index overflows")
+                    })?;
+                    slot
                 } else {
                     1
                 };
