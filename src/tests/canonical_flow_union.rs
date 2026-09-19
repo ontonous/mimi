@@ -2244,3 +2244,397 @@ fn float_equality_comparison_stays_outside_the_canonical_binary_contract() {
         "the rejection must name the float operator: {capability_error:?}"
     );
 }
+
+// R6-1045: cross-consumer operator-face audit. After R6-1044 repaired the
+// native integer Multiply/Divide/Remainder asymmetry, the remaining operator
+// faces were audited across every admission point (checker, verifier
+// capability gate, native scalar contract, bytecode VM and reference
+// executors). The audit found no further asymmetry in the route-breaking
+// direction: unary faces are admitted everywhere (f64 negate, int negate,
+// bool not — pinned below) or rejected at the checker before MIR exists
+// (f32 negate, E0201 — pinned below), and the remaining binary faces (float
+// ordering/equality comparisons, shifts and bitwise/power operators, string
+// concatenation) are fail-closed at the capability gate even where the
+// bytecode VM carries latent implementations. The pins below freeze those
+// dispositions so future consumer drift fails a test instead of a user.
+
+#[test]
+fn operator_face_audit_keeps_out_of_contract_faces_fail_closed() {
+    struct OutOfContractCase {
+        name: &'static str,
+        transition_body: &'static str,
+        expected_fragment: &'static str,
+    }
+    const CASES: &[OutOfContractCase] = &[
+        // Float ordering and inequality comparisons: the finite-only Copy
+        // f64 binary contract admits Add|Subtract only (SD-9/SD-10). Greater
+        // and Equal have dedicated pins above; these four complete the set.
+        OutOfContractCase {
+            name: "float_less",
+            transition_body: "if self.v < 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
+            expected_fragment: "float binary operator Less is outside the canonical finite-only Copy f64 contract",
+        },
+        OutOfContractCase {
+            name: "float_less_equal",
+            transition_body: "if self.v <= 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
+            expected_fragment: "float binary operator LessEqual is outside the canonical finite-only Copy f64 contract",
+        },
+        OutOfContractCase {
+            name: "float_greater_equal",
+            transition_body: "if self.v >= 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
+            expected_fragment: "float binary operator GreaterEqual is outside the canonical finite-only Copy f64 contract",
+        },
+        OutOfContractCase {
+            name: "float_not_equal",
+            transition_body: "if self.v != 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
+            expected_fragment: "float binary operator NotEqual is outside the canonical finite-only Copy f64 contract",
+        },
+        // Shifts: outside the verifier capability entirely. The bytecode VM
+        // and reference executor carry latent wrapping implementations, but
+        // no default-route program can reach them; if this face is ever
+        // admitted it needs SD-7-style checked (trap) semantics first, not
+        // the latent wrapping shapes.
+        OutOfContractCase {
+            name: "shift_left",
+            transition_body: "if 100 < self.v { let bumped = self.v << 1\nreturn Big { w: bumped } }\nreturn S { v: self.v }",
+            expected_fragment: "binary operator is outside the verifier capability",
+        },
+        OutOfContractCase {
+            name: "shift_right",
+            transition_body: "if 100 < self.v { let bumped = self.v >> 1\nreturn Big { w: bumped } }\nreturn S { v: self.v }",
+            expected_fragment: "binary operator is outside the verifier capability",
+        },
+    ];
+    for case in CASES {
+        let source = format!(
+            r#"
+flow F {{
+    state S {{ v: i64 }}
+    state Big {{ w: i64 }}
+    transition go(S) -> S | Big | Fault {{
+        {body}
+    }}
+}}
+
+func main() -> i64 {{
+    let s = S {{ v: 150 }}
+    let r = F::go(s)
+    let v = match r {{
+        S {{ v }} => v
+        Big {{ w }} => w
+        Fault {{ last_state: _, unexpected_event: _, snapshot: _, trace: _ }} => 9999 as i64
+    }}
+    println(v)
+    0
+}}
+"#,
+            body = case.transition_body,
+        );
+        let label = format!("out-of-contract operator face {}", case.name);
+        let mir = materialize(&source, &label);
+        let rejection = crate::verifier::validate_mir_capabilities(&mir);
+        assert!(
+            rejection.is_err(),
+            "{label} must stay outside the capability contract"
+        );
+        let messages = format!("{:?}", rejection.unwrap_err());
+        assert!(
+            messages.contains(case.expected_fragment),
+            "{label} rejection must name the contract: {messages}"
+        );
+    }
+
+    // String concatenation: the string handle is not a complete Copy scalar,
+    // so `+` on strings is fail-closed even though the bytecode VM has a
+    // latent ConcatStr opcode. Pinned with the fixture that carried the CLI
+    // probe (string field on the big state).
+    let string_source = r#"
+flow F {
+    state S { v: i64 }
+    state Big { label: string, w: i64 }
+    transition go(S) -> S | Big | Fault {
+        if 100 < self.v {
+            let tag = "hit" + "!"
+            return Big { label: tag, w: self.v }
+        }
+        return S { v: self.v }
+    }
+}
+
+func main() -> i64 {
+    let s = S { v: 150 }
+    let r = F::go(s)
+    let v = match r {
+        S { v } => 0 as i64
+        Big { label: _, w } => w
+        Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 9999 as i64
+    }
+    println(v)
+    0
+}
+"#;
+    let mir = materialize(string_source, "out-of-contract operator face string_concat");
+    let rejection = crate::verifier::validate_mir_capabilities(&mir);
+    assert!(
+        rejection.is_err(),
+        "string concatenation must stay outside the capability contract"
+    );
+    let messages = format!("{:?}", rejection.unwrap_err());
+    assert!(
+        messages.contains("binary operand TypeDesc is outside the complete Copy scalar contract"),
+        "string concat rejection must name the Copy scalar contract: {messages}"
+    );
+}
+
+#[test]
+fn f32_unary_negate_is_rejected_at_the_checker_before_mir_exists() {
+    // The MIR-level float unary contract is f64-only (defense in depth), but
+    // the checker rejects f32 negation first with E0201, so no f32 negate
+    // instruction can ever reach the MIR capability gate or any consumer.
+    let source = r#"
+        flow F {
+            state S { v: i64 }
+            transition go(S) -> S | Fault {
+                let scaled: f32 = 2.5
+                let flipped = -scaled
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 7 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+            }
+            println(v)
+            0
+        }
+    "#;
+    let file = parse_prod(source);
+    let diagnostics = crate::core::check_program(&file)
+        .expect_err("checker must reject f32 unary negation with E0201");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("E0201")),
+        "the rejection must carry E0201: {diagnostics:?}"
+    );
+}
+
+// Admitted unary and logic faces: bool `not` in a guard and integer unary
+// negate in a payload must execute identically on all three consumers.
+#[test]
+fn admitted_unary_and_logic_faces_agree_across_consumers() {
+    struct AdmittedFaceCase {
+        name: &'static str,
+        guard: &'static str,
+        payload: &'static str,
+        initial: i64,
+        expected: i64,
+    }
+    const CASES: &[AdmittedFaceCase] = &[
+        AdmittedFaceCase {
+            name: "bool_not_guard",
+            guard: "not (self.v < 100)",
+            payload: "self.v + 1",
+            initial: 150,
+            expected: 151,
+        },
+        AdmittedFaceCase {
+            name: "int_negate_payload",
+            guard: "100 < self.v",
+            payload: "-(self.v - 301)",
+            initial: 150,
+            expected: 151,
+        },
+    ];
+    for case in CASES {
+        let source = format!(
+            r#"
+flow F {{
+    state S {{ v: i64 }}
+    state Big {{ w: i64 }}
+    transition go(S) -> S | Big | Fault {{
+        if {guard} {{
+            let bumped = {payload}
+            return Big {{ w: bumped }}
+        }}
+        return S {{ v: self.v }}
+    }}
+}}
+
+func main() -> i64 {{
+    let s = S {{ v: {initial} }}
+    let r = F::go(s)
+    let v = match r {{
+        S {{ v }} => v
+        Big {{ w }} => w
+        Fault {{ last_state: _, unexpected_event: _, snapshot: _, trace: _ }} => 9999 as i64
+    }}
+    println(v)
+    0
+}}
+"#,
+            guard = case.guard,
+            payload = case.payload,
+            initial = case.initial,
+        );
+        let label = format!("admitted operator face {}", case.name);
+        let mir = materialize(&source, &label);
+        assert!(
+            crate::core::mir::contains_multi_target_flow_union_candidate(&mir),
+            "{label} must materialize a union candidate"
+        );
+        assert!(
+            crate::core::mir::multi_target_flow_union_face_closed(&mir),
+            "{label} must stay on the promoted union contract"
+        );
+        assert!(
+            crate::verifier::validate_mir_capabilities(&mir).is_ok(),
+            "{label} must pass the capability gate"
+        );
+        let digest = mir.canonical_digest();
+
+        let expected_stdout = format!("{}\n", case.expected);
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("{label} reference execution failed: {error}"));
+        assert_eq!(reference.output, expected_stdout, "{label} reference");
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+        assert!(bytecode.ast.is_none(), "{label} bytecode must be AST-free");
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(vm.run_value().is_ok(), "{label} bytecode runs");
+        assert_eq!(vm.stdout(), expected_stdout, "{label} bytecode");
+
+        if !can_link() {
+            continue;
+        }
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(
+            &context,
+            &format!("mir_union_admitted_face_{}", case.name),
+        );
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("{label} native module verifies: {error}"));
+        let native = link_and_observe_canonical_mir(&generator)
+            .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+        assert_eq!(native.exit_code, Some(0), "{label} native exit");
+        assert_eq!(native.stdout, expected_stdout, "{label} native stdout");
+        assert_eq!(native.stderr, "", "{label} native stderr");
+        assert_eq!(mir.canonical_digest(), digest, "{label} digest stability");
+    }
+}
+
+// The f64 negate face inside a transition body, observed through a real C
+// ABI boundary embedded in the same transition: the flow calls
+// `mir_probe(-(self.v + 0.5))` with v=150, so the probe sees exactly -150.5
+// and every consumer must print 42. This pins both the in-transition float
+// unary negate and the in-transition FFI call receipt.
+#[test]
+fn float_negate_inside_transition_observed_through_ffi_agrees_across_consumers() {
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_probe(double x) { return x == -150.5 ? 42 : -1; }
+"#;
+    const SOURCE: &str = r#"
+        extern "C" { func mir_probe(x: f64) -> i64; }
+
+        flow F {
+            state S { v: i64 }
+            state Big { w: i64 }
+            transition go(S) -> S | Big | Fault {
+                if 100 < self.v {
+                    let observed = mir_probe(-(self.v + 0.5))
+                    return Big { w: observed }
+                }
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 150 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Big { w } => w
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 9999 as i64
+            }
+            println(v)
+            0
+        }
+    "#;
+    const EXPECTED: &str = "42\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = float_ffi_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let mir = materialize(SOURCE, "in-transition float negate fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("mir_probe", [MirRuntimeValue::FloatBits(bits)]) => {
+                    let matched = f64::from_bits(*bits) == -150.5;
+                    Ok(MirRuntimeValue::Int(if matched { 42 } else { -1 }))
+                }
+                _ => Err("unexpected in-transition float negate FFI call".into()),
+            }
+        }
+    }
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor in-transition float negate");
+    assert_eq!(reference.output, EXPECTED);
+
+    let bytecode = compile_mir_program(&mir).expect("in-transition float negate bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(
+        vm.run_value().is_ok(),
+        "bytecode in-transition float negate runs"
+    );
+    assert_eq!(vm.stdout(), EXPECTED);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_union_float_negate_transition");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native in-transition float negate emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM in-transition float negate module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native in-transition float negate against the C fixture");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, EXPECTED);
+    assert_eq!(native.stderr, "");
+}
