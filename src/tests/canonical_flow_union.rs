@@ -496,6 +496,122 @@ fn union_verifier_boundary_is_scoped_to_contract_bearing_callables() {
 }
 
 #[test]
+fn union_contract_verifier_trusted_subset_baseline() {
+    // R6-1036A baseline pin (test-first for the symbolic-domain promotion):
+    // contract-bearing union callables are today rejected wholesale by the
+    // MIR-VERIFIER-FLOW-UNION-001 boundary in `verify_function` before any
+    // symbolic exploration, so no real verdict (Proven/Disproven) is ever
+    // produced for a union body.  R6-1036B replaces this pin:
+    //   provable transition -> Proven on the same obligations,
+    //   contract-bearing caller -> Proven through a union-aware transition
+    //   call plus the generic variant SwitchMove,
+    // and the ensures-only sibling pinned by
+    // union_verifier_boundary_is_scoped_to_contract_bearing_callables flips
+    // to a real Disproven.
+
+    // 1. Provable transition: requires + ensures constrain the same
+    //    parameter, so the obligation discharges on both union return paths.
+    let provable = materialize(
+        r#"
+        flow Gauge {
+            state Cold { v: i32 }
+            state Hot { v: i32 }
+            transition heat(Cold, delta: i32) -> Hot | Cold {
+                requires: delta != 0
+                ensures: delta != 0
+                if self.v + delta > 50 {
+                    return Hot { v: self.v + delta }
+                } else {
+                    return Cold { v: self.v + delta }
+                }
+            }
+        }
+
+        func main() -> i32 {
+            let g = Cold { v: 40 }
+            let next = Gauge::heat(g, 20)
+            let t = match next {
+                Hot { v } => v
+                Cold { v } => v
+            }
+            println(t)
+            0
+        }
+    "#,
+        "provable union transition",
+    );
+    let results = crate::verifier::verify_mir(&provable, "union-baseline-provable".into())
+        .expect("MIR verifier runs the provable union program");
+    let heat = results
+        .iter()
+        .find(|result| result.func_name.contains("heat"))
+        .expect("heat verification result");
+    assert_eq!(
+        heat.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
+    );
+    assert!(
+        heat
+            .message
+            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
+        "{}",
+        heat.message
+    );
+
+    // 2. Contract-bearing caller: main's own `ensures` forces the verifier
+    //    into its body, whose values include the union scrutinee — the
+    //    boundary currently rejects the whole function before the transition
+    //    call or the SwitchMove is ever interpreted.
+    let caller = materialize(
+        r#"
+        flow Gauge {
+            state Cold { v: i32 }
+            state Hot { v: i32 }
+            transition heat(Cold, delta: i32) -> Hot | Cold {
+                requires: delta != 0
+                ensures: delta != 0
+                if self.v + delta > 50 {
+                    return Hot { v: self.v + delta }
+                } else {
+                    return Cold { v: self.v + delta }
+                }
+            }
+        }
+
+        func main() -> i32 {
+            ensures: result == 0
+            let g = Cold { v: 40 }
+            let next = Gauge::heat(g, 20)
+            let t = match next {
+                Hot { v } => v
+                Cold { v } => v
+            }
+            println(t)
+            0
+        }
+    "#,
+        "contract-bearing union caller",
+    );
+    let results = crate::verifier::verify_mir(&caller, "union-baseline-caller".into())
+        .expect("MIR verifier runs the caller program");
+    let main = results
+        .iter()
+        .find(|result| result.func_name.contains("main"))
+        .expect("main verification result");
+    assert_eq!(
+        main.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
+    );
+    assert!(
+        main
+            .message
+            .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE),
+        "{}",
+        main.message
+    );
+}
+
+#[test]
 fn union_transition_with_failure_stays_checker_rejected() {
     // E0433 fail-closed boundary: `fails` combined with a multi-target union
     // return stays rejected at the checker before any MIR exists.
