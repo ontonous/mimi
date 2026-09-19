@@ -15,7 +15,7 @@ SRC_DIR="$ROOT_DIR/src"
 readonly EXPECTED_OWNER_ACCESSOR_CALL_SITES=1
 readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=4
 readonly EXPECTED_PRODUCTION_RAW_AST_CALL_SITES=0
-readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=8
+readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=7
 readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # The deletion conditions are part of the compatibility contract. Keep a
 # digest beside each prose condition so scope changes are detected by the

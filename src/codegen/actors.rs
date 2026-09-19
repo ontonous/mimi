@@ -842,6 +842,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // clone/drop operations; inheriting a previous function's type would
         // silently skip adoption for Option/Result/product returns.
         let saved_ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+        // Actor bodies are emitted outside the compile_func_legacy funnel, so
+        // the V-11 nested-shadow frame guard that regular bodies get on entry
+        // must be installed here too: shadows registered while compiling this
+        // method body (bare-name redirect + displaced func_defs entry) must
+        // stay live through the whole body but not leak into subsequently
+        // compiled functions.
+        let saved_shadows = self.nested_shadow_symbols.clone();
+        let saved_current_fn = std::mem::replace(&mut self.current_legacy_fn, method.name.clone());
         let result = (|| {
             let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
             self.current_fn_ret_ty_ast = method.ret.clone();
@@ -858,6 +866,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             result.and(scope_result)
         })();
         self.current_fn_ret_ty_ast = saved_ret_ty_ast;
+        self.restore_nested_shadow_frame(saved_shadows, saved_current_fn);
         result
     }
 
@@ -1412,22 +1421,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if f.is_comptime {
                     // Comptime functions: skip codegen (interpreter-only)
                 } else {
-                    self.func_defs
-                        .entry(f.name.clone())
-                        .or_insert_with(|| f.clone());
-                    let saved_block = self.builder.get_insert_block();
-                    let saved_type_map = self.type_map.clone();
-                    let saved_var_types = std::mem::take(&mut self.var_types);
-                    let saved_var_type_names = std::mem::take(&mut self.var_type_names);
-                    let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
-                    self.compile_func_legacy(f)?;
-                    self.var_types = saved_var_types;
-                    self.var_type_names = saved_var_type_names;
-                    self.list_elem_llvm_types = saved_list_elem;
-                    self.type_map = saved_type_map;
-                    if let Some(bb) = saved_block {
-                        self.builder.position_at_end(bb);
-                    }
+                    // Same nested-func contract as legacy bodies: capture-free
+                    // declarations emit as standalone functions with V-11
+                    // shadow mangling, capturing ones become closures in the
+                    // local scope. The previous bare duplicate of this logic
+                    // compiled a shadowing nested name to the displaced global
+                    // body and rejected capturing declarations outright.
+                    self.compile_nested_func_stmt(f, vars)?;
                 }
             }
             Stmt::Requires(_, _)

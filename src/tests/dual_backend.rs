@@ -8932,6 +8932,74 @@ fn dual_actor_method_with_return_value() {
 }
 
 #[test]
+fn dual_actor_nested_func_captures_local() {
+    // R6-1031 (L1): a nested `func` inside an actor method that captures an
+    // enclosing local must become a closure, exactly like the same shape in
+    // ordinary bodies. The previous actor-only duplicate compiled it as a
+    // standalone function and rejected the capture with E0700 on native
+    // while the VM ran it correctly.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        actor Counter {
+            base: i32 = 0;
+            func bump(delta: i32) -> i32 {
+                let scale = 10
+                func scaled(d: i32) -> i32 {
+                    scale + d
+                }
+                self.base = self.base + scaled(delta)
+                self.base
+            }
+        }
+        func main() -> i32 {
+            let c = Counter.spawn();
+            println(c.bump(5));
+            0
+        }
+    "#,
+        "15"
+    );
+}
+
+#[test]
+fn dual_actor_nested_func_shadows_global() {
+    // R6-1031 (L1): a nested `func` whose bare name equals an earlier global
+    // shadows it for the rest of the enclosing body (V-11). The previous
+    // actor-only duplicate silently dispatched calls to the displaced global
+    // body on native (121 instead of 42) while the VM honored the shadow.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func helper(x: i32) -> i32 {
+            x + 100
+        }
+        actor Shadower {
+            v: i32 = 0;
+            func touch(y: i32) -> i32 {
+                func helper(x: i32) -> i32 {
+                    x * 2
+                }
+                self.v = helper(y)
+                self.v
+            }
+        }
+        func main() -> i32 {
+            let s = Shadower.spawn();
+            println(s.touch(21));
+            println(helper(1));
+            0
+        }
+    "#,
+        "42\n101"
+    );
+}
+
+#[test]
 fn dual_actor_stress_many_calls() {
     if !can_link() {
         return;

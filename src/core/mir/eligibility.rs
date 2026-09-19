@@ -385,9 +385,9 @@ fn is_exact_cross_state_f64_failure_receipt_for_transition(
 /// moves one owned String field from a two-field source state into a one-field
 /// target state, while the other source field is released by the canonical
 /// `MoveProjectDrop` receipt on the failure path.  The MIR lowerer and all
-/// consumers already support this receipt; admission was intentionally kept
-/// behind the single-field retry/F2 profiles until this composition boundary
-/// had a fixed real-world fixture.
+/// consumers support this receipt; since `5bb4cf14` it is admitted as one arm
+/// of [`is_flow_failure_retry_candidate`] and stays bounded to the exact
+/// shape checked below.
 fn is_exact_multifield_cross_state_record_receipt(
     program: &CheckedProgram,
     transition: &crate::core::resolved::ResolvedTransition,

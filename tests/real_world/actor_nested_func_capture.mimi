@@ -1,0 +1,24 @@
+// Regression (L1, R6-1031): a nested `func` inside an actor method that
+// captures an enclosing local must become a closure, exactly like the same
+// shape in ordinary bodies. The previous actor-only duplicate compiled it as
+// a standalone function and rejected the capture with E0700 on native while
+// the VM ran it correctly.
+actor Counter {
+    base: i32 = 0;
+
+    func bump(delta: i32) -> i32 {
+        let scale = 10
+        func scaled(d: i32) -> i32 {
+            scale + d
+        }
+        self.base = self.base + scaled(delta)
+        self.base
+    }
+}
+
+func main() -> i32 {
+    let c = Counter.spawn()
+    let r = c.bump(5)
+    println(r)
+    0
+}

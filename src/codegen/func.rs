@@ -4357,11 +4357,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         result
     }
 
-    /// Undo the shadows registered by one compile_func_legacy frame.
-    /// Entries inherited from the enclosing frame (identical mangled symbol
-    /// in the saved snapshot) are kept untouched; entries (re)registered by
-    /// this frame restore the func_defs entry they displaced.
-    fn restore_nested_shadow_frame(
+    /// Undo the shadows registered by one body frame. Entries inherited from
+    /// the enclosing frame (identical mangled symbol in the saved snapshot)
+    /// are kept untouched; entries (re)registered by this frame restore the
+    /// func_defs entry they displaced. Consumed by `compile_func_legacy` and
+    /// by `compile_actor_method` (actor bodies are emitted outside the
+    /// `compile_func_legacy` funnel but need the same per-body scoping).
+    pub(super) fn restore_nested_shadow_frame(
         &mut self,
         saved_shadows: HashMap<String, (String, Option<FuncDef>)>,
         saved_current_fn: String,

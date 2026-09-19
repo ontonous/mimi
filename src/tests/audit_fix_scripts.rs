@@ -288,7 +288,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "production_legacy_body_file_call_sites=4",
         "production_raw_ast_call_sites=0",
-        "production_compile_func_legacy_call_sites=8",
+        "production_compile_func_legacy_call_sites=7",
         "scalar_ffi_direct_expression_legacy_refs=0",
         "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
         "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",

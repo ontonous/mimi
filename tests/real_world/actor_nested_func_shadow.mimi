@@ -1,0 +1,28 @@
+// Regression (L1, R6-1031): a nested `func` whose bare name equals an earlier
+// global shadows it for the rest of the enclosing body (V-11), and the shadow
+// must not leak past that body. The previous actor-only duplicate silently
+// dispatched calls to the displaced global body on native (121 instead of 42)
+// while the VM honored the shadow.
+func helper(x: i32) -> i32 {
+    x + 100
+}
+
+actor Shadower {
+    v: i32 = 0;
+
+    func touch(y: i32) -> i32 {
+        func helper(x: i32) -> i32 {
+            x * 2
+        }
+        self.v = helper(y)
+        self.v
+    }
+}
+
+func main() -> i32 {
+    let s = Shadower.spawn()
+    let r = s.touch(21)
+    println(r)
+    println(helper(1))
+    0
+}
