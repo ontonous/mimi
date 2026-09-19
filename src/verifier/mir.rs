@@ -640,6 +640,31 @@ fn verify_function(
         ));
     }
 
+    // A contract-bearing callable whose canonical values include the
+    // multi-target Flow union TypeDesc has no symbolic domain for its union
+    // construction or match distribution.  Report the explicit runtime-only
+    // boundary identity (execution consumers still run this shape) instead of
+    // a generic walk failure, so the route layer can scope its tolerance.
+    let touches_flow_union = catalog.get(&function.result).is_some_and(|descriptor| {
+        descriptor.kind == crate::core::mir::types::MirTypeKind::FlowStateSet
+    }) || function.values.values().any(|value| {
+        catalog.get(&value.ty).is_some_and(|descriptor| {
+            descriptor.kind == crate::core::mir::types::MirTypeKind::FlowStateSet
+        })
+    });
+    if touches_flow_union {
+        return Ok((
+            VerifStatus::NotInTrustedSubset,
+            format!(
+                "{}: contract-bearing function '{}' touches the multi-target Flow union; it has no symbolic domain and MIR execution remains NotInTrustedSubset for this shape",
+                crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE,
+                function.owner.0
+            ),
+            0,
+            Some(TrustedSubsetDomain::Body),
+        ));
+    }
+
     // The verifier admits an owned String result only through the same
     // canonical one-block Move/Clone/Drop ledger used by MIR construction and
     // native admission. String payloads stay opaque in Z3, but their TypeDesc
@@ -3424,6 +3449,13 @@ fn eval_flow_transition(
             transition.0
         )
     })?;
+    if crate::core::mir::multi_target_union_shape(contract, catalog) {
+        return Err(format!(
+            "{}: multi-target Flow union transition '{}' has no symbolic domain; MIR execution remains NotInTrustedSubset for this shape",
+            crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE,
+            transition.0
+        ));
+    }
     let recoverable = contract.effect.is_recoverable();
     if (!recoverable
         && !matches!(
@@ -3464,6 +3496,7 @@ fn eval_flow_transition(
         &argument_types,
         &result_ty,
         effect_receipt,
+        catalog,
     )?;
     let target = program.functions().get(&contract.owner).ok_or_else(|| {
         format!(

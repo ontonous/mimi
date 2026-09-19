@@ -464,10 +464,10 @@ pub use islands::{
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
-    contains_owned_record_projection_candidate, contains_s8_flow_transition_candidate,
-    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    has_generic_record_update_candidate, has_managed_result_call_candidate,
-    has_unsupported_generic_list_facade_candidate,
+    contains_multi_target_flow_union_candidate, contains_owned_record_projection_candidate,
+    contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
+    contains_scalar_collection_operation_candidate, has_generic_record_update_candidate,
+    has_managed_result_call_candidate, has_unsupported_generic_list_facade_candidate,
     has_unsupported_generic_option_projection_candidate,
     has_unsupported_generic_option_projection_fallback_candidate,
     has_unsupported_generic_record_projection_candidate,
@@ -475,8 +475,9 @@ pub use islands::{
     has_unsupported_generic_result_projection_candidate,
     has_unsupported_generic_result_projection_fallback_candidate,
     has_unsupported_generic_variant_predicate_candidate, has_unsupported_list_concat_candidate,
-    has_unsupported_list_reverse_candidate, validate_managed_result_call_island,
-    validate_scalar_collection_island, FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
+    has_unsupported_list_reverse_candidate, multi_target_flow_union_face_closed,
+    validate_managed_result_call_island, validate_scalar_collection_island,
+    FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
     GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
     GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
     ManagedResultCallAdmission, ScalarCollectionAdmission,
@@ -763,12 +764,70 @@ impl MirTransitionEffect {
 /// Validate the complete identity carried by a Flow Boundary effect receipt.
 /// This is shared by MIR admission and all four consumers so a receipt cannot
 /// become a backend-local permission to call an otherwise unsupported target.
+/// The checker-owned multi-target union shape: the transition result is a
+/// FlowStateSet materialized as a closed Enum whose variants are exactly the
+/// contract's target states (matched by state identity — the union orders
+/// variants name-sorted while the contract keeps declaration order). Only
+/// this proven shape may carry more than one target; every other
+/// multi-target spelling stays fail-closed.
+pub(crate) fn multi_target_union_shape(
+    contract: &MirTransitionContract,
+    type_catalog: &types::MirTypeCatalog,
+) -> bool {
+    contract.targets.len() > 1
+        && contract.failure.is_none()
+        && !contract.is_fallback
+        && !contract.is_ffi_pinned
+        && type_catalog
+            .get(&contract.result)
+            .is_some_and(|descriptor| match &descriptor.layout {
+                types::MirLayout::Enum { variants, .. } => {
+                    variants.len() == contract.targets.len()
+                        && contract.targets.iter().all(|target| {
+                            type_catalog.get(target).is_some_and(|target_desc| {
+                                let (state_name, fields) = match &target_desc.layout {
+                                    types::MirLayout::Record { nominal, fields } => {
+                                        let name = nominal
+                                            .as_str()
+                                            .rsplit_once("::")
+                                            .map(|(_, name)| name)
+                                            .unwrap_or(nominal.as_str());
+                                        (name, fields)
+                                    }
+                                    _ => return false,
+                                };
+                                variants
+                                    .iter()
+                                    .filter(|variant| variant.name == state_name)
+                                    .count()
+                                    == 1
+                                    && variants
+                                        .iter()
+                                        .find(|variant| variant.name == state_name)
+                                        .is_some_and(|variant| {
+                                            fields.len() == variant.fields.len()
+                                                && fields.iter().zip(&variant.fields).all(
+                                                    |(field, payload)| {
+                                                        field.id == payload.id
+                                                            && field.name == payload.name
+                                                            && field.ty == payload.ty
+                                                    },
+                                                )
+                                        })
+                            })
+                        })
+                }
+                _ => false,
+            })
+}
+
 pub(crate) fn validate_flow_effect_receipt(
     transition: &NodeId,
     contract: &MirTransitionContract,
     argument_types: &[ResolvedTypeId],
     result_ty: &ResolvedTypeId,
     receipt: Option<&types::MirFlowEffectReceipt>,
+    type_catalog: &types::MirTypeCatalog,
 ) -> Result<(), String> {
     match (contract.effect, receipt) {
         (MirTransitionEffect::Boundary, Some(receipt)) => {
@@ -788,6 +847,14 @@ pub(crate) fn validate_flow_effect_receipt(
                 return Err("Flow Boundary effect receipt result TypeDesc disagrees with transition contract".into());
             }
             let [target] = contract.targets.as_slice() else {
+                // A multi-target union transition has no single target; the
+                // receipt must name the union identity itself.
+                if multi_target_union_shape(contract, type_catalog) {
+                    if receipt.target != contract.result {
+                        return Err("Flow Boundary effect receipt target identity disagrees with transition contract".into());
+                    }
+                    return Ok(());
+                }
                 return Err(
                     "Flow Boundary effect receipt target identity disagrees with transition contract"
                         .into(),

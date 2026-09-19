@@ -1,0 +1,36 @@
+// Canonical MIR migration pin (R6-1034): a multi-target Flow transition
+// (`-> Hot | Cold`) whose union face is flat Copy — one single-field variant
+// payload of the same Copy scalar type across every target — routes Canonical
+// on the default run/build/verify entries and on `--mir`.  The heterogeneous
+// (non-Copy payload) face stays on the explicit compatibility route; see
+// flow_multi_target_union_match.mimi.
+// Expected stdout: 60 then 40; main returns 0.
+flow Gauge {
+    state Cold { v: i32 }
+    state Hot { v: i32 }
+    transition heat(Cold, delta: i32) -> Hot | Cold {
+        if self.v + delta > 50 {
+            return Hot { v: self.v + delta }
+        } else {
+            return Cold { v: self.v + delta }
+        }
+    }
+}
+
+func main() -> i32 {
+    let g = Cold { v: 40 }
+    let next = Gauge::heat(g, 20)
+    let t = match next {
+        Hot { v } => v
+        Cold { v } => v
+    }
+    println(t)
+    let c = Cold { v: 35 }
+    let down = Gauge::heat(c, 5)
+    let u = match down {
+        Hot { v } => v
+        Cold { v } => v
+    }
+    println(u)
+    0
+}

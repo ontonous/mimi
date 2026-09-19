@@ -731,6 +731,7 @@ pub struct CheckedProgram {
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     resolved_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    resolved_state_field_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_variants: BTreeMap<NodeId, ResolvedVariantSchema>,
     resolved_type_targets: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_session_actions: BTreeMap<NodeId, crate::core::ResolvedSessionAction>,
@@ -1028,6 +1029,7 @@ impl CheckedProgram {
             resolved_variants,
             resolved_type_targets,
             resolved_type_arguments,
+            resolved_state_field_types,
         ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
         for meta in program.node_meta.values_mut() {
             meta.expression_key = None;
@@ -1041,6 +1043,7 @@ impl CheckedProgram {
         program.resolved_node_types = resolved_node_types;
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
+        program.resolved_state_field_types = resolved_state_field_types;
         program.resolved_variants = resolved_variants;
         program.resolved_type_targets = resolved_type_targets;
         program.resolved_type_arguments = resolved_type_arguments;
@@ -1362,6 +1365,7 @@ impl CheckedProgram {
             resolved_type_operands: BTreeMap::new(),
             resolved_type_arguments: BTreeMap::new(),
             resolved_field_types: BTreeMap::new(),
+            resolved_state_field_types: BTreeMap::new(),
             resolved_variants: BTreeMap::new(),
             resolved_type_targets: BTreeMap::new(),
             resolved_session_actions: BTreeMap::new(),
@@ -1887,6 +1891,13 @@ impl CheckedProgram {
 
     pub fn resolved_field_type(&self, field: &NodeId) -> Option<&crate::core::ResolvedTypeId> {
         self.resolved_field_types.get(field)
+    }
+
+    /// Canonical payload types for flow states targeted by multi-target
+    /// transitions, keyed by the state payload field identity. Empty unless a
+    /// union-return receipt needs it.
+    pub fn resolved_state_field_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
+        &self.resolved_state_field_types
     }
 
     pub fn resolved_variants(&self) -> &BTreeMap<NodeId, ResolvedVariantSchema> {
@@ -8551,6 +8562,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, ResolvedVariantSchema>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
+    BTreeMap<NodeId, crate::core::ResolvedTypeId>,
 );
 
 fn canonical_reference_binding_type(initializer: &ZonkedTy) -> Result<ZonkedTy, String> {
@@ -9069,6 +9081,7 @@ fn build_canonical_function_signatures(
     let mut type_operands = BTreeMap::new();
     let mut type_arguments = BTreeMap::new();
     let mut field_types = BTreeMap::new();
+    let mut state_field_types = BTreeMap::new();
     let mut resolved_variants = BTreeMap::new();
     let mut type_targets = BTreeMap::new();
     let mut errors = Vec::new();
@@ -10494,6 +10507,92 @@ fn build_canonical_function_signatures(
         }
     }
 
+    // Multi-target union receipt payload types: intern the payload fields of
+    // states targeted by multi-target transitions so the MIR catalog can
+    // materialize the FlowStateSet variant layout without reopening the
+    // checker. Only multi-target target states are interned, keeping the map
+    // empty for every program without a union-return transition; an interning
+    // failure surfaces as a fail-closed diagnostic here rather than a silent
+    // layout gap in a consumer.
+    let multi_target_states: BTreeMap<String, BTreeSet<String>> = {
+        let mut map = BTreeMap::new();
+        for transition in program.transitions.values() {
+            if transition.targets.len() > 1 {
+                map.entry(transition.id.flow.0.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .extend(transition.targets.iter().map(|target| target.name.clone()));
+            }
+        }
+        map
+    };
+    for flow in program.flows.values() {
+        let Some(target_states) = multi_target_states.get(&flow.id.0) else {
+            continue;
+        };
+        let module = flow.id.0.rsplit_once("::").map(|(module, _)| module);
+        let mut resolve_state_name = |name: &str| {
+            if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                return Some(primitive);
+            }
+            let flow_qualified = format!("{}::{name}", flow.id.0);
+            if let Some(candidates) = nominal_catalog.get(&flow_qualified) {
+                if candidates.len() == 1 {
+                    return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                        .ok()
+                        .map(crate::core::ResolvedTypeName::Nominal);
+                }
+            }
+            if let Some(module) = module {
+                let qualified = format!("{module}::{name}");
+                if let Some(candidates) = nominal_catalog.get(&qualified) {
+                    if candidates.len() == 1 {
+                        return crate::core::NominalTypeId::new(candidates.iter().next()?.clone())
+                            .ok()
+                            .map(crate::core::ResolvedTypeName::Nominal);
+                    }
+                }
+            }
+            if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                return Some(resolved);
+            }
+            builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+        };
+        for state in flow.states.values() {
+            if !target_states.contains(&state.id.name) {
+                continue;
+            }
+            for (field_name, field_ty) in &state.payload {
+                let Some(field_id) = state.field_ids.get(field_name) else {
+                    continue;
+                };
+                let zonked = match ZonkedTy::from_resolved(field_ty.clone()) {
+                    Ok(zonked) => zonked,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: state '{}'::{} field '{}' is not zonked: {error}",
+                                flow.id.0, state.id.name, field_name
+                            ),
+                            state.origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                match types.intern_zonked(&zonked, &capabilities, &mut resolve_state_name) {
+                    Ok(ty) => {
+                        state_field_types.insert(field_id.clone(), ty);
+                    }
+                    Err(error) => errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: state '{}'::{} field '{}' is not canonical: {error}",
+                            flow.id.0, state.id.name, field_name
+                        ),
+                        state.origin.user_span(),
+                    )),
+                }
+            }
+        }
+    }
     if let Err(type_errors) = types.validate() {
         errors.extend(type_errors.into_iter().map(|error| {
             Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), Span::UNKNOWN)
@@ -10509,6 +10608,7 @@ fn build_canonical_function_signatures(
             resolved_variants,
             type_targets,
             type_arguments,
+            state_field_types,
         ))
     } else {
         Err(errors)

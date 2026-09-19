@@ -234,7 +234,7 @@ impl MirProgram {
         .map_err(MirProgramBuildError::Lowering)?;
         let transitions = materialize_transition_contracts(program, &type_catalog, None)
             .map_err(MirProgramBuildError::Validation)?;
-        attach_flow_effect_receipts(&mut functions, &transitions);
+        attach_flow_effect_receipts(&mut functions, &transitions, &type_catalog);
         let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
         Self::with_type_catalog_and_instances_and_transitions_and_ffi(
@@ -285,11 +285,8 @@ impl MirProgram {
             if !callable.signature.generic_parameters.is_empty() {
                 continue;
             }
-            let transition_result = program
-                .transitions()
-                .values()
-                .find(|transition| transition.node_id == *owner && transition.fails.is_some())
-                .map(|_| callable.signature.result.clone());
+            let transition_result =
+                super::lower::transition_lowering_result(program, owner, callable);
             match super::lower::lower_callable_with_type_catalog_and_permissions_for_transition(
                 callable,
                 &type_catalog,
@@ -315,7 +312,7 @@ impl MirProgram {
         let transitions =
             materialize_transition_contracts(program, &type_catalog, Some(excluded_sources))
                 .map_err(MirProgramBuildError::Validation)?;
-        attach_flow_effect_receipts(&mut functions, &transitions);
+        attach_flow_effect_receipts(&mut functions, &transitions, &type_catalog);
         let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
         Self::with_type_catalog_and_instances_and_transitions_and_ffi(
@@ -3775,73 +3772,79 @@ fn validate_transition_contracts(
                     .into(),
             });
         }
-        match contract.effect {
-            MirTransitionEffect::SilentLocal => {
-                if contract.targets.len() != 1
-                    || contract.failure.is_some()
-                    || contract.is_fallback
-                    || contract.is_ffi_pinned
-                    || contract.targets.first() != Some(&contract.result)
-                {
-                    errors.push(super::MirValidationError {
-                        subject,
-                        message: "silent-local transition must be one target, non-failing, non-fallback, non-pinned, and return that target state".into(),
-                    });
+        // A proven multi-target union contract carries its own shape proof
+        // (variants ↔ targets correspondence) and must not be measured by
+        // the single-target per-effect checks below.
+        if !super::multi_target_union_shape(contract, type_catalog) {
+            match contract.effect {
+                MirTransitionEffect::SilentLocal => {
+                    if contract.targets.len() != 1
+                        || contract.failure.is_some()
+                        || contract.is_fallback
+                        || contract.is_ffi_pinned
+                        || contract.targets.first() != Some(&contract.result)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject,
+                            message: "silent-local transition must be one target, non-failing, non-fallback, non-pinned, and return that target state".into(),
+                        });
+                    }
                 }
-            }
-            MirTransitionEffect::RecoverableLocal | MirTransitionEffect::RecoverableBoundary => {
-                let valid_result = type_catalog
-                    .get(&contract.result)
-                    .and_then(|descriptor| match &descriptor.layout {
-                        super::types::MirLayout::Result { ok, error, .. }
-                            if contract.targets.len() == 1
-                                && contract.targets.first() == Some(ok)
-                                && contract.failure.as_ref() == Some(error)
-                                && target.result == contract.result =>
-                        {
-                            Some(())
-                        }
-                        _ => None,
-                    })
-                    .is_some();
-                let carries_source = contract
-                    .failure
-                    .as_ref()
-                    .and_then(|failure| type_catalog.get(failure))
-                    .is_some_and(|descriptor| {
-                        matches!(
-                            &descriptor.layout,
-                            super::types::MirLayout::Tuple(elements)
-                                if elements.first() == Some(&contract.source)
-                        )
-                    });
-                if !valid_result
-                    || !carries_source
-                    || contract.is_fallback
-                    || contract.is_ffi_pinned
-                    || contract.targets.len() != 1
-                {
-                    errors.push(super::MirValidationError {
-                        subject,
-                        message: if !carries_source {
-                            "recoverable-local transition failure must carry the source TypeDesc at tuple index 0".into()
-                        } else {
-                            "recoverable-local transition must return canonical Result<target, failure>, have one target, and be non-fallback/non-pinned".into()
-                        },
-                    });
+                MirTransitionEffect::RecoverableLocal
+                | MirTransitionEffect::RecoverableBoundary => {
+                    let valid_result = type_catalog
+                        .get(&contract.result)
+                        .and_then(|descriptor| match &descriptor.layout {
+                            super::types::MirLayout::Result { ok, error, .. }
+                                if contract.targets.len() == 1
+                                    && contract.targets.first() == Some(ok)
+                                    && contract.failure.as_ref() == Some(error)
+                                    && target.result == contract.result =>
+                            {
+                                Some(())
+                            }
+                            _ => None,
+                        })
+                        .is_some();
+                    let carries_source = contract
+                        .failure
+                        .as_ref()
+                        .and_then(|failure| type_catalog.get(failure))
+                        .is_some_and(|descriptor| {
+                            matches!(
+                                &descriptor.layout,
+                                super::types::MirLayout::Tuple(elements)
+                                    if elements.first() == Some(&contract.source)
+                            )
+                        });
+                    if !valid_result
+                        || !carries_source
+                        || contract.is_fallback
+                        || contract.is_ffi_pinned
+                        || contract.targets.len() != 1
+                    {
+                        errors.push(super::MirValidationError {
+                            subject,
+                            message: if !carries_source {
+                                "recoverable-local transition failure must carry the source TypeDesc at tuple index 0".into()
+                            } else {
+                                "recoverable-local transition must return canonical Result<target, failure>, have one target, and be non-fallback/non-pinned".into()
+                            },
+                        });
+                    }
                 }
-            }
-            MirTransitionEffect::Boundary => {
-                if contract.targets.len() != 1
-                    || contract.failure.is_some()
-                    || contract.is_fallback
-                    || contract.is_ffi_pinned
-                    || contract.targets.first() != Some(&contract.result)
-                {
-                    errors.push(super::MirValidationError {
-                        subject,
-                        message: "Boundary transition must be one-target, non-failing, non-fallback, non-pinned, and return that target state".into(),
-                    });
+                MirTransitionEffect::Boundary => {
+                    if contract.targets.len() != 1
+                        || contract.failure.is_some()
+                        || contract.is_fallback
+                        || contract.is_ffi_pinned
+                        || contract.targets.first() != Some(&contract.result)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject,
+                            message: "Boundary transition must be one-target, non-failing, non-fallback, non-pinned, and return that target state".into(),
+                        });
+                    }
                 }
             }
         }
@@ -3872,12 +3875,15 @@ fn validate_flow_transition_instruction(
         return;
     };
     let recoverable = contract.effect.is_recoverable();
+    // A proven multi-target union contract is its own island: the shape
+    // predicate carries the target-set proof and excludes fallback/pinned.
+    let union = super::multi_target_union_shape(contract, type_catalog);
     if (!recoverable
         && !matches!(
             contract.effect,
             MirTransitionEffect::SilentLocal | MirTransitionEffect::Boundary
         ))
-        || contract.targets.len() != 1
+        || (contract.targets.len() != 1 && !union)
         || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
         || contract.is_ffi_pinned
@@ -3904,6 +3910,7 @@ fn validate_flow_transition_instruction(
                 .map(|value| value.ty.clone())
                 .unwrap_or_else(|| contract.result.clone()),
             effect_receipt,
+            type_catalog,
         ) {
             errors.push(super::MirValidationError {
                 subject: subject.into(),
@@ -4109,6 +4116,7 @@ fn materialize_transition_contracts(
 fn attach_flow_effect_receipts(
     functions: &mut BTreeMap<NodeId, MirFunction>,
     transitions: &BTreeMap<NodeId, MirTransitionContract>,
+    type_catalog: &MirTypeCatalog,
 ) {
     for function in functions.values_mut() {
         for block in function.blocks.values_mut() {
@@ -4142,11 +4150,17 @@ fn attach_flow_effect_receipts(
                     .first()
                     .cloned()
                     .unwrap_or_else(|| contract.source.clone());
-                let target = contract
-                    .targets
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| contract.result.clone());
+                let target = if super::multi_target_union_shape(contract, type_catalog) {
+                    // A union transition has no single target state; the
+                    // receipt names the union identity itself.
+                    contract.result.clone()
+                } else {
+                    contract
+                        .targets
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| contract.result.clone())
+                };
                 *effect_receipt = Some(super::types::MirFlowEffectReceipt {
                     transition: transition.clone(),
                     source,
@@ -7344,12 +7358,13 @@ impl<'a> MirReferenceInterpreter<'a> {
                     )
                 })?;
                 let recoverable = contract.effect.is_recoverable();
+                let union = super::multi_target_union_shape(contract, self.program.type_catalog());
                 if (!recoverable
                     && !matches!(
                         contract.effect,
                         MirTransitionEffect::SilentLocal | MirTransitionEffect::Boundary
                     ))
-                    || contract.targets.len() != 1
+                    || (contract.targets.len() != 1 && !union)
                     || (!recoverable && contract.failure.is_some())
                     || contract.is_fallback
                     || contract.is_ffi_pinned
@@ -7383,6 +7398,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &argument_types,
                     &result_ty,
                     effect_receipt.as_ref(),
+                    self.program.type_catalog(),
                 )
                 .map_err(|message| self.error(&function.owner, message))?;
                 let arguments = self.take_transfer_values(function, values, arguments)?;

@@ -866,6 +866,12 @@ pub(crate) fn select_default_route(
             && materialized_generic_result_projection_fallback_candidate);
     let managed_result_call_route_candidate = complete_managed_result_call_candidate
         || (managed_result_call_hint && materialized_managed_result_call_candidate);
+    // The multi-target Flow union face is a first-class route candidate only
+    // when it fully closed onto the flat Copy native contract; the open face
+    // is vetoed to the compatibility route below.
+    let multi_target_union_route_candidate =
+        mimi::core::mir::contains_multi_target_flow_union_candidate(canonical)
+            && mimi::core::mir::multi_target_flow_union_face_closed(canonical);
     let record_route_candidate =
         complete_record_candidate || (record_hint && copy_record) || generic_route_candidate;
     let option_string_route_candidate = complete_option_string_candidate
@@ -913,6 +919,18 @@ pub(crate) fn select_default_route(
     if flow_failure_retry_hint && !materialized_flow_failure_retry_candidate {
         return DefaultMirRoute::Rejected(
             "recoverable Flow candidate did not materialize a canonical failure boundary".into(),
+        );
+    }
+    // Multi-target Flow union compatibility boundary.  A graph whose union
+    // face has not fully closed onto the flat Copy native contract keeps the
+    // explicit compatibility route: the legacy union path is still alive, and
+    // admitting the graph would hard-reject working union programs on the
+    // default entries before the non-Copy union native contract is promoted.
+    if mimi::core::mir::contains_multi_target_flow_union_candidate(canonical)
+        && !mimi::core::mir::multi_target_flow_union_face_closed(canonical)
+    {
+        return DefaultMirRoute::Legacy(
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
         );
     }
 
@@ -1020,6 +1038,7 @@ pub(crate) fn select_default_route(
         && !copy_option_f64_route_candidate
         && !copy_result_i32_route_candidate
         && !managed_result_call_route_candidate
+        && !multi_target_union_route_candidate
     {
         return DefaultMirRoute::Legacy(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
@@ -1295,6 +1314,7 @@ pub(crate) fn select_default_route(
             Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
                 &results,
                 exact_f64_flow_failure_route_candidate,
+                mimi::core::mir::contains_multi_target_flow_union_candidate(canonical),
             ),
             Err(error) => {
                 if materialized_managed_result_call_candidate {
@@ -1361,7 +1381,7 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
     }
     match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
         Ok(results)
-            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false) =>
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
             DefaultMirRoute::Canonical(program)
         }
@@ -3232,20 +3252,95 @@ mod tests {
 
     #[test]
     fn multi_target_union_transition_stays_outside_the_migrated_profile() {
-        // R6-1033 baseline: a multi-target (`-> A | B`) transition is legacy
-        // ABI territory (stable tagged union since 0.34.15) and no canonical
-        // consumer has a union-return receipt yet. The layered admission
-        // carries the FlowStateSet-typed call through the collection hint,
-        // but no island receipt materializes a candidate, so the default
-        // route keeps the program on the legacy path instead of half-
-        // lowering a FlowStateSet without a variant layout; the future
-        // union-return slice flips this pin deliberately.
+        // R6-1034 split: the flat Copy union face migrated (see
+        // flat_copy_multi_target_union_routes_canonical), but the heterogeneous
+        // face — a variant payload outside the flat Copy scalar contract — has
+        // no native tagged-union contract yet.  The compatibility veto keeps
+        // such graphs on the explicit legacy route (the union legacy path is
+        // alive) instead of admitting a half-closed face that would hard-reject
+        // working union programs on the default entries.
         let source = include_str!("../../tests/real_world/flow_multi_target_union_match.mimi");
         let (checked, file) = checked(source);
         assert!(!mimi::core::mir::is_s8_flow_transition_candidate(&checked));
         assert!(!mimi::core::mir::is_flow_failure_retry_candidate(&checked));
         let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
-            panic!("multi-target union transitions must stay outside the migrated profile");
+            panic!(
+                "heterogeneous multi-target union transitions must stay on the compatibility route"
+            );
+        };
+        assert_eq!(
+            reason,
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+        );
+    }
+
+    #[test]
+    fn flat_copy_multi_target_union_routes_canonical() {
+        // R6-1034: a multi-target (`-> Hot | Cold`) transition whose union
+        // face is flat Copy — one single-field variant payload of the same
+        // Copy scalar type across targets — materializes the union receipt,
+        // closes onto the flat Copy native contract, and passes all four
+        // consumer gates on the default route.
+        let source = include_str!("../../tests/real_world/flow_multi_target_union_copy_flat.mimi");
+        let (checked, file) = checked(source);
+        assert!(!mimi::core::mir::is_s8_flow_transition_candidate(&checked));
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("flat Copy multi-target union must route canonical");
+        };
+        assert!(mimi::core::mir::contains_multi_target_flow_union_candidate(
+            &program
+        ));
+        assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+            &program
+        ));
+        let union_transition = program
+            .transitions()
+            .values()
+            .find(|contract| contract.targets.len() > 1)
+            .expect("multi-target transition contract");
+        assert_eq!(union_transition.targets.len(), 2);
+    }
+
+    #[test]
+    fn heterogeneous_union_face_keeps_the_whole_graph_legacy() {
+        // The face-closed receipt is whole-graph: one heterogeneous union in
+        // an otherwise flat Copy program vetoes the migrated route for every
+        // face, so no consumer ever sees a half-admitted union graph.
+        let source = r#"
+            flow Gauge {
+                state Cold { v: i32 }
+                state Hot { v: i32 }
+                transition heat(Cold, delta: i32) -> Hot | Cold {
+                    if self.v + delta > 50 {
+                        return Hot { v: self.v + delta }
+                    } else {
+                        return Cold { v: self.v + delta }
+                    }
+                }
+            }
+
+            flow Bag {
+                state Full { tag: string }
+                state Empty { v: i32 }
+                transition drop_one(Full) -> Full | Empty {
+                    return Empty { v: 0 }
+                }
+            }
+
+            func main() -> i32 {
+                let g = Cold { v: 40 }
+                let next = Gauge::heat(g, 20)
+                let t = match next {
+                    Hot { v } => v
+                    Cold { v } => v
+                }
+                println(t)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+            panic!("one heterogeneous union must veto the migrated route for the whole graph");
         };
         assert_eq!(
             reason,

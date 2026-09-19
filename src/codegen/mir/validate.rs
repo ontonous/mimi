@@ -2728,18 +2728,20 @@ impl<'a> NativeMirValidator<'a> {
             return;
         };
         let recoverable = contract.effect.is_recoverable();
+        let union =
+            crate::core::mir::multi_target_union_shape(contract, self.program.type_catalog());
         if (!recoverable
             && !matches!(
                 contract.effect,
                 crate::core::mir::MirTransitionEffect::SilentLocal
                     | crate::core::mir::MirTransitionEffect::Boundary
             ))
-            || contract.targets.len() != 1
+            || (contract.targets.len() != 1 && !union)
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
             || (recoverable && contract.failure.is_none())
-            || (!recoverable && contract.targets.first() != Some(&contract.result))
+            || (!recoverable && !union && contract.targets.first() != Some(&contract.result))
         {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -2762,6 +2764,7 @@ impl<'a> NativeMirValidator<'a> {
                 &argument_types,
                 &result_ty,
                 effect_receipt,
+                self.program.type_catalog(),
             ) {
                 self.errors.push(NativeMirError::new(subject, message));
             }

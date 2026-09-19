@@ -629,6 +629,27 @@ impl<'a> CapabilityGate<'a> {
                 }
                 Ok(())
             }
+            MirLayout::Enum { variants, .. } => {
+                // Checker-materialized enum layouts (user enum type defs and
+                // the multi-target Flow union) share the flat Copy variant
+                // contract; a non-Copy tagged union has no verifier capability
+                // until its own contract is promoted.
+                if descriptor.ownership != MirOwnership::Copy {
+                    return Err(
+                        "non-Copy enum TypeDesc is outside the verifier capability: only the flat Copy variant contract is admitted"
+                            .into(),
+                    );
+                }
+                catalog.validate_flat_copy_variant(ty).map_err(|message| {
+                    format!("Copy enum TypeDesc is outside the verifier capability: {message}")
+                })?;
+                for variant in variants {
+                    for field in &variant.fields {
+                        self.validate_type(&field.ty, "variant field");
+                    }
+                }
+                Ok(())
+            }
             layout => Err(format!(
                 "layout {layout:?} is outside the verifier capability"
             )),
@@ -1559,13 +1580,15 @@ impl<'a> CapabilityGate<'a> {
             return;
         };
         let recoverable = contract.effect.is_recoverable();
+        let union =
+            crate::core::mir::multi_target_union_shape(contract, self.program.type_catalog());
         if (!recoverable
             && !matches!(
                 contract.effect,
                 crate::core::mir::MirTransitionEffect::SilentLocal
                     | crate::core::mir::MirTransitionEffect::Boundary
             ))
-            || contract.targets.len() != 1
+            || (contract.targets.len() != 1 && !union)
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
@@ -1591,6 +1614,7 @@ impl<'a> CapabilityGate<'a> {
                 &argument_types,
                 &result_ty,
                 effect_receipt,
+                self.program.type_catalog(),
             ) {
                 self.error(format!("{subject} {message}"));
             }

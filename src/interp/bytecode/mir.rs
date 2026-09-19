@@ -2526,13 +2526,15 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         let recoverable = contract.effect.is_recoverable();
+        let union =
+            crate::core::mir::multi_target_union_shape(contract, self.program.type_catalog());
         if (!recoverable
             && !matches!(
                 contract.effect,
                 crate::core::mir::MirTransitionEffect::SilentLocal
                     | crate::core::mir::MirTransitionEffect::Boundary
             ))
-            || contract.targets.len() != 1
+            || (contract.targets.len() != 1 && !union)
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
@@ -2569,6 +2571,7 @@ impl<'a> FunctionEmitter<'a> {
             &argument_types,
             &result_ty,
             effect_receipt,
+            self.program.type_catalog(),
         ) {
             self.error(message);
             return;

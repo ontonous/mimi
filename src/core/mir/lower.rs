@@ -11,7 +11,7 @@
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::core::ir::{
     CheckedConversionKind, NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee,
@@ -100,6 +100,67 @@ pub fn lower_body_with_type_catalog(
     lower_body_impl(body, Some(type_catalog), None, None)
 }
 
+/// Terminator successor blocks, mirroring the structural validator's
+/// successor extraction so reachability is computed identically.
+fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
+    match terminator {
+        MirTerminator::Goto { target, .. } => vec![target.clone()],
+        MirTerminator::Branch {
+            then_target,
+            else_target,
+            ..
+        } => vec![then_target.clone(), else_target.clone()],
+        MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+            arms.iter().map(|arm| arm.target.clone()).collect()
+        }
+        MirTerminator::Return { .. }
+        | MirTerminator::Trap { .. }
+        | MirTerminator::Fault { .. }
+        | MirTerminator::Unreachable => Vec::new(),
+    }
+}
+
+/// Values an instruction defines, mirroring the structural validator's
+/// definition sites so pruned-block definitions are tracked identically.
+fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
+    use MirInstructionKind::*;
+    match kind {
+        Const { result, .. }
+        | Load { result, .. }
+        | Copy { result, .. }
+        | Move { result, .. }
+        | Clone { result, .. }
+        | Borrow { result, .. }
+        | Project { result, .. }
+        | MoveProject { result, .. }
+        | MoveProjectDrop { result, .. }
+        | VariantProject { result, .. }
+        | VariantProjectOr { result, .. }
+        | VariantProjectMove { result, .. }
+        | Construct { result, .. }
+        | ConstructList { result, .. }
+        | ListOp { result, .. }
+        | VariantPredicate { result, .. }
+        | ConstructSet { result, .. }
+        | SetOp { result, .. }
+        | ConstructVariant { result, .. }
+        | ConstructVariantMove { result, .. }
+        | UpdateRecord { result, .. }
+        | Binary { result, .. }
+        | Unary { result, .. }
+        | FlowTransition { result, .. }
+        | BuiltinCall { result, .. }
+        | SessionCall { result, .. }
+        | Convert { result, .. } => vec![result],
+        Call { result, .. } => result
+            .as_ref()
+            .map(|result| vec![result])
+            .unwrap_or_default(),
+        SessionPairBind { lo, hi, .. } => vec![lo, hi],
+        Drop { .. } | EndBorrow { .. } | Nop => Vec::new(),
+    }
+}
+
 fn lower_body_impl(
     body: &ResolvedBody,
     type_catalog: Option<&MirTypeCatalog>,
@@ -163,7 +224,7 @@ fn lower_body_impl(
         return Err(lowerer.errors);
     }
 
-    let blocks = lowerer.finish_blocks();
+    let blocks = lowerer.finish_blocks(&entry);
     if !lowerer.errors.is_empty() {
         return Err(lowerer.errors);
     }
@@ -283,6 +344,31 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition(
     Ok(function)
 }
 
+/// The transition-body return contract passed to body lowering: recoverable
+/// transitions lower returns through the canonical Result envelope, while
+/// multi-target transitions (no `fails`) return a checker-owned FlowStateSet
+/// union whose canonical identity lives in the transition's interned
+/// signature — the checked callable's own signature result is a unit
+/// placeholder for those transitions.
+pub(crate) fn transition_lowering_result(
+    program: &crate::core::CheckedProgram,
+    owner: &NodeId,
+    callable: &crate::core::ResolvedCallable,
+) -> Option<crate::core::ResolvedTypeId> {
+    match program
+        .transitions()
+        .values()
+        .find(|transition| transition.node_id == *owner)
+    {
+        Some(transition) if transition.fails.is_some() => Some(callable.signature.result.clone()),
+        Some(transition) if transition.targets.len() > 1 => program
+            .resolved_signatures()
+            .get(&transition.node_id)
+            .map(|signature| signature.result.clone()),
+        _ => None,
+    }
+}
+
 /// Lower every checker-owned callable that has a ResolvedCallable body.
 /// Errors are aggregated so callers can report the complete migration gap in
 /// one pass instead of falling back one function at a time.
@@ -343,11 +429,12 @@ pub fn lower_program_with_type_catalog(
         if !is_concrete_callable(callable) {
             continue;
         }
-        let transition_result = program
-            .transitions()
-            .values()
-            .find(|transition| transition.node_id == *owner && transition.fails.is_some())
-            .map(|_| callable.signature.result.clone());
+        // Recoverable transitions lower their returns through the canonical
+        // Result envelope. Multi-target transitions (no `fails`) return a
+        // checker-owned FlowStateSet union, whose canonical identity lives in
+        // the transition's interned signature — the checked callable's own
+        // signature result is a unit placeholder for those transitions.
+        let transition_result = transition_lowering_result(program, owner, callable);
         match lower_callable_with_type_catalog_and_permissions_for_transition(
             callable,
             type_catalog,
@@ -7182,7 +7269,52 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn finish_blocks(&mut self) -> BTreeMap<MirBlockId, MirBlock> {
+    /// Blocks reachable from `entry` over the not-yet-finished drafts.
+    fn reachable_draft_blocks(&self, entry: &MirBlockId) -> BTreeSet<MirBlockId> {
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![entry.clone()];
+        while let Some(block_id) = pending.pop() {
+            if !reachable.insert(block_id.clone()) {
+                continue;
+            }
+            let Some(block) = self.blocks.get(&block_id) else {
+                continue;
+            };
+            if let Some(terminator) = &block.terminator {
+                pending.extend(terminator_successors(terminator));
+            }
+        }
+        reachable
+    }
+
+    fn finish_blocks(&mut self, entry: &MirBlockId) -> BTreeMap<MirBlockId, MirBlock> {
+        // Drop scaffolding blocks that provably never execute. Branching
+        // lowerers pre-create join blocks before lowering the arms, so when
+        // every arm terminates (return/fault) no branch jumps to the join.
+        // Unreachable drafts carry no observable behavior; removing them
+        // keeps the structural validator's reachability invariant without
+        // changing any reachable path.
+        let reachable = self.reachable_draft_blocks(entry);
+        self.blocks.retain(|id, _| reachable.contains(id));
+        // Values defined only by pruned drafts are dead too; the value
+        // catalog must not declare them (the validator rejects declared but
+        // never defined values). Function parameters and surviving block
+        // parameters/instruction results stay.
+        let mut defined: BTreeSet<MirValueId> = self
+            .body
+            .parameters
+            .iter()
+            .filter_map(|parameter| self.locals.get(parameter).cloned())
+            .collect();
+        for draft in self.blocks.values() {
+            for parameter in &draft.parameters {
+                defined.insert(parameter.value.clone());
+            }
+            for instruction in &draft.instructions {
+                defined.extend(instruction_results(&instruction.kind).into_iter().cloned());
+            }
+        }
+        self.values.retain(|id, _| defined.contains(id));
         let mut finished = BTreeMap::new();
         for (id, draft) in std::mem::take(&mut self.blocks) {
             let Some(terminator) = draft.terminator else {
@@ -9229,6 +9361,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_transition_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        if self.transition_result_is_multi_target_union() {
+            return self.lower_multi_target_union_return(expression);
+        }
         let value = self.lower_return_expr(expression);
         if self.transition_result.is_some() {
             self.emit_success_parameter_drops(&expression.node_id);
@@ -9236,6 +9371,256 @@ impl<'a> Lowerer<'a> {
         } else {
             value
         }
+    }
+
+    /// True when the transition result is a checker-owned multi-target Flow
+    /// state union (a FlowStateSet materialized with an Enum layout), as
+    /// opposed to a recoverable Result envelope.
+    fn transition_result_is_multi_target_union(&self) -> bool {
+        self.transition_result
+            .as_ref()
+            .and_then(|result_ty| self.type_catalog.and_then(|catalog| catalog.get(result_ty)))
+            .is_some_and(|descriptor| {
+                matches!(descriptor.layout, super::types::MirLayout::Enum { .. })
+            })
+    }
+
+    /// Lower a return site whose transition result is a multi-target Flow
+    /// state union. The receipt is a checker-owned tagged union, so the only
+    /// admitted return shape is a direct target-state record construction:
+    /// the record's state nominal selects the union variant and its payload
+    /// fields move into that variant, paired by checker field identity.
+    /// Every other shape stays fail-closed.
+    fn lower_multi_target_union_return(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        let Some(result_ty) = self.transition_result.clone() else {
+            return self.lower_return_expr(expression);
+        };
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                &expression.node_id,
+                "multi-target Flow union return requires a canonical TypeDesc catalog",
+            );
+            return self.fallback_value(expression);
+        };
+        let Some(descriptor) = catalog.get(&result_ty) else {
+            self.error(
+                &expression.node_id,
+                "multi-target Flow union return TypeDesc is absent",
+            );
+            return self.fallback_value(expression);
+        };
+        let super::types::MirLayout::Enum { nominal, variants } = &descriptor.layout else {
+            self.error(
+                &expression.node_id,
+                "multi-target Flow transition result has no canonical union layout",
+            );
+            return self.fallback_value(expression);
+        };
+        // A Copy union must be built with the non-consuming constructor; the
+        // Move form is contractually reserved for non-Copy variants.
+        let copy_union = descriptor.ownership == super::types::MirOwnership::Copy;
+        let nominal = match NominalTypeId::new(nominal.as_str().to_string()) {
+            Ok(nominal) => nominal,
+            Err(error) => {
+                self.error(&expression.node_id, error.to_string());
+                return self.fallback_value(expression);
+            }
+        };
+        let ResolvedExprKind::Record {
+            nominal: state,
+            fields,
+            rest: None,
+        } = &expression.kind
+        else {
+            // An if whose branches select target states is the other
+            // admitted return shape; the branches lower through the same
+            // union receipt (block tails dispatch back into this path).
+            if let ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } = &expression.kind
+            {
+                return self.lower_multi_target_union_if(
+                    &expression.node_id,
+                    &result_ty,
+                    condition,
+                    then_block,
+                    else_block,
+                );
+            }
+            self.error(
+                &expression.node_id,
+                "multi-target Flow union return admits only a direct target-state construction or an if selecting one",
+            );
+            return self.fallback_value(expression);
+        };
+        let state_name = state
+            .as_str()
+            .rsplit_once("::")
+            .map(|(_, name)| name)
+            .unwrap_or(state.as_str());
+        let Some(variant) = variants.iter().find(|variant| variant.name == state_name) else {
+            self.error(
+                &expression.node_id,
+                format!("multi-target Flow union has no '{state_name}' target state"),
+            );
+            return self.fallback_value(expression);
+        };
+        if fields.len() != variant.fields.len() {
+            self.error(
+                &expression.node_id,
+                format!(
+                    "state '{}' supplies {} fields but the union variant carries {}",
+                    state_name,
+                    fields.len(),
+                    variant.fields.len()
+                ),
+            );
+            return self.fallback_value(expression);
+        }
+        let variant_id = variant.id.clone();
+        let mut paired = Vec::with_capacity(fields.len());
+        for field in fields {
+            let value = self.lower_expr(&field.value);
+            let Some(target) = variant
+                .fields
+                .iter()
+                .find(|candidate| candidate.id == field.field)
+            else {
+                self.error(
+                    &field.value.node_id,
+                    "state construction field is absent from the union variant receipt",
+                );
+                return self.fallback_value(expression);
+            };
+            paired.push((target.id.clone(), value));
+        }
+        self.emit_success_parameter_drops(&expression.node_id);
+        let Some(result) = self.id("flow.union", &expression.node_id) else {
+            return self.fallback_value(expression);
+        };
+        self.insert_value(result.clone(), result_ty, &expression.node_id);
+        if copy_union {
+            self.emit(
+                &expression.node_id,
+                "flow_union",
+                MirInstructionKind::ConstructVariant {
+                    result: result.clone(),
+                    nominal,
+                    variant: variant_id,
+                    fields: paired,
+                },
+            );
+        } else {
+            self.emit(
+                &expression.node_id,
+                "flow_union",
+                MirInstructionKind::ConstructVariantMove {
+                    result: result.clone(),
+                    nominal,
+                    variant: variant_id,
+                    fields: paired,
+                },
+            );
+        }
+        result
+    }
+
+    /// Lower an if-shaped multi-target union return: each branch produces a
+    /// target-state value through the ordinary block lowering (whose tail
+    /// dispatches back into the union receipt) and the join block parameter
+    /// carries the union identity.
+    fn lower_multi_target_union_if(
+        &mut self,
+        node: &NodeId,
+        result_ty: &crate::core::ResolvedTypeId,
+        condition: &ResolvedExpr,
+        then_block: &ResolvedBlock,
+        else_block: &ResolvedBlock,
+    ) -> MirValueId {
+        let fallback = |this: &mut Self| {
+            this.fallback_value_for_type(result_ty, node)
+                .unwrap_or_else(|| this.fallback_value.clone())
+        };
+        let Some(result) = self.id("flow.union", node) else {
+            return fallback(self);
+        };
+        let Some(then_id) = self.block_id("if.union.then", node) else {
+            return fallback(self);
+        };
+        let Some(else_id) = self.block_id("if.union.else", node) else {
+            return fallback(self);
+        };
+        let Some(join_id) = self.block_id("if.union.join", node) else {
+            return fallback(self);
+        };
+        let Some(then_edge) = self.edge_id("if.union.then", node) else {
+            return fallback(self);
+        };
+        let Some(else_edge) = self.edge_id("if.union.else", node) else {
+            return fallback(self);
+        };
+        let Some(then_join_edge) = self.edge_id("if.union.then.join", node) else {
+            return fallback(self);
+        };
+        let Some(else_join_edge) = self.edge_id("if.union.else.join", node) else {
+            return fallback(self);
+        };
+
+        let condition = self.lower_expr(condition);
+        self.insert_value(result.clone(), result_ty.clone(), node);
+        self.add_block(then_id.clone(), Vec::new());
+        self.add_block(else_id.clone(), Vec::new());
+        self.add_block(
+            join_id.clone(),
+            vec![MirBlockParameter {
+                value: result.clone(),
+            }],
+        );
+        self.terminate(MirTerminator::Branch {
+            condition,
+            then_edge,
+            then_target: then_id.clone(),
+            then_arguments: Vec::new(),
+            else_edge,
+            else_target: else_id.clone(),
+            else_arguments: Vec::new(),
+        });
+
+        self.switch_to(then_id);
+        let then_value = self.lower_block_expr(then_block);
+        if !self.current_is_terminated() {
+            match then_value {
+                Some(value) => self.terminate(MirTerminator::Goto {
+                    edge: then_join_edge,
+                    target: join_id.clone(),
+                    arguments: vec![value],
+                }),
+                None => self.error(
+                    node,
+                    "multi-target Flow union if then branch has no target-state value",
+                ),
+            }
+        }
+
+        self.switch_to(else_id);
+        let else_value = self.lower_block_expr(else_block);
+        if !self.current_is_terminated() {
+            match else_value {
+                Some(value) => self.terminate(MirTerminator::Goto {
+                    edge: else_join_edge,
+                    target: join_id.clone(),
+                    arguments: vec![value],
+                }),
+                None => self.error(
+                    node,
+                    "multi-target Flow union if else branch has no target-state value",
+                ),
+            }
+        }
+        self.switch_to(join_id);
+        result
     }
 
     fn lower_switch_bindings(
@@ -9881,10 +10266,13 @@ impl<'a> Lowerer<'a> {
                 ),
             }
         }
-        block
-            .result
-            .as_deref()
-            .map(|result| self.lower_return_expr(result))
+        block.result.as_deref().map(|result| {
+            if self.transition_result_is_multi_target_union() {
+                self.lower_multi_target_union_return(result)
+            } else {
+                self.lower_return_expr(result)
+            }
+        })
     }
 
     fn fallback_value(&mut self, expression: &ResolvedExpr) -> MirValueId {

@@ -47,6 +47,12 @@ pub const MIR_VERIFIER_FLOAT_BOUNDARY_CODE: &str = "MIR-VERIFIER-FLOAT-001";
 /// verifier capability, the other describes execution definedness.
 pub const MIR_VERIFIER_FLOAT_MODEL: &str = "f64_rejected";
 
+/// Stable verifier admission identity for multi-target Flow state unions.
+/// Execution and ABI consumers accept the checker-owned Enum union receipt,
+/// but the symbolic domain has no encoding for a tagged union value yet, so
+/// these transitions stay outside the trusted MIR verifier subset.
+pub const MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE: &str = "MIR-VERIFIER-FLOW-UNION-001";
+
 /// Build the one stable diagnostic used when a canonical contract reaches a
 /// floating-point TypeDesc that the MIR verifier cannot soundly encode.
 pub fn verifier_float_boundary_message(ty: &ResolvedTypeId, abi: MirAbiClass) -> String {
@@ -2395,6 +2401,118 @@ impl MirTypeCatalog {
     pub fn from_checked_program(program: &CheckedProgram) -> Result<Self, Vec<String>> {
         let mut catalog = Self::from_resolved_types(program.resolved_types())?;
         let mut errors = Vec::new();
+        // Multi-target Flow union receipt: a FlowStateSet is materialized as a
+        // closed Enum layout whose variants are the transition's target states
+        // in the set's canonical (name-sorted) order — the same discriminant
+        // order the legacy synthetic `flow::{Flow}::__MultiTarget` union uses.
+        // Payload fields come from the checker-owned state payload receipt;
+        // any missing piece is a fail-closed catalog error, never a Handle
+        // fallback.
+        for (id, ty) in program.resolved_types().iter() {
+            let ResolvedType::FlowStateSet { flow, states } = ty else {
+                continue;
+            };
+            let flow_name = flow.as_str().trim_start_matches("flow:");
+            let flow_id = crate::core::FlowId(flow_name.to_string());
+            let Some(resolved_flow) = program.flows().get(&flow_id) else {
+                errors.push(format!(
+                    "flow state set '{}' references flow '{}' absent from the program",
+                    id.as_str(),
+                    flow_name
+                ));
+                continue;
+            };
+            let mut variants = Vec::with_capacity(states.len());
+            let mut ownership = MirOwnership::Copy;
+            let mut layout_complete = true;
+            for (discriminant, state) in states.iter().enumerate() {
+                let state_name = state
+                    .as_str()
+                    .rsplit_once("::")
+                    .map(|(_, name)| name)
+                    .unwrap_or(state.as_str());
+                let Some(discriminant) = u16::try_from(discriminant).ok() else {
+                    errors.push(format!(
+                        "flow state set '{}' has more than {} variants",
+                        id.as_str(),
+                        u16::MAX
+                    ));
+                    continue;
+                };
+                let Some(resolved_state) = resolved_flow.states.get(state_name) else {
+                    errors.push(format!(
+                        "flow state set '{}' references state '{}' absent from flow '{}'",
+                        id.as_str(),
+                        state_name,
+                        flow_name
+                    ));
+                    layout_complete = false;
+                    continue;
+                };
+                let mut fields = Vec::with_capacity(resolved_state.payload.len());
+                for (field_name, _) in &resolved_state.payload {
+                    let Some(field_id) = resolved_state.field_ids.get(field_name) else {
+                        errors.push(format!(
+                            "flow state '{}'::{} payload field '{}' has no stable identity",
+                            flow_name, state_name, field_name
+                        ));
+                        layout_complete = false;
+                        continue;
+                    };
+                    let Some(field_ty) = program.resolved_state_field_types().get(field_id) else {
+                        errors.push(format!(
+                            "flow state '{}'::{} payload field '{}' has no canonical resolved type",
+                            flow_name, state_name, field_name
+                        ));
+                        layout_complete = false;
+                        continue;
+                    };
+                    let Some(field_descriptor) = catalog.get(field_ty) else {
+                        errors.push(format!(
+                            "flow state '{}'::{} payload field '{}' references a type absent from MIR catalog",
+                            flow_name, state_name, field_name
+                        ));
+                        layout_complete = false;
+                        continue;
+                    };
+                    ownership = combine_ownership(ownership, field_descriptor.ownership);
+                    fields.push(MirFieldDesc {
+                        id: field_id.clone(),
+                        name: field_name.clone(),
+                        ty: field_ty.clone(),
+                    });
+                }
+                variants.push(MirVariantDesc {
+                    id: resolved_state.node_id.clone(),
+                    name: state_name.to_string(),
+                    discriminant,
+                    fields,
+                });
+            }
+            if !layout_complete {
+                continue;
+            }
+            let nominal = match NominalTypeId::new(format!("flow::{flow_name}::__MultiTarget")) {
+                Ok(nominal) => nominal,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    continue;
+                }
+            };
+            let Some(descriptor) = catalog.entries.get_mut(id) else {
+                errors.push(format!(
+                    "flow state set '{}' has no MIR TypeDesc entry",
+                    id.as_str()
+                ));
+                continue;
+            };
+            descriptor.abi = MirAbiClass::Aggregate;
+            descriptor.ownership = ownership;
+            descriptor.needs_drop_glue = ownership.needs_drop();
+            descriptor.needs_clone_glue = ownership.needs_clone();
+            descriptor.glue = MirGlueContract::for_type(&descriptor.kind, ownership);
+            descriptor.layout = MirLayout::Enum { nominal, variants };
+        }
         for (id, ty) in program.resolved_types().iter() {
             let ResolvedType::Nominal {
                 item, arguments, ..
@@ -2911,7 +3029,16 @@ impl MirTypeCatalog {
         let is_builtin =
             descriptor.kind == MirTypeKind::Option || descriptor.kind == MirTypeKind::Result;
         let is_user_enum = matches!(descriptor.layout, MirLayout::Enum { .. });
-        if !is_builtin && !(is_user_enum && descriptor.kind == MirTypeKind::Nominal) {
+        // Nominal covers checker-materialized user enum type defs;
+        // FlowStateSet covers the checker-owned multi-target Flow union the
+        // checker materializes for `-> A | B` transitions.  Both share the
+        // same flat Copy ABI once this contract proves the payload shape.
+        let user_enum_kind_admitted = is_user_enum
+            && matches!(
+                descriptor.kind,
+                MirTypeKind::Nominal | MirTypeKind::FlowStateSet
+            );
+        if !is_builtin && !user_enum_kind_admitted {
             return Err(format!(
                 "variant TypeDesc '{}' kind {:?} is outside the flat Copy variant contract",
                 ty.as_str(),

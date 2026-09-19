@@ -143,28 +143,30 @@ pub fn verify_mir_with_route_manifest(
 
 /// Decide whether verifier observations are compatible with an execution
 /// route.  This is not a proof verdict: `NotInTrustedSubset` remains visible
-/// to callers and is only tolerated for the one recoverable Flow/f64 boundary
-/// whose native and bytecode consumers have an executable MIR contract.
+/// to callers and is only tolerated for the two runtime-only boundaries whose
+/// native and bytecode consumers have an executable MIR contract — the
+/// recoverable Flow/f64 island and the multi-target Flow union face.
 pub fn canonical_execution_route_verifier_ready(
     results: &[VerificationResult],
     allow_recoverable_float_boundary: bool,
+    allow_flow_union_boundary: bool,
 ) -> bool {
-    let runtime_only_float_boundary = allow_recoverable_float_boundary
-        && results.iter().any(|result| {
-            result.status == VerifStatus::NotInTrustedSubset
+    let runtime_only_boundary = |result: &VerificationResult| {
+        result.status == VerifStatus::NotInTrustedSubset
+            && ((allow_recoverable_float_boundary
                 && result
                     .message
-                    .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE)
-        });
+                    .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE))
+                || (allow_flow_union_boundary
+                    && result
+                        .message
+                        .contains(crate::core::mir::types::MIR_VERIFIER_FLOW_UNION_BOUNDARY_CODE)))
+    };
     results.iter().all(|result| {
         matches!(
             result.status,
             VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
-        ) || (runtime_only_float_boundary
-            && result.status == VerifStatus::NotInTrustedSubset
-            && result
-                .message
-                .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE))
+        ) || runtime_only_boundary(result)
     })
 }
 

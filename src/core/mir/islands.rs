@@ -3375,6 +3375,37 @@ pub fn contains_flow_failure_retry_candidate(program: &MirProgram) -> bool {
     })
 }
 
+/// Materialization receipt for the multi-target Flow union face (`-> A | B`).
+/// A graph carrying this receipt has the checker-owned tagged-union return
+/// materialized; the route layer still decides whether the face closed onto
+/// the executable native contract via [`multi_target_flow_union_face_closed`].
+pub fn contains_multi_target_flow_union_candidate(program: &MirProgram) -> bool {
+    program.transitions().values().any(|contract| {
+        contract.targets.len() > 1 && !contract.is_fallback && !contract.is_ffi_pinned
+    })
+}
+
+/// Whether every multi-target Flow union in the graph carries the flat Copy
+/// variant contract admitted by all four consumers (bytecode, native, the
+/// capability gate and the symbolic verifier boundary).  A graph whose union
+/// face is not fully closed keeps the explicit compatibility route; admitting
+/// it would hard-reject working legacy union programs on the default entries.
+pub fn multi_target_flow_union_face_closed(program: &MirProgram) -> bool {
+    program
+        .transitions()
+        .values()
+        .filter(|contract| {
+            contract.targets.len() > 1 && !contract.is_fallback && !contract.is_ffi_pinned
+        })
+        .all(|contract| {
+            super::multi_target_union_shape(contract, program.type_catalog())
+                && program
+                    .type_catalog()
+                    .validate_flat_copy_variant(&contract.result)
+                    .is_ok()
+        })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR

@@ -1211,6 +1211,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !crate::verifier::canonical_execution_route_verifier_ready(
             &results,
             crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
+            crate::core::mir::contains_multi_target_flow_union_candidate(&canonical),
         ) {
             return Err(vec![crate::diagnostic::Diagnostic::error_code(
                 "MIR-VERIFY-001",
