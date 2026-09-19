@@ -2716,6 +2716,11 @@ impl<'a> FunctionEmitter<'a> {
             MirConversionKind::ScalarIdentity | MirConversionKind::SignedI32ToI64 => {
                 Op::Mov { rd, rs: ra }
             }
+            // The VM carries integer payloads in one unified i64 slot, so the
+            // int source needs no widening op before the float promotion.
+            MirConversionKind::SignedI32ToFloat64 | MirConversionKind::SignedI64ToFloat64 => {
+                Op::IntToFloat { rd, ra }
+            }
             MirConversionKind::Float64ToFloat32 => Op::FloatNarrow { rd, ra },
         };
         self.proto.emit(opcode);

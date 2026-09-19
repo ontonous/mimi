@@ -714,6 +714,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             .map(BasicValueEnum::from)
                             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                     }
+                    MirConversionKind::SignedI32ToFloat64
+                    | MirConversionKind::SignedI64ToFloat64 => {
+                        let source = source_value.into_int_value();
+                        self.generator
+                            .builder
+                            .build_signed_int_to_float(
+                                source,
+                                self.generator.context.f64_type(),
+                                "mir_int_to_f64",
+                            )
+                            .map(BasicValueEnum::from)
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    }
                     MirConversionKind::Float64ToFloat32 => {
                         let source = source_value.into_float_value();
                         self.generator

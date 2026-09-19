@@ -7355,13 +7355,12 @@ impl<'a> Lowerer<'a> {
     /// re-recording the operand identity, so the narrower operand keeps its
     /// stale pre-coercion TypeDesc and the canonical binary contract — which
     /// requires operand identity equality — fail-closes the whole program at
-    /// the capability gate.  Materialize the signed i32 -> i64 widening as an
-    /// explicit Convert; this is exactly the pair the canonical conversion
-    /// contract admits (`MirConversionContract::accepted_description`), so
-    /// every other mixed identity — including the checker's float-widening
-    /// pairs, which the conversion contract does not admit yet — stays
-    /// fail-closed by design.
-    fn materialize_signed_binary_widening(
+    /// the capability gate.  Materialize the admitted conversions (`signed
+    /// i32 -> i64` and `(i32|i64) -> f64`) as explicit Convert instructions;
+    /// this is exactly the domain the canonical conversion contract admits
+    /// (`MirConversionContract::accepted_description`), so every other mixed
+    /// identity stays fail-closed by design.
+    fn materialize_numeric_binary_widening(
         &mut self,
         node_id: &NodeId,
         left: MirValueId,
@@ -7391,10 +7390,19 @@ impl<'a> Lowerer<'a> {
             bits: 64,
             signed: true,
         };
+        let float64 = super::types::MirAbiClass::Float { bits: 64 };
+        let int_widenable =
+            |abi: &super::types::MirAbiClass| *abi == signed_i32 || *abi == signed_i64;
         if right_desc.abi == signed_i32 && left_desc.abi == signed_i64 {
             let converted = self.widen_binary_operand(node_id, right, left_ty);
             (left, converted)
         } else if left_desc.abi == signed_i32 && right_desc.abi == signed_i64 {
+            let converted = self.widen_binary_operand(node_id, left, right_ty);
+            (converted, right)
+        } else if int_widenable(&right_desc.abi) && left_desc.abi == float64 {
+            let converted = self.widen_binary_operand(node_id, right, left_ty);
+            (left, converted)
+        } else if int_widenable(&left_desc.abi) && right_desc.abi == float64 {
             let converted = self.widen_binary_operand(node_id, left, right_ty);
             (converted, right)
         } else {
@@ -8103,7 +8111,7 @@ impl<'a> Lowerer<'a> {
                 let left = self.lower_expr(left);
                 let right = self.lower_expr(right);
                 let (left, right) =
-                    self.materialize_signed_binary_widening(&expression.node_id, left, right);
+                    self.materialize_numeric_binary_widening(&expression.node_id, left, right);
                 self.emit(
                     &expression.node_id,
                     "binary",

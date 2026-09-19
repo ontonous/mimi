@@ -5694,6 +5694,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                             ))
                         }
                     },
+                    super::types::MirConversionKind::SignedI32ToFloat64
+                    | super::types::MirConversionKind::SignedI64ToFloat64 => match value {
+                        MirRuntimeValue::Int(value) => {
+                            MirRuntimeValue::FloatBits((value as f64).to_bits())
+                        }
+                        _ => {
+                            return Err(self.error(
+                                &function.owner,
+                                format!(
+                                    "conversion '{}' received an incompatible runtime value",
+                                    contract.name
+                                ),
+                            ))
+                        }
+                    },
                     super::types::MirConversionKind::Float64ToFloat32 => match value {
                         MirRuntimeValue::FloatBits(bits) => MirRuntimeValue::FloatBits(
                             ((f64::from_bits(bits) as f32) as f64).to_bits(),
@@ -9752,20 +9767,21 @@ mod tests {
     }
 
     #[test]
-    fn canonical_i32_to_f64_conversion_rejects_before_any_backend() {
+    fn canonical_i32_to_f64_conversion_executes_on_the_reference_oracle() {
+        // R6-1043: the conversion contract admits signed (i32|i64) -> f64
+        // (IEEE-754 round-to-nearest-even), so the surface cast materializes
+        // as a Convert and the reference executor must produce the exact
+        // widened value instead of rejecting the program.
         let source = "func main() -> f64 { let value: i32 = 7; value as f64 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("i32 to f64 remains outside the canonical conversion contract");
-        match error {
-            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
-                error.message.contains("conversion")
-                    && error.message.contains("accepted: same Copy scalar type")
-            })),
-            other => panic!("unsupported conversion escaped the validator: {other:?}"),
-        }
+        let program =
+            MirProgram::from_checked_program(&checked).expect("i32 to f64 is in the contract");
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference execution of the widened cast");
+        assert_eq!(value, MirRuntimeValue::FloatBits(7.0_f64.to_bits()));
     }
 
     #[test]

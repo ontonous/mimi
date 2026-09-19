@@ -9,8 +9,15 @@
 //! tagged-union contract is promoted; the route layer keeps such graphs on the
 //! compatibility route.
 
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
-use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+use crate::core::mir::reference::{
+    MirProgram, MirReferenceFfiResolver, MirReferenceInterpreter, MirRuntimeValue,
+};
+use crate::core::mir::MirFfiCallContract;
 use crate::core::{NodeId, ResolvedTypeId};
 use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
 use crate::interp::Value;
@@ -32,6 +39,46 @@ fn materialize(source: &str, label: &str) -> MirProgram {
         .unwrap_or_else(|diags| panic!("check {label}: {diags:?}"));
     MirProgram::from_checked_program(&checked)
         .unwrap_or_else(|error| panic!("materialize {label}: {error:?}"))
+}
+
+/// Test-owned C ABI fixture for the float-conversion pins: compiles the
+/// helper source into a real shared object the bytecode VM loads through
+/// `MIMI_FFI_LIB` and the native harness links statically.
+struct FloatFfiFixture {
+    dir: PathBuf,
+}
+
+impl Drop for FloatFfiFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+static FLOAT_FFI_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn float_ffi_fixture(counter: u64, c_source: &str) -> FloatFfiFixture {
+    let fixture_id = FLOAT_FFI_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-flow-union-float-ffi-{}-{counter}-{fixture_id}",
+        std::process::id(),
+    ));
+    std::fs::create_dir_all(&dir).expect("create float FFI fixture directory");
+    let c_path = dir.join("ffi.c");
+    let library = dir.join("ffi.so");
+    std::fs::write(&c_path, c_source).expect("write float FFI fixture C source");
+    let cc = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("C compiler for float FFI fixture");
+    assert!(
+        cc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    FloatFfiFixture { dir }
 }
 
 fn flow_union_instruction_mut(
@@ -286,15 +333,121 @@ fn three_target_union_mixed_width_operands_execute_on_all_consumers() {
 }
 
 #[test]
-fn binary_float_widening_stays_outside_the_canonical_binary_contract() {
-    // Known boundary (honest fail-closed, NOT a promotion): the checker
-    // legalizes int-vs-float comparisons through the (f64,i64)/(f64,i32)
-    // numeric-coercion pairs, but the canonical conversion contract admits
-    // only signed i32 -> i64 widening (plus f64 -> f32) between Copy
-    // scalars, so a float-widening binary operand keeps its stale identity
-    // and the capability gate must keep rejecting the whole program rather
-    // than silently comparing across widths.  Widening this face requires
-    // extending MirConversionContract together with all five consumers.
+fn binary_float_widening_closes_onto_the_canonical_contract() {
+    // R6-1043: the checker legalizes int-vs-float arithmetic through the
+    // (f64,i64)/(f64,i32) numeric-coercion pairs, and the canonical
+    // conversion contract now admits signed (i32|i64) -> f64 widening, so
+    // the narrower operand materializes as an explicit Convert inside both
+    // the transition body and main.  The f64 result is observed bit-honestly
+    // through a real C ABI boundary (x == 7.5 ? 42 : -1) on all three
+    // consumers — this flips the R6-1042 known-boundary negative pin.  The
+    // float *comparison* face stays fail-closed and is pinned separately
+    // below.
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_expect_f64(double x) { return x == 7.5 ? 42 : -1; }
+"#;
+    const SOURCE: &str = r#"
+        extern "C" { func mir_ffi_expect_f64(x: f64) -> i64; }
+
+        flow F {
+            state S { v: i64 }
+            transition go(S) -> S | Fault {
+                let widened = self.v + 0.5
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 7 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+            }
+            let observed = mir_ffi_expect_f64(v + 0.5)
+            println(observed)
+            0
+        }
+    "#;
+    const EXPECTED: &str = "42\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = float_ffi_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let mir = materialize(SOURCE, "float-widening union fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(
+        crate::core::mir::multi_target_flow_union_face_closed(&mir),
+        "a float-widening binary operand must not reopen the union face"
+    );
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("mir_ffi_expect_f64", [MirRuntimeValue::FloatBits(bits)]) => {
+                    let matched = f64::from_bits(*bits) == 7.5;
+                    Ok(MirRuntimeValue::Int(if matched { 42 } else { -1 }))
+                }
+                _ => Err("unexpected float-widening FFI call".into()),
+            }
+        }
+    }
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor float-widening union");
+    assert_eq!(reference.output, EXPECTED);
+
+    let bytecode = compile_mir_program(&mir).expect("float-widening union bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(vm.run_value().is_ok(), "bytecode float-widening union runs");
+    assert_eq!(vm.stdout(), EXPECTED);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_float_widening");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native float-widening union emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM float-widening union module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native union execution against the C fixture");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, EXPECTED);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn binary_float_comparison_stays_outside_the_canonical_binary_contract() {
+    // R6-1043 restatement of the R6-1042 negative pin.  The conversion
+    // contract now admits signed (i32|i64) -> f64, so the int operand
+    // materializes as an explicit Convert and the old stale-identity
+    // rejection is gone — but the float comparison itself is still outside
+    // the canonical finite-only Copy f64 binary contract (Add/Subtract
+    // only), so the capability gate must keep rejecting the program with
+    // the operator rejection.  Widening this face is a separate contract
+    // extension (all consumers plus the SD-9/SD-10 comparison semantics),
+    // not part of the conversion domain.
     let source = r#"
         flow F {
             state S { v: i64 }
@@ -317,12 +470,221 @@ fn binary_float_widening_stays_outside_the_canonical_binary_contract() {
             0
         }
     "#;
-    let mir = materialize(source, "float-widening boundary fixture");
+    let mir = materialize(source, "float-comparison boundary fixture");
     let capability_error = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("capability gate must keep rejecting mixed float-width binary operands");
-    assert!(capability_error
-        .iter()
-        .any(|error| error.contains("binary operands have different TypeDesc identities")));
+        .expect_err("capability gate must keep rejecting float comparisons");
+    assert!(
+        capability_error.iter().any(|error| error.contains(
+            "float binary operator Greater is outside the canonical finite-only Copy f64 contract"
+        )),
+        "the rejection must name the float operator, not a stale operand identity: {capability_error:?}"
+    );
+    assert!(
+        !capability_error
+            .iter()
+            .any(|error| error.contains("binary operands have different TypeDesc identities")),
+        "the int->f64 conversion must have materialized: {capability_error:?}"
+    );
+}
+
+#[test]
+fn integer_float_call_argument_receipt_executes_on_all_consumers() {
+    // R6-1043: the call-argument NumericWiden receipt (R6-1041) covers the
+    // checker's float-widening pairs too, so the integer literal argument to
+    // an f64 parameter materializes as an Int->Float64 Convert at the call
+    // site inside main, flows through the identity function, and is observed
+    // through a real C ABI boundary (x == 2.0 ? 42 : -1) on all three
+    // consumers.
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_expect_scaled(double x) { return x == 2.0 ? 42 : -1; }
+"#;
+    const SOURCE: &str = r#"
+        extern "C" { func mir_ffi_expect_scaled(x: f64) -> i64; }
+
+        func scaled(x: f64) -> f64 {
+            x
+        }
+
+        flow F {
+            state S { v: i64 }
+            state Big { w: i64 }
+            transition go(S) -> S | Big | Fault {
+                if 100 < self.v {
+                    let bumped = self.v + 1
+                    return Big { w: bumped }
+                }
+                return S { v: self.v }
+            }
+        }
+
+        func main() -> i64 {
+            let s = S { v: 150 }
+            let r = F::go(s)
+            let v = match r {
+                S { v } => v
+                Big { w } => w
+                Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+            }
+            println(mir_ffi_expect_scaled(scaled(2)))
+            0
+        }
+    "#;
+    const EXPECTED: &str = "42\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = float_ffi_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let mir = materialize(SOURCE, "int-to-float call argument fixture");
+    assert!(crate::core::mir::contains_multi_target_flow_union_candidate(&mir));
+    assert!(crate::core::mir::multi_target_flow_union_face_closed(&mir));
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("mir_ffi_expect_scaled", [MirRuntimeValue::FloatBits(bits)]) => {
+                    let matched = f64::from_bits(*bits) == 2.0;
+                    Ok(MirRuntimeValue::Int(if matched { 42 } else { -1 }))
+                }
+                _ => Err("unexpected int-to-float call argument FFI call".into()),
+            }
+        }
+    }
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor int-to-float call argument");
+    assert_eq!(reference.output, EXPECTED);
+
+    let bytecode = compile_mir_program(&mir).expect("int-to-float call argument bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(
+        vm.run_value().is_ok(),
+        "bytecode int-to-float call argument runs"
+    );
+    assert_eq!(vm.stdout(), EXPECTED);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_int_float_call");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native int-to-float call argument emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM int-to-float call argument module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native union execution against the C fixture");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, EXPECTED);
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
+fn i64_f64_conversion_rounds_to_nearest_even_on_all_consumers() {
+    // Aggressive differential: 2^53 + 1 is not representable in f64 and
+    // IEEE-754 round-to-nearest-even maps it exactly onto 2^53
+    // (bit pattern 0x4330000000000000).  The C ABI helper pins the exact
+    // bit pattern, so a consumer that compared exactly, truncated,
+    // narrowed, or widened differently would return -1 instead of 42 —
+    // the printed value pins which consumer disagreed.
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_probe_f64_bits(double x) {
+    union { double d; uint64_t u; } payload = { .d = x };
+    return payload.u == 0x4340000000000000ULL ? 42 : -1;
+}
+"#;
+    const SOURCE: &str = r#"
+        extern "C" { func mir_ffi_probe_f64_bits(x: f64) -> i64; }
+
+        func main() -> i64 {
+            let big: i64 = 9007199254740993
+            let widened = big + 0.0
+            println(mir_ffi_probe_f64_bits(widened))
+            0
+        }
+    "#;
+    const EXPECTED: &str = "42\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = float_ffi_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let mir = materialize(SOURCE, "i64-to-f64 rounding fixture");
+    assert!(crate::verifier::validate_mir_capabilities(&mir).is_ok());
+
+    struct Oracle;
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("mir_ffi_probe_f64_bits", [MirRuntimeValue::FloatBits(bits)]) => {
+                    let matched = *bits == 9007199254740992.0_f64.to_bits();
+                    Ok(MirRuntimeValue::Int(if matched { 42 } else { -1 }))
+                }
+                _ => Err("unexpected i64-to-f64 rounding FFI call".into()),
+            }
+        }
+    }
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&Oracle)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("reference executor i64-to-f64 rounding");
+    assert_eq!(
+        reference.output, EXPECTED,
+        "round-to-nearest-even must land on exactly 2^53"
+    );
+
+    let bytecode = compile_mir_program(&mir).expect("i64-to-f64 rounding bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(vm.run_value().is_ok(), "bytecode i64-to-f64 rounding runs");
+    assert_eq!(vm.stdout(), EXPECTED);
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_flow_union_i64_f64_rounding");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native i64-to-f64 rounding emission");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM i64-to-f64 rounding module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native execution against the C fixture");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, EXPECTED);
+    assert_eq!(native.stderr, "");
 }
 
 #[test]

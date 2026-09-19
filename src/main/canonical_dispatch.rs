@@ -3573,6 +3573,49 @@ mod tests {
     }
 
     #[test]
+    fn binary_float_widening_routes_canonical() {
+        // R6-1043: the checker's float-widening coercion pairs
+        // ((f64,i32)/(f64,i64)) materialize as Int->Float64 Convert once the
+        // canonical conversion contract admits them, so a float-widening
+        // arithmetic operand inside a union transition must route canonical
+        // instead of hard-rejecting the default entry (the R6-1042 known
+        // boundary).  The float comparison face stays fail-closed and is
+        // pinned separately in the capability suite.
+        let source = r#"
+            flow F {
+                state S { v: i64 }
+                transition go(S) -> S | Fault {
+                    let widened = self.v + 0.5
+                    return S { v: self.v }
+                }
+            }
+
+            func main() -> i64 {
+                let s = S { v: 7 }
+                let r = F::go(s)
+                let v = match r {
+                    S { v } => v
+                    Fault { last_state: _, unexpected_event: _, snapshot: _, trace: _ } => 0 as i64
+                }
+                println(v)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Canonical(program) = route else {
+            panic!("a float-widening binary operand must route canonical: {route:?}");
+        };
+        assert!(mimi::core::mir::contains_multi_target_flow_union_candidate(
+            &program
+        ));
+        assert!(mimi::core::mir::multi_target_flow_union_face_closed(
+            &program
+        ));
+        assert!(mimi::verifier::validate_mir_capabilities(&program).is_ok());
+    }
+
+    #[test]
     fn out_of_contract_union_is_checker_rejected_before_route_selection() {
         // R6-1039: user-declared out-of-contract union payload shapes are
         // rejected by the checker (E0446) at the declaration site, so

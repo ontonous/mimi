@@ -768,6 +768,8 @@ impl<'a> NativeMirValidator<'a> {
                             contract.kind,
                             MirConversionKind::ScalarIdentity
                                 | MirConversionKind::SignedI32ToI64
+                                | MirConversionKind::SignedI32ToFloat64
+                                | MirConversionKind::SignedI64ToFloat64
                                 | MirConversionKind::Float64ToFloat32
                         ) {
                             self.errors.push(NativeMirError::new(

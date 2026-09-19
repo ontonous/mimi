@@ -2231,6 +2231,20 @@ fn eval_instruction(
                         ));
                     }
                 },
+                crate::core::mir::types::MirConversionKind::SignedI32ToFloat64
+                | crate::core::mir::types::MirConversionKind::SignedI64ToFloat64 => match value {
+                    // The verifier's symbolic domain deliberately has no
+                    // IEEE float sort (SD-9 finite-only boundary), so the
+                    // widened payload becomes opaque with the f64 identity.
+                    SymbolicValue::Int(_) => SymbolicValue::Opaque { ty: result_ty },
+                    SymbolicValue::Opaque { .. } => SymbolicValue::Opaque { ty: result_ty },
+                    _ => {
+                        return Err(format!(
+                            "MIR conversion '{}' received a non-integer symbolic value",
+                            contract.name
+                        ));
+                    }
+                },
                 crate::core::mir::types::MirConversionKind::Float64ToFloat32 => match value {
                     SymbolicValue::Opaque { .. } => SymbolicValue::Opaque { ty: result_ty },
                     _ => {
