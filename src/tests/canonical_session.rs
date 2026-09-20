@@ -253,10 +253,13 @@ fn actor_handle_without_canonical_glue_fails_closed_at_materialization() {
 
 // R6-1049 opened the root-level scalar-assign face (Identity/NumericWiden
 // into an i32/i64/bool local), so plain reassignments lower explicitly.
-// The face boundary that MUST stay fail-closed is everything else: assigns
-// inside nested blocks (no merge lowering yet) and targets outside the
-// admitted scalar ABI (f64 has no differential proof).  Each residual shape
-// keeps an explicit lowering rejection — never a silently dropped assignment.
+// R6-1057 widened the face with the Copy f64 target, so plain float
+// reassignments materialize too (differential-pinned in
+// canonical_float_bind.rs).  The residual boundary that MUST stay
+// fail-closed is assigns inside nested blocks (no merge lowering yet);
+// projected/aggregate targets are kept out by the same ABI gate.  The
+// residual shape keeps an explicit lowering rejection — never a silently
+// dropped assignment.
 #[test]
 fn assign_statement_boundary_stays_fail_closed_in_mir_phase_0() {
     let nested = r#"
@@ -281,30 +284,6 @@ fn assign_statement_boundary_stays_fail_closed_in_mir_phase_0() {
     assert!(
         messages.contains("assign inside a nested block"),
         "the rejection must name the nested-block assign boundary: {messages}"
-    );
-
-    let float_target = r#"
-        func main() -> i32 {
-            let mut acc = 0.5
-            acc = 1.5
-            println(acc)
-            0
-        }
-    "#;
-    let tokens = crate::lexer::Lexer::new(float_target)
-        .tokenize()
-        .expect("lex");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("parse");
-    let checked = crate::core::check_program(&file)
-        .unwrap_or_else(|diags| panic!("check float assign: {diags:?}"));
-    let error = MirProgram::from_checked_program(&checked)
-        .expect_err("assign targets outside the scalar ABI must fail lowering explicitly");
-    let messages = format!("{error:?}");
-    assert!(
-        messages.contains("assign target type is outside the MIR Phase 0 scalar-assign face"),
-        "the rejection must name the scalar-assign face boundary: {messages}"
     );
 }
 

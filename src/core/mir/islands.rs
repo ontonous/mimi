@@ -1016,22 +1016,24 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     }
                 }
                 ResolvedStmtKind::Assign { value, .. } => {
-                    // R6-1054/R6-1055: float and owned-String assign targets
-                    // are outside the MIR Phase 0 scalar-assign face
+                    // R6-1055: owned-String assign targets are outside the
+                    // MIR Phase 0 scalar-assign face
                     // (`resolved_assign_is_admitted_scalar_shape` admits
-                    // I32/I64/Bool only; the lowerer fails construction on
-                    // the rest), so the graph must stay mixed instead of
-                    // luring the canonical route into a construction
-                    // failure.  This floor is defense-in-depth beside the
-                    // unmigrated-shape check: the print-face literal
-                    // exemption below lets a literal RHS pass visit_expr
-                    // untouched, so the classification scanner must not
-                    // depend on another pass to hold the shape closed.
+                    // I32/I64/Bool/F64 since R6-1057; the lowerer fails
+                    // construction on the rest), so the graph must stay
+                    // mixed instead of luring the canonical route into a
+                    // construction failure.  This floor is defense-in-depth
+                    // beside the unmigrated-shape check: the print-face
+                    // literal exemption below lets a literal RHS pass
+                    // visit_expr untouched, so the classification scanner
+                    // must not depend on another pass to hold the shape
+                    // closed.  The former f64 half of this floor flipped
+                    // with the face widening: float assigns are now a
+                    // migrated shape, classified through the normal visit.
                     if concrete
                         && matches!(
                             self.program.resolved_types().get(&value.ty),
-                            Some(ResolvedType::Primitive(PrimitiveType::F64))
-                                | Some(ResolvedType::Primitive(PrimitiveType::String))
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
                         )
                     {
                         self.mixed = true;
@@ -1252,9 +1254,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 // StringHandle and f64 print faces) are Canonical MIR
                 // nodes here. Other println shapes (aggregate, multi-arg)
                 // remain on the explicit mixed compatibility route; float
-                // arithmetic and float assigns keep their own mixed floors
-                // (Binary operand recheck; the Assign statement arm) until
-                // their contracts are independently materialized.
+                // arithmetic keeps its Binary operand mixed floor until its
+                // contract is independently materialized (R6-1057 migrated
+                // the float assign face, so assigns no longer floor here).
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
@@ -2752,15 +2754,16 @@ fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) 
     })
 }
 
-/// The MIR Phase 0 scalar-assign face (R6-1049): a direct local target with
-/// no projections, an Identity or NumericWiden conversion receipt into a
-/// signed 32/64-bit integer or bool, and nothing else.  Island classifiers
-/// must consult this exact predicate before treating an Assign statement as
-/// unmigrated shape, so admission can never disagree with what construction
-/// accepts: a construction-capability widening that outruns its classifier
-/// turns working compatibility programs into hard route rejections (the
-/// R6-1048 parity lesson).  The lowering side enforces the same face against
-/// the target local's materialized ABI class.
+/// The MIR Phase 0 scalar-assign face (R6-1049; R6-1057 adds the Copy f64
+/// target): a direct local target with no projections, an Identity or
+/// NumericWiden conversion receipt into a signed 32/64-bit integer, bool, or
+/// 64-bit float, and nothing else.  Island classifiers must consult this
+/// exact predicate before treating an Assign statement as unmigrated shape,
+/// so admission can never disagree with what construction accepts: a
+/// construction-capability widening that outruns its classifier turns
+/// working compatibility programs into hard route rejections (the R6-1048
+/// parity lesson).  The lowering side enforces the same face against the
+/// target local's materialized ABI class.
 pub(crate) fn resolved_assign_is_admitted_scalar_shape(
     program: &CheckedProgram,
     statement: &crate::core::ir::ResolvedStmt,
@@ -2784,7 +2787,7 @@ pub(crate) fn resolved_assign_is_admitted_scalar_shape(
     matches!(
         program.resolved_types().get(&conversion.to),
         Some(ResolvedType::Primitive(
-            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool | PrimitiveType::F64
         ))
     )
 }
@@ -4792,8 +4795,18 @@ impl<'a> ScalarCollectionValidator<'a> {
     }
 
     fn require_copy_scalar(&mut self, ty: &crate::core::ResolvedTypeId, subject: &str, role: &str) {
-        if let Err(message) = self.program.type_catalog().validate_copy_scalar(ty) {
-            self.error(format!("{subject} {role} rejected: {message}"));
+        match self.program.type_catalog().validate_copy_scalar(ty) {
+            Ok(()) => {}
+            Err(message) => {
+                // R6-1057: a Copy-role f64 (the widen-assign Convert result)
+                // carries the same per-function print-contract admission as
+                // the Move/Clone arms (R6-1054); the envelope stays exactly
+                // the classification's float-print function set.
+                if self.function_admits_float_print && self.is_print_face_f64(ty) {
+                    return;
+                }
+                self.error(format!("{subject} {role} rejected: {message}"));
+            }
         }
     }
 

@@ -7456,9 +7456,10 @@ impl<'a> Lowerer<'a> {
         Ok(value)
     }
 
-    /// Lower the checker-proven MIR Phase 0 scalar-assign face (R6-1049): a
-    /// direct local target whose declared ABI is a signed 32/64-bit integer
-    /// or bool, with an Identity or NumericWiden conversion receipt, in the
+    /// Lower the checker-proven MIR Phase 0 scalar-assign face (R6-1049;
+    /// R6-1057 adds the Copy f64 target): a direct local target whose
+    /// declared ABI is a signed 32/64-bit integer, bool, or 64-bit float,
+    /// with an Identity or NumericWiden conversion receipt, in the
     /// root statement sequence only.  MIR enforces one static definition per
     /// value, so every reassignment materializes a fresh slot and re-points
     /// the local to it; subsequent loads resolve to the latest definition.
@@ -7544,8 +7545,10 @@ impl<'a> Lowerer<'a> {
 
     /// Whether a target type's materialized ABI is inside the scalar-assign
     /// face.  Copy scalars never need drop glue, so replacing the local's
-    /// latest definition can never leak; aggregate and float targets stay
-    /// outside the face.
+    /// latest definition can never leak; aggregate targets stay outside the
+    /// face.  R6-1057 admits the Copy f64 ABI beside the signed integers and
+    /// bool: the bind face already proves Move/Clone/Convert receipts for
+    /// `Float { bits: 64 }` values across all three consumers.
     fn assign_target_abi_is_admitted_scalar(&self, ty: &crate::core::ResolvedTypeId) -> bool {
         let Some(catalog) = self.type_catalog else {
             return false;
@@ -7559,6 +7562,7 @@ impl<'a> Lowerer<'a> {
                 bits: 32 | 64,
                 signed: true
             } | super::types::MirAbiClass::Bool
+                | super::types::MirAbiClass::Float { bits: 64 }
         )
     }
 

@@ -22155,17 +22155,17 @@ fn canonical_mir_float_bind_routes_canonical_across_consumers() {
     let _ = fs::remove_file(&native);
 }
 
-// R6-1054 negative pin: a float ASSIGN target is outside the MIR Phase 0
-// scalar-assign face.  The Assign statement floor keeps the graph mixed, so
-// the default entry runs the program through the explicit compatibility
-// route while the direct `--mir` entry fails construction with the stable
-// scalar-assign diagnostic — never a silent mis-lowering.
+// R6-1057 face opening, mirroring the R6-1054 bind pin: a Copy f64 local
+// target reassigned from a float literal lowers as Const(FloatBits) -> Move
+// (fresh slot materialization; Copy scalars never need drop glue), routes
+// canonical on the default entry, and is differential-pinned across the
+// explicit `--mir` run and the native `build --mir` binary.
 #[test]
-fn canonical_mir_float_assign_keeps_compatibility_route() {
+fn canonical_mir_float_assign_routes_canonical_across_consumers() {
     let source = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_float_assign_rejected.mimi");
+        .join("mir_float_assign_face.mimi");
 
     let run = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -22177,14 +22177,12 @@ fn canonical_mir_float_assign_keeps_compatibility_route() {
     let stderr = String::from_utf8_lossy(&run.stderr).to_string();
     assert!(
         run.status.success(),
-        "float assign program must keep running via compatibility: {stderr}"
+        "float assign program must execute: {stderr}"
     );
     assert_eq!(run.stdout, b"1.5\n");
     assert!(
-        stderr.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
-        ),
-        "float assign must keep the explicit compatibility route: {stderr}"
+        !stderr.contains("canonical route disposition: legacy"),
+        "float assign program must route canonical on the default entry: {stderr}"
     );
 
     let mir_run = Command::new(mimi_bin())
@@ -22195,14 +22193,33 @@ fn canonical_mir_float_assign_keeps_compatibility_route() {
         .output()
         .unwrap();
     assert!(
-        !mir_run.status.success(),
-        "explicit MIR run must fail construction on a float assign target"
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
     );
-    let mir_stderr = String::from_utf8_lossy(&mir_run.stderr).to_string();
+    assert_eq!(mir_run.stdout, b"1.5\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_float_assign_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
     assert!(
-        mir_stderr.contains("assign target type is outside the MIR Phase 0 scalar-assign face"),
-        "float assign must carry the stable scalar-assign diagnostic: {mir_stderr}"
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
     );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"1.5\n");
+    let _ = fs::remove_file(&native);
 }
 
 // R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal

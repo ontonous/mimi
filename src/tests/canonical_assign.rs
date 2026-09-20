@@ -7,9 +7,11 @@
 //! equivalence (reference interpreter, AST-free bytecode VM, native emitter
 //! on one shared `MirProgram`) for that exact face, so the "construction
 //! capability widens => classifier parity" rule (the R6-1048 lesson) has a
-//! proof to point at.  Faces outside the scalar assign contract — float
-//! targets and projected/aggregate targets — stay fail-closed at their
-//! owning layer and are pinned too.
+//! proof to point at.  R6-1057 widens the face with the Copy f64 target,
+//! pinned at the construction layer below (its three-consumer differential
+//! lives with the float bind family in `canonical_float_bind.rs`).
+//! Projected/aggregate targets stay outside the scalar assign contract and
+//! fail closed at the same construction gate.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -135,12 +137,15 @@ fn scalar_assign_matrix_agrees_across_consumers() {
     }
 }
 
-// A float local target is deliberately outside the R6-1049 scalar-assign
-// contract (no differential proof exists for float reassignment yet); it
-// must keep the compatibility route via a construction failure, not enter a
-// canonical graph unproven.
+// R6-1057 admits the Copy f64 target beside the signed integers and bool: a
+// float reassignment now materializes exactly like the integer cases above
+// (Copy scalars never need drop glue, so the Move replacement cannot leak).
+// The three-consumer differential for float reassignment lives in
+// `canonical_float_bind.rs`; this pin keeps the assign-face ABI gate honest
+// at the construction layer — a revert of the F64 widening fails here by
+// name instead of silently re-routing float assigns.
 #[test]
-fn float_assign_target_stays_fail_closed_at_construction() {
+fn float_assign_target_materializes_at_construction() {
     let source = r#"
         func main() -> i32 {
             let mut acc = 0.5
@@ -148,10 +153,10 @@ fn float_assign_target_stays_fail_closed_at_construction() {
             0
         }
     "#;
-    let mir = MirProgram::from_checked_program(&checked_program_of(source));
-    let error = mir.expect_err("float assign must stay fail-closed");
+    let mir = MirProgram::from_checked_program(&checked_program_of(source))
+        .expect("float assign must materialize since R6-1057");
     assert!(
-        error.to_string().contains("assign"),
-        "the construction failure must name the assign boundary: {error:?}"
+        crate::verifier::validate_mir_capabilities(&mir).is_ok(),
+        "float assign must pass the capability gate"
     );
 }

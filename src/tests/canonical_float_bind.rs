@@ -1,4 +1,5 @@
-//! Canonical float-bind differential tests (R6-1054).
+//! Canonical float-bind differential tests (R6-1054; R6-1057 widens the
+//! face with float assigns).
 //!
 //! A float literal bound to a local and read by `println` lowers as
 //! `Const(FloatBits)` → `Move` into the slot → `Clone` slot read →
@@ -6,9 +7,13 @@
 //! float print contract — the same per-function shape the island gate
 //! re-proves on the materialized graph — and the differential matrix pins
 //! three-consumer equivalence (reference interpreter, AST-free bytecode VM,
-//! native emitter on one shared `MirProgram`).  Float arithmetic and float
-//! assigns keep their explicit mixed floors (Binary operand recheck; Assign
-//! statement arm) until their contracts are independently materialized.
+//! native emitter on one shared `MirProgram`).  R6-1057 admits float
+//! reassignment into the same face (Copy f64 targets need no drop glue, so
+//! the Move replacement cannot leak); float arithmetic and second-hand
+//! float assigns (RHS Load, not a literal) keep their explicit mixed floors
+//! (Binary operand recheck; the classifier's profile-type requirement on
+//! non-literal float values) until their contracts are independently
+//! materialized.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -109,6 +114,36 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "7\n0.25\n",
         },
+        // R6-1057: the scalar-assign face admits the Copy f64 target — a
+        // reassignment materializes a fresh slot via Move (Copy scalars need
+        // no drop glue, so replacing the latest definition cannot leak).
+        FloatBindCase {
+            name: "float_assign_literal",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.5
+                    x = 1.5
+                    println(x)
+                    0
+                }
+            "#,
+            expected_stdout: "1.5\n",
+        },
+        // A bare-integer-literal RHS records the same NumericWiden Convert
+        // receipt the call-argument face uses; the Convert result is a
+        // Copy-role f64 under the print-face admission.
+        FloatBindCase {
+            name: "float_assign_widen",
+            source: r#"
+                func main() -> i32 {
+                    let mut acc = 0.5
+                    acc = 2
+                    println(acc)
+                    0
+                }
+            "#,
+            expected_stdout: "2\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -190,8 +225,10 @@ fn float_bind_ensures_contract_verifies_on_mir() {
 }
 
 // The bind face is print-face-scoped: float arithmetic, second-hand float
-// locals, float assigns, and dead float binds in non-printing functions all
-// keep the graph on the explicit mixed compatibility route.
+// locals and assigns, and dead float binds in non-printing functions all
+// keep the graph on the explicit mixed compatibility route.  (R6-1057
+// restated the former literal float-assign mixed case: it migrated into the
+// matrix above.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -224,15 +261,18 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // Float assign targets are outside the MIR Phase 0 scalar-assign
-        // face; the classifier floors the graph so the canonical route never
-        // lures a construction failure.
+        // R6-1057 restatement: the literal-RHS float assign migrated into
+        // the matrix above.  A SECOND-HAND float assign (RHS Load, not a
+        // literal) stays out: only literal-initialized float values carry
+        // the print-face receipt, so the classifier floors the graph and
+        // the compatibility route keeps serving the program.
         MixedCase {
-            name: "float_assign",
+            name: "float_assign_from_local",
             source: r#"
                 func main() -> i32 {
                     let mut x = 0.5
-                    x = 1.5
+                    let y = 1.5
+                    x = y
                     println(x)
                     0
                 }

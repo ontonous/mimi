@@ -1,0 +1,11 @@
+// R6-1057 float assign face: a Copy f64 local target reassigned from a float
+// literal lowers as Const(FloatBits) -> Move (fresh slot materialization,
+// no drop glue needed) and routes canonical on the default entry
+// (three-consumer differential in src/tests/canonical_float_bind.rs; the
+// widen-assign Convert case lives in the same matrix).
+func main() -> i32 {
+    let mut x = 0.5
+    x = 1.5
+    println(x)
+    0
+}
