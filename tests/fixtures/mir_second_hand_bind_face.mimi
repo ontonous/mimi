@@ -1,0 +1,14 @@
+// R6-1060: second-hand print-face bind roots (`let y = x` for f64,
+// `let t = s` for owned String) route canonical across the default run
+// entry, the routed `mimi verify` entry (the MIR verifier proves the
+// ensures contract) and the native `build --mir` entry.
+func main() -> i32 {
+    ensures: result == 0
+    let x = 0.5;
+    let y = x;
+    println(y);
+    let s = "hi";
+    let t = s;
+    println(t);
+    0
+}

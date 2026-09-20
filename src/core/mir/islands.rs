@@ -1010,9 +1010,44 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             )) => self.in_string_print_function(),
                             _ => false,
                         };
-                    self.visit_pattern(pattern, concrete, print_face_literal_initializer);
+                    // R6-1060: a second-hand print-face bind root (a plain
+                    // local read as the initializer, f64 or owned String)
+                    // joins the same face under the same per-function print
+                    // contract — the mirror of the R6-1059 assign root.
+                    // Inside a concrete island a local of these types can
+                    // only originate in an admitted literal bind (call
+                    // results, parameters and arithmetic floor the whole
+                    // program before this point), so the read adds no
+                    // unclassified provenance; the island gate's Clone arm
+                    // re-proves the contract on the materialized graph.
+                    // Call-result roots stay floored (they are not Load
+                    // nodes and their provenance is an unmigrated body).
+                    let second_hand_print_face_root = concrete
+                        && initializer.as_ref().is_some_and(|value| {
+                            let face_active = match &value.kind {
+                                ResolvedExprKind::Load(_) => {
+                                    matches!(
+                                        self.program.resolved_types().get(&value.ty),
+                                        Some(ResolvedType::Primitive(PrimitiveType::F64))
+                                    ) && self.in_float_print_function()
+                                        || matches!(
+                                            self.program.resolved_types().get(&value.ty),
+                                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                                        ) && self.in_string_print_function()
+                                }
+                                _ => false,
+                            };
+                            face_active
+                        });
+                    self.visit_pattern(
+                        pattern,
+                        concrete,
+                        print_face_literal_initializer || second_hand_print_face_root,
+                    );
                     if let Some(initializer) = initializer {
-                        self.visit_expr(initializer, concrete);
+                        if !second_hand_print_face_root {
+                            self.visit_expr(initializer, concrete);
+                        }
                     }
                 }
                 ResolvedStmtKind::Assign { value, .. } => {

@@ -1,6 +1,6 @@
 //! Canonical float-bind differential tests (R6-1054; R6-1057 widens the
 //! face with float assigns; R6-1059 widens it with second-hand assign
-//! roots).
+//! roots; R6-1060 widens it with second-hand bind roots).
 //!
 //! A float literal bound to a local and read by `println` lowers as
 //! `Const(FloatBits)` → `Move` into the slot → `Clone` slot read →
@@ -11,12 +11,13 @@
 //! native emitter on one shared `MirProgram`).  R6-1057 admits float
 //! reassignment into the same face (Copy f64 targets need no drop glue, so
 //! the Move replacement cannot leak).  R6-1059 admits a second-hand assign
-//! root (`x = y` with a plain local read as RHS): inside a concrete island
-//! an f64 local can only originate in an admitted literal bind, so the
-//! read adds no unclassified provenance.  Float arithmetic and second-hand
-//! float *binds* (`let y = x`) keep their explicit mixed floors (Binary
-//! operand recheck; the bind exemption still requires a literal
-//! initializer) until their contracts are independently materialized.
+//! root (`x = y` with a plain local read as RHS) and R6-1060 the mirror
+//! second-hand bind root (`let y = x`): inside a concrete island an f64
+//! local can only originate in an admitted literal bind, so a local read
+//! adds no unclassified provenance.  Float arithmetic and call-result
+//! binds keep their explicit mixed floors (Binary operand recheck; the
+//! call-result provenance is an unmigrated body) until their contracts are
+//! independently materialized.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -166,6 +167,23 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "1.5\n",
         },
+        // R6-1060: a second-hand bind root (`let y = x`) joins the same
+        // face under the same contract — the mirror of the assign root
+        // above.  Rebind chains stay admitted because every hop is a local
+        // read of a transitively literal-origin value.
+        FloatBindCase {
+            name: "float_rebind_second_hand",
+            source: r#"
+                func main() -> i32 {
+                    let x = 0.5
+                    let y = x
+                    let z = y
+                    println(z)
+                    0
+                }
+            "#,
+            expected_stdout: "0.5\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -277,13 +295,41 @@ fn float_second_hand_assign_ensures_verifies_on_mir() {
     );
 }
 
-// The bind face is print-face-scoped: float arithmetic, second-hand float
-// *binds* (bind from a Load — the R6-1059 exemption covers assign roots
-// only; the bind face still requires a literal initializer) and dead float
-// binds in non-printing functions all keep the graph on the explicit mixed
-// compatibility route.  (R6-1057 restated the former literal float-assign
-// mixed case and R6-1059 the second-hand float-assign case: both migrated
-// into the matrix above.)
+// R6-1060: the second-hand bind graph (Const → Move → Clone read → Move
+// bind → Clone read → PrintlnFloat) carries no float arithmetic either, so
+// the MIR verifier proves the contract obligations on this routed shape
+// too — the same proof the default `mimi verify` entry reaches once the
+// face classifies complete.
+#[test]
+fn float_second_hand_bind_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            let x = 0.5
+            let y = x
+            println(y)
+            0
+        }
+    "#;
+    let label = "float second-hand bind ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-second-hand-bind-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The bind face is print-face-scoped: float arithmetic, call-result binds
+// and dead float binds in non-printing functions all keep the graph on the
+// explicit mixed compatibility route.  (R6-1057 restated the former literal
+// float-assign mixed case, R6-1059 the second-hand float-assign case and
+// R6-1060 the second-hand float-bind case: all migrated into the matrix
+// above.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -303,18 +349,19 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // R6-1059 restatement: the second-hand float assign (RHS Load)
-        // migrated into the matrix above.  A second-hand float *bind*
-        // (`let y = x`) stays out: the bind exemption still requires a
-        // float literal initializer, so the classifier floors the graph
-        // and the compatibility route keeps serving the program.
+        // R6-1060 restatement: the second-hand float bind migrated into
+        // the matrix above.  A call-result root is never a plain local
+        // read — its provenance is an unmigrated body, so the bind pattern
+        // still floors on its f64 type.
         MixedCase {
-            name: "float_rebind_from_local_is_mixed",
+            name: "float_bind_from_call_is_mixed",
             source: r#"
+                func value() -> f64 {
+                    0.5
+                }
                 func main() -> i32 {
-                    let x = 0.5
-                    let y = x
-                    println(y)
+                    let x = value()
+                    println(x)
                     0
                 }
             "#,

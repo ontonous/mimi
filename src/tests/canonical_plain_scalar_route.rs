@@ -57,9 +57,11 @@ fn checked_program_of(source: &str) -> (crate::core::CheckedProgram, PreludeExcl
 // (string values outside the print face, floats) keeps `MixedCoverage`.
 // R6-1055 restatement: a String literal bind read by the print face joined
 // the complete set (its differential matrix lives in
-// canonical_string_bind.rs), so the mixed representative below uses a
-// second-hand String local — a Load-root bind the print-face exemption
-// never covers.
+// canonical_string_bind.rs).  R6-1060 restatement: the second-hand String
+// bind joined it too (R6-1060 opened Load-root print-face bind roots), so
+// the mixed representative below uses a dead float bind in a
+// non-printing function — the per-function contract boundary the bind
+// exemption still respects.
 #[test]
 fn plain_scalar_admission_matrix_pins_the_flip_set() {
     let complete_shapes = [
@@ -117,24 +119,14 @@ fn plain_scalar_admission_matrix_pins_the_flip_set() {
         );
     }
 
-    let mixed_shapes = [
-        (
-            "string_second_hand_bind",
-            r#"func main() {
-                let s = "hi"
-                let t = s
-                println(t)
-            }"#,
-        ),
-        (
-            "float_local",
-            r#"func main() {
+    let mixed_shapes = [(
+        "float_local",
+        r#"func main() {
                 println(1)
                 let probe_float = 0.5
                 drop(probe_float)
             }"#,
-        ),
-    ];
+    )];
     for (name, source) in mixed_shapes {
         let (checked, _) = checked_program_of(source);
         let admission = crate::core::mir::classify_scalar_collection_admission(&checked);

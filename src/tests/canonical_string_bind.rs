@@ -1,4 +1,5 @@
-//! Canonical owned-String bind differential tests (R6-1055).
+//! Canonical owned-String bind differential tests (R6-1055; R6-1060
+//! widens the face with second-hand bind roots).
 //!
 //! A String literal bound to a local and read by `println` lowers as
 //! `Const(String)` → `Move` into the slot → `Clone` slot read →
@@ -8,7 +9,10 @@
 //! — the same per-function shape the island gate re-proves on the
 //! materialized graph — and the differential matrix pins three-consumer
 //! equivalence (reference interpreter, AST-free bytecode VM, native emitter
-//! on one shared `MirProgram`).  Second-hand binds, call-result binds,
+//! on one shared `MirProgram`).  R6-1060 admits a second-hand bind root
+//! (`let t = s` with a plain local read as initializer): inside a concrete
+//! island an owned-String local can only originate in an admitted literal
+//! bind, so the read adds no unclassified provenance.  Call-result binds,
 //! String assigns, and dead binds in non-printing functions keep their
 //! explicit mixed floors.
 
@@ -112,6 +116,23 @@ fn string_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "7\nhi\n",
         },
+        // R6-1060: a second-hand bind root (`let t = s`) joins the same
+        // face under the same per-function contract — the read of a
+        // transitively literal-origin owned slot adds no unclassified
+        // provenance.  Rebind chains stay admitted for the same reason.
+        StringBindCase {
+            name: "string_rebind_second_hand",
+            source: r#"
+                func main() -> i32 {
+                    let s = "hi"
+                    let t = s
+                    let u = t
+                    println(u)
+                    0
+                }
+            "#,
+            expected_stdout: "hi\n",
+        },
         // The print contract is per-function: the helper owns its bind and
         // its println, so the caller stays a plain integer graph.
         StringBindCase {
@@ -210,9 +231,38 @@ fn string_bind_ensures_contract_verifies_on_mir() {
     );
 }
 
-// The bind face is print-face-scoped: second-hand locals, call-result binds,
-// String assigns, and dead binds in non-printing functions all keep the
-// graph on the explicit mixed compatibility route.
+// R6-1060: the second-hand bind graph (Const → Move → Clone read → Move
+// bind → Clone read → PrintlnString) proves the contract obligations on
+// the MIR path too — the same proof the default `mimi verify` entry
+// reaches once the face classifies complete.
+#[test]
+fn string_second_hand_bind_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            let s = "hi"
+            let t = s
+            println(t)
+            0
+        }
+    "#;
+    let label = "string second-hand bind ensures";
+    let mir = materialize_string_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "string-second-hand-bind-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The bind face is print-face-scoped: call-result binds, String assigns,
+// and dead binds in non-printing functions all keep the graph on the
+// explicit mixed compatibility route.  (R6-1060 restated the former
+// second-hand bind mixed case: it migrated into the matrix above.)
 #[test]
 fn string_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -220,21 +270,9 @@ fn string_bind_faces_stay_mixed() {
         source: &'static str,
     }
     const CASES: &[MixedCase] = &[
-        // A second-hand local (bind from a Load, not a literal) stays out:
-        // the bind exemption requires a String literal initializer.
-        MixedCase {
-            name: "string_rebind_from_local",
-            source: r#"
-                func main() -> i32 {
-                    let s = "hi"
-                    let t = s
-                    println(t)
-                    0
-                }
-            "#,
-        },
-        // A call-result root is never a print-face literal, so the bind
-        // pattern floors on its String type.
+        // A call-result root is never a print-face literal or a plain
+        // local read of one, so the bind pattern floors on its String
+        // type.
         MixedCase {
             name: "string_bind_from_call",
             source: r#"
