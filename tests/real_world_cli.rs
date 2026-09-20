@@ -22222,6 +22222,76 @@ fn canonical_mir_float_assign_routes_canonical_across_consumers() {
     let _ = fs::remove_file(&native);
 }
 
+// R6-1059 face opening: a second-hand float assign (`x = y` with a plain
+// local read as RHS) routes canonical on the default entry, the routed
+// `mimi verify` entry proves the ensures contract on the MIR path (the
+// legacy-path verifier keeps floats uninterpreted and failed this exact
+// program before the flip), and the native `build --mir` binary agrees.
+#[test]
+fn canonical_mir_float_second_hand_assign_routes_canonical_with_proof() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_float_second_hand_assign.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "second-hand float assign program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"1.5\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "second-hand float assign must route canonical on the default entry: {stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .unwrap();
+    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    assert!(
+        verify.status.success(),
+        "routed verify must prove the contract: {verify_out}"
+    );
+    assert!(
+        verify_out.contains("1/1 verified"),
+        "routed verify must prove exactly the main contract: {verify_out}"
+    );
+
+    let native = project_root().join("target").join(format!(
+        "mir_float_second_hand_assign_native_{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"1.5\n");
+    let _ = fs::remove_file(&native);
+}
+
 // R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal
 // bound to a local and read by the owned-String println face lowers as
 // Const(String) -> Move -> Clone -> PrintlnString, routes canonical on the

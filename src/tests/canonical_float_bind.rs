@@ -1,5 +1,6 @@
 //! Canonical float-bind differential tests (R6-1054; R6-1057 widens the
-//! face with float assigns).
+//! face with float assigns; R6-1059 widens it with second-hand assign
+//! roots).
 //!
 //! A float literal bound to a local and read by `println` lowers as
 //! `Const(FloatBits)` → `Move` into the slot → `Clone` slot read →
@@ -9,11 +10,13 @@
 //! three-consumer equivalence (reference interpreter, AST-free bytecode VM,
 //! native emitter on one shared `MirProgram`).  R6-1057 admits float
 //! reassignment into the same face (Copy f64 targets need no drop glue, so
-//! the Move replacement cannot leak); float arithmetic and second-hand
-//! float assigns (RHS Load, not a literal) keep their explicit mixed floors
-//! (Binary operand recheck; the classifier's profile-type requirement on
-//! non-literal float values) until their contracts are independently
-//! materialized.
+//! the Move replacement cannot leak).  R6-1059 admits a second-hand assign
+//! root (`x = y` with a plain local read as RHS): inside a concrete island
+//! an f64 local can only originate in an admitted literal bind, so the
+//! read adds no unclassified provenance.  Float arithmetic and second-hand
+//! float *binds* (`let y = x`) keep their explicit mixed floors (Binary
+//! operand recheck; the bind exemption still requires a literal
+//! initializer) until their contracts are independently materialized.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -144,6 +147,25 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "2\n",
         },
+        // R6-1059: a second-hand assign root (RHS is a plain local read,
+        // not a literal) joins the same face inside the print-contract
+        // envelope — the graph is Const → Move → Clone (the read) → Move
+        // (the assign) → PrintlnFloat, all admitted vocabulary.  The
+        // routed `mimi verify` for this shape proves the contract on the
+        // MIR path (pinned by the ensures test below).
+        FloatBindCase {
+            name: "float_assign_second_hand",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.5
+                    let y = 1.5
+                    x = y
+                    println(x)
+                    0
+                }
+            "#,
+            expected_stdout: "1.5\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -224,11 +246,44 @@ fn float_bind_ensures_contract_verifies_on_mir() {
     );
 }
 
+// R6-1059: the second-hand assign graph (Const → Move → Clone read → Move
+// assign → PrintlnFloat) carries no float arithmetic either, so the MIR
+// verifier proves the contract obligations on this routed shape too — the
+// same proof the default `mimi verify` entry now reaches once the face
+// classifies complete (the legacy-path verifier keeps floats
+// uninterpreted and failed this exact program before the flip).
+#[test]
+fn float_second_hand_assign_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            let mut x = 0.5
+            let y = 1.5
+            x = y
+            println(x)
+            0
+        }
+    "#;
+    let label = "float second-hand assign ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-second-hand-assign-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
 // The bind face is print-face-scoped: float arithmetic, second-hand float
-// locals and assigns, and dead float binds in non-printing functions all
-// keep the graph on the explicit mixed compatibility route.  (R6-1057
-// restated the former literal float-assign mixed case: it migrated into the
-// matrix above.)
+// *binds* (bind from a Load — the R6-1059 exemption covers assign roots
+// only; the bind face still requires a literal initializer) and dead float
+// binds in non-printing functions all keep the graph on the explicit mixed
+// compatibility route.  (R6-1057 restated the former literal float-assign
+// mixed case and R6-1059 the second-hand float-assign case: both migrated
+// into the matrix above.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -248,32 +303,18 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // A second-hand local (bind from a Load, not a literal) stays out:
-        // the bind exemption requires a float literal initializer.
+        // R6-1059 restatement: the second-hand float assign (RHS Load)
+        // migrated into the matrix above.  A second-hand float *bind*
+        // (`let y = x`) stays out: the bind exemption still requires a
+        // float literal initializer, so the classifier floors the graph
+        // and the compatibility route keeps serving the program.
         MixedCase {
-            name: "float_rebind_from_local",
+            name: "float_rebind_from_local_is_mixed",
             source: r#"
                 func main() -> i32 {
                     let x = 0.5
                     let y = x
                     println(y)
-                    0
-                }
-            "#,
-        },
-        // R6-1057 restatement: the literal-RHS float assign migrated into
-        // the matrix above.  A SECOND-HAND float assign (RHS Load, not a
-        // literal) stays out: only literal-initialized float values carry
-        // the print-face receipt, so the classifier floors the graph and
-        // the compatibility route keeps serving the program.
-        MixedCase {
-            name: "float_assign_from_local",
-            source: r#"
-                func main() -> i32 {
-                    let mut x = 0.5
-                    let y = 1.5
-                    x = y
-                    println(x)
                     0
                 }
             "#,

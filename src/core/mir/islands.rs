@@ -1038,7 +1038,31 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     {
                         self.mixed = true;
                     }
-                    self.visit_expr(value, concrete)
+                    // R6-1059: a second-hand f64 assign root (a plain local
+                    // read feeding an admitted scalar assign target) joins
+                    // the print face exactly while the function carries the
+                    // float println contract — the same per-function
+                    // envelope as the bind exemption above and the island
+                    // gate's Clone admission, which re-proves it on the
+                    // materialized graph.  The profile-type floor is
+                    // skipped for this root the way the println-argument
+                    // Load root is: inside a concrete island an f64 local
+                    // can only originate in an admitted literal bind
+                    // (parameters, results and call returns floor the whole
+                    // program before this point), so the read has no
+                    // unclassified provenance left to police.  Every other
+                    // RHS root keeps its normal floor.
+                    let second_hand_float_root = concrete
+                        && self.in_float_print_function()
+                        && matches!(&value.kind, ResolvedExprKind::Load(_))
+                        && matches!(
+                            self.program.resolved_types().get(&value.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                        && resolved_assign_is_admitted_scalar_shape(self.program, statement);
+                    if !second_hand_float_root {
+                        self.visit_expr(value, concrete);
+                    }
                 }
                 ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
                     if let Some(value) = value {

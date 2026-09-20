@@ -1,0 +1,13 @@
+// R6-1059: second-hand float assign face (`x = y` with a plain local read
+// as RHS) routes canonical across the default run entry, the routed
+// `mimi verify` entry (the MIR verifier proves the ensures contract; the
+// legacy-path verifier keeps floats uninterpreted and failed this exact
+// program before the flip) and the native `build --mir` entry.
+func main() -> i32 {
+    ensures: result == 0
+    let mut x = 0.5;
+    let y = 1.5;
+    x = y;
+    println(x);
+    0
+}
