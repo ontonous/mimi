@@ -1,0 +1,9 @@
+// R6-1055 owned-String bind face: a String literal bound to a local and read
+// by the owned-String println face lowers as Const(String) -> Move -> Clone
+// -> PrintlnString and routes canonical on the default entry
+// (three-consumer differential in src/tests/canonical_string_bind.rs).
+func main() -> i32 {
+    let s = "hi"
+    println(s)
+    0
+}

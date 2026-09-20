@@ -22205,6 +22205,124 @@ fn canonical_mir_float_assign_keeps_compatibility_route() {
     );
 }
 
+// R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal
+// bound to a local and read by the owned-String println face lowers as
+// Const(String) -> Move -> Clone -> PrintlnString, routes canonical on the
+// default entry, and is differential-pinned across the explicit `--mir` run
+// and the native `build --mir` binary.
+#[test]
+fn canonical_mir_string_bind_routes_canonical_across_consumers() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_string_bind_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "string bind program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"hi\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "string bind program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"hi\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_string_bind_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"hi\n");
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1055 negative pin, mirroring the R6-1054 assign pin: a String ASSIGN
+// target is outside the MIR Phase 0 scalar-assign face.  The R6-1049
+// assign-face predicate plus the classifier's Assign floor keep the graph
+// mixed, so the default entry runs the program through the explicit
+// compatibility route while the direct `--mir` entry fails construction with
+// the stable scalar-assign diagnostic — never a silent mis-lowering.
+#[test]
+fn canonical_mir_string_assign_keeps_compatibility_route() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_string_assign_rejected.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "string assign program must keep running via compatibility: {stderr}"
+    );
+    assert_eq!(run.stdout, b"b\n");
+    assert!(
+        stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "string assign must keep the explicit compatibility route: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        !mir_run.status.success(),
+        "explicit MIR run must fail construction on a String assign target"
+    );
+    let mir_stderr = String::from_utf8_lossy(&mir_run.stderr).to_string();
+    assert!(
+        mir_stderr.contains("assign target type is outside the MIR Phase 0 scalar-assign face"),
+        "string assign must carry the stable scalar-assign diagnostic: {mir_stderr}"
+    );
+}
+
 // R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a
 // helper) plus an admitted stdout effect runs through the direct canonical
 // entries — the explicit `--mir` run and the native `build --mir` —

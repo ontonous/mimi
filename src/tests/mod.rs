@@ -64,6 +64,7 @@ pub(crate) mod canonical_flow_union;
 pub(crate) mod canonical_plain_scalar_route;
 pub(crate) mod canonical_scalar_ffi;
 pub(crate) mod canonical_session;
+pub(crate) mod canonical_string_bind;
 pub(crate) mod canonical_string_print;
 pub(crate) mod canonical_switch_literal;
 pub(crate) mod cap_runtime;

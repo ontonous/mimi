@@ -55,6 +55,11 @@ fn checked_program_of(source: &str) -> (crate::core::CheckedProgram, PreludeExcl
 // user helpers, string print literals, root-level scalar assignment) gain
 // `CompleteCoverage` for the first time, while every compatibility boundary
 // (string values outside the print face, floats) keeps `MixedCoverage`.
+// R6-1055 restatement: a String literal bind read by the print face joined
+// the complete set (its differential matrix lives in
+// canonical_string_bind.rs), so the mixed representative below uses a
+// second-hand String local — a Load-root bind the print-face exemption
+// never covers.
 #[test]
 fn plain_scalar_admission_matrix_pins_the_flip_set() {
     let complete_shapes = [
@@ -63,6 +68,13 @@ fn plain_scalar_admission_matrix_pins_the_flip_set() {
         (
             "string_literal_print",
             r#"func main() { println("hello") }"#,
+        ),
+        (
+            "string_literal_bind_print",
+            r#"func main() {
+                let s = "hi"
+                println(s)
+            }"#,
         ),
         (
             "bool_match_helper",
@@ -107,10 +119,11 @@ fn plain_scalar_admission_matrix_pins_the_flip_set() {
 
     let mixed_shapes = [
         (
-            "string_binding",
+            "string_second_hand_bind",
             r#"func main() {
                 let s = "hi"
-                println(s)
+                let t = s
+                println(t)
             }"#,
         ),
         (

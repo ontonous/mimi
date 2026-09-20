@@ -1,0 +1,12 @@
+// R6-1055 negative pin: a String ASSIGN target is outside the MIR Phase 0
+// scalar-assign face (`resolved_assign_is_admitted_scalar_shape` admits
+// I32/I64/Bool only; the classifier's Assign floor keeps the graph mixed).
+// The default entry keeps the explicit compatibility route and the direct
+// `--mir` entry fails construction with the scalar-assign diagnostic
+// instead of silently mis-lowering.
+func main() -> i32 {
+    let mut s = "a"
+    s = "b"
+    println(s)
+    0
+}

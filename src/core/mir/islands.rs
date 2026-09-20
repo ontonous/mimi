@@ -839,13 +839,18 @@ fn scan_scalar_collection_admission(
     // pass applies the bind exemption from that set.  Both passes walk the
     // identical bodies, so the exemption can never drift from the evidence
     // the island gate later re-proves per materialized function.
-    let discovery = scan_scalar_collection_once(program, BTreeSet::new());
-    scan_scalar_collection_once(program, discovery.float_print_functions)
+    let discovery = scan_scalar_collection_once(program, BTreeSet::new(), BTreeSet::new());
+    scan_scalar_collection_once(
+        program,
+        discovery.float_print_functions,
+        discovery.string_print_functions,
+    )
 }
 
 fn scan_scalar_collection_once(
     program: &CheckedProgram,
     float_print_functions: BTreeSet<NodeId>,
+    string_print_functions: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -856,6 +861,7 @@ fn scan_scalar_collection_once(
         mixed: false,
         seen_types: BTreeSet::new(),
         float_print_functions,
+        string_print_functions,
         current_callable: None,
     };
 
@@ -918,10 +924,25 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// the discovery pass and consulted by the classification pass for the
     /// float bind exemption (R6-1054).
     float_print_functions: BTreeSet<NodeId>,
+    /// Callables whose bodies contain an admitted owned-String println —
+    /// the StringHandle mirror of the float bind exemption (R6-1055).
+    string_print_functions: BTreeSet<NodeId>,
     current_callable: Option<NodeId>,
 }
 
 impl<'a> ScalarCollectionAdmissionScanner<'a> {
+    fn in_float_print_function(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.float_print_functions.contains(owner))
+    }
+
+    fn in_string_print_function(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.string_print_functions.contains(owner))
+    }
+
     fn require_profile_type(&mut self, id: &crate::core::ResolvedTypeId) {
         if !self.seen_types.insert(id.clone()) {
             return;
@@ -973,40 +994,44 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     pattern,
                     initializer,
                 } => {
-                    // R6-1054: a float literal bind opens as a print-face
-                    // value only inside a function whose float println will
-                    // materialize the exact consumption shape.  Every other
-                    // f64 origin (call result, arithmetic, second-hand local)
+                    // R6-1054/R6-1055: a print-face literal bind (f64 or
+                    // owned String) opens as a print-face value only inside
+                    // a function whose print call will materialize the
+                    // exact consumption shape.  Every other out-of-profile
+                    // origin (call result, arithmetic, second-hand local)
                     // still takes the profile-type floor below.
-                    let float_literal_initializer = matches!(
-                        initializer.as_ref().map(|value| &value.kind),
-                        Some(ResolvedExprKind::Literal(
-                            crate::core::ResolvedLiteral::FloatBits(_)
-                        ))
-                    );
-                    let printing_function = self
-                        .current_callable
-                        .as_ref()
-                        .is_some_and(|owner| self.float_print_functions.contains(owner));
-                    self.visit_pattern(
-                        pattern,
-                        concrete,
-                        float_literal_initializer && printing_function,
-                    );
+                    let print_face_literal_initializer =
+                        match initializer.as_ref().map(|value| &value.kind) {
+                            Some(ResolvedExprKind::Literal(
+                                crate::core::ResolvedLiteral::FloatBits(_),
+                            )) => self.in_float_print_function(),
+                            Some(ResolvedExprKind::Literal(
+                                crate::core::ResolvedLiteral::String(_),
+                            )) => self.in_string_print_function(),
+                            _ => false,
+                        };
+                    self.visit_pattern(pattern, concrete, print_face_literal_initializer);
                     if let Some(initializer) = initializer {
                         self.visit_expr(initializer, concrete);
                     }
                 }
                 ResolvedStmtKind::Assign { value, .. } => {
-                    // R6-1054: float assign targets are outside the MIR Phase
-                    // 0 scalar-assign face (the lowerer fails construction on
-                    // them), so the classifier must keep the graph mixed
-                    // instead of luring the canonical route into a
-                    // construction failure.
+                    // R6-1054/R6-1055: float and owned-String assign targets
+                    // are outside the MIR Phase 0 scalar-assign face
+                    // (`resolved_assign_is_admitted_scalar_shape` admits
+                    // I32/I64/Bool only; the lowerer fails construction on
+                    // the rest), so the graph must stay mixed instead of
+                    // luring the canonical route into a construction
+                    // failure.  This floor is defense-in-depth beside the
+                    // unmigrated-shape check: the print-face literal
+                    // exemption below lets a literal RHS pass visit_expr
+                    // untouched, so the classification scanner must not
+                    // depend on another pass to hold the shape closed.
                     if concrete
                         && matches!(
                             self.program.resolved_types().get(&value.ty),
                             Some(ResolvedType::Primitive(PrimitiveType::F64))
+                                | Some(ResolvedType::Primitive(PrimitiveType::String))
                         )
                     {
                         self.mixed = true;
@@ -1193,20 +1218,33 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 {
                     self.has_candidate = true;
                 }
-                // R6-1054: a float println call both evidences the enclosing
-                // function's print face (the bind exemption the island gate
-                // re-proves per materialized function) and admits its own
-                // direct value argument below.
-                let float_print_call = is_scalar_println_call(self.program, call)
-                    && call.arguments.first().is_some_and(|argument| {
+                // R6-1054/R6-1055: a print-face println call both evidences
+                // the enclosing function's print face (the bind exemption
+                // the island gate re-proves per materialized function) and
+                // admits its own direct value argument below.
+                let print_argument_primitive =
+                    |argument: &crate::core::ir::ResolvedArgument, expected: PrimitiveType| {
                         matches!(
                             self.program.resolved_types().get(&argument.value.ty),
-                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                            Some(ResolvedType::Primitive(primitive)) if *primitive == expected
                         )
+                    };
+                let float_print_call = is_scalar_println_call(self.program, call)
+                    && call.arguments.first().is_some_and(|argument| {
+                        print_argument_primitive(argument, PrimitiveType::F64)
                     });
-                if float_print_call {
+                let string_print_call = is_scalar_println_call(self.program, call)
+                    && call.arguments.first().is_some_and(|argument| {
+                        print_argument_primitive(argument, PrimitiveType::String)
+                    });
+                if float_print_call || string_print_call {
                     if let Some(owner) = self.current_callable.clone() {
-                        self.float_print_functions.insert(owner);
+                        if float_print_call {
+                            self.float_print_functions.insert(owner.clone());
+                        }
+                        if string_print_call {
+                            self.string_print_functions.insert(owner);
+                        }
                     }
                 }
                 // Only the closed stdout effects of this island (signed
@@ -1251,21 +1289,31 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.mixed = true;
                 }
                 for argument in &call.arguments {
-                    if float_print_call
-                        && matches!(
-                            &argument.value.kind,
-                            ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_))
-                                | ResolvedExprKind::Load(_)
+                    let print_face_value_root = match (&argument.value.kind, float_print_call) {
+                        (
+                            ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_)),
+                            true,
                         )
-                    {
-                        // The f64 value shape was admitted by
-                        // `is_scalar_println_call`; a float literal or a
+                        | (ResolvedExprKind::Load(_), true) => true,
+                        _ => {
+                            string_print_call
+                                && matches!(
+                                    &argument.value.kind,
+                                    ResolvedExprKind::Literal(
+                                        crate::core::ResolvedLiteral::String(_)
+                                    ) | ResolvedExprKind::Load(_)
+                                )
+                        }
+                    };
+                    if print_face_value_root {
+                        // The value shape was admitted by
+                        // `is_scalar_println_call`; a print-face literal or a
                         // plain local read has no nested expression left to
                         // police, so skip the value-type floor the way the
                         // literal exemption does.  Any other argument root
                         // (call result, arithmetic, projection) keeps its
-                        // normal floor — its inner f64 origin must stay
-                        // outside this face.
+                        // normal floor — its inner out-of-profile origin
+                        // must stay outside this face.
                         continue;
                     }
                     self.visit_expr(&argument.value, concrete);
