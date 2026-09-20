@@ -2033,11 +2033,21 @@ impl<'a> CapabilityGate<'a> {
                 let Some(ty) = value_type(function, scrutinee) else {
                     return;
                 };
-                if self.program.type_catalog().variant_layout(&ty).is_none()
-                    || arms
-                        .iter()
-                        .any(|arm| matches!(arm.case, MirSwitchCase::Literal(_)))
+                if arms
+                    .iter()
+                    .any(|arm| matches!(arm.case, MirSwitchCase::Literal(_)))
                 {
+                    // Scalar literal switch (R6-1051): the shared catalog
+                    // contract proves the Copy-scalar scrutinee, literal
+                    // shapes, and exhaustive coverage before any consumer.
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_scalar_switch(&ty, arms)
+                    {
+                        self.error(format!("{subject} Switch rejected: {message}"));
+                    }
+                } else if self.program.type_catalog().variant_layout(&ty).is_none() {
                     self.error(format!(
                         "{subject} Switch is outside the Copy variant verifier capability"
                     ));

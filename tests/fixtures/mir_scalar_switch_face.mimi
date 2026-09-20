@@ -1,0 +1,22 @@
+// R6-1051 face: scalar literal switches (bool match in a helper plus an
+// integer match with a default) ride the direct canonical entries.  The
+// stdout effects give the program a candidate family, while the
+// cross-function shape keeps the default entry on the compatibility route.
+func label(flag: bool) -> i32 {
+    match flag {
+        true => 41,
+        false => 7,
+    }
+}
+func classify(v: i32) -> i32 {
+    match v {
+        0 => 1,
+        _ => 3,
+    }
+}
+func main() -> i32 {
+    println(label(true))
+    println(label(false))
+    println(classify(99))
+    0
+}

@@ -2020,6 +2020,9 @@ impl<'a> NativeMirValidator<'a> {
         let Some(scrutinee_value) = function.values.get(scrutinee) else {
             return;
         };
+        let literal_switch = arms
+            .iter()
+            .any(|arm| matches!(arm.case, crate::core::mir::MirSwitchCase::Literal(_)));
         if self.union_tagged_scrutinee(&scrutinee_value.ty) {
             if let Err(message) = self
                 .program
@@ -2029,15 +2032,28 @@ impl<'a> NativeMirValidator<'a> {
                 self.errors.push(NativeMirError::new(subject, message));
                 return;
             }
+        } else if literal_switch {
+            // Scalar literal switch (R6-1051): the shared catalog contract is
+            // the same gate the verifier and bytecode consumer pass through.
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_scalar_switch(&scrutinee_value.ty, arms)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+                return;
+            }
         } else if !self.validate_copy_variant_type(&scrutinee_value.ty, subject) {
             return;
         }
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_switch(&scrutinee_value.ty, arms)
-        {
-            self.errors.push(NativeMirError::new(subject, message));
+        if !literal_switch {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_switch(&scrutinee_value.ty, arms)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
         }
         for arm in arms {
             let Some(target) = function.blocks.get(&arm.target) else {

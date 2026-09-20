@@ -22033,3 +22033,103 @@ fn canonical_mir_float_print_keeps_compatibility() {
         "float println must keep the explicit compatibility route: {stderr}"
     );
 }
+
+// R6-1051 face: a scalar literal switch (bool match in a helper) plus an
+// admitted stdout effect runs through the direct canonical entries — the
+// explicit `--mir` run and the native `build --mir` — byte-for-byte.  The
+// default entry keeps its compatibility disposition (the cross-function shape
+// is mixed-coverage, not a materialized candidate), so only the direct
+// entries pin canonicality here.
+#[test]
+fn canonical_mir_scalar_switch_runs_on_direct_entries() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_switch_face.mimi");
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"41\n7\n3\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_scalar_switch_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"41\n7\n3\n");
+    let _ = fs::remove_file(&native);
+
+    // The default entry keeps the compatibility disposition for the
+    // mixed-coverage shape while still producing the same output.
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    assert_eq!(run.stdout, b"41\n7\n3\n");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "the mixed-coverage shape must keep the compatibility disposition: {stderr}"
+    );
+}
+
+// R6-1051 restatement of the R6-1050 boundary fixture: the Option<string>
+// assign-face program (unwrap in main, bool match in a helper, owned string
+// print) now compiles through the canonical native backend end-to-end and
+// prints `yes` / `2`.
+#[test]
+fn canonical_mir_option_string_assign_face_builds_native() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_option_string_assign_face.mimi");
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_option_assign_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "the assign-face fixture must build native after the scalar switch face: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"yes\n2\n");
+    let _ = fs::remove_file(&native);
+}

@@ -4593,6 +4593,16 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
+        if !consume_scrutinee
+            && arms
+                .iter()
+                .any(|arm| matches!(arm.case, crate::core::mir::MirSwitchCase::Literal(_)))
+        {
+            // Scalar literal switch (R6-1051): the shared catalog contract is
+            // the same gate the verifier and native validator pass through.
+            self.emit_literal_switch(scrutinee_reg, &scrutinee_info.ty, arms);
+            return;
+        };
         let Some((nominal, _)) = self
             .program
             .type_catalog()
@@ -4691,6 +4701,101 @@ impl<'a> FunctionEmitter<'a> {
         }
         if !has_default && arms.is_empty() {
             self.error("variant switch has no arms");
+        }
+    }
+
+    /// Lower a scalar literal switch (R6-1051). The shared catalog contract
+    /// proved the Copy-scalar scrutinee and exhaustive coverage, so the false
+    /// edge of the final literal either lands on the default arm or on a
+    /// defensively unreachable trap.
+    fn emit_literal_switch(
+        &mut self,
+        scrutinee_reg: Reg,
+        scrutinee_ty: &crate::core::ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+    ) {
+        if let Err(message) = self.supported_type(scrutinee_ty) {
+            self.error(format!("scalar switch scrutinee is unsupported: {message}"));
+            return;
+        }
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_scalar_switch(scrutinee_ty, arms)
+        {
+            self.error(format!("scalar switch is invalid: {message}"));
+            return;
+        }
+        let literal_arms: Vec<&crate::core::mir::MirSwitchArm> = arms
+            .iter()
+            .filter(|arm| matches!(arm.case, crate::core::mir::MirSwitchCase::Literal(_)))
+            .collect();
+        for (index, arm) in literal_arms.iter().enumerate() {
+            let crate::core::mir::MirSwitchCase::Literal(literal) = &arm.case else {
+                self.error("scalar switch arm lost its literal case");
+                return;
+            };
+            let condition = self.alloc_reg();
+            match literal {
+                ResolvedLiteral::Int(value) => {
+                    let const_reg = self.alloc_reg();
+                    let idx = self.add_const(ConstValue::Int(*value));
+                    self.proto.emit(Op::LoadConst { rd: const_reg, idx });
+                    self.proto.emit(Op::EqInt {
+                        rd: condition,
+                        ra: scrutinee_reg,
+                        rb: const_reg,
+                    });
+                }
+                ResolvedLiteral::Bool(value) => {
+                    let const_reg = self.alloc_reg();
+                    self.proto.emit(if *value {
+                        Op::LoadTrue { rd: const_reg }
+                    } else {
+                        Op::LoadFalse { rd: const_reg }
+                    });
+                    self.proto.emit(Op::Eq {
+                        rd: condition,
+                        ra: scrutinee_reg,
+                        rb: const_reg,
+                    });
+                }
+                _ => {
+                    self.error("scalar switch case is outside the scrutinee ABI");
+                    return;
+                }
+            }
+            let conditional = self.proto.emit(Op::JmpIfNot {
+                offset: 0,
+                ra: condition,
+            });
+            self.emit_edge_arguments(&arm.target, &arm.arguments);
+            let arm_jump = self.proto.emit(Op::Jmp { offset: 0 });
+            self.pending_jumps.push((arm_jump, arm.target.clone()));
+            let next_start = self.proto.code.len();
+            if let Err(message) = self.proto.try_patch_jump_to(conditional, next_start) {
+                self.error(format!("scalar switch jump patch failed: {message}"));
+                return;
+            }
+            if index + 1 == literal_arms.len() {
+                match arms
+                    .iter()
+                    .find(|arm| matches!(arm.case, crate::core::mir::MirSwitchCase::Default))
+                {
+                    Some(default_arm) => {
+                        self.emit_edge_arguments(&default_arm.target, &default_arm.arguments);
+                        let default_jump = self.proto.emit(Op::Jmp { offset: 0 });
+                        self.pending_jumps
+                            .push((default_jump, default_arm.target.clone()));
+                    }
+                    None => {
+                        let msg = self.add_const(ConstValue::Str(
+                            "[E0800] canonical MIR scalar switch has no matching arm".into(),
+                        ));
+                        self.proto.emit(Op::Trap { msg });
+                    }
+                }
+            }
         }
     }
 

@@ -62,6 +62,7 @@ pub(crate) mod canonical_flow_union;
 pub(crate) mod canonical_scalar_ffi;
 pub(crate) mod canonical_session;
 pub(crate) mod canonical_string_print;
+pub(crate) mod canonical_switch_literal;
 pub(crate) mod cap_runtime;
 pub(crate) mod cli_commands;
 pub(crate) mod codegen_control;

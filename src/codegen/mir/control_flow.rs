@@ -287,6 +287,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .cloned();
 
         if variant_arms.is_empty() {
+            let has_literal_arms = arms
+                .iter()
+                .any(|arm| matches!(arm.case, MirSwitchCase::Literal(_)));
+            if has_literal_arms {
+                // Scalar literal switch (R6-1051): the shared catalog contract
+                // proved the Copy-scalar scrutinee and exhaustive coverage in
+                // validate_mir_native; this is the mechanical lowering.
+                return self.emit_literal_switch(
+                    &scrutinee_value,
+                    &scrutinee_ty,
+                    arms,
+                    default_arm.as_ref(),
+                    subject,
+                );
+            }
             let default_arm = default_arm.ok_or_else(|| {
                 NativeMirError::new(subject.to_string(), "variant switch has no native arm")
             })?;
@@ -438,6 +453,132 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_unreachable()
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a scalar literal switch (R6-1051). The structural validator
+    /// proved the scrutinee is a Copy scalar with admitted Bool/signed-integer
+    /// ABI, every case is a Literal or trailing Default, and coverage is
+    /// exhaustive — so the false edge of the final literal either lands on the
+    /// default arm or on a defensively unreachable abort.
+    fn emit_literal_switch(
+        &mut self,
+        scrutinee_value: &BasicValueEnum<'ctx>,
+        scrutinee_ty: &crate::core::ResolvedTypeId,
+        arms: &[MirSwitchArm],
+        default_arm: Option<&MirSwitchArm>,
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(scrutinee_ty)
+            .ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "scalar switch TypeDesc is absent")
+            })?;
+        let literal_arms: Vec<&MirSwitchArm> = arms
+            .iter()
+            .filter(|arm| matches!(arm.case, MirSwitchCase::Literal(_)))
+            .collect();
+        for (index, arm) in literal_arms.iter().enumerate() {
+            let MirSwitchCase::Literal(literal) = &arm.case else {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "native scalar switch arm lost its literal case",
+                ));
+            };
+            let constant = match (descriptor.abi, literal) {
+                (MirAbiClass::Bool, ResolvedLiteral::Bool(value)) => self
+                    .generator
+                    .context
+                    .bool_type()
+                    .const_int(u64::from(*value), false),
+                (
+                    MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    ResolvedLiteral::Int(value),
+                ) => self
+                    .generator
+                    .context
+                    .i32_type()
+                    .const_int(*value as u64, true),
+                (
+                    MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    },
+                    ResolvedLiteral::Int(value),
+                ) => self
+                    .generator
+                    .context
+                    .i64_type()
+                    .const_int(*value as u64, true),
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject.to_string(),
+                        "scalar switch case is outside the native scalar ABI",
+                    ));
+                }
+            };
+            let condition = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    scrutinee_value.into_int_value(),
+                    constant,
+                    "mir_scalar_case",
+                )
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            let target = *self.blocks.get(&arm.target).ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "scalar switch target is absent")
+            })?;
+            let current = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "scalar switch case has no LLVM block")
+            })?;
+            self.queue_edge(&arm.target, &arm.arguments, current, subject)?;
+            if index + 1 < literal_arms.len() {
+                let next = self
+                    .generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_scalar_next");
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, next)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.generator.builder.position_at_end(next);
+            } else if let Some(default_arm) = default_arm {
+                self.queue_edge(
+                    &default_arm.target,
+                    &default_arm.arguments,
+                    current,
+                    subject,
+                )?;
+                let default_block = *self.blocks.get(&default_arm.target).ok_or_else(|| {
+                    NativeMirError::new(subject.to_string(), "default target LLVM block is absent")
+                })?;
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, default_block)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            } else {
+                let no_match = self
+                    .generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_scalar_no_match");
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, no_match)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.generator.builder.position_at_end(no_match);
+                self.emit_abort_with_message(
+                    "[E0800] canonical MIR scalar switch has no matching arm",
+                    &subject.to_string(),
+                )?;
             }
         }
         Ok(())

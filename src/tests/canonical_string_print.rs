@@ -7,9 +7,11 @@
 //! the non-consuming observation shape.  The differential matrix pins
 //! three-consumer equivalence (reference interpreter, AST-free bytecode VM,
 //! native emitter on one shared `MirProgram`) so retiring the historical
-//! recoverable-Flow-only stdout gate has a proof to point at.  The
-//! Option<string> unwrap face stays fail-closed at the native flat Copy
-//! variant contract and is pinned at that boundary, not silently dropped.
+//! recoverable-Flow-only stdout gate has a proof to point at.  (R6-1051
+//! restatement: the Option<string> assign-face program this file used to pin
+//! at the Copy variant capability boundary now runs canonical end-to-end via
+//! the scalar literal-switch face; only its route disposition — compatibility
+//! on the default entry — is still pinned here.)
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -185,37 +187,26 @@ fn string_print_matrix_agrees_across_consumers() {
     }
 }
 
-// The Option<string> unwrap face (the R6-1049 boundary fixture) stays on the
-// explicit boundary after the string-print gate retired: the unwrap-style
-// consumption is not the option island's switch candidacy, so the program
-// keeps the compatibility route, and the `--mir` opt-in must keep failing
-// closed at the Copy variant capability (verifier Switch gate, native flat
-// Copy variant contract) rather than entering an unproven non-Copy payload
-// ABI.  This pin documents the boundary; widening the variant contract to
-// StringHandle payloads is its own differential slice, not a silent
-// pass-through here.
+// Restated in R6-1051: the Option<string> assign-face fixture no longer fails
+// the capability gate — the scalar literal-switch face admitted its bool
+// match, and the three-consumer differential now lives in
+// `canonical_switch_literal.rs`.  What this pin keeps is the route half of
+// the old doctrine: the fixture still has no option-island switch candidacy
+// (the only match scrutinee is bool), so the option island stays
+// OutsideProfile and the default entry keeps the compatibility route instead
+// of a mixed rejection.
 #[test]
-fn option_string_unwrap_stays_outside_profile_and_fail_closed() {
+fn option_string_unwrap_keeps_compatibility_route_disposition() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/mir_option_string_assign_face.mimi"),
     )
     .expect("fixture");
-    let label = "option string unwrap boundary";
+    let label = "option string unwrap route disposition";
     let mir = materialize_string_print(&source, label);
-    let capability = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("the Option<string> payload must stay outside the Copy variant capability");
-    assert!(
-        capability
-            .iter()
-            .any(|message| message.contains("Copy variant")),
-        "the capability failure must name the Copy variant boundary: {capability:?}"
-    );
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} must pass the capability gate: {errors:?}"));
 
-    // Route disposition: no Option<string> switch candidacy exists (the only
-    // match scrutinee is bool), so the option island stays OutsideProfile and
-    // the default entry keeps the compatibility route instead of a mixed
-    // rejection.
     let checked = checked_program_of(&source);
     let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
         .expect("the fixture must still materialize its canonical route graph");

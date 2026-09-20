@@ -11016,6 +11016,110 @@ impl MirTypeCatalog {
         self.validate_variant_switch_cases(scrutinee_ty, arms, false)
     }
 
+    /// Validate a scalar literal switch over a Copy-scalar scrutinee
+    /// (R6-1051). The lowerer already emits `MirSwitchCase::Literal` arms for
+    /// `match` on bool and signed integers; this is the one shared contract
+    /// every consumer gates through before lowering. Floating and String
+    /// scrutinees stay fail-closed: no differential proof exists for
+    /// floating-literal dispatch.
+    pub fn validate_scalar_switch(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+    ) -> Result<(), String> {
+        let descriptor = self.get(scrutinee_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                scrutinee_ty.as_str()
+            )
+        })?;
+        if descriptor.layout != MirLayout::Scalar {
+            return Err(format!(
+                "scalar switch scrutinee type '{}' layout {:?} is outside the scalar switch contract",
+                scrutinee_ty.as_str(),
+                descriptor.layout
+            ));
+        }
+        let is_bool = descriptor.abi == MirAbiClass::Bool;
+        let int_bits = match descriptor.abi {
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } => Some(match descriptor.abi {
+                MirAbiClass::Integer { bits: 32, .. } => 32u32,
+                _ => 64,
+            }),
+            _ => None,
+        };
+        if !is_bool && int_bits.is_none() {
+            return Err(format!(
+                "scalar switch scrutinee type '{}' ABI {:?} is outside the scalar switch contract",
+                scrutinee_ty.as_str(),
+                descriptor.abi
+            ));
+        }
+        if arms.is_empty() {
+            return Err("scalar switch has no arms".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut seen_bools = [false; 2];
+        let mut has_default = false;
+        for (index, arm) in arms.iter().enumerate() {
+            if !arm.bindings.is_empty() {
+                return Err("scalar switch arm cannot bind a payload".into());
+            }
+            match &arm.case {
+                crate::core::mir::MirSwitchCase::Literal(literal) => {
+                    if has_default {
+                        return Err("scalar switch has an arm after its default".into());
+                    }
+                    match literal {
+                        crate::core::ResolvedLiteral::Bool(value) if is_bool => {
+                            if seen_bools[*value as usize] {
+                                return Err("scalar switch case is repeated".into());
+                            }
+                            seen_bools[*value as usize] = true;
+                        }
+                        crate::core::ResolvedLiteral::Int(value) if int_bits.is_some() => {
+                            if int_bits == Some(32) && i32::try_from(*value).is_err() {
+                                return Err(format!(
+                                    "scalar switch case {value} is outside the i32 scrutinee range"
+                                ));
+                            }
+                            if !seen.insert(*value) {
+                                return Err("scalar switch case is repeated".into());
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "scalar switch case {literal:?} is outside the scrutinee ABI"
+                            ));
+                        }
+                    }
+                }
+                crate::core::mir::MirSwitchCase::Default => {
+                    if has_default {
+                        return Err("scalar switch has more than one default arm".into());
+                    }
+                    if index + 1 != arms.len() {
+                        return Err("scalar switch default arm must be last".into());
+                    }
+                    has_default = true;
+                }
+                crate::core::mir::MirSwitchCase::Variant(_) => {
+                    return Err("scalar switch cannot use a variant case".into());
+                }
+            }
+        }
+        if is_bool && !has_default && !(seen_bools[0] && seen_bools[1]) {
+            return Err("bool scalar switch must cover true and false or carry a default".into());
+        }
+        if int_bits.is_some() && !has_default {
+            return Err("integer scalar switch must carry a default arm".into());
+        }
+        Ok(())
+    }
+
     /// Validate the structural variant-switch contract while making the
     /// payload transport mode explicit. Read-only `Switch` may bind only
     /// Copy fields; consuming `SwitchMove` opts into the field MoveOut mode.
