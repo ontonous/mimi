@@ -25,23 +25,24 @@ use super::{
     classify_generic_result_projection_fallback_admission,
     classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
     classify_option_nested_tuple_variant_admission, classify_option_string_variant_admission,
-    classify_scalar_collection_admission, contains_copy_option_i32_variant_candidate,
-    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
-    contains_flat_copy_record_candidate, contains_flow_failure_retry_candidate,
-    contains_generic_option_projection_candidate,
+    classify_scalar_collection_admission, classify_session_channel_admission,
+    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
+    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
+    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
     contains_option_nested_tuple_variant_candidate, contains_option_string_variant_candidate,
     contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
-    contains_scalar_collection_operation_candidate, is_exact_s8_flow_transition,
-    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, scalar_ffi_boundary_reason,
-    CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
-    GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
-    GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
-    GenericVariantPredicateAdmission, ManagedResultCallAdmission,
-    OptionNestedTupleVariantAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
+    contains_scalar_collection_operation_candidate, contains_session_channel_candidate,
+    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    scalar_ffi_boundary_reason, CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission,
+    FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
+    GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
+    GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
+    ManagedResultCallAdmission, OptionNestedTupleVariantAdmission, OptionStringVariantAdmission,
+    ScalarCollectionAdmission, SessionChannelAdmission,
 };
 
 #[cfg(test)]
@@ -82,6 +83,7 @@ pub enum CanonicalMirRouteProfile {
     CopyOptionI64Variant,
     CopyOptionF64Variant,
     CopyResultI32Variant,
+    SessionChannel,
 }
 
 impl CanonicalMirRouteProfile {
@@ -111,6 +113,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionI64Variant => super::COPY_OPTION_I64_VARIANT_ISLAND,
             Self::CopyOptionF64Variant => super::COPY_OPTION_F64_VARIANT_ISLAND,
             Self::CopyResultI32Variant => super::COPY_RESULT_I32_VARIANT_ISLAND,
+            Self::SessionChannel => super::SESSION_CHANNEL_ISLAND,
         }
     }
 
@@ -143,6 +146,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionI64Variant => admission.copy_option_i64_complete(),
             Self::CopyOptionF64Variant => admission.copy_option_f64_complete(),
             Self::CopyResultI32Variant => admission.copy_result_i32_complete(),
+            Self::SessionChannel => admission.session_complete(),
         }
     }
 
@@ -174,6 +178,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionI64Variant => route.materialized_copy_option_i64_candidate,
             Self::CopyOptionF64Variant => route.materialized_copy_option_f64_candidate,
             Self::CopyResultI32Variant => route.materialized_copy_result_i32_candidate,
+            Self::SessionChannel => route.materialized_session_candidate,
         }
     }
 }
@@ -289,6 +294,7 @@ pub struct CanonicalMirRouteAdmission {
     pub copy_option_i64: CopyOptionI32VariantAdmission,
     pub copy_option_f64: CopyOptionI32VariantAdmission,
     pub copy_result_i32: CopyResultI32VariantAdmission,
+    pub session: SessionChannelAdmission,
 }
 
 impl CanonicalMirRouteAdmission {
@@ -350,6 +356,7 @@ impl CanonicalMirRouteAdmission {
                 self.copy_result_i32,
                 CopyResultI32VariantAdmission::OutsideProfile
             )
+            || !matches!(self.session, SessionChannelAdmission::OutsideProfile)
     }
 
     pub const fn collection_complete(self) -> bool {
@@ -454,6 +461,10 @@ impl CanonicalMirRouteAdmission {
             CopyResultI32VariantAdmission::CompleteCoverage
         )
     }
+
+    pub const fn session_complete(self) -> bool {
+        matches!(self.session, SessionChannelAdmission::CompleteCoverage)
+    }
 }
 
 /// One immutable canonical graph plus the receipts needed by route owners.
@@ -482,6 +493,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_copy_option_i64_candidate: bool,
     pub materialized_copy_option_f64_candidate: bool,
     pub materialized_copy_result_i32_candidate: bool,
+    pub materialized_session_candidate: bool,
 }
 
 /// Classify route eligibility once from checker-owned typed facts.
@@ -520,6 +532,7 @@ pub fn classify_canonical_mir_route_admission(
             crate::core::PrimitiveType::F64,
         ),
         copy_result_i32: classify_copy_result_i32_variant_admission(program),
+        session: classify_session_channel_admission(program),
     }
 }
 
@@ -552,9 +565,14 @@ pub fn materialize_canonical_mir_route(
     }
     // All public scalar-FFI consumers use the same known prelude exclusion.
     // Imported/user code stays in the graph; calls into excluded prelude code
-    // remain missing-target errors, never compatibility retries.
+    // remain missing-target errors, never compatibility retries.  The
+    // session-channel island shares the exclusion: the direct native entry
+    // and the public verify path must observe the same prelude-free graph as
+    // the CLI dispatch wrapper.  A complete flat Copy-record admission shares
+    // it for the same reason: preloaded prelude bodies carry Assign statements
+    // MIR Phase 0 cannot lower, and the dispatch wrapper never lowers them.
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
-    if admission.scalar_ffi {
+    if admission.scalar_ffi || admission.session_complete() || admission.record_complete() {
         selected_exclusions.extend(
             program
                 .source_registry()
@@ -625,6 +643,7 @@ pub fn materialize_canonical_mir_route(
         super::contains_copy_option_f64_variant_candidate(&canonical);
     let materialized_copy_result_i32_candidate =
         contains_copy_result_i32_variant_candidate(&canonical);
+    let materialized_session_candidate = contains_session_channel_candidate(&canonical);
     if admission.scalar_ffi {
         // Recognizing FFI must not widen an existing aggregate/collection
         // island. Keep these intersection gates in the shared materializer,
@@ -841,6 +860,15 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.session_complete() && !materialized_session_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::SessionChannel,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete session-channel admission did not materialize a session operation receipt"
+                    .into(),
+        });
+    }
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
@@ -863,6 +891,7 @@ pub fn materialize_canonical_mir_route(
         materialized_copy_option_i64_candidate,
         materialized_copy_option_f64_candidate,
         materialized_copy_result_i32_candidate,
+        materialized_session_candidate,
     })
 }
 
@@ -979,6 +1008,12 @@ fn match_complete_or_compatibility(
             stage,
             message,
         }
+    } else if admission.session_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::SessionChannel,
+            stage,
+            message,
+        }
     } else {
         CanonicalMirRouteMaterializationError::Compatibility { admission, message }
     }
@@ -1091,6 +1126,77 @@ mod tests {
     }
 
     #[test]
+    fn complete_session_channel_materialization_carries_one_receipt() {
+        let program = checked(
+            r#"
+                session Proto = !i32 . ?i32 . end
+
+                func main() -> i64 {
+                    let (tx, rx) = session_pair::<Proto>()
+                    session_send(tx, 10)
+                    let first = session_recv(rx)
+                    session_send(rx, first + 1)
+                    let second = session_recv(tx)
+                    session_close(rx)
+                    session_close(tx)
+                    println(first)
+                    println(second)
+                    0
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(admission.session, SessionChannelAdmission::CompleteCoverage);
+        assert!(admission.has_candidate());
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete session-channel route must materialize");
+        assert!(route.materialized_session_candidate);
+        assert!(CanonicalMirRouteProfile::SessionChannel.is_admitted(route.admission));
+        assert!(CanonicalMirRouteProfile::SessionChannel.is_materialized(&route));
+        let island_validation = crate::core::mir::validate_session_channel_island(&route.program);
+        assert!(
+            island_validation.is_ok(),
+            "island validator: {island_validation:?}"
+        );
+    }
+
+    #[test]
+    fn session_assign_sibling_keeps_compatibility_route() {
+        // The Assign statement is outside MIR Phase 0 (R6-1046 boundary), so
+        // a session program containing one is not the differential-proven
+        // face: admission is MixedCoverage and materialization keeps the
+        // explicit compatibility route.  It must never become a hard
+        // rejection of a working legacy program or an unproven canonical
+        // admission.
+        let program = checked(
+            r#"
+                session Proto = !i32 . ?i32 . end
+
+                func main() -> i64 {
+                    let (tx, rx) = session_pair::<Proto>()
+                    let mut sent = 0
+                    sent = 1
+                    session_send(tx, sent)
+                    let first = session_recv(rx)
+                    session_send(rx, first)
+                    let second = session_recv(tx)
+                    session_close(rx)
+                    session_close(tx)
+                    0
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(admission.session, SessionChannelAdmission::MixedCoverage);
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("mixed session coverage must not materialize a canonical route");
+        let CanonicalMirRouteMaterializationError::Compatibility { admission, .. } = error else {
+            panic!("mixed session coverage must keep the compatibility route: {error:?}");
+        };
+        assert_eq!(admission.session, SessionChannelAdmission::MixedCoverage);
+    }
+
+    #[test]
     fn compatibility_materialization_error_preserves_candidate_admission() {
         let admission = CanonicalMirRouteAdmission {
             scalar_ffi: false,
@@ -1113,6 +1219,7 @@ mod tests {
             copy_option_i64: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_f64: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_result_i32: CopyResultI32VariantAdmission::OutsideProfile,
+            session: SessionChannelAdmission::OutsideProfile,
         };
         let error = match_complete_or_compatibility(
             admission,
@@ -1728,6 +1835,55 @@ mod tests {
                 .expect("generic Record<f64> argument TypeDesc")
                 .abi,
             crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+    }
+
+    #[test]
+    fn record_program_with_integer_print_is_complete_admission() {
+        // R6-1048 regression repair: once numeric-widen call receipts let the
+        // graph materialize the record candidate inside mixed coverage, the
+        // doctrine forbids the legacy fallback — the record island must close
+        // admission for the checker-legal integer-print face instead, keeping
+        // the classifier in parity with demonstrated graph construction.
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_record_print_face.mimi"
+        ));
+        assert_eq!(
+            classify_flat_copy_record_admission(&program),
+            FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("record print face must materialize");
+        assert!(route.materialized_record_candidate);
+        for function in route.program.functions().values() {
+            function
+                .validate()
+                .expect("record print face graph must be structurally valid");
+        }
+    }
+
+    #[test]
+    fn record_program_with_non_integer_print_stays_mixed_coverage() {
+        // The admitted scalar-print face is exactly the signed-integer
+        // builtin println the graph demonstrably lowers; a float argument
+        // keeps the explicit compatibility boundary (construction fails on
+        // the unsupported builtin kind and the program stays a legacy
+        // compatibility input).
+        let program = checked(
+            r#"
+                type Point { x: i64, y: i64 }
+
+                func main() -> i32 {
+                    let p = Point { x: 1, y: 2 }
+                    println(p.x)
+                    println(1.5)
+                    0
+                }
+            "#,
+        );
+        assert_eq!(
+            classify_flat_copy_record_admission(&program),
+            FlatCopyRecordAdmission::MixedCoverage
         );
     }
 }

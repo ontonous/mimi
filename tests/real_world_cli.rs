@@ -18404,12 +18404,16 @@ fn canonical_mir_convert_i32_to_i64_cli_smoke() {
     );
 }
 
+// R6-1043 admitted signed (i32|i64) -> f64 into the canonical conversion
+// contract, so the rejection face moves to the nearest shape still outside
+// it: float-to-int narrowing (`f64 as i32`), which has trap/loss semantics
+// no canonical conversion entry covers.
 #[test]
-fn canonical_mir_convert_i32_to_f64_rejects_without_fallback() {
+fn canonical_mir_convert_f64_to_i32_rejects_without_fallback() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_convert_i32_to_f64_rejected.mimi");
+        .join("mir_convert_f64_to_i32_rejected.mimi");
     let output = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
@@ -18419,7 +18423,7 @@ fn canonical_mir_convert_i32_to_f64_rejects_without_fallback() {
         .expect("failed to spawn rejected canonical conversion fixture");
     assert!(
         !output.status.success(),
-        "i32 to f64 conversion must fail closed"
+        "f64 to i32 conversion must fail closed"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -21460,4 +21464,180 @@ fn real_world_cli_suite() {
         }
         panic!("{msg}");
     }
+}
+
+// R6-1047: the integer-payload session face is a migrated default-route
+// island.  A clean session program must execute on the canonical route (the
+// legacy disposition must stay silent under MIMI_VERBOSE).  A session
+// program carrying a sibling shape outside MIR Phase 0 (assign) is mixed
+// coverage, not the differential-proven face: it keeps the compatibility
+// route — the program still runs, and the disposition line makes that route
+// observable instead of silent.
+#[test]
+fn session_channel_default_route_is_canonical_and_assign_sibling_keeps_compatibility() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_session_route_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create session route directory");
+
+    let clean = dir.join("session_clean.mimi");
+    fs::write(
+        &clean,
+        r#"session Proto = !i32 . ?i32 . end
+
+func main() -> i64 {
+    let (tx, rx) = session_pair::<Proto>()
+    session_send(tx, 10)
+    let first = session_recv(rx)
+    session_send(rx, first + 1)
+    let second = session_recv(tx)
+    session_close(rx)
+    session_close(tx)
+    println(first)
+    println(second)
+    0
+}
+"#,
+    )
+    .unwrap();
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&clean)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "clean session program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"10\n11\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "session program must not re-enter the compatibility route: {stderr}"
+    );
+
+    let assign = dir.join("session_assign.mimi");
+    fs::write(
+        &assign,
+        r#"session Proto = !i32 . ?i32 . end
+
+func main() -> i64 {
+    let (tx, rx) = session_pair::<Proto>()
+    let mut sent = 0
+    sent = 1
+    session_send(tx, sent)
+    let first = session_recv(rx)
+    session_send(rx, first)
+    let second = session_recv(tx)
+    session_close(rx)
+    session_close(tx)
+    0
+}
+"#,
+    )
+    .unwrap();
+    let compat = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&assign)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let compat_stderr = String::from_utf8_lossy(&compat.stderr).to_string();
+    assert!(
+        compat.status.success(),
+        "the assign sibling is a working legacy program and must keep running: {compat_stderr}"
+    );
+    assert!(
+        compat_stderr.contains("canonical route disposition: legacy"),
+        "mixed session coverage must keep the explicit compatibility route: {compat_stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// R6-1048 regression repair: a checker-legal flat Copy record program whose
+// only non-record shape is an integer `println` used to hard-reject on the
+// default route — numeric-widen call receipts let graph construction
+// materialize the record candidate inside mixed coverage, where the doctrine
+// forbids the legacy fallback.  The record island now closes admission for
+// exactly this face, and the program must route canonical on all three
+// consumers with reference/bytecode/native agreeing byte for byte.
+#[test]
+fn canonical_mir_record_print_routes_canonical_across_consumers() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_record_print_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create record print route directory");
+    let source = dir.join("record_print.mimi");
+    fs::write(&source, include_str!("fixtures/mir_record_print_face.mimi")).unwrap();
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "record print program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"25\n3\n4\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "record print program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"25\n3\n4\n");
+
+    let native = dir.join("record_print_native");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("canonical route disposition: legacy"),
+        "native MIR build must not fall back to legacy: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"25\n3\n4\n");
+
+    let _ = fs::remove_dir_all(&dir);
 }

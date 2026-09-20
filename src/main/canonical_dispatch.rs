@@ -185,6 +185,14 @@ pub(crate) fn select_default_route(
     let copy_option_f64_admission = admission.copy_option_f64;
     let copy_result_i32_admission = admission.copy_result_i32;
     let flow_failure_retry_hint = admission.flow_failure_retry;
+    let session_hint = !matches!(
+        admission.session,
+        mimi::core::mir::SessionChannelAdmission::OutsideProfile
+    );
+    let complete_session_candidate = matches!(
+        admission.session,
+        mimi::core::mir::SessionChannelAdmission::CompleteCoverage
+    );
     // Imported stdlib facades are part of the production island once their
     // concrete operations materialize in MIR.  Do not use the retained File
     // import list as a second route policy: checker admission records the
@@ -363,6 +371,7 @@ pub(crate) fn select_default_route(
         && !copy_option_i64_hint
         && !copy_option_f64_hint
         && !copy_result_i32_hint
+        && !session_hint
     {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
@@ -492,6 +501,14 @@ pub(crate) fn select_default_route(
             ) {
                 return DefaultMirRoute::Rejected(format!(
                     "managed Result direct-call canonical MIR {stage:?} failed: {message}"
+                ));
+            }
+            if matches!(
+                profile,
+                mimi::core::mir::CanonicalMirRouteProfile::SessionChannel
+            ) {
+                return DefaultMirRoute::Rejected(format!(
+                    "session-channel canonical MIR {stage:?} failed: {message}"
                 ));
             }
             let reason = match stage {
@@ -848,6 +865,7 @@ pub(crate) fn select_default_route(
     let materialized_copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
     let materialized_copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
     let materialized_copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
+    let materialized_session_candidate = route.materialized_session_candidate;
     let flow_route_candidate =
         flow_candidate || materialized_flow_candidate || flow_failure_retry_hint;
     let flow_failure_route_candidate =
@@ -895,6 +913,12 @@ pub(crate) fn select_default_route(
         || (copy_option_f64_hint && materialized_copy_option_f64_candidate);
     let copy_result_i32_route_candidate = complete_copy_result_i32_candidate
         || (copy_result_i32_hint && materialized_copy_result_i32_candidate);
+    // The session island has no partial canonical admission: only the exact
+    // differential-proven face whose graph also materializes session
+    // receipts routes canonical.  Every mixed-coverage shape keeps the
+    // compatibility route unchanged; an unproven hint never becomes a
+    // rejection or a canonical admission.
+    let session_route_candidate = complete_session_candidate && materialized_session_candidate;
     if flow_route_candidate && !flow_transition_operation {
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
@@ -1047,6 +1071,7 @@ pub(crate) fn select_default_route(
         && !copy_result_i32_route_candidate
         && !managed_result_call_route_candidate
         && !multi_target_union_route_candidate
+        && !session_route_candidate
     {
         return DefaultMirRoute::Legacy(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
@@ -1234,6 +1259,15 @@ pub(crate) fn select_default_route(
         }
     }
 
+    if materialized_session_candidate {
+        if let Err(errors) = mimi::core::mir::validate_session_channel_island(&canonical) {
+            return DefaultMirRoute::Rejected(format!(
+                "{} capability gate failed: {errors:?}",
+                mimi::core::mir::SESSION_CHANNEL_ISLAND
+            ));
+        }
+    }
+
     // The MIR verifier intentionally skips bodies with no contract.  That is
     // not permission for an unsupported instruction to enter a default
     // native/bytecode island.  Scan the complete canonical graph before the
@@ -1243,6 +1277,12 @@ pub(crate) fn select_default_route(
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
                 "managed Result direct-call canonical MIR verifier capability gate failed: {error:?}"
+            ));
+        }
+        if materialized_session_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "{} MIR verifier capability gate failed: {error:?}",
+                mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
         if user_record_hint
@@ -1280,6 +1320,12 @@ pub(crate) fn select_default_route(
                 "managed Result direct-call MIR-bytecode preflight failed: {errors:?}"
             ));
         }
+        if materialized_session_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "{} MIR-bytecode preflight failed: {errors:?}",
+                mimi::core::mir::SESSION_CHANNEL_ISLAND
+            ));
+        }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -1297,6 +1343,12 @@ pub(crate) fn select_default_route(
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
                 "managed Result direct-call native MIR preflight failed: {errors:?}"
+            ));
+        }
+        if materialized_session_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "{} native MIR preflight failed: {errors:?}",
+                mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
         return reject_migrated_candidates_with_copy_f64(
@@ -1330,6 +1382,12 @@ pub(crate) fn select_default_route(
                         "managed Result direct-call verifier contract pass failed: {error}"
                     ));
                 }
+                if materialized_session_candidate {
+                    return DefaultMirRoute::Rejected(format!(
+                        "{} verifier contract pass failed: {error}",
+                        mimi::core::mir::SESSION_CHANNEL_ISLAND
+                    ));
+                }
                 return reject_migrated_candidates_with_copy_f64(
                     flow_route_candidate,
                     collection_route_candidate,
@@ -1350,6 +1408,12 @@ pub(crate) fn select_default_route(
                 "managed Result direct-call verifier returned an unsupported or inconclusive result"
                     .into(),
             );
+        }
+        if materialized_session_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "{} verifier returned an unsupported or inconclusive result",
+                mimi::core::mir::SESSION_CHANNEL_ISLAND
+            ));
         }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,

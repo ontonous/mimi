@@ -12,9 +12,9 @@
 use std::collections::BTreeSet;
 
 use crate::core::ir::{
-    ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
-    ResolvedLiteral, ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedType,
-    ResolvedUnaryOp, ResolvedValueProjection,
+    ResolvedBinaryOp, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
+    ResolvedFStringPart, ResolvedLiteral, ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind,
+    ResolvedType, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
@@ -2525,6 +2525,38 @@ pub(crate) fn is_owned_generic_record_update_callable(
 /// expressions, record construction/projection, direct user calls, and
 /// structured `if`; collection values, builtin/runtime calls, loops,
 /// concurrency, and higher-order expressions belong to other islands.
+/// A builtin `println` whose every argument is a signed 32/64-bit integer
+/// lowers as a `PrintlnInt` builtin inside the flat-record island graph —
+/// the same scalar-print face the session-channel island admits.  Every
+/// other builtin (and println over any other argument type) keeps the
+/// compatibility boundary.  Classifying the admitted face as unmigrated
+/// would strand checker-legal record programs on a hard route rejection:
+/// once graph construction materializes the record candidate inside mixed
+/// coverage, the doctrine forbids falling back to legacy (R6-1048 parity
+/// repair after numeric-widen call receipts widened construction).
+fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) -> bool {
+    if !matches!(
+        call.callee,
+        ResolvedCallee::Builtin(ref builtin) if builtin.as_str() == "println"
+    ) {
+        return false;
+    }
+    if !call.effects.is_empty() || !call.session.is_empty() || call.permission.is_some() {
+        return false;
+    }
+    matches!(
+        program.resolved_types().get(&call.result),
+        Some(ResolvedType::Primitive(PrimitiveType::Unit))
+    ) && call.arguments.iter().all(|argument| {
+        matches!(
+            program.resolved_types().get(&argument.value.ty),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64
+            ))
+        )
+    })
+}
+
 fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
     // A managed generic record projection may materialize a one-level
     // `List<Copy scalar>` or `Set<Copy scalar>` payload in its caller.  The
@@ -2627,20 +2659,24 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
             }
             ResolvedExprKind::Call(call) => {
-                matches!(
-                    call.callee,
-                    crate::core::ir::ResolvedCallee::Builtin(ref builtin)
-                        if !matches!(builtin.as_str(), "Some" | "None" | "Ok" | "Err")
-                ) || !call.effects.is_empty()
-                    || !call.session.is_empty()
-                    || call.permission.is_some()
-                    || call.arguments.iter().any(|argument| {
-                        expr_has_unmigrated_shape(
-                            program,
-                            &argument.value,
-                            admits_managed_record_collection,
-                        )
-                    })
+                if is_admitted_scalar_print_call(program, call) {
+                    false
+                } else {
+                    matches!(
+                        call.callee,
+                        crate::core::ir::ResolvedCallee::Builtin(ref builtin)
+                            if !matches!(builtin.as_str(), "Some" | "None" | "Ok" | "Err")
+                    ) || !call.effects.is_empty()
+                        || !call.session.is_empty()
+                        || call.permission.is_some()
+                        || call.arguments.iter().any(|argument| {
+                            expr_has_unmigrated_shape(
+                                program,
+                                &argument.value,
+                                admits_managed_record_collection,
+                            )
+                        })
+                }
             }
             ResolvedExprKind::Record { fields, rest, .. } => {
                 rest.as_ref().is_some_and(|value| {
@@ -2713,8 +2749,11 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                         expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                     })
                 }
-                ResolvedStmtKind::Assign { value, .. }
-                | ResolvedStmtKind::Expr(value)
+                // MIR Phase 0 has no Assign lowering yet; a complete-admission
+                // claim over a body carrying one would turn the compatibility
+                // input into a hard construction failure (R6-1048 parity).
+                ResolvedStmtKind::Assign { .. } => true,
+                ResolvedStmtKind::Expr(value)
                 | ResolvedStmtKind::Contract {
                     condition: value, ..
                 } => expr_has_unmigrated_shape(program, value, admits_managed_record_collection),

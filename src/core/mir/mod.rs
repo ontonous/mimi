@@ -428,6 +428,7 @@ mod option_nested_tuple_island;
 mod receipt;
 pub mod reference;
 mod route;
+mod session_island;
 pub mod types;
 
 pub use contracts::{
@@ -511,6 +512,10 @@ pub use route::{
 };
 #[cfg(test)]
 pub(crate) use route::{reset_test_route_materialization_count, test_route_materialization_count};
+pub use session_island::{
+    classify_session_channel_admission, contains_session_channel_candidate,
+    validate_session_channel_island, SessionChannelAdmission, SESSION_CHANNEL_ISLAND,
+};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.

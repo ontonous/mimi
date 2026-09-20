@@ -1,0 +1,22 @@
+// R6-1048 regression-repair fixture: a checker-legal flat Copy record program
+// whose only non-record shape is an integer `println`.  The record island
+// must classify this face Complete so the default route stays canonical;
+// classifying it mixed used to hard-reject the program once numeric-widen
+// call receipts let the graph materialize the record candidate.
+type Point { x: i64, y: i64 }
+
+func make_point(a: i64, b: i64) -> Point {
+    Point { x: a, y: b }
+}
+
+func distance_sq(p: Point) -> i64 {
+    p.x * p.x + p.y * p.y
+}
+
+func main() -> i32 {
+    let p = make_point(3, 4)
+    println(distance_sq(p))
+    println(p.x)
+    println(p.y)
+    0
+}

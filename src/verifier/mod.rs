@@ -655,7 +655,7 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 18] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 19] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
@@ -674,6 +674,7 @@ fn verify_closed_mir_program(
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionF64Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant,
+        crate::core::mir::CanonicalMirRouteProfile::SessionChannel,
     ];
     for profile in PROFILES {
         if let Some(results) = verify_closed_mir_profile(program, profile, source_hash.clone())? {
@@ -784,6 +785,13 @@ fn verify_closed_mir_profile(
             crate::core::mir::validate_managed_result_call_island(&canonical).map_err(|errors| {
                 format!(
                     "MIR-CAPABILITY-001: canonical verifier rejected the managed Result direct-call island: {errors:?}"
+                )
+            })?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::SessionChannel => {
+            crate::core::mir::validate_session_channel_island(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the session-channel island: {errors:?}"
                 )
             })?;
         }

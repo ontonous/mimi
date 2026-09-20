@@ -1,16 +1,17 @@
-//! Canonical session-channel differential tests (R6-1046).
+//! Canonical session-channel differential tests (R6-1046/R6-1047).
 //!
-//! Session programs are not yet in the migrated default-route profile (the
-//! route layer keeps them on the compatibility route with
-//! `outside-migrated-profile`), but the MIR-level consumers already execute
-//! the integer-payload session face.  These pins lock the three-consumer
-//! differential (reference interpreter, AST-free bytecode VM, native emitter
-//! on one shared `MirProgram`) so a later default-route migration starts from
-//! proven equivalence instead of assumption.  The faces outside the profile —
-//! non-integer session payloads (checker E0444), actor handles without
-//! canonical glue (structural validation), and assign statements outside MIR
-//! Phase 0 — are pinned as fail-closed rejections with their owning layer
-//! named.
+//! R6-1046 pinned the three-consumer differential (reference interpreter,
+//! AST-free bytecode VM, native emitter on one shared `MirProgram`) for the
+//! integer-payload session face before any route change, so the R6-1047
+//! default-route migration started from proven equivalence instead of
+//! assumption.  The route layer now recognizes exactly that proven face
+//! through the `session-channel-v1` island
+//! (`classify_session_channel_admission`); every other session-bearing shape
+//! stays `MixedCoverage` on the explicit compatibility route, unchanged from
+//! before the island existed.  The faces outside any profile — non-integer
+//! session payloads (checker E0444), actor handles without canonical glue
+//! (structural validation), and assign statements outside MIR Phase 0 — are
+//! pinned with their owning layer named.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -281,5 +282,95 @@ fn assign_statement_boundary_stays_fail_closed_in_mir_phase_0() {
     assert!(
         messages.contains("structured control flow is not lowered by MIR Phase 0"),
         "the rejection must name the Phase 0 statement boundary: {messages}"
+    );
+}
+
+// R6-1047: the default route recognizes the integer-payload session face via
+// the `session-channel-v1` island.  The checker admission is Complete, the
+// shared materializer attaches the SessionChannel receipts, and the island
+// validator plus the verifier capability gate accept the same graph.  A
+// session program carrying a sibling shape outside MIR Phase 0 (assign) is
+// NOT the differential-proven face: admission is MixedCoverage and the
+// compatibility route is preserved exactly as before the island existed —
+// it is neither a hard rejection of a working legacy program nor an
+// unproven canonical admission.
+#[test]
+fn session_channel_default_route_is_admitted_and_assign_sibling_keeps_compatibility() {
+    let source = r#"
+        session Proto = !i32 . ?i32 . end
+
+        func main() -> i64 {
+            let (tx, rx) = session_pair::<Proto>()
+            session_send(tx, 10)
+            let first = session_recv(rx)
+            session_send(rx, first + 1)
+            let second = session_recv(tx)
+            session_close(rx)
+            session_close(tx)
+            println(first)
+            println(second)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file)
+        .unwrap_or_else(|diags| panic!("check session route: {diags:?}"));
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert_eq!(
+        admission.session,
+        crate::core::mir::SessionChannelAdmission::CompleteCoverage
+    );
+    assert!(admission.has_candidate());
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("complete session-channel route must materialize");
+    assert!(route.materialized_session_candidate);
+    assert!(crate::core::mir::CanonicalMirRouteProfile::SessionChannel.is_admitted(route.admission));
+    assert!(crate::core::mir::CanonicalMirRouteProfile::SessionChannel.is_materialized(&route));
+    assert!(crate::core::mir::validate_session_channel_island(&route.program).is_ok());
+    assert!(crate::verifier::validate_mir_capabilities(&route.program).is_ok());
+
+    let assign_source = r#"
+        session Proto = !i32 . ?i32 . end
+
+        func main() -> i64 {
+            let (tx, rx) = session_pair::<Proto>()
+            let mut sent = 0
+            sent = 1
+            session_send(tx, sent)
+            let first = session_recv(rx)
+            session_send(rx, first)
+            let second = session_recv(tx)
+            session_close(rx)
+            session_close(tx)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(assign_source)
+        .tokenize()
+        .expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file)
+        .unwrap_or_else(|diags| panic!("check session assign: {diags:?}"));
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert_eq!(
+        admission.session,
+        crate::core::mir::SessionChannelAdmission::MixedCoverage
+    );
+    let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("mixed session coverage must not materialize a canonical route");
+    let crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+        admission, ..
+    } = error
+    else {
+        panic!("mixed session coverage must keep the compatibility route: {error:?}");
+    };
+    assert_eq!(
+        admission.session,
+        crate::core::mir::SessionChannelAdmission::MixedCoverage
     );
 }

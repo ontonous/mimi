@@ -587,6 +587,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.copy_result_i32_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()
+            // R6-1048 parity: a complete flat Copy-record admission must see
+            // the same prelude-free graph the CLI dispatch wrapper builds.
+            // Without the exclusion, preloaded prelude bodies carrying Assign
+            // statements (repeat_action/times) hard-fail construction even
+            // though dispatch never lowers them.
+            || admission.record_complete()
         {
             program
                 .source_registry()
@@ -898,6 +904,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "MIR-COVERAGE-001",
                         format!(
                             "complete Copy Result<i32, i32> variant MIR island materialization failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::SessionChannel,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete session-channel MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::SessionChannel,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete session-channel MIR island materialization failed: {message}"
                         ),
                     ),
                     (
