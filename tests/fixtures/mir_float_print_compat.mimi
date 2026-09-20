@@ -1,4 +1,0 @@
-func main() -> i32 {
-    println(0.5)
-    0
-}

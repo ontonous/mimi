@@ -1182,6 +1182,7 @@ impl<'a> NativeMirValidator<'a> {
                         | MirBuiltinKind::PrintlnBool
                         | MirBuiltinKind::PrintlnInt
                         | MirBuiltinKind::PrintlnString
+                        | MirBuiltinKind::PrintlnFloat
                 );
                 if !supported_kind {
                     self.errors.push(NativeMirError::new(

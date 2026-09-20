@@ -342,20 +342,61 @@ fn assert_legacy_return_receipt(
     eprintln!("[stop-ship-receipt]\n{text}");
 }
 
-/// Record the remaining mixed Set function-form boundary.  The Set operation
-/// and the scalar plus owned-StringHandle println nodes are canonical (the
-/// string face opened in R6-1050); this witness deliberately includes a float
-/// println, whose output ABI/effect is still outside the island.
-fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
-    assert_legacy_return_receipt(
-        case_id,
-        "set-lowering-return-ownership",
-        "not-closed: float stdout effect is outside the canonical ABI contract",
-        "Set function-form contains",
-        "legacy:mixed-coverage-without-materialized-candidate",
-        src,
+/// R6-1053 restatement of the Set function-form receipt: the Set operation,
+/// the owned StringHandle print face (R6-1050) and the f64 literal print face
+/// are all canonical stdout/collection faces now, so a Set function-form
+/// `contains` graph that prints a float literal is a complete canonical
+/// admission.  The receipt asserts construction success, the island
+/// capability gate, and byte-for-byte VM/native agreement.
+fn assert_set_contains_canonical_receipt(src: &str, expected_stdout: &str) {
+    let file = parse_prod(src);
+    let checked = crate::core::check_program(&file).expect("checker rejected Set contains graph");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&checked),
+        crate::core::mir::ScalarCollectionAdmission::CompleteCoverage,
+        "Set function-form contains with admitted print faces must be a complete admission"
+    );
+    let program = {
+        // Mirror the production dispatch's prelude exclusion: merged prelude
+        // bodies stay on the compatibility route and never enter the
+        // canonical graph.
+        use std::collections::HashSet;
+        let excluded_sources = file
+            .sources
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
+        crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+            &checked,
+            &excluded_sources,
+        )
+        .expect("canonical MIR construction must succeed for the Set contains graph")
+    };
+    crate::core::mir::validate_scalar_collection_island(&program)
+        .expect("Set contains + float print graph must satisfy the island capability gate");
+
+    let (value, stdout) = checked_run_source_with_stdout(src);
+    assert_eq!(
+        format!("{value:?}"),
+        "Int(0)",
+        "checked VM return value drifted"
+    );
+    assert_eq!(stdout.trim(), expected_stdout, "VM output drifted");
+
+    let native = checked_codegen_compile_and_observe(src)
+        .expect("production compile_checked native witness must link");
+    assert_eq!(native.exit_code, Some(0), "native return status drifted");
+    assert_eq!(
+        native.stdout.trim(),
         expected_stdout,
-        None,
+        "native output drifted"
+    );
+    assert_eq!(
+        native.stdout.trim(),
+        stdout.trim(),
+        "VM/native output diverged"
     );
 }
 
@@ -1193,8 +1234,7 @@ fn audit1j_set_function_form_receipt() {
     if !can_link() {
         return;
     }
-    assert_set_contains_receipt(
-        "audit_1j_contains_set_haystack_fn_form",
+    assert_set_contains_canonical_receipt(
         r#"
         func main() -> i32 {
             let s = {4, 1, 1}

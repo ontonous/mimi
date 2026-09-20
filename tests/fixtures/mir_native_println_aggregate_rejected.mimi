@@ -1,0 +1,12 @@
+// Aggregate println remains outside the canonical stdout print face and must
+// fail closed under --mir with the stable canonical diagnostic; only bool,
+// signed i32/i64, the owned StringHandle print face (R6-1050) and the f64
+// literal print face (R6-1053) are admitted.
+func main() -> i32 {
+    ensures: result == 0
+    let values: Set<i32> = {4, 1}
+    println(contains(values, 1))
+    println(values)
+    drop(values)
+    0
+}

@@ -2124,6 +2124,19 @@ fn eval_instruction(
                 }
                 (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
                 (MirBuiltinKind::PrintlnInt, [SymbolicValue::Int(_)]) => SymbolicValue::Unit,
+                (MirBuiltinKind::PrintlnFloat, [SymbolicValue::Opaque { ty }]) => {
+                    // Z3 has no float sort in SymbolicValue; floats travel as
+                    // Opaque values. Verify the checker-owned TypeDesc admits
+                    // exactly the Copy f64 ABI the PrintlnFloat contract
+                    // declares, then treat the line as an opaque side effect.
+                    let descriptor = catalog
+                        .get(ty)
+                        .ok_or_else(|| "MIR println float source TypeDesc is absent".to_string())?;
+                    if descriptor.abi != (MirAbiClass::Float { bits: 64 }) {
+                        return Err("MIR builtin 'println' received a non-f64 value".into());
+                    }
+                    SymbolicValue::Unit
+                }
                 (MirBuiltinKind::PrintlnString, [argument]) => {
                     if let Some(receipt) = string_field_contract {
                         let source_ty = function

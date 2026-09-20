@@ -927,12 +927,10 @@ fn compute_liveness(
         if in_changed {
             live_in.insert(block_id.clone(), input);
             // Only an IN change can alter predecessors' OUT sets.
-            if !queued.is_empty() || true {
-                for edge in cfg.predecessors(&block_id) {
-                    if cfg.reachable.contains(&edge.from) && !queued.contains(&edge.from) {
-                        worklist.push_back(edge.from.clone());
-                        queued.insert(edge.from.clone());
-                    }
+            for edge in cfg.predecessors(&block_id) {
+                if cfg.reachable.contains(&edge.from) && !queued.contains(&edge.from) {
+                    worklist.push_back(edge.from.clone());
+                    queued.insert(edge.from.clone());
                 }
             }
         }

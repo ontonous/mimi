@@ -1,0 +1,7 @@
+// R6-1053: the f64 literal print face is a canonical stdout effect. The
+// output goes through the shared shortest round-trip runtime formatter, so
+// reference, bytecode and native consumers print byte-identical text.
+func main() -> i32 {
+    println(0.5)
+    0
+}

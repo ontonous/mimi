@@ -1026,14 +1026,16 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // R6-1052: a string literal is part of the owned StringHandle
             // stdout print face when it reaches a scalar println (R6-1050);
             // the expression-type scan below would otherwise read its
-            // String type as an out-of-profile VALUE.  Composite
-            // expressions re-check operand types explicitly so the literal
-            // cannot hide inside a non-print operation.
-            let is_string_literal = matches!(
+            // String type as an out-of-profile VALUE.  R6-1053 extends the
+            // same literal-only exemption to f64 (shortest round-trip print
+            // face).  Composite expressions re-check operand types explicitly
+            // so the literal cannot hide inside a non-print operation.
+            let is_print_face_literal = matches!(
                 &expression.kind,
                 ResolvedExprKind::Literal(crate::core::ResolvedLiteral::String(_))
+                    | ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_))
             );
-            if !is_string_literal {
+            if !is_print_face_literal {
                 self.require_profile_type(&expression.ty);
             }
         }
@@ -1134,9 +1136,10 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.has_candidate = true;
                 }
                 // Only the closed stdout effects of this island (signed
-                // integers, bool, and — since R6-1050 — the StringHandle
-                // print face) are Canonical MIR nodes here. Other println
-                // shapes (float, aggregate, multi-arg) remain on the explicit
+                // integers, bool, and — since R6-1050/R6-1053 — the
+                // StringHandle and f64 literal print faces) are Canonical MIR
+                // nodes here. Other println shapes (float bindings, float
+                // arithmetic, aggregate, multi-arg) remain on the explicit
                 // mixed compatibility route until their output ABI and effect
                 // contract is independently materialized.
                 if matches!(
@@ -1360,6 +1363,10 @@ fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::Reso
                 // print admission here — leaving it as mixed shape would turn
                 // previously compatible programs into hard route rejections.
                 | Some(ResolvedType::Primitive(PrimitiveType::String))
+                // R6-1053: the f64 literal print face is differential-pinned
+                // through the shared shortest round-trip runtime formatter,
+                // so a complete float-stdout-only graph routes canonical.
+                | Some(ResolvedType::Primitive(PrimitiveType::F64))
         )
     })
 }
@@ -3089,10 +3096,12 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 /// plain collection value is still a compatibility input; only a materialized
 /// `ListOp::Len`/`Reverse`/`Concat`, a receipt-bearing nested List index,
 /// `SetOp::Contains`, or checker-owned scalar Set/List facade instance,
-/// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt`/`PrintlnString`
+/// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt`/`PrintlnString`/
+/// `PrintlnFloat`
 /// has crossed the S11 production boundary.  R6-1052 admits the owned
 /// StringHandle print face into the stdout receipt so a complete
-/// string-stdout-only graph routes canonical like an integer/bool one.
+/// string-stdout-only graph routes canonical like an integer/bool one; R6-1053
+/// admits the f64 literal print face the same way.
 /// Keeping this fact next to the island contract prevents the CLI and direct
 /// native entry points from growing independent candidate predicates.
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
@@ -3105,7 +3114,8 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
                         MirInstructionKind::BuiltinCall {
                             kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
                                 | crate::core::mir::types::MirBuiltinKind::PrintlnInt
-                                | crate::core::mir::types::MirBuiltinKind::PrintlnString,
+                                | crate::core::mir::types::MirBuiltinKind::PrintlnString
+                                | crate::core::mir::types::MirBuiltinKind::PrintlnFloat,
                             ..
                         }
                     )
@@ -3568,6 +3578,25 @@ fn function_contains_println_string(function: &MirFunction) -> bool {
     })
 }
 
+/// Whether this function's executable graph contains the f64 literal
+/// `PrintlnFloat` print face (R6-1053).  Like the StringHandle face, the
+/// island's value/literal admission accepts exactly the Copy f64 values this
+/// face materializes, mirroring the checker-level classifier so admission and
+/// capability can never disagree.
+fn function_contains_println_float(function: &MirFunction) -> bool {
+    function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::BuiltinCall {
+                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnFloat,
+                    ..
+                }
+            )
+        })
+    })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
@@ -3582,6 +3611,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         checked_types: BTreeSet::new(),
         allow_owned_record_family: contains_owned_record_projection_candidate(program),
         function_admits_string_print: false,
+        function_admits_float_print: false,
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -3597,6 +3627,7 @@ struct ScalarCollectionValidator<'a> {
     checked_types: BTreeSet<crate::core::ResolvedTypeId>,
     allow_owned_record_family: bool,
     function_admits_string_print: bool,
+    function_admits_float_print: bool,
 }
 
 impl<'a> ScalarCollectionValidator<'a> {
@@ -3617,6 +3648,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         // are intentionally not part of this scan.
         for function in self.program.functions().values() {
             self.function_admits_string_print = function_contains_println_string(function);
+            self.function_admits_float_print = function_contains_println_float(function);
             self.validate_function(function);
         }
         for instance in self.program.instances().values() {
@@ -3807,7 +3839,13 @@ impl<'a> ScalarCollectionValidator<'a> {
                     Err("Unit TypeDesc has an inconsistent ABI/ownership/glue contract".into())
                 }
             }
-            MirLayout::Scalar => self.program.type_catalog().validate_copy_scalar(ty),
+            MirLayout::Scalar => {
+                if self.function_admits_float_print && self.is_print_face_f64(ty) {
+                    Ok(())
+                } else {
+                    self.program.type_catalog().validate_copy_scalar(ty)
+                }
+            }
             MirLayout::List { .. } => self
                 .program
                 .type_catalog()
@@ -3855,6 +3893,19 @@ impl<'a> ScalarCollectionValidator<'a> {
         self.program.type_catalog().validate_copy_scalar(ty)
     }
 
+    /// Whether `ty` is exactly the Copy f64 leaf the `PrintlnFloat` print face
+    /// materializes.  Deliberately f64-only: f32 values have no print receipt
+    /// in this island.
+    fn is_print_face_f64(&self, ty: &crate::core::ResolvedTypeId) -> bool {
+        self.program
+            .type_catalog()
+            .get(ty)
+            .is_some_and(|descriptor| {
+                descriptor.is_canonical_copy_scalar(true)
+                    && descriptor.abi == (MirAbiClass::Float { bits: 64 })
+            })
+    }
+
     fn validate_instruction(
         &mut self,
         function: &MirFunction,
@@ -3871,6 +3922,9 @@ impl<'a> ScalarCollectionValidator<'a> {
                         self.require_copy_scalar(&result_ty, subject, "constant result");
                     }
                     ResolvedLiteral::Unit => self.require_unit(&result_ty, subject),
+                    ResolvedLiteral::FloatBits(_)
+                        if self.function_admits_float_print
+                            && self.is_print_face_f64(&result_ty) => {}
                     ResolvedLiteral::String(_)
                         if (self.allow_owned_record_family
                             || self.function_admits_string_print)
@@ -4245,6 +4299,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                     kind,
                     crate::core::mir::types::MirBuiltinKind::PrintlnBool
                         | crate::core::mir::types::MirBuiltinKind::PrintlnInt
+                        | crate::core::mir::types::MirBuiltinKind::PrintlnFloat
                 ) {
                     self.error(format!(
                         "{subject} builtin {kind:?} is outside {SCALAR_COLLECTION_ISLAND}"
@@ -4274,13 +4329,25 @@ impl<'a> ScalarCollectionValidator<'a> {
                 let Some(result_ty) = self.value_type(function, result, subject) else {
                     return;
                 };
-                self.require_copy_scalar(&argument_ty, subject, "println argument");
+                if *kind == crate::core::mir::types::MirBuiltinKind::PrintlnFloat {
+                    if !self.is_print_face_f64(&argument_ty) {
+                        self.error(format!(
+                            "{subject} builtin 'println' argument rejected: type '{}' is not the Copy f64 print-face contract",
+                            argument_ty.as_str()
+                        ));
+                    }
+                } else {
+                    self.require_copy_scalar(&argument_ty, subject, "println argument");
+                }
                 let valid_input = match *kind {
                     crate::core::mir::types::MirBuiltinKind::PrintlnBool => {
                         is_bool(&self.program.type_catalog(), &argument_ty)
                     }
                     crate::core::mir::types::MirBuiltinKind::PrintlnInt => {
                         is_signed_integer(&self.program.type_catalog(), &argument_ty)
+                    }
+                    crate::core::mir::types::MirBuiltinKind::PrintlnFloat => {
+                        is_f64(&self.program.type_catalog(), &argument_ty)
                     }
                     _ => false,
                 };
@@ -4727,6 +4794,15 @@ fn is_bool(
         .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Bool)
 }
 
+fn is_f64(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    catalog
+        .get(ty)
+        .is_some_and(|descriptor| descriptor.abi == (MirAbiClass::Float { bits: 64 }))
+}
+
 fn binary_supported(
     op: ResolvedBinaryOp,
     left: &crate::core::ResolvedTypeId,
@@ -4898,9 +4974,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_println_from_the_canonical_stdout_effect() {
+    fn admits_float_literal_println_as_a_canonical_stdout_effect() {
+        // R6-1053 restatement: the f64 literal print face joined the closed
+        // stdout contract through the shared shortest round-trip formatter,
+        // so a float-stdout-only graph is a complete canonical admission.
         let tokens = Lexer::new(include_str!(
-            "../../../tests/fixtures/mir_native_println_float_rejected.mimi"
+            "../../../tests/fixtures/mir_native_println_float.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        super::MirInstructionKind::BuiltinCall {
+                            kind: crate::core::mir::types::MirBuiltinKind::PrintlnFloat,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+        validate_scalar_collection_island(&program).expect("println f64 effect contract");
+    }
+
+    #[test]
+    fn rejects_aggregate_println_from_the_canonical_stdout_effect() {
+        // R6-1053 restatement: with the f64 literal face admitted, the pinned
+        // unsupported println shape is the aggregate print — it keeps the
+        // stable canonical construction diagnostic and stays an explicit
+        // mixed compatibility input on the default route.
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_println_aggregate_rejected.mimi"
         ))
         .tokenize()
         .expect("lex");
@@ -4911,7 +5024,7 @@ mod tests {
             ScalarCollectionAdmission::MixedCoverage
         );
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("float println must fail before a canonical backend");
+            .expect_err("aggregate println must fail before a canonical backend");
         assert!(format!("{error:?}").contains("canonical contract accepts signed i32 or i64"));
     }
 

@@ -243,6 +243,13 @@ pub enum MirBuiltinKind {
     /// width is checker-owned by the argument TypeDesc: signed i32 and i64
     /// are the only concrete integer ABIs in this contract.
     PrintlnInt,
+    /// Write one Copy f64 followed by a newline via the runtime's shortest
+    /// round-trip Display helper (`mimi_to_string_f64`), the same formatter
+    /// the legacy native path and the bytecode VM already share, so the three
+    /// consumers are byte-identical by construction. Admission is the
+    /// literal-only stdout face (SD-9): float bindings or arithmetic keep a
+    /// program outside the island until value-flow analysis exists.
+    PrintlnFloat,
     /// Write one borrowed owned StringHandle followed by a newline. The
     /// builtin observes the bytes but does not consume the String; the caller
     /// remains responsible for the canonical OwnedString drop.
@@ -352,6 +359,18 @@ impl MirBuiltinContract {
                 result_must_be_unit: true,
                 effect: MirBuiltinEffect::StdoutLine,
             },
+            MirBuiltinKind::PrintlnFloat => Self {
+                kind,
+                name: "println",
+                arity: 1,
+                input_abi: MirAbiClass::Float { bits: 64 },
+                preserves_type: false,
+                requires_copy: true,
+                requires_same_input_type: false,
+                overflow_trap: None,
+                result_must_be_unit: true,
+                effect: MirBuiltinEffect::StdoutLine,
+            },
             MirBuiltinKind::PrintlnString => Self {
                 kind,
                 name: "println",
@@ -416,6 +435,7 @@ impl MirBuiltinContract {
                     bits: 32 | 64,
                     signed: true,
                 } => MirBuiltinKind::PrintlnInt,
+                MirAbiClass::Float { bits: 64 } => MirBuiltinKind::PrintlnFloat,
                 MirAbiClass::StringHandle => MirBuiltinKind::PrintlnString,
                 _ => return None,
             };
@@ -451,6 +471,7 @@ impl MirBuiltinContract {
                     signed: true,
                 }
             ),
+            MirBuiltinKind::PrintlnFloat => abi == MirAbiClass::Float { bits: 64 },
             MirBuiltinKind::PrintlnString => abi == MirAbiClass::StringHandle,
             MirBuiltinKind::SessionOpen => abi == MirAbiClass::OpaqueHandle,
             MirBuiltinKind::SessionPair => abi == MirAbiClass::Aggregate,
@@ -467,7 +488,8 @@ impl MirBuiltinContract {
             | MirBuiltinKind::Min
             | MirBuiltinKind::Max
             | MirBuiltinKind::PrintlnBool
-            | MirBuiltinKind::PrintlnInt => matches!(layout, MirLayout::Scalar),
+            | MirBuiltinKind::PrintlnInt
+            | MirBuiltinKind::PrintlnFloat => matches!(layout, MirLayout::Scalar),
             MirBuiltinKind::PrintlnString => matches!(layout, MirLayout::Handle),
         }
     }
@@ -478,6 +500,7 @@ impl MirBuiltinContract {
             MirBuiltinKind::Min | MirBuiltinKind::Max => "signed i64",
             MirBuiltinKind::PrintlnBool => "bool",
             MirBuiltinKind::PrintlnInt => "signed i32 or i64",
+            MirBuiltinKind::PrintlnFloat => "f64",
             MirBuiltinKind::PrintlnString => "owned StringHandle (borrowed for output)",
             MirBuiltinKind::SessionOpen => "SessionChan handle",
             MirBuiltinKind::SessionPair => "Copy tuple of two signed i64 handles",
@@ -496,6 +519,7 @@ impl MirBuiltinKind {
             Self::Max => "Max",
             Self::PrintlnBool => "PrintlnBool",
             Self::PrintlnInt => "PrintlnInt",
+            Self::PrintlnFloat => "PrintlnFloat",
             Self::PrintlnString => "PrintlnString",
             Self::SessionOpen => "SessionOpen",
             Self::SessionPair => "SessionPair",

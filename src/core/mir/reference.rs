@@ -6799,6 +6799,25 @@ impl<'a> MirReferenceInterpreter<'a> {
                         self.output.borrow_mut().push_str(&format!("{value}\n"));
                         MirRuntimeValue::Unit
                     }
+                    super::types::MirBuiltinKind::PrintlnFloat => {
+                        let argument = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "println argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        let MirRuntimeValue::FloatBits(bits) = argument else {
+                            return Err(self.error(
+                                &function.owner,
+                                "builtin 'println' received a non-float value",
+                            ));
+                        };
+                        // Rust `Display` on f64 is the shortest round-trip
+                        // form — the exact formatter `mimi_to_string_f64`
+                        // hands the native emitter, so reference and native
+                        // stdout are byte-identical by construction.
+                        let value = f64::from_bits(bits);
+                        self.output.borrow_mut().push_str(&format!("{value}\n"));
+                        MirRuntimeValue::Unit
+                    }
                     super::types::MirBuiltinKind::PrintlnString => {
                         let argument = arguments.first().ok_or_else(|| {
                             self.error(&function.owner, "println argument is absent")

@@ -18779,13 +18779,14 @@ fn canonical_mir_set_contains_println_bool_matches_all_production_consumers() {
 
 #[test]
 fn canonical_mir_rejects_unsupported_println_before_any_backend() {
-    // R6-1050 restatement: the owned StringHandle print face is admitted, so
-    // the pinned unsupported shape is the float println — still fail-closed
-    // before any backend with the same stable canonical diagnostic.
+    // R6-1053 restatement: the f64 literal print face is admitted, so the
+    // pinned unsupported shape is the aggregate println — still fail-closed
+    // before any backend with the same stable canonical diagnostic, while the
+    // default entry keeps the explicit mixed compatibility route.
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_native_println_float_rejected.mimi");
+        .join("mir_native_println_aggregate_rejected.mimi");
     let explicit = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("build")
@@ -18804,10 +18805,19 @@ fn canonical_mir_rejects_unsupported_println_before_any_backend() {
         .current_dir(project_root())
         .arg("run")
         .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
         .output()
-        .expect("failed to spawn compatibility float println run");
+        .expect("failed to spawn compatibility aggregate println run");
     assert!(default.status.success());
-    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\n0.5\n");
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        "true\nSet{1, 4}\n"
+    );
+    let run_stderr = String::from_utf8_lossy(&default.stderr);
+    assert!(
+        run_stderr.contains("canonical route disposition: legacy"),
+        "aggregate println must keep the explicit compatibility route: {run_stderr}"
+    );
 }
 
 #[test]
@@ -22012,31 +22022,71 @@ fn canonical_mir_string_print_routes_canonical_across_consumers() {
     let _ = fs::remove_file(&native);
 }
 
-// R6-1050 face boundary: a float println keeps the explicit compatibility
-// route — the owned StringHandle widening does not extend to float stdout,
-// whose output ABI and effect contract remain unmaterialized.  Without a
-// materialized island candidate the program stays legacy-compat (never a
-// mixed-coverage hard reject).
+// R6-1053 face opening, restating the R6-1050 compatibility pin: the f64
+// literal print face lowers as the `PrintlnFloat` builtin whose output goes
+// through the same shortest round-trip runtime formatter (`mimi_to_string_f64`)
+// the reference executor uses, so the face is differential-pinned across all
+// three consumers and routes canonical on the default entry.
 #[test]
-fn canonical_mir_float_print_keeps_compatibility() {
-    let fixture = project_root()
+fn canonical_mir_float_print_routes_canonical_across_consumers() {
+    let source = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_float_print_compat.mimi");
+        .join("mir_native_println_float.mimi");
+
     let run = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
-        .arg(&fixture)
+        .arg(&source)
         .env("MIMI_VERBOSE", "1")
         .output()
-        .expect("failed to spawn float print default run");
-    assert!(run.status.success());
-    assert_eq!(run.stdout, b"0.5\n");
-    let stderr = String::from_utf8_lossy(&run.stderr);
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
     assert!(
-        stderr.contains("canonical route disposition: legacy"),
-        "float println must keep the explicit compatibility route: {stderr}"
+        run.status.success(),
+        "float print program must execute: {stderr}"
     );
+    assert_eq!(run.stdout, b"0.5\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "float print program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"0.5\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_float_print_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"0.5\n");
+    let _ = fs::remove_file(&native);
 }
 
 // R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a

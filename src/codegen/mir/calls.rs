@@ -648,6 +648,67 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             return Ok(self.generator.context.i64_type().const_zero().into());
         }
+        if kind == MirBuiltinKind::PrintlnFloat {
+            // R6-1053: float stdout face. Format through the same runtime
+            // helper the legacy native path uses (`mimi_to_string_f64`,
+            // shortest round-trip Rust Display) so canonical and legacy
+            // binaries are byte-identical, then release the helper buffer
+            // the way legacy display frees do.
+            let argument = arguments
+                .first()
+                .ok_or_else(|| NativeMirError::new(subject, "builtin argument is absent"))?;
+            let value = self.value(argument, subject)?.into_float_value();
+            let to_string = self
+                .generator
+                .get_runtime_fn("mimi_to_string_f64")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let text = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        to_string,
+                        &[BasicMetadataValueEnum::FloatValue(value)],
+                        "mir_println_f64_str",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "mimi_to_string_f64 returned void"))?
+            .into_pointer_value();
+            let format = self
+                .generator
+                .builder
+                .build_global_string_ptr("%s\n", "mir_println_f64_format")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let printf = self
+                .generator
+                .get_runtime_fn("printf")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(
+                    printf,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(format.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(text),
+                    ],
+                    "mir_println_f64_call",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let free_fn = self
+                .generator
+                .get_runtime_fn("free")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::PointerValue(text)],
+                    "mir_println_f64_free",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            return Ok(self.generator.context.i64_type().const_zero().into());
+        }
         let left = self
             .value(
                 arguments
@@ -820,6 +881,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirBuiltinKind::PrintlnString => Err(NativeMirError::new(
                 subject,
                 "PrintlnString must use the owned or borrowed String dispatch path",
+            )),
+            MirBuiltinKind::PrintlnFloat => Err(NativeMirError::new(
+                subject,
+                "PrintlnFloat must use the float dispatch path",
             )),
             MirBuiltinKind::SessionOpen | MirBuiltinKind::SessionPair => Err(NativeMirError::new(
                 subject,
