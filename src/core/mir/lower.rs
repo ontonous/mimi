@@ -7456,6 +7456,112 @@ impl<'a> Lowerer<'a> {
         Ok(value)
     }
 
+    /// Lower the checker-proven MIR Phase 0 scalar-assign face (R6-1049): a
+    /// direct local target whose declared ABI is a signed 32/64-bit integer
+    /// or bool, with an Identity or NumericWiden conversion receipt, in the
+    /// root statement sequence only.  MIR enforces one static definition per
+    /// value, so every reassignment materializes a fresh slot and re-points
+    /// the local to it; subsequent loads resolve to the latest definition.
+    /// Conditional merges would need block parameters and are deliberately
+    /// outside the face (`lower_block_expr` keeps nested assigns fail-closed).
+    /// The face is exactly what the island classifiers admit through
+    /// `resolved_assign_is_admitted_scalar_shape`, so a graph that constructs
+    /// can never disagree with the admission that routed it (the R6-1048
+    /// parity lesson).
+    fn lower_assign_statement(
+        &mut self,
+        node: &NodeId,
+        target: &crate::core::ir::ResolvedPlace,
+        value: &crate::core::ir::ResolvedExpr,
+        conversion: &crate::core::ir::CheckedConversion,
+    ) {
+        if !target.projections.is_empty() {
+            self.error(
+                node,
+                "projected assign target requires aggregate glue and is not lowered by MIR Phase 0",
+            );
+            return;
+        }
+        if !matches!(
+            conversion.kind,
+            CheckedConversionKind::Identity | CheckedConversionKind::NumericWiden
+        ) {
+            self.error(node, "assign conversion kind is not lowered by MIR Phase 0");
+            return;
+        }
+        let Some(definition) = self.body.locals.get(&target.base) else {
+            self.error(
+                node,
+                "assign target local is absent from the ResolvedBody catalog",
+            );
+            return;
+        };
+        let target_ty = definition.ty.clone();
+        if !self.assign_target_abi_is_admitted_scalar(&target_ty) {
+            self.error(
+                node,
+                "assign target type is outside the MIR Phase 0 scalar-assign face",
+            );
+            return;
+        }
+        let source = self.lower_expr(value);
+        // A checker-accepted numeric widening (e.g. `acc = 5` into an `i64`
+        // local) is carried by the conversion receipt, not by the RHS's
+        // recorded pre-coercion identity; materialize the same Convert
+        // receipt the call-argument face uses.
+        let source = if conversion.kind == CheckedConversionKind::NumericWiden {
+            let conversion_node = NodeId(format!("{}/assign-conversion", node.0));
+            let Some(converted) = self.id("assign.convert", &conversion_node) else {
+                return;
+            };
+            self.insert_value(converted.clone(), conversion.to.clone(), &conversion_node);
+            self.emit(
+                &conversion_node,
+                "assign_numeric_convert",
+                MirInstructionKind::Convert {
+                    result: converted.clone(),
+                    source,
+                },
+            );
+            converted
+        } else {
+            source
+        };
+        let Some(destination) = self.id("assign", node) else {
+            return;
+        };
+        self.insert_value(destination.clone(), target_ty, node);
+        self.locals.insert(target.base.clone(), destination.clone());
+        self.emit(
+            node,
+            "assign",
+            MirInstructionKind::Move {
+                result: destination,
+                source,
+            },
+        );
+    }
+
+    /// Whether a target type's materialized ABI is inside the scalar-assign
+    /// face.  Copy scalars never need drop glue, so replacing the local's
+    /// latest definition can never leak; aggregate and float targets stay
+    /// outside the face.
+    fn assign_target_abi_is_admitted_scalar(&self, ty: &crate::core::ResolvedTypeId) -> bool {
+        let Some(catalog) = self.type_catalog else {
+            return false;
+        };
+        let Some(descriptor) = catalog.get(ty) else {
+            return false;
+        };
+        matches!(
+            descriptor.abi,
+            super::types::MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true
+            } | super::types::MirAbiClass::Bool
+        )
+    }
+
     /// Return extra transition parameters whose TypeDesc requires an explicit
     /// runtime discharge when the transition body does not move them into its
     /// result. The first parameter is the Flow source and is deliberately
@@ -7812,6 +7918,13 @@ impl<'a> Lowerer<'a> {
                     body,
                 } => {
                     let _ = self.lower_block_expr(body);
+                }
+                ResolvedStmtKind::Assign {
+                    target,
+                    value,
+                    conversion,
+                } => {
+                    self.lower_assign_statement(&statement.node_id, target, value, conversion);
                 }
                 _ => self.error(
                     &statement.node_id,
@@ -10345,6 +10458,16 @@ impl<'a> Lowerer<'a> {
                     body,
                 } => {
                     let _ = self.lower_block_expr(body);
+                }
+                ResolvedStmtKind::Assign { .. } => {
+                    // Conditional merges need block parameters; a reassignment
+                    // inside a nested block is outside the root-level
+                    // scalar-assign face and must keep the compatibility
+                    // route, never a linear re-pointing of the local.
+                    self.error(
+                        &statement.node_id,
+                        "assign inside a nested block is outside the MIR Phase 0 scalar-assign face",
+                    );
                 }
                 _ => self.error(
                     &statement.node_id,

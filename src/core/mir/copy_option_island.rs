@@ -61,7 +61,8 @@ pub fn classify_copy_option_variant_admission(
         if super::islands::is_prelude_origin(program, &callable.body.root.origin) {
             continue;
         }
-        let body_is_closed = super::option_island::option_body_is_closed(&callable.body.root);
+        let body_is_closed =
+            super::option_island::option_body_is_closed(program, &callable.body.root);
         let has_any_unwrap = body_has_option_unwrap(program, &callable.body.root);
         let has_expected_unwrap =
             body_has_option_primitive_unwrap(program, &callable.body.root, expected);

@@ -47,7 +47,7 @@ pub fn classify_option_string_variant_admission(
         if !callable.signature.generic_parameters.is_empty() {
             continue;
         }
-        let body_is_closed = option_body_is_closed(&callable.body.root);
+        let body_is_closed = option_body_is_closed(program, &callable.body.root);
         if body_is_closed {
             candidate |= callable_has_option_string_switch(program, callable);
         }
@@ -275,7 +275,27 @@ fn is_option_string_unwrap_call(
             .is_some_and(|argument| is_option_string_type_in_checked(program, &argument.value.ty))
 }
 
-pub(crate) fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
+pub(crate) fn option_body_is_closed(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    option_body_walk(program, block, true)
+}
+
+/// Nested-block entry: block-parameter merges are outside the R6-1049
+/// scalar-assign face, so nested statements never admit assigns.
+fn option_body_is_closed_nested(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    option_body_walk(program, block, false)
+}
+
+fn option_body_walk(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+    admits_assign: bool,
+) -> bool {
     block.statements.iter().all(|statement| {
         if !statement.backend_requirements.is_empty() {
             return false;
@@ -285,22 +305,33 @@ pub(crate) fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> b
                 pattern,
                 initializer,
             } => {
-                pattern_is_closed(pattern) && initializer.as_ref().is_none_or(option_expr_is_closed)
+                pattern_is_closed(pattern)
+                    && initializer
+                        .as_ref()
+                        .is_none_or(|value| option_expr_is_closed(program, value))
             }
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
-                value.as_ref().is_none_or(option_expr_is_closed)
+            ResolvedStmtKind::Assign { value, .. } => {
+                // R6-1049: the construction-proven root-level scalar-assign
+                // face is a migrated shape exactly when its RHS is itself
+                // closed; nested-block assigns stay outside the face.
+                admits_assign
+                    && super::islands::resolved_assign_is_admitted_scalar_shape(program, statement)
+                    && option_expr_is_closed(program, value)
             }
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_none_or(|expr| option_expr_is_closed(program, expr)),
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
-            } => option_expr_is_closed(value),
+            } => option_expr_is_closed(program, value),
             ResolvedStmtKind::Drop(_) => true,
             _ => false,
         }
     }) && block
         .result
         .as_ref()
-        .is_none_or(|expr| option_expr_is_closed(expr))
+        .is_none_or(|expr| option_expr_is_closed(program, expr))
 }
 
 fn pattern_is_closed(pattern: &ResolvedPattern) -> bool {
@@ -317,7 +348,7 @@ fn pattern_is_closed(pattern: &ResolvedPattern) -> bool {
     }
 }
 
-fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
+fn option_expr_is_closed(program: &CheckedProgram, expression: &ResolvedExpr) -> bool {
     if !expression.effects.is_empty() || !expression.backend_requirements.is_empty() {
         return false;
     }
@@ -350,10 +381,10 @@ fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
                 && call
                     .arguments
                     .iter()
-                    .all(|argument| option_expr_is_closed(&argument.value))
+                    .all(|argument| option_expr_is_closed(program, &argument.value))
         }
         ResolvedExprKind::Binary { left, right, .. } => {
-            option_expr_is_closed(left) && option_expr_is_closed(right)
+            option_expr_is_closed(program, left) && option_expr_is_closed(program, right)
         }
         ResolvedExprKind::Unary { operand, op } => {
             !matches!(
@@ -361,20 +392,20 @@ fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
                 crate::core::ir::ResolvedUnaryOp::BorrowShared
                     | crate::core::ir::ResolvedUnaryOp::BorrowMutable
                     | crate::core::ir::ResolvedUnaryOp::Dereference
-            ) && option_expr_is_closed(operand)
+            ) && option_expr_is_closed(program, operand)
         }
         ResolvedExprKind::Cast { value, .. } | ResolvedExprKind::Old(value) => {
-            option_expr_is_closed(value)
+            option_expr_is_closed(program, value)
         }
         ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-            option_body_is_closed(block)
+            option_body_is_closed_nested(program, block)
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            option_expr_is_closed(scrutinee)
+            option_expr_is_closed(program, scrutinee)
                 && arms.iter().all(|arm| {
                     arm.guard.is_none()
                         && pattern_is_closed(&arm.pattern)
-                        && option_expr_is_closed(&arm.body)
+                        && option_expr_is_closed(program, &arm.body)
                 })
         }
         _ => false,

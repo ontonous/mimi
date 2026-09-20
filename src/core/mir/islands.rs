@@ -2525,15 +2525,17 @@ pub(crate) fn is_owned_generic_record_update_callable(
 /// expressions, record construction/projection, direct user calls, and
 /// structured `if`; collection values, builtin/runtime calls, loops,
 /// concurrency, and higher-order expressions belong to other islands.
-/// A builtin `println` whose every argument is a signed 32/64-bit integer
-/// lowers as a `PrintlnInt` builtin inside the flat-record island graph —
-/// the same scalar-print face the session-channel island admits.  Every
-/// other builtin (and println over any other argument type) keeps the
-/// compatibility boundary.  Classifying the admitted face as unmigrated
-/// would strand checker-legal record programs on a hard route rejection:
-/// once graph construction materializes the record candidate inside mixed
-/// coverage, the doctrine forbids falling back to legacy (R6-1048 parity
-/// repair after numeric-widen call receipts widened construction).
+/// A builtin `println` whose every argument is a signed 32/64-bit integer or
+/// a bool lowers as a `PrintlnInt`/`PrintlnBool` builtin inside the
+/// flat-record island graph — the same scalar-print face the session-channel
+/// island admits (the bool face is differential-pinned standalone and in the
+/// Set.contains island).  Every other builtin (and println over any other
+/// argument type) keeps the compatibility boundary.  Classifying the admitted
+/// face as unmigrated would strand checker-legal record programs on a hard
+/// route rejection: once graph construction materializes the record candidate
+/// inside mixed coverage, the doctrine forbids falling back to legacy
+/// (R6-1048 parity repair after numeric-widen call receipts widened
+/// construction; bool widened in R6-1049 under the same rule).
 fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) -> bool {
     if !matches!(
         call.callee,
@@ -2551,10 +2553,47 @@ fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) 
         matches!(
             program.resolved_types().get(&argument.value.ty),
             Some(ResolvedType::Primitive(
-                PrimitiveType::I32 | PrimitiveType::I64
+                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
             ))
         )
     })
+}
+
+/// The MIR Phase 0 scalar-assign face (R6-1049): a direct local target with
+/// no projections, an Identity or NumericWiden conversion receipt into a
+/// signed 32/64-bit integer or bool, and nothing else.  Island classifiers
+/// must consult this exact predicate before treating an Assign statement as
+/// unmigrated shape, so admission can never disagree with what construction
+/// accepts: a construction-capability widening that outruns its classifier
+/// turns working compatibility programs into hard route rejections (the
+/// R6-1048 parity lesson).  The lowering side enforces the same face against
+/// the target local's materialized ABI class.
+pub(crate) fn resolved_assign_is_admitted_scalar_shape(
+    program: &CheckedProgram,
+    statement: &crate::core::ir::ResolvedStmt,
+) -> bool {
+    let crate::core::ir::ResolvedStmtKind::Assign {
+        target, conversion, ..
+    } = &statement.kind
+    else {
+        return false;
+    };
+    if !target.projections.is_empty() {
+        return false;
+    }
+    if !matches!(
+        conversion.kind,
+        crate::core::ir::CheckedConversionKind::Identity
+            | crate::core::ir::CheckedConversionKind::NumericWiden
+    ) {
+        return false;
+    }
+    matches!(
+        program.resolved_types().get(&conversion.to),
+        Some(ResolvedType::Primitive(
+            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+        ))
+    )
 }
 
 fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
@@ -2690,7 +2729,7 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 })
             }
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-                block_has_unmigrated_shape(program, block, admits_managed_record_collection)
+                block_has_unmigrated_shape(program, block, admits_managed_record_collection, false)
             }
             ResolvedExprKind::If {
                 condition,
@@ -2702,11 +2741,13 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                         program,
                         then_block,
                         admits_managed_record_collection,
+                        false,
                     )
                     || block_has_unmigrated_shape(
                         program,
                         else_block,
                         admits_managed_record_collection,
+                        false,
                     )
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
@@ -2725,9 +2766,12 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                         )
                     })
             }
-            ResolvedExprKind::Lambda(lambda) => {
-                block_has_unmigrated_shape(program, &lambda.body, admits_managed_record_collection)
-            }
+            ResolvedExprKind::Lambda(lambda) => block_has_unmigrated_shape(
+                program,
+                &lambda.body,
+                admits_managed_record_collection,
+                false,
+            ),
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::Load(_)
             | ResolvedExprKind::Constant(_) => false,
@@ -2738,6 +2782,7 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         program: &CheckedProgram,
         block: &crate::core::ir::ResolvedBlock,
         admits_managed_record_collection: bool,
+        admits_assign: bool,
     ) -> bool {
         block.statements.iter().any(|statement| {
             if !statement.backend_requirements.is_empty() {
@@ -2749,10 +2794,21 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                         expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                     })
                 }
-                // MIR Phase 0 has no Assign lowering yet; a complete-admission
-                // claim over a body carrying one would turn the compatibility
-                // input into a hard construction failure (R6-1048 parity).
-                ResolvedStmtKind::Assign { .. } => true,
+                // R6-1049: the root-level scalar-assign face is
+                // construction-proven (differential matrix in
+                // src/tests/canonical_assign.rs), so it is a migrated shape
+                // exactly when its RHS is itself migrated.  Nested-block
+                // assigns need block-parameter merges (construction keeps
+                // them fail-closed), and every other assign shape stays
+                // unmigrated so the compatibility route stands.
+                ResolvedStmtKind::Assign { value, .. } => {
+                    if admits_assign && resolved_assign_is_admitted_scalar_shape(program, statement)
+                    {
+                        expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
+                    } else {
+                        true
+                    }
+                }
                 ResolvedStmtKind::Expr(value)
                 | ResolvedStmtKind::Contract {
                     condition: value, ..
@@ -2783,7 +2839,7 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         .values()
         .filter(|body| !is_prelude_origin(program, &body.root.origin))
         .any(|body| {
-            block_has_unmigrated_shape(program, &body.root, admits_managed_record_collection)
+            block_has_unmigrated_shape(program, &body.root, admits_managed_record_collection, true)
         })
 }
 

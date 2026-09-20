@@ -1162,12 +1162,12 @@ mod tests {
 
     #[test]
     fn session_assign_sibling_keeps_compatibility_route() {
-        // The Assign statement is outside MIR Phase 0 (R6-1046 boundary), so
-        // a session program containing one is not the differential-proven
-        // face: admission is MixedCoverage and materialization keeps the
-        // explicit compatibility route.  It must never become a hard
-        // rejection of a working legacy program or an unproven canonical
-        // admission.
+        // The scalar-assign face lowers root-level assigns (R6-1049), so an
+        // assign sibling now CONSTRUCTS a canonical graph.  The compatibility
+        // route is still kept: the session island only routes canonical when
+        // admission is CompleteCoverage, and MixedCoverage here means the
+        // session profile is not admitted — never a hard rejection of a
+        // working legacy program and never an unproven canonical admission.
         let program = checked(
             r#"
                 session Proto = !i32 . ?i32 . end
@@ -1188,12 +1188,16 @@ mod tests {
         );
         let admission = classify_canonical_mir_route_admission(&program);
         assert_eq!(admission.session, SessionChannelAdmission::MixedCoverage);
-        let error = materialize_canonical_mir_route(&program, None)
-            .expect_err("mixed session coverage must not materialize a canonical route");
-        let CanonicalMirRouteMaterializationError::Compatibility { admission, .. } = error else {
-            panic!("mixed session coverage must keep the compatibility route: {error:?}");
-        };
-        assert_eq!(admission.session, SessionChannelAdmission::MixedCoverage);
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("the scalar-assign face lowers the sibling program's graph");
+        assert_eq!(
+            route.admission.session,
+            SessionChannelAdmission::MixedCoverage
+        );
+        assert!(
+            !CanonicalMirRouteProfile::SessionChannel.is_admitted(route.admission),
+            "mixed session coverage must not admit the session-channel route"
+        );
     }
 
     #[test]

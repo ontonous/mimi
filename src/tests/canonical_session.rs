@@ -251,37 +251,60 @@ fn actor_handle_without_canonical_glue_fails_closed_at_materialization() {
     );
 }
 
-// MIR Phase 0 does not lower assign statements yet — even at function-body
-// top level, outside any structured control flow.  The boundary must stay an
-// explicit lowering rejection (the compatibility route keeps such programs
-// working), never a silently dropped assignment.
+// R6-1049 opened the root-level scalar-assign face (Identity/NumericWiden
+// into an i32/i64/bool local), so plain reassignments lower explicitly.
+// The face boundary that MUST stay fail-closed is everything else: assigns
+// inside nested blocks (no merge lowering yet) and targets outside the
+// admitted scalar ABI (f64 has no differential proof).  Each residual shape
+// keeps an explicit lowering rejection — never a silently dropped assignment.
 #[test]
 fn assign_statement_boundary_stays_fail_closed_in_mir_phase_0() {
-    let source = r#"
-        func reassign() -> i64 {
-            let mut total = 40 as i64
-            total = total + 2 as i64
-            total
-        }
-
-        func main() -> i64 {
-            let out = reassign()
-            println(out)
+    let nested = r#"
+        func main() -> i32 {
+            let mut total = 0
+            while total < 3 {
+                total = total + 1
+            }
+            println(total)
             0
         }
     "#;
-    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let tokens = crate::lexer::Lexer::new(nested).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
     let checked = crate::core::check_program(&file)
-        .unwrap_or_else(|diags| panic!("check reassign: {diags:?}"));
+        .unwrap_or_else(|diags| panic!("check nested assign: {diags:?}"));
     let error = MirProgram::from_checked_program(&checked)
-        .expect_err("assign statements must fail MIR Phase 0 lowering explicitly");
+        .expect_err("assigns inside nested blocks must fail MIR Phase 0 lowering explicitly");
     let messages = format!("{error:?}");
     assert!(
-        messages.contains("structured control flow is not lowered by MIR Phase 0"),
-        "the rejection must name the Phase 0 statement boundary: {messages}"
+        messages.contains("assign inside a nested block"),
+        "the rejection must name the nested-block assign boundary: {messages}"
+    );
+
+    let float_target = r#"
+        func main() -> i32 {
+            let mut acc = 0.5
+            acc = 1.5
+            println(acc)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(float_target)
+        .tokenize()
+        .expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file)
+        .unwrap_or_else(|diags| panic!("check float assign: {diags:?}"));
+    let error = MirProgram::from_checked_program(&checked)
+        .expect_err("assign targets outside the scalar ABI must fail lowering explicitly");
+    let messages = format!("{error:?}");
+    assert!(
+        messages.contains("assign target type is outside the MIR Phase 0 scalar-assign face"),
+        "the rejection must name the scalar-assign face boundary: {messages}"
     );
 }
 
@@ -289,11 +312,12 @@ fn assign_statement_boundary_stays_fail_closed_in_mir_phase_0() {
 // the `session-channel-v1` island.  The checker admission is Complete, the
 // shared materializer attaches the SessionChannel receipts, and the island
 // validator plus the verifier capability gate accept the same graph.  A
-// session program carrying a sibling shape outside MIR Phase 0 (assign) is
-// NOT the differential-proven face: admission is MixedCoverage and the
-// compatibility route is preserved exactly as before the island existed —
-// it is neither a hard rejection of a working legacy program nor an
-// unproven canonical admission.
+// session program carrying a root scalar assign is NOT the
+// differential-proven session face: the session island closure keeps Assign
+// unclean, so admission stays MixedCoverage (R6-1049 made the graph
+// constructible, and the profile gate — not a construction failure — is
+// what keeps the compatibility route; it is neither a hard rejection of a
+// working legacy program nor an unproven canonical admission).
 #[test]
 fn session_channel_default_route_is_admitted_and_assign_sibling_keeps_compatibility() {
     let source = r#"
@@ -361,16 +385,14 @@ fn session_channel_default_route_is_admitted_and_assign_sibling_keeps_compatibil
         admission.session,
         crate::core::mir::SessionChannelAdmission::MixedCoverage
     );
-    let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
-        .expect_err("mixed session coverage must not materialize a canonical route");
-    let crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
-        admission, ..
-    } = error
-    else {
-        panic!("mixed session coverage must keep the compatibility route: {error:?}");
-    };
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("the scalar-assign face lowers the sibling program's graph");
     assert_eq!(
-        admission.session,
+        route.admission.session,
         crate::core::mir::SessionChannelAdmission::MixedCoverage
+    );
+    assert!(
+        !crate::core::mir::CanonicalMirRouteProfile::SessionChannel.is_admitted(route.admission),
+        "mixed session coverage must not admit the session-channel route"
     );
 }

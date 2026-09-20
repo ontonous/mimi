@@ -21641,3 +21641,294 @@ fn canonical_mir_record_print_routes_canonical_across_consumers() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// R6-1049: the scalar-assign face (root-level statement, direct local target,
+// Identity/NumericWiden conversion, i32/i64/bool target ABI) routes canonical
+// and agrees across all three consumers.  This pins the record-composition
+// route flip: pure record programs with root scalar assigns must not strand
+// on the compatibility route once construction materializes them.
+#[test]
+fn canonical_mir_scalar_assign_routes_canonical_across_consumers() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_assign_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "scalar assign program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"3\n3\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "scalar assign program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"3\n3\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_scalar_assign_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("canonical route disposition: legacy"),
+        "native MIR build must not fall back to legacy: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"3\n3\n");
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1049: the collection face routes by materialization, so root scalar
+// assigns beside a collection literal flip the whole program canonical once
+// construction can lower them.  Pin the three-consumer agreement so the flip
+// stays differential-proven rather than accidental.
+#[test]
+fn canonical_mir_scalar_assign_collection_routes_canonical_across_consumers() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_assign_collection_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "collection assign program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"3\n5\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "collection assign program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"3\n5\n");
+
+    let native = project_root().join("target").join(format!(
+        "mir_scalar_assign_collection_native_{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"3\n5\n");
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1049 parity debt repair: `println` over a bool literal lowers as the
+// scalar print face inside the flat-record island.  The record program with
+// a bool print must route canonical across all three consumers.
+#[test]
+fn canonical_mir_record_bool_print_routes_canonical_across_consumers() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_record_bool_print_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "record bool print program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"3\ntrue\n4\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "record bool print program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"3\ntrue\n4\n");
+
+    let native = project_root().join("target").join(format!(
+        "mir_record_bool_print_native_{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"3\ntrue\n4\n");
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1049 face boundary: the Option<string> island closure now admits root
+// scalar assigns at the classifier, but the program graph still cannot
+// materialize `println` over a StringHandle (the scalar print contract
+// accepts signed i32/i64/bool only), so the whole program keeps the explicit
+// compatibility route with unchanged output.  Pin the honest disposition:
+// no silent canonical admission, no hard reject for a compat-shaped program.
+#[test]
+fn canonical_mir_option_string_assign_keeps_compatibility() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_option_string_assign_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "option assign program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"yes\n2\n");
+    assert!(
+        stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "option assign program must keep the explicit compatibility route: {stderr}"
+    );
+}
+
+// R6-1049 parity boundary: flow mixed coverage with a materializable record
+// candidate keeps the designed hard rejection.  The reject is pre-existing
+// Flow-face behavior (identical without the assign), not a construction-
+// widening flip; pin it so the doctrine boundary stays explicit.
+#[test]
+fn canonical_mir_scalar_assign_mixed_flow_rejects_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_assign_mixed_flow_boundary.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn mixed flow assign default run");
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("default Canonical MIR route rejected"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "mixed coverage with a materialized candidate must not fall back silently: {stderr}"
+    );
+}
+
+// R6-1049 face boundary: assigns inside a nested block (while body) stay
+// outside the Phase 0 scalar-assign face; the program keeps the explicit
+// compatibility route with the verbose disposition line.
+#[test]
+fn canonical_mir_scalar_assign_nested_block_keeps_compatibility() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_assign_nested_block_compat.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn nested block assign default run");
+    assert!(run.status.success());
+    assert_eq!(run.stdout, b"3\n3\n");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "nested-block assign must keep the explicit compatibility route: {stderr}"
+    );
+}

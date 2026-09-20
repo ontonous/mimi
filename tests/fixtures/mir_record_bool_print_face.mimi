@@ -1,0 +1,10 @@
+type Point { x: i64, y: i64 }
+func make_point(a: i64, b: i64) -> Point { Point { x: a, y: b } }
+func main() -> i32 {
+    let flag = true;
+    let p = make_point(3, 4);
+    println(p.x);
+    println(flag);
+    println(p.y);
+    0
+}

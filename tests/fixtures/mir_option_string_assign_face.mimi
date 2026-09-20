@@ -1,0 +1,15 @@
+func label(flag: bool) -> Option<string> {
+    match flag {
+        true => Some("yes"),
+        false => None,
+    }
+}
+func main() -> i32 {
+    let mut acc = 1;
+    acc = acc + 1;
+    let l = label(true);
+    let s = l.unwrap();
+    println(s);
+    println(acc);
+    0
+}

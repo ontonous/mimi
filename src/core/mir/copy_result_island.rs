@@ -45,7 +45,8 @@ pub fn classify_copy_result_i32_variant_admission(
         {
             continue;
         }
-        let body_is_closed = super::option_island::option_body_is_closed(&callable.body.root);
+        let body_is_closed =
+            super::option_island::option_body_is_closed(program, &callable.body.root);
         let has_any_unwrap = body_has_result_unwrap(program, &callable.body.root, false);
         let has_expected_unwrap = body_has_result_unwrap(program, &callable.body.root, true);
         if body_is_closed {

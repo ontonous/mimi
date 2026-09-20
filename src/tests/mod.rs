@@ -57,6 +57,7 @@ pub(crate) mod borrow_boundary;
 pub(crate) mod build_shared;
 pub(crate) mod builtin_extended;
 pub(crate) mod builtin_registry;
+pub(crate) mod canonical_assign;
 pub(crate) mod canonical_flow_union;
 pub(crate) mod canonical_scalar_ffi;
 pub(crate) mod canonical_session;

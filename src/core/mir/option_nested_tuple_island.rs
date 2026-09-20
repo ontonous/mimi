@@ -45,7 +45,7 @@ pub fn classify_option_nested_tuple_variant_admission(
         {
             continue;
         }
-        let closed = nested_tuple_body_is_closed(&callable.body.root);
+        let closed = nested_tuple_body_is_closed(program, &callable.body.root);
         candidate |= block_has_option_nested_tuple_switch(program, &callable.body.root);
         if !closed
             || !callable.signature.effects.is_empty()
@@ -278,7 +278,27 @@ fn tuple_contains_owned_string(program: &CheckedProgram, ty: &ResolvedTypeId) ->
     }
 }
 
-fn nested_tuple_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
+fn nested_tuple_body_is_closed(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    nested_tuple_body_walk(program, block, true)
+}
+
+/// Nested-block entry: block-parameter merges are outside the R6-1049
+/// scalar-assign face, so nested statements never admit assigns.
+fn nested_tuple_body_is_closed_nested(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    nested_tuple_body_walk(program, block, false)
+}
+
+fn nested_tuple_body_walk(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+    admits_assign: bool,
+) -> bool {
     block.statements.iter().all(|statement| {
         if !statement.backend_requirements.is_empty() {
             return false;
@@ -289,22 +309,32 @@ fn nested_tuple_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
                 initializer,
             } => {
                 nested_tuple_pattern_is_closed(pattern)
-                    && initializer.as_ref().is_none_or(nested_tuple_expr_is_closed)
+                    && initializer
+                        .as_ref()
+                        .is_none_or(|value| nested_tuple_expr_is_closed(program, value))
             }
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
-                value.as_ref().is_none_or(nested_tuple_expr_is_closed)
+            ResolvedStmtKind::Assign { value, .. } => {
+                // R6-1049: the construction-proven root-level scalar-assign
+                // face is a migrated shape exactly when its RHS is itself
+                // closed; nested-block assigns stay outside the face.
+                admits_assign
+                    && super::islands::resolved_assign_is_admitted_scalar_shape(program, statement)
+                    && nested_tuple_expr_is_closed(program, value)
             }
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_none_or(|expression| nested_tuple_expr_is_closed(program, expression)),
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
-            } => nested_tuple_expr_is_closed(value),
+            } => nested_tuple_expr_is_closed(program, value),
             ResolvedStmtKind::Drop(_) => true,
             _ => false,
         }
     }) && block
         .result
         .as_ref()
-        .is_none_or(|expression| nested_tuple_expr_is_closed(expression))
+        .is_none_or(|expression| nested_tuple_expr_is_closed(program, expression))
 }
 
 fn nested_tuple_pattern_is_closed(pattern: &ResolvedPattern) -> bool {
@@ -322,7 +352,7 @@ fn nested_tuple_pattern_is_closed(pattern: &ResolvedPattern) -> bool {
     }
 }
 
-fn nested_tuple_expr_is_closed(expression: &ResolvedExpr) -> bool {
+fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedExpr) -> bool {
     if !expression.effects.is_empty() || !expression.backend_requirements.is_empty() {
         return false;
     }
@@ -347,10 +377,11 @@ fn nested_tuple_expr_is_closed(expression: &ResolvedExpr) -> bool {
                 && call
                     .arguments
                     .iter()
-                    .all(|argument| nested_tuple_expr_is_closed(&argument.value))
+                    .all(|argument| nested_tuple_expr_is_closed(program, &argument.value))
         }
         ResolvedExprKind::Binary { left, right, .. } => {
-            nested_tuple_expr_is_closed(left) && nested_tuple_expr_is_closed(right)
+            nested_tuple_expr_is_closed(program, left)
+                && nested_tuple_expr_is_closed(program, right)
         }
         ResolvedExprKind::Unary { operand, op } => {
             !matches!(
@@ -358,16 +389,16 @@ fn nested_tuple_expr_is_closed(expression: &ResolvedExpr) -> bool {
                 crate::core::ir::ResolvedUnaryOp::BorrowShared
                     | crate::core::ir::ResolvedUnaryOp::BorrowMutable
                     | crate::core::ir::ResolvedUnaryOp::Dereference
-            ) && nested_tuple_expr_is_closed(operand)
+            ) && nested_tuple_expr_is_closed(program, operand)
         }
         ResolvedExprKind::Cast { value, .. } | ResolvedExprKind::Old(value) => {
-            nested_tuple_expr_is_closed(value)
+            nested_tuple_expr_is_closed(program, value)
         }
         ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-            nested_tuple_body_is_closed(block)
+            nested_tuple_body_is_closed_nested(program, block)
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            nested_tuple_expr_is_closed(scrutinee)
+            nested_tuple_expr_is_closed(program, scrutinee)
                 && if arms.iter().any(|arm| {
                     matches!(
                         &arm.pattern.kind,
@@ -381,11 +412,13 @@ fn nested_tuple_expr_is_closed(expression: &ResolvedExpr) -> bool {
                     arms.iter().all(|arm| {
                         arm.guard.is_none()
                             && nested_tuple_pattern_is_closed(&arm.pattern)
-                            && nested_tuple_expr_is_closed(&arm.body)
+                            && nested_tuple_expr_is_closed(program, &arm.body)
                     })
                 }
         }
-        ResolvedExprKind::Tuple(values) => values.iter().all(nested_tuple_expr_is_closed),
+        ResolvedExprKind::Tuple(values) => values
+            .iter()
+            .all(|value| nested_tuple_expr_is_closed(program, value)),
         _ => false,
     }
 }

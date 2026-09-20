@@ -1288,7 +1288,7 @@ fn audit_record_element_field_mutation_stop_ship_receipts() {
             "legacy:mixed-coverage-without-materialized-candidate",
             src,
             expected_stdout,
-            Some("structured control flow is not lowered by MIR Phase 0"),
+            Some("projected assign target requires aggregate glue"),
         );
     }
 }

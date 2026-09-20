@@ -6950,9 +6950,11 @@ mod tests {
         .expect_err("indexed assignment is outside the read-only List index slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
+                // R6-1049 moved plain scalar assigns into the lowering face,
+                // so projected targets now fail with the dedicated
+                // projected-assign boundary message.
                 assert!(
-                    message.contains("structured control flow")
-                        || message.contains("indexed place projection"),
+                    message.contains("projected assign target"),
                     "unexpected canonical rejection: {message}"
                 );
             }
