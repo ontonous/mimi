@@ -1108,6 +1108,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         if scalar_collection_candidate {
             if let Err(errors) = crate::core::mir::validate_scalar_collection_island(&canonical) {
+                // R6-1052: an stdout-only plain-scalar candidate that fails
+                // the island preflight is an explicit compatibility input
+                // (the route it already ran on), not a hard rejection of a
+                // previously working program.  A materialized List/Set
+                // operation keeps its cannot-re-enter-legacy tripwire.
+                if !route.materialized_collection_operation_candidate && !flow_transition_candidate
+                {
+                    return Ok(None);
+                }
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

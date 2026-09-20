@@ -477,6 +477,12 @@ pub struct CanonicalMirRouteMaterialization {
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_scalar_ffi_candidate: bool,
     pub materialized_collection_candidate: bool,
+    /// R6-1052: whether the receipt came from a migrated collection
+    /// operation (List/Set op face) rather than the plain-scalar stdout
+    /// candidacy.  Only the operation face carries the cannot-re-enter-legacy
+    /// tripwire; an stdout-only candidate that fails the island preflight is
+    /// an explicit compatibility input.
+    pub materialized_collection_operation_candidate: bool,
     pub materialized_record_candidate: bool,
     pub materialized_flow_candidate: bool,
     pub materialized_flow_failure_retry_candidate: bool,
@@ -571,8 +577,15 @@ pub fn materialize_canonical_mir_route(
     // the CLI dispatch wrapper.  A complete flat Copy-record admission shares
     // it for the same reason: preloaded prelude bodies carry Assign statements
     // MIR Phase 0 cannot lower, and the dispatch wrapper never lowers them.
+    // The plain-scalar collection island (R6-1052) shares the exclusion for
+    // the same reason, so a direct `materialize_canonical_mir_route` caller
+    // observes the same prelude-free graph as the CLI dispatch wrapper.
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
-    if admission.scalar_ffi || admission.session_complete() || admission.record_complete() {
+    if admission.scalar_ffi
+        || admission.session_complete()
+        || admission.record_complete()
+        || admission.collection_complete()
+    {
         selected_exclusions.extend(
             program
                 .source_registry()
@@ -875,6 +888,7 @@ pub fn materialize_canonical_mir_route(
         admission,
         materialized_scalar_ffi_candidate,
         materialized_collection_candidate,
+        materialized_collection_operation_candidate,
         materialized_record_candidate,
         materialized_flow_candidate,
         materialized_flow_failure_retry_candidate,
@@ -918,6 +932,18 @@ fn match_complete_or_compatibility(
             stage,
             message,
         }
+    } else if admission.collection_complete()
+        && stage == CanonicalMirRouteFailureStage::Construction
+    {
+        // R6-1052 guard: the scalar collection admission is a checker-side
+        // type/coverage scan, while construction is the ground truth for the
+        // executable statement surface (for example an assignment nested in
+        // a block is outside the MIR Phase 0 scalar-assign face).  A shape
+        // construction cannot lower is precisely a compatibility input: the
+        // working legacy route stays alive for it, and the lowering error
+        // travels in the compatibility message instead of becoming a hard
+        // reject of a program that ran before this slice.
+        CanonicalMirRouteMaterializationError::Compatibility { admission, message }
     } else if admission.collection_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -1050,31 +1076,61 @@ mod tests {
     }
 
     #[test]
-    fn complete_scalar_collection_materialization_failure_is_hard() {
-        let program = checked(
+    fn complete_scalar_collection_preflight_policy_is_stage_specific() {
+        // R6-1052 restatement of complete_scalar_collection_materialization_failure_is_hard:
+        // the coverage scan is a checker-side type heuristic while
+        // construction is the ground truth for the executable statement
+        // surface, so a shape construction cannot lower is an explicit
+        // compatibility input carrying the lowering error — never a hard
+        // rejection of a previously working program.  A complete scan whose
+        // construction succeeds but materializes no receipt at all stays a
+        // hard Coverage failure (an internal scan/receipt inconsistency).
+        let construction_failure = checked(
             r#"
                 func main() -> i32 {
-                    let values = [1, 2, 3]
-                    let count = len(values)
-                    drop(values)
-                    for i in range(0, 3) {
-                        let copy = i
-                        drop(copy)
-                    }
-                    count
+                    let mut total = 0
+                    let flag = true
+                    if flag { total = 5 }
+                    total
                 }
             "#,
         );
-        let error = materialize_canonical_mir_route(&program, None)
-            .expect_err("complete collection lowering must not become compatibility");
-        assert!(matches!(
-            error,
-            CanonicalMirRouteMaterializationError::Complete {
-                profile: CanonicalMirRouteProfile::ScalarCollection,
-                stage: CanonicalMirRouteFailureStage::Construction,
-                ..
-            }
-        ));
+        let error = materialize_canonical_mir_route(&construction_failure, None)
+            .expect_err("nested-assign construction failure must not route canonical");
+        match error {
+            CanonicalMirRouteMaterializationError::Compatibility { message, .. } => assert!(
+                message.contains("assign inside a nested block"),
+                "the compatibility message must carry the lowering error: {message}"
+            ),
+            other => panic!("construction failure must downgrade, got: {other:?}"),
+        }
+
+        // R6-1052 stdout gate: plain-scalar candidacy is stdout-gated. A body
+        // with no scalar stdout effect and no collection operation never
+        // forms a candidate, so its graph materializes with an empty receipt
+        // set and the dispatcher's no-candidate veto keeps it on the legacy
+        // route.  The Coverage-stage hard failure stays a defensive invariant
+        // for receipt loss under a complete scan; aligned scans cannot
+        // produce that shape from a real program, and the diagnostic
+        // taxonomy test pins the stage's error code.
+        let stdout_free = checked(
+            r#"
+                func main() -> i32 {
+                    let total = 1 + 1
+                    drop(total)
+                    0
+                }
+            "#,
+        );
+        assert_eq!(
+            crate::core::mir::classify_scalar_collection_admission(&stdout_free),
+            ScalarCollectionAdmission::OutsideProfile
+        );
+        let route = materialize_canonical_mir_route(&stdout_free, None)
+            .expect("a stdout-free plain-scalar body makes no canonical claim");
+        assert!(!route.materialized_collection_candidate);
+        assert!(!route.materialized_collection_operation_candidate);
+        assert!(!route.materialized_scalar_ffi_candidate);
     }
 
     #[test]

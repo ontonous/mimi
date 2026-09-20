@@ -59,6 +59,7 @@ pub(crate) mod builtin_extended;
 pub(crate) mod builtin_registry;
 pub(crate) mod canonical_assign;
 pub(crate) mod canonical_flow_union;
+pub(crate) mod canonical_plain_scalar_route;
 pub(crate) mod canonical_scalar_ffi;
 pub(crate) mod canonical_session;
 pub(crate) mod canonical_string_print;

@@ -1,0 +1,14 @@
+// R6-1052 construction ground truth: an assignment nested inside a block is
+// outside the MIR Phase 0 scalar-assign face.  The coverage scan stays
+// complete (it is a type scan), so without the construction-failure guard the
+// default route would hard-reject this program; the guard keeps it on the
+// working legacy route with the explicit compatibility disposition.
+func main() -> i32 {
+    let mut total = 0
+    let flag = true
+    if flag {
+        total = 5
+    }
+    println(total)
+    0
+}

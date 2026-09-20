@@ -1511,6 +1511,30 @@ fn explore_variant_switch(
         .get(scrutinee)
         .map(|value| value.ty.clone())
         .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
+    // R6-1052: a scalar literal switch (bool / signed integer scrutinee) is
+    // explored with plain equality guards instead of the variant tag/payload
+    // machinery. The shared catalog contract keeps this admission aligned
+    // with construction, the island gate and both backends.
+    if arms
+        .iter()
+        .any(|arm| matches!(arm.case, MirSwitchCase::Literal(_)))
+    {
+        if consume_scrutinee {
+            return Err("canonical MIR verifier switch-move cannot use a literal case".into());
+        }
+        return explore_literal_switch(
+            function,
+            program,
+            catalog,
+            state,
+            &scrutinee_ty,
+            scrutinee,
+            arms,
+            active,
+            returns,
+            traps,
+        );
+    }
     if consume_scrutinee {
         validate_consuming_variant_contract(function, program, catalog, &scrutinee_ty)?;
         catalog.validate_variant_switch_move_contract(&scrutinee_ty, arms)?;
@@ -1646,6 +1670,71 @@ fn explore_variant_switch(
         for (parameter, value) in bindings {
             next.values.insert(parameter, value);
         }
+        explore_block(
+            function,
+            program,
+            catalog,
+            &mut next,
+            &arm.target,
+            &mut active.clone(),
+            returns,
+            traps,
+        )?;
+    }
+    Ok(())
+}
+
+/// Explore a scalar literal switch (R6-1052).  Each `Literal` arm constrains
+/// the symbolic scrutinee with plain equality; `Default` is the negation of
+/// the preceding literal guards.  Exhaustiveness is enforced by the shared
+/// catalog contract (`validate_scalar_switch`), so a switch without a
+/// default never reaches a symbolic no-match state: bool scrutinees cover
+/// both literals and integer scrutinees always carry a default arm.
+fn explore_literal_switch(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    scrutinee_ty: &crate::core::ResolvedTypeId,
+    scrutinee: &MirValueId,
+    arms: &[crate::core::mir::MirSwitchArm],
+    active: &mut BTreeSet<crate::core::mir::MirBlockId>,
+    returns: &mut Vec<ReturnPath>,
+    traps: &mut Vec<SymbolicTrap>,
+) -> Result<(), String> {
+    catalog.validate_scalar_switch(scrutinee_ty, arms)?;
+    let value = state
+        .values
+        .get(scrutinee)
+        .cloned()
+        .ok_or_else(|| format!("switch scrutinee '{scrutinee}' is not defined"))?;
+    let mut previous_cases: Vec<Bool> = Vec::new();
+    for arm in arms {
+        let guard = match &arm.case {
+            MirSwitchCase::Literal(crate::core::ir::ResolvedLiteral::Bool(expected)) => {
+                let scrutinee_bool = expect_bool(value.clone(), "scalar switch scrutinee")?;
+                let equals = scrutinee_bool.eq(&Bool::from_bool(*expected));
+                previous_cases.push(equals.clone());
+                equals
+            }
+            MirSwitchCase::Literal(crate::core::ir::ResolvedLiteral::Int(expected)) => {
+                let SymbolicValue::Int(scrutinee_int) = &value else {
+                    return Err("scalar switch scrutinee is not a symbolic integer".into());
+                };
+                let equals = scrutinee_int.eq(&Int::from_i64(*expected));
+                previous_cases.push(equals.clone());
+                equals
+            }
+            MirSwitchCase::Literal(_) => {
+                return Err("scalar switch cannot dispatch on a float or string literal".into())
+            }
+            MirSwitchCase::Default => symbolic_default_guard(&previous_cases),
+            MirSwitchCase::Variant(_) => {
+                return Err("scalar switch cannot use a variant case".into())
+            }
+        };
+        let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
+        next.constraints.push(guard);
         explore_block(
             function,
             program,

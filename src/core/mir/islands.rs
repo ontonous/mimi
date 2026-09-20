@@ -840,7 +840,18 @@ fn scan_scalar_collection_admission(
         seen_types: BTreeSet::new(),
     };
 
-    for callable in program.callables().values() {
+    // R6-1052: the automatically merged prelude is a compatibility source,
+    // not part of the user program's island. Its bodies carry float helpers,
+    // capturing lambdas and multi-argument prints that would poison every
+    // program's coverage scan; the newer families already filter it through
+    // `is_prelude_origin`. Calls from user code into prelude callables stay
+    // an explicit mixed boundary below so a graph that still depends on a
+    // compatibility body keeps the legacy route.
+    for callable in program
+        .callables()
+        .values()
+        .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
+    {
         let concrete = callable.signature.generic_parameters.is_empty();
         if !callable.signature.effects.is_empty()
             || callable.signature.parameters.iter().any(|parameter| {
@@ -868,33 +879,10 @@ fn scan_scalar_collection_admission(
         }
     }
 
-    // These declarations are checker-owned executable dependencies.  A
-    // scalar collection call must not silently coexist with another consumer
-    // family whose semantics are still supplied by a legacy path.
-    let is_runtime_origin =
-        |origin: &crate::core::Origin| matches!(origin, crate::core::Origin::RuntimeSystem { .. });
-    scanner.mixed |= program.has_imports()
-        || program
-            .flows()
-            .values()
-            .any(|flow| !is_runtime_origin(&flow.origin))
-        || program
-            .transitions()
-            .values()
-            .any(|transition| !is_runtime_origin(&transition.origin))
-        || !program.sessions().is_empty()
-        || !program.actors().is_empty()
-        || !program.capabilities().is_empty()
-        || !program.traits().is_empty()
-        || !program.impls().is_empty()
-        || !program.extern_blocks().is_empty()
-        || !program.backend_requirements().is_empty()
-        || program.functions().values().any(|function| {
-            function.is_async
-                || function.is_comptime
-                || function.extern_abi.is_some()
-                || !function.effects.is_empty()
-        });
+    // R6-1052: share the prelude-decoupled declaration-mixedness floor with
+    // the other islands instead of the previous inline copy whose unfiltered
+    // prelude traits poisoned every program's coverage scan.
+    scanner.mixed |= has_mixed_coverage(program);
 
     scanner
 }
@@ -1035,7 +1023,19 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
 
     fn visit_expr(&mut self, expression: &ResolvedExpr, concrete: bool) {
         if concrete {
-            self.require_profile_type(&expression.ty);
+            // R6-1052: a string literal is part of the owned StringHandle
+            // stdout print face when it reaches a scalar println (R6-1050);
+            // the expression-type scan below would otherwise read its
+            // String type as an out-of-profile VALUE.  Composite
+            // expressions re-check operand types explicitly so the literal
+            // cannot hide inside a non-print operation.
+            let is_string_literal = matches!(
+                &expression.kind,
+                ResolvedExprKind::Literal(crate::core::ResolvedLiteral::String(_))
+            );
+            if !is_string_literal {
+                self.require_profile_type(&expression.ty);
+            }
         }
         match &expression.kind {
             ResolvedExprKind::FString(parts) => {
@@ -1061,6 +1061,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 }
             }
             ResolvedExprKind::Binary { left, right, .. } => {
+                if concrete {
+                    // R6-1052 guard: a string literal operand must not
+                    // smuggle a String operation (comparison, concat) into a
+                    // complete admission; only the scalar print face admits
+                    // string values.
+                    self.require_profile_type(&left.ty);
+                    self.require_profile_type(&right.ty);
+                }
                 self.visit_expr(left, concrete);
                 self.visit_expr(right, concrete);
             }
@@ -1136,6 +1144,32 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
                 ) && !is_scalar_println_call(self.program, call)
                 {
+                    self.mixed = true;
+                }
+                // R6-1052: a user call into an automatically merged prelude
+                // callable keeps the compatibility route. The prelude itself
+                // is excluded from the coverage scan, so this is the one
+                // remaining channel through which a complete admission could
+                // depend on a compatibility body.
+                if let ResolvedCallee::Function(owner) = &call.callee {
+                    if let Some(target) = self.program.callables().get(owner) {
+                        if is_prelude_origin(self.program, &target.body.root.origin) {
+                            self.mixed = true;
+                        }
+                    }
+                }
+                if concrete
+                    && call.arguments.iter().any(|argument| {
+                        matches!(
+                            self.program.resolved_types().get(&argument.value.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        )
+                    })
+                    && !is_scalar_println_call(self.program, call)
+                {
+                    // A string literal argument to any callee other than the
+                    // scalar print face (len, starts_with, user calls, ...)
+                    // has no canonical MIR node in this island.
                     self.mixed = true;
                 }
                 for argument in &call.arguments {
@@ -3055,8 +3089,10 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 /// plain collection value is still a compatibility input; only a materialized
 /// `ListOp::Len`/`Reverse`/`Concat`, a receipt-bearing nested List index,
 /// `SetOp::Contains`, or checker-owned scalar Set/List facade instance,
-/// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
-/// S11 production boundary.
+/// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt`/`PrintlnString`
+/// has crossed the S11 production boundary.  R6-1052 admits the owned
+/// StringHandle print face into the stdout receipt so a complete
+/// string-stdout-only graph routes canonical like an integer/bool one.
 /// Keeping this fact next to the island contract prevents the CLI and direct
 /// native entry points from growing independent candidate predicates.
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
@@ -3068,7 +3104,8 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
                         instruction.kind,
                         MirInstructionKind::BuiltinCall {
                             kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
-                                | crate::core::mir::types::MirBuiltinKind::PrintlnInt,
+                                | crate::core::mir::types::MirBuiltinKind::PrintlnInt
+                                | crate::core::mir::types::MirBuiltinKind::PrintlnString,
                             ..
                         }
                     )
@@ -4480,8 +4517,23 @@ impl<'a> ScalarCollectionValidator<'a> {
                 None => {}
             },
             MirTerminator::Trap { .. } => {}
-            MirTerminator::Switch { .. }
-            | MirTerminator::SwitchMove { .. }
+            MirTerminator::Switch { scrutinee, arms } => {
+                // R6-1052: a scalar literal switch over a Copy-scalar
+                // scrutinee is part of the plain-scalar island (R6-1051
+                // admitted the face across construction and both backends).
+                // The shared catalog contract keeps every consumer aligned;
+                // variant-payload switches keep their fail-closed boundary.
+                if let Some(ty) = self.value_type(function, scrutinee, subject) {
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_scalar_switch(&ty, arms)
+                    {
+                        self.error(format!("{subject} scalar switch rejected: {message}"));
+                    }
+                }
+            }
+            MirTerminator::SwitchMove { .. }
             | MirTerminator::Fault { .. }
             | MirTerminator::Unreachable => self.error(format!(
                 "{subject} terminator is outside {SCALAR_COLLECTION_ISLAND}"
@@ -4685,11 +4737,20 @@ fn binary_supported(
     let boolean = is_bool(&validator.program.type_catalog(), left);
     let result_is_bool = is_bool(&validator.program.type_catalog(), result);
     match op {
-        // Keep this matrix identical to the native MIR validator.  The
-        // island must be an intersection of consumer capabilities; accepting
-        // an operation that only reference/VM can execute would recreate the
-        // native-only eligibility drift this gate is meant to prevent.
-        ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract => integer && left == result,
+        // Keep this matrix identical to the native MIR validator and the
+        // verifier capability gate.  The island must be an intersection of
+        // consumer capabilities; accepting an operation that only
+        // reference/VM can execute would recreate the native-only eligibility
+        // drift this gate is meant to prevent.  Multiply/Divide/Remainder on
+        // signed integers are admitted by both consumer gates (checked
+        // overflow and MIN/-1 / zero-divide traps, SD-7/SD-8) and R6-1052's
+        // prelude decoupling made real programs with them visible to this
+        // matrix for the first time.
+        ResolvedBinaryOp::Add
+        | ResolvedBinaryOp::Subtract
+        | ResolvedBinaryOp::Multiply
+        | ResolvedBinaryOp::Divide
+        | ResolvedBinaryOp::Remainder => integer && left == result,
         ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
             (integer || boolean) && result_is_bool
         }

@@ -21,6 +21,10 @@ pub(crate) enum LegacyRouteReason {
     /// A compatibility-shaped program did not materialize a migrated MIR
     /// operation, so it remains outside the current production island.
     MixedCoverageWithoutMaterializedCandidate,
+    /// R6-1052: a plain-scalar stdout candidate failed the island preflight
+    /// (the graph carries an operation outside the island envelope), so the
+    /// program keeps its explicit compatibility route.
+    PlainScalarIslandPreflightCompatibility,
 }
 
 impl LegacyRouteReason {
@@ -29,6 +33,9 @@ impl LegacyRouteReason {
             Self::OutsideMigratedProfile => "outside-migrated-profile",
             Self::MixedCoverageWithoutMaterializedCandidate => {
                 "mixed-coverage-without-materialized-candidate"
+            }
+            Self::PlainScalarIslandPreflightCompatibility => {
+                "plain-scalar-island-preflight-compatibility"
             }
         }
     }
@@ -1086,6 +1093,19 @@ pub(crate) fn select_default_route(
     // re-enter the legacy route.
     if materialized_collection_candidate {
         if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(&canonical) {
+            // R6-1052: the plain-scalar stdout face is a route candidacy over
+            // a checker-side type scan, not a migrated operation face.  When
+            // the island preflight proves the graph carries an operation the
+            // island cannot execute (a shift or power beside the stdout
+            // receipt), the program is an explicit compatibility input — the
+            // route it already ran on — instead of a hard rejection of a
+            // previously working program.  A materialized List/Set OPERATION
+            // keeps its cannot-re-enter-legacy tripwire below.
+            if !route.materialized_collection_operation_candidate && !flow_route_candidate {
+                return DefaultMirRoute::Legacy(
+                    LegacyRouteReason::PlainScalarIslandPreflightCompatibility,
+                );
+            }
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 true,

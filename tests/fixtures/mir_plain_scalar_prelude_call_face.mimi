@@ -1,0 +1,7 @@
+// R6-1052 compatibility boundary: a call into an automatically merged prelude
+// function keeps the mixed coverage state and the legacy disposition — the
+// prelude never silently becomes part of a canonical route.
+func main() -> i32 {
+    println(clamp(50, 1, 10))
+    0
+}

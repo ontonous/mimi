@@ -1,0 +1,11 @@
+// R6-1052 island-preflight compatibility face: shift arithmetic is outside
+// every consumer's island matrix (native MIR validator and verifier
+// capability gate both reject it), so the plain-scalar stdout candidacy
+// downgrades to the explicit legacy disposition instead of hard-rejecting a
+// previously running program.
+func main() -> i32 {
+    let base = 3
+    let shifted = base << 2
+    println(shifted)
+    0
+}

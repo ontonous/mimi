@@ -1,0 +1,25 @@
+// R6-1052 face: the plain-scalar island route flip.  Bool match in a helper,
+// integer match with a default, an owned string literal print, and a
+// root-level scalar assign combine in one complete plain-scalar graph, so the
+// program routes canonical on the default entry (no `--mir` flag needed).
+func label(flag: bool) -> i32 {
+    match flag {
+        true => 41,
+        false => 7,
+    }
+}
+func main() -> i32 {
+    let mut total = 0
+    total = 5
+    println(label(true))
+    println(label(false))
+    let tag = match 7 {
+        5 => 50,
+        7 => 70,
+        _ => 90,
+    }
+    println(tag)
+    println(total)
+    println("plain scalar")
+    0
+}

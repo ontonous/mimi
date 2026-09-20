@@ -18947,7 +18947,12 @@ fn canonical_mir_standalone_integer_println_matches_all_production_consumers() {
     assert!(default_ir.status.success());
     let ir = String::from_utf8_lossy(&default_ir.stdout);
     assert!(ir.contains("define i32 @main("));
-    assert!(ir.contains("@printf") && ir.contains("c\"%ld\\00"));
+    // R6-1052 restatement: the default entry now routes the standalone
+    // integer println through the canonical MIR native emitter, whose
+    // PrintlnInt prints the whole line with one printf("%ld\n") call instead
+    // of the legacy value-plus-separate-newline shape (newline spelled as the
+    // IR octal escape \0A in the format constant).
+    assert!(ir.contains("@printf") && ir.contains("c\"%ld\\0A\\00"));
 
     let verification = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -22034,12 +22039,12 @@ fn canonical_mir_float_print_keeps_compatibility() {
     );
 }
 
-// R6-1051 face: a scalar literal switch (bool match in a helper) plus an
-// admitted stdout effect runs through the direct canonical entries — the
-// explicit `--mir` run and the native `build --mir` — byte-for-byte.  The
-// default entry keeps its compatibility disposition (the cross-function shape
-// is mixed-coverage, not a materialized candidate), so only the direct
-// entries pin canonicality here.
+// R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a
+// helper) plus an admitted stdout effect runs through the direct canonical
+// entries — the explicit `--mir` run and the native `build --mir` —
+// byte-for-byte.  R6-1052's prelude decoupling made the pure plain-scalar
+// graph a complete collection admission, so the default entry now routes
+// canonical too instead of keeping the compatibility disposition.
 #[test]
 fn canonical_mir_scalar_switch_runs_on_direct_entries() {
     let source = project_root()
@@ -22083,8 +22088,9 @@ fn canonical_mir_scalar_switch_runs_on_direct_entries() {
     assert_eq!(native_run.stdout, b"41\n7\n3\n");
     let _ = fs::remove_file(&native);
 
-    // The default entry keeps the compatibility disposition for the
-    // mixed-coverage shape while still producing the same output.
+    // R6-1052 restatement: the prelude decoupling made this pure plain-scalar
+    // graph a complete collection admission, so the default entry routes
+    // canonical with the same output.
     let run = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
@@ -22092,12 +22098,12 @@ fn canonical_mir_scalar_switch_runs_on_direct_entries() {
         .env("MIMI_VERBOSE", "1")
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
     assert!(run.status.success());
     assert_eq!(run.stdout, b"41\n7\n3\n");
-    let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("canonical route disposition: legacy"),
-        "the mixed-coverage shape must keep the compatibility disposition: {stderr}"
+        !stderr.contains("canonical route disposition: legacy"),
+        "the complete plain-scalar shape must route canonical on the default entry: {stderr}"
     );
 }
 
@@ -22132,4 +22138,167 @@ fn canonical_mir_option_string_assign_face_builds_native() {
     assert!(native_run.status.success());
     assert_eq!(native_run.stdout, b"yes\n2\n");
     let _ = fs::remove_file(&native);
+}
+
+// R6-1052 face: the prelude decoupling makes the combined plain-scalar graph
+// (bool match helper + integer match + string literal print + root scalar
+// assign) a complete collection admission, so the default entry routes
+// canonical without any flag, and the explicit entries share the same
+// MirProgram identity.
+#[test]
+fn canonical_mir_plain_scalar_face_routes_canonical_on_default_entry() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_plain_scalar_route_face.mimi");
+    let expected = b"41\n7\n70\n5\nplain scalar\n";
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "plain scalar program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, expected);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "the plain-scalar face must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, expected);
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_plain_scalar_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("canonical route disposition: legacy"),
+        "native MIR build must not fall back to legacy: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, expected);
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1052 construction ground truth at the CLI boundary: the nested-assign
+// shape has a complete coverage scan but cannot lower, so the
+// construction-failure guard keeps the default entry on the working legacy
+// route (explicit compatibility disposition, same output) instead of turning
+// a previously running program into a hard reject.
+#[test]
+fn canonical_mir_nested_assign_keeps_legacy_via_construction_guard() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_nested_assign_face.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn nested assign default run");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "the nested-assign program must keep running on the legacy route: {stderr}"
+    );
+    assert_eq!(run.stdout, b"5\n");
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "nested assign must keep the explicit compatibility route: {stderr}"
+    );
+}
+
+// R6-1052 compatibility boundary: a call into an automatically merged prelude
+// function keeps the mixed coverage state and the legacy disposition with the
+// same output — the prelude never silently becomes part of a canonical route.
+#[test]
+fn canonical_mir_prelude_call_keeps_legacy_disposition() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_plain_scalar_prelude_call_face.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn prelude call default run");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "the prelude-calling program must keep running on the legacy route: {stderr}"
+    );
+    assert_eq!(run.stdout, b"10\n");
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "a prelude callee must keep the explicit compatibility route: {stderr}"
+    );
+}
+
+// R6-1052 island-preflight compatibility boundary: shift arithmetic is
+// outside every consumer's island matrix (the native MIR validator and the
+// verifier capability gate both reject it), so the stdout-only plain-scalar
+// candidacy downgrades to the named legacy disposition with the same output
+// — only a materialized List/Set operation keeps the cannot-re-enter-legacy
+// tripwire.
+#[test]
+fn canonical_mir_shift_face_keeps_named_legacy_disposition() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_plain_scalar_shift_face.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn shift face default run");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "the shift program must keep running on the legacy route: {stderr}"
+    );
+    assert_eq!(run.stdout, b"12\n");
+    assert!(
+        stderr.contains(
+            "canonical route disposition: legacy (plain-scalar-island-preflight-compatibility)"
+        ),
+        "the shift face must carry the named island-preflight compatibility reason: {stderr}"
+    );
 }
