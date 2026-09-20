@@ -18779,10 +18779,13 @@ fn canonical_mir_set_contains_println_bool_matches_all_production_consumers() {
 
 #[test]
 fn canonical_mir_rejects_unsupported_println_before_any_backend() {
+    // R6-1050 restatement: the owned StringHandle print face is admitted, so
+    // the pinned unsupported shape is the float println — still fail-closed
+    // before any backend with the same stable canonical diagnostic.
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_native_println_non_bool_rejected.mimi");
+        .join("mir_native_println_float_rejected.mimi");
     let explicit = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("build")
@@ -18802,9 +18805,9 @@ fn canonical_mir_rejects_unsupported_println_before_any_backend() {
         .arg("run")
         .arg(&fixture)
         .output()
-        .expect("failed to spawn compatibility non-bool println run");
+        .expect("failed to spawn compatibility float println run");
     assert!(default.status.success());
-    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\nlegacy\n");
+    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\n0.5\n");
 }
 
 #[test]
@@ -21846,12 +21849,15 @@ fn canonical_mir_record_bool_print_routes_canonical_across_consumers() {
     let _ = fs::remove_file(&native);
 }
 
-// R6-1049 face boundary: the Option<string> island closure now admits root
-// scalar assigns at the classifier, but the program graph still cannot
-// materialize `println` over a StringHandle (the scalar print contract
-// accepts signed i32/i64/bool only), so the whole program keeps the explicit
-// compatibility route with unchanged output.  Pin the honest disposition:
-// no silent canonical admission, no hard reject for a compat-shaped program.
+// R6-1049 face boundary: the Option<string> island keeps the explicit
+// compatibility route for the R6-1050 boundary fixture.  R6-1050 retired the
+// reference validator's recoverable-Flow-only stdout gate, so the program now
+// materializes its `println(string)` graph; it stays on the compatibility
+// route because unwrap-style Option consumption is not the option island's
+// switch candidacy (no Option<string> scrutinee anywhere), and the `--mir`
+// capability gates keep the non-Copy variant payload fail-closed.  Pin the
+// honest disposition: no silent canonical admission, no hard reject for a
+// compat-shaped program.
 #[test]
 fn canonical_mir_option_string_assign_keeps_compatibility() {
     let source = project_root()
@@ -21930,5 +21936,100 @@ fn canonical_mir_scalar_assign_nested_block_keeps_compatibility() {
     assert!(
         stderr.contains("canonical route disposition: legacy"),
         "nested-block assign must keep the explicit compatibility route: {stderr}"
+    );
+}
+
+// R6-1050: `println` over a StringHandle lowers as the `PrintlnString`
+// builtin (owned direct print consumes a fresh clone; borrowed record-field
+// receipt is the non-consuming observation shape).  The string-print face is
+// differential-pinned across all three consumers, so a collection-graph
+// program printing an owned string literal routes canonical on the default
+// entry instead of stranding on the compatibility route.
+#[test]
+fn canonical_mir_string_print_routes_canonical_across_consumers() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_string_print_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "string print program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"3\n5\ntag\n");
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "string print program must route canonical on the default entry: {stderr}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(
+        mir_run.status.success(),
+        "explicit MIR run must execute: {}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+    assert_eq!(mir_run.stdout, b"3\n5\ntag\n");
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_string_print_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, b"3\n5\ntag\n");
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1050 face boundary: a float println keeps the explicit compatibility
+// route — the owned StringHandle widening does not extend to float stdout,
+// whose output ABI and effect contract remain unmaterialized.  Without a
+// materialized island candidate the program stays legacy-compat (never a
+// mixed-coverage hard reject).
+#[test]
+fn canonical_mir_float_print_keeps_compatibility() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_float_print_compat.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn float print default run");
+    assert!(run.status.success());
+    assert_eq!(run.stdout, b"0.5\n");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "float println must keep the explicit compatibility route: {stderr}"
     );
 }

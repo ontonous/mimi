@@ -343,13 +343,14 @@ fn assert_legacy_return_receipt(
 }
 
 /// Record the remaining mixed Set function-form boundary.  The Set operation
-/// and scalar println nodes are canonical; this witness deliberately includes
-/// a string println, whose output ABI/effect is still outside the island.
+/// and the scalar plus owned-StringHandle println nodes are canonical (the
+/// string face opened in R6-1050); this witness deliberately includes a float
+/// println, whose output ABI/effect is still outside the island.
 fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
     assert_legacy_return_receipt(
         case_id,
         "set-lowering-return-ownership",
-        "not-closed: scalar collection string-output effect is outside the canonical ABI contract",
+        "not-closed: float stdout effect is outside the canonical ABI contract",
         "Set function-form contains",
         "legacy:mixed-coverage-without-materialized-candidate",
         src,
@@ -1198,11 +1199,11 @@ fn audit1j_set_function_form_receipt() {
         func main() -> i32 {
             let s = {4, 1, 1}
             println(contains(s, 1))
-            println("legacy")
+            println(0.5)
             0
         }
     "#,
-        "true\nlegacy",
+        "true\n0.5",
     );
 }
 

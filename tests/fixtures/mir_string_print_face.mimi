@@ -1,0 +1,9 @@
+func main() -> i32 {
+    let mut total = 0;
+    total = 5;
+    let xs = [10, 20, 30];
+    println(xs.len());
+    println(total);
+    println("tag");
+    0
+}

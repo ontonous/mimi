@@ -507,13 +507,7 @@ impl MirProgram {
                 function,
                 &type_catalog,
             ));
-            errors.extend(validate_builtin_calls(
-                function,
-                &type_catalog,
-                transitions
-                    .values()
-                    .any(|contract| contract.effect.is_recoverable()),
-            ));
+            errors.extend(validate_builtin_calls(function, &type_catalog));
             errors.extend(validate_conversions(function, &type_catalog));
             errors.extend(super::contracts::validate_contracts(
                 function,
@@ -1604,11 +1598,15 @@ fn validate_conversions(
 /// Validate the complete semantic contract for every first-class builtin
 /// instruction. The validator owns the boundary between checker-resolved
 /// types and backend dispatch: arity, exact result identity, TypeDesc ABI,
-/// and Copy ownership are checked before execution.
+/// and Copy ownership are checked before execution.  R6-1050: `PrintlnString`
+/// is a first-class builtin on the same contract basis as the scalar prints —
+/// the owned direct print consumes a fresh clone of its source (the lowerer
+/// materializes the Clone when the source local must remain live) and the
+/// borrowed record-field receipt is the non-consuming observation shape, so
+/// the historical recoverable-Flow-only stdout gate is retired.
 fn validate_builtin_calls(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
-    allow_string_stdout: bool,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
     for block in function.blocks.values() {
@@ -1623,16 +1621,6 @@ fn validate_builtin_calls(
                 continue;
             };
             let contract = super::types::MirBuiltinContract::for_kind(*kind);
-            if *kind == super::types::MirBuiltinKind::PrintlnString && !allow_string_stdout {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!(
-                        "builtin '{}' does not support StringHandle outside the recoverable Flow stdout contract; canonical contract accepts signed i32 or i64",
-                        contract.name
-                    ),
-                });
-                continue;
-            }
             let borrowed_string_field = if let Some(receipt) = string_field_contract {
                 if *kind != super::types::MirBuiltinKind::PrintlnString {
                     errors.push(super::MirValidationError {

@@ -1125,10 +1125,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 {
                     self.has_candidate = true;
                 }
-                // Only the closed Copy-scalar stdout effects are Canonical MIR
-                // nodes in this island. Other println shapes remain on the
-                // explicit mixed compatibility route until their output ABI
-                // and effect contract is independently materialized.
+                // Only the closed stdout effects of this island (signed
+                // integers, bool, and — since R6-1050 — the StringHandle
+                // print face) are Canonical MIR nodes here. Other println
+                // shapes (float, aggregate, multi-arg) remain on the explicit
+                // mixed compatibility route until their output ABI and effect
+                // contract is independently materialized.
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
@@ -1318,6 +1320,12 @@ fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::Reso
             Some(ResolvedType::Primitive(PrimitiveType::Bool))
                 | Some(ResolvedType::Primitive(PrimitiveType::I32))
                 | Some(ResolvedType::Primitive(PrimitiveType::I64))
+                // R6-1050: the StringHandle stdout face is differential-pinned
+                // owned (fresh-clone consumption) and borrowed (record-field
+                // receipt) across all three consumers, so it joins the closed
+                // print admission here — leaving it as mixed shape would turn
+                // previously compatible programs into hard route rejections.
+                | Some(ResolvedType::Primitive(PrimitiveType::String))
         )
     })
 }
@@ -2535,7 +2543,9 @@ pub(crate) fn is_owned_generic_record_update_callable(
 /// route rejection: once graph construction materializes the record candidate
 /// inside mixed coverage, the doctrine forbids falling back to legacy
 /// (R6-1048 parity repair after numeric-widen call receipts widened
-/// construction; bool widened in R6-1049 under the same rule).
+/// construction; bool widened in R6-1049 under the same rule; the StringHandle
+/// face — owned clone and borrowed record-field receipt — widened in R6-1050
+/// under the same rule).
 fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) -> bool {
     if !matches!(
         call.callee,
@@ -2554,7 +2564,7 @@ fn is_admitted_scalar_print_call(program: &CheckedProgram, call: &ResolvedCall) 
             program.resolved_types().get(&argument.value.ty),
             Some(ResolvedType::Primitive(
                 PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
-            ))
+            )) | Some(ResolvedType::Primitive(PrimitiveType::String))
         )
     })
 }
@@ -3501,6 +3511,26 @@ pub fn multi_target_flow_union_face_closed(program: &MirProgram) -> bool {
         })
 }
 
+/// Whether this function's executable graph contains the owned `PrintlnString`
+/// print face.  When it does, the island's value/literal/clone/move admission
+/// accepts the canonical owned StringHandle values the face materializes
+/// (print constant, argument clone): the checker-level island classifier
+/// admits exactly the same face, so admission and capability can never
+/// disagree (the R6-1048 parity rule, one layer deeper).
+fn function_contains_println_string(function: &MirFunction) -> bool {
+    function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::BuiltinCall {
+                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnString,
+                    ..
+                }
+            )
+        })
+    })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
@@ -3514,6 +3544,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         errors: BTreeSet::new(),
         checked_types: BTreeSet::new(),
         allow_owned_record_family: contains_owned_record_projection_candidate(program),
+        function_admits_string_print: false,
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -3528,6 +3559,7 @@ struct ScalarCollectionValidator<'a> {
     errors: BTreeSet<String>,
     checked_types: BTreeSet<crate::core::ResolvedTypeId>,
     allow_owned_record_family: bool,
+    function_admits_string_print: bool,
 }
 
 impl<'a> ScalarCollectionValidator<'a> {
@@ -3547,6 +3579,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         // sound whole-program boundary; unmaterialized checker declarations
         // are intentionally not part of this scan.
         for function in self.program.functions().values() {
+            self.function_admits_string_print = function_contains_println_string(function);
             self.validate_function(function);
         }
         for instance in self.program.instances().values() {
@@ -3757,7 +3790,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                         .validate_aggregate_glue(ty, MirGlueOperation::Drop)
                 }),
             MirLayout::Handle
-                if self.allow_owned_record_family
+                if (self.allow_owned_record_family || self.function_admits_string_print)
                     && self
                         .program
                         .type_catalog()
@@ -3802,7 +3835,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                     }
                     ResolvedLiteral::Unit => self.require_unit(&result_ty, subject),
                     ResolvedLiteral::String(_)
-                        if self.allow_owned_record_family
+                        if (self.allow_owned_record_family
+                            || self.function_admits_string_print)
                             && self
                                 .program
                                 .type_catalog()
@@ -4128,8 +4162,48 @@ impl<'a> ScalarCollectionValidator<'a> {
                 result,
                 kind,
                 arguments,
-                ..
+                string_field_contract,
             } => {
+                if *kind == crate::core::mir::types::MirBuiltinKind::PrintlnString {
+                    // R6-1050: the owned StringHandle print face is
+                    // differential-pinned across reference, bytecode and
+                    // native consumers, so it is admitted next to the scalar
+                    // prints.  The borrowed record-field receipt stays with
+                    // its owning record island.
+                    if string_field_contract.is_some() {
+                        self.error(format!(
+                            "{subject} borrowed String-field receipt is outside {SCALAR_COLLECTION_ISLAND}"
+                        ));
+                        return;
+                    }
+                    if arguments.len() != 1 {
+                        self.error(format!(
+                            "{subject} builtin '{}' has {} arguments; contract requires 1",
+                            crate::core::mir::types::MirBuiltinContract::for_kind(*kind).name,
+                            arguments.len()
+                        ));
+                        return;
+                    }
+                    let argument = &arguments[0];
+                    let Some(argument_ty) = self.value_type(function, argument, subject) else {
+                        return;
+                    };
+                    let Some(result_ty) = self.value_type(function, result, subject) else {
+                        return;
+                    };
+                    if self
+                        .program
+                        .type_catalog()
+                        .validate_owned_string(&argument_ty)
+                        .is_err()
+                    {
+                        self.error(format!(
+                            "{subject} builtin 'println' argument is not the canonical owned StringHandle contract"
+                        ));
+                    }
+                    self.require_unit(&result_ty, subject);
+                    return;
+                }
                 if !matches!(
                     kind,
                     crate::core::mir::types::MirBuiltinKind::PrintlnBool
@@ -4506,16 +4580,17 @@ impl<'a> ScalarCollectionValidator<'a> {
     }
 
     fn is_owned_record_or_string_type(&self, ty: &crate::core::ResolvedTypeId) -> bool {
-        if !self.allow_owned_record_family {
-            return false;
-        }
         if self
             .program
             .type_catalog()
             .validate_owned_string(ty)
             .is_ok()
+            && (self.allow_owned_record_family || self.function_admits_string_print)
         {
             return true;
+        }
+        if !self.allow_owned_record_family {
+            return false;
         }
         self.program
             .type_catalog()
@@ -4764,7 +4839,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_println_from_the_canonical_stdout_effect() {
         let tokens = Lexer::new(include_str!(
-            "../../../tests/fixtures/mir_native_println_non_bool_rejected.mimi"
+            "../../../tests/fixtures/mir_native_println_float_rejected.mimi"
         ))
         .tokenize()
         .expect("lex");
@@ -4775,7 +4850,7 @@ mod tests {
             ScalarCollectionAdmission::MixedCoverage
         );
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("non-bool println must fail before a canonical backend");
+            .expect_err("float println must fail before a canonical backend");
         assert!(format!("{error:?}").contains("canonical contract accepts signed i32 or i64"));
     }
 
