@@ -17,6 +17,22 @@ ENV["LLVM_SYS_181_PREFIX"] = "/tmp/llvm-wrapper"
 # programs intentionally unsupported by codegen, not individual weak features.
 INTERPRETER_ONLY = frozenset({"flow_test_macros.mimi"})
 
+# Registered fail-closed known gaps (R6-1056): programs the default Canonical
+# MIR route stably rejects by a recorded design decision, mirroring
+# KNOWN_GAPS in tests/real_world_cli.rs.  Gap programs are still executed on
+# every suite run — the entry is a drift detector, not a skip.  A failing gap
+# reports as GAP and does not fail the suite; a PASSING gap is stale ledger
+# state (the slice that closed the face must remove the entry) and fails the
+# suite exactly like a real regression.
+KNOWN_GAPS = {
+    "core_generics_return_abi.mimi": (
+        "S105 fa6696fa: the generic List<string>/List<List<string>> "
+        "construction island only accepts single-element Copy-scalar "
+        "receipts, so default run/build stably reject without legacy "
+        "fallback (fail-closed by design; see RESULTS.md 0.1.7 status)"
+    ),
+}
+
 
 def run_one(path: Path):
     rel = path.relative_to(ROOT)
@@ -115,7 +131,23 @@ def main():
     run_pass = 0
     build_pass = 0
     exec_pass = 0
+    gap_count = 0
+    stale_gaps = []
     for r in results:
+        gap_name = r["name"] if r["name"] in KNOWN_GAPS else None
+        all_ok = r["interp_ok"] and (
+            not r["requires_codegen"] or (r["cg_ok"] is True and r["exe_ok"] is True)
+        )
+        if gap_name is not None:
+            if all_ok:
+                # A registered gap that now passes is stale ledger state: the
+                # entry must be removed by the slice that closed the face.
+                stale_gaps.append(r)
+                print(f"{r['name']:<40} {'GAP-CLOSED':>10} (remove from KNOWN_GAPS)")
+                continue
+            gap_count += 1
+            print(f"{r['name']:<40} {'GAP':>6} (registered known gap, still executed)")
+            continue
         run_mark = "PASS" if r["interp_ok"] else "FAIL"
         build_mark = "SKIP" if not r["requires_codegen"] else ("PASS" if r["cg_ok"] else "FAIL")
         exec_mark = "SKIP" if not r["requires_codegen"] else ("PASS" if r["exe_ok"] else "FAIL")
@@ -128,14 +160,26 @@ def main():
         print(f"{r['name']:<40} {run_mark:>6} {build_mark:>6} {exec_mark:>6}")
 
     print("=" * 80)
-    print(f"Total: {total}  run: {run_pass}/{total}  build: {build_pass}/{total}  exec: {exec_pass}/{total}")
+    counted = total - gap_count - len(stale_gaps)
+    codegen_counted = sum(
+        1
+        for r in results
+        if r["requires_codegen"] and r["name"] not in KNOWN_GAPS
+    )
+    print(
+        f"Total: {total}  run: {run_pass}/{counted}  build: {build_pass}/{codegen_counted}  "
+        f"exec: {exec_pass}/{codegen_counted}  known-gap: {gap_count}"
+    )
 
     # Detail failures
     failed = [
         r
         for r in results
-        if not r["interp_ok"]
-        or (r["requires_codegen"] and (r["cg_ok"] is not True or r["exe_ok"] is not True))
+        if r["name"] not in KNOWN_GAPS
+        and (
+            not r["interp_ok"]
+            or (r["requires_codegen"] and (r["cg_ok"] is not True or r["exe_ok"] is not True))
+        )
     ]
     if failed:
         print("\n--- Failure details ---")
@@ -148,7 +192,12 @@ def main():
             if r["requires_codegen"] and r["exe_ok"] is not True:
                 print("[exec FAIL]\n" + r["exe_out"][:800])
 
-    sys.exit(0 if not failed else 1)
+    if stale_gaps:
+        print("\n--- Stale known-gap entries (passing but still registered) ---")
+        for r in stale_gaps:
+            print(f"\n>> {r['name']}\n  {KNOWN_GAPS[r['name']]}")
+
+    sys.exit(0 if not failed and not stale_gaps else 1)
 
 
 if __name__ == "__main__":

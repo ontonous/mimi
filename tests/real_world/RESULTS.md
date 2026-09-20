@@ -12,6 +12,17 @@
 - 完整 CLI MCDD 套件通过：所有 `tests/real_world/*.mimi`（除 interpreter-only 的 `flow_test_macros.mimi`）均通过 `mimi run`、`mimi build` 和 native exec，且 stdout 与 interpreter 一致。
 - 新增 `std_mimispec_ast_typechecks` 回归：`mimi check std/mimispec/ast.mimi` 通过。
 
+### run_suite.py 的 KNOWN_GAPS 漂移检测（R6-1056）
+
+`run_suite.py` 与 cargo 侧 `KNOWN_GAPS` 同源登记 fail-closed 已知缺口（当前唯一：
+`core_generics_return_abi.mimi`，S105 `fa6696fa` 裁决见上条）。机制语义：
+
+- gap 程序**每次全量跑仍然执行**（登记是漂移检测器，不是跳过）；
+- 按裁决失败 → 行标记 `GAP`、独立计数（`known-gap: N`）、不计入失败、exit 0；
+- 意外通过 → 行标记 `GAP-CLOSED`、**套件 exit 1** 并提示从 `KNOWN_GAPS` 移除——
+  关闭该面的切片必须同步删除登记条目（与钉测重述同一纪律）；
+- 未登记程序的失败照常 FAIL + exit 1，红色输出不再被已知缺口噪音污染。
+
 ## v0.31.3 CFG / ownership 收口门禁
 
 - Cargo 自动发现的 real-world 套件全绿；每个非 interpreter-only 程序均执行 `mimi run`、`mimi build`、native executable 与 stdout 等价检查。
