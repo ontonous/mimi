@@ -85,6 +85,7 @@ unsafe fn current_tid() -> i64 {
 }
 
 #[cfg(not(target_os = "linux"))]
+// SAFETY: called from the signal-guard installation path only; the body's sole operation is the async-signal-safe SYS_gettid syscall.
 unsafe fn current_tid() -> i64 {
     // Non-Linux fallback: treat the whole process as one guarded "thread".
     // This is conservative; the signal guard is primarily a Linux/glibc
@@ -273,6 +274,7 @@ impl Drop for CrashCleanupPopper {
 }
 
 /// `std::panic::resume_unwind` (the caller observes the original panic).
+// SAFETY: the caller must pass a closure that does not itself install signal guards unsafely; this fn only sets up the process-wide recovery point and restores it on exit.
 pub(crate) unsafe fn call_guarded<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce() -> R,

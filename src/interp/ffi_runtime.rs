@@ -1461,6 +1461,7 @@ impl FfiRuntime {
                             "FFI wrapper: malloc failed for StringTransfer".to_string(),
                         ));
                     }
+                // SAFETY: `ptr` is the malloc'd buffer from above with room for `bytes.len()` plus the NUL; the copy stays in bounds and takes ownership for the FFI caller.
                     unsafe {
                         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
                         *ptr.add(bytes.len()) = 0;

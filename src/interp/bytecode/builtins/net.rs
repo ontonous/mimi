@@ -479,6 +479,7 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
         tv_sec: 5,
         tv_usec: 0,
     };
+    // SAFETY: `fd` is the live socket fd guarded by `_fd_guard` above; `tmo` is a stack timeval and setsockopt only writes kernel option state.
     let rc = unsafe {
         libc::setsockopt(
             fd as i32,
@@ -494,6 +495,7 @@ fn http_send_recv(fd: i64, request: &str) -> Result<String, InterpError> {
             std::io::Error::last_os_error()
         )));
     }
+    // SAFETY: `fd` is the live socket fd guarded by `_fd_guard` above; `tmo` is a stack timeval and setsockopt only writes kernel option state.
     let rc = unsafe {
         libc::setsockopt(
             fd as i32,
@@ -894,6 +896,7 @@ mod tests {
         // process; both ends are closed on all paths below.
         let mut fds = [0i32; 2];
         assert_eq!(
+            // SAFETY: socketpair creates two connected fds into the caller's array; both ends are closed on all paths below.
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
             0
         );
@@ -954,6 +957,7 @@ mod tests {
         // SAFETY: socketpair as above; both ends closed on all paths.
         let mut fds = [0i32; 2];
         assert_eq!(
+            // SAFETY: socketpair creates two connected fds into the caller's array; both ends are closed on all paths below.
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
             0
         );

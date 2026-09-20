@@ -1393,6 +1393,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let loop_id = self
             .context
             .metadata_node(&[placeholder.into(), prop_node.into()]);
+        // SAFETY: `loop_id` is a live metadata node built above in the same context; the replace only rewires operand 0 of this self-constructed node.
         unsafe {
             use inkwell::llvm_sys::core::{LLVMReplaceMDNodeOperandWith, LLVMValueAsMetadata};
             let loop_id_val = inkwell::values::AsValueRef::as_value_ref(&loop_id);
@@ -5277,6 +5278,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     continue;
                 }
+                // SAFETY: `func` is a live function value of the module being emitted; the rename goes through the LLVM core API on the same value ref.
                 unsafe {
                     // inkwell 0.9 has no FunctionValue::set_name; go through
                     // the LLVM core API directly (same value-ref rename).

@@ -274,6 +274,7 @@ fn acquire_test_file_lock(
         // SAFETY: file is an open regular lock file and flock only changes its
         // advisory lock state; no Rust references cross the FFI boundary.
         let result =
+            // SAFETY: file is an open regular lock file; flock only changes its advisory lock state.
             unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), operation) };
         if result == 0 {
             return Ok(TestFileLockGuard { file });

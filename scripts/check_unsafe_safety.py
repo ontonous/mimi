@@ -29,8 +29,11 @@ import sys
 # Locked baseline of unsafe blocks lacking a SAFETY comment in NON-runtime
 # code, measured 2026-07-22 (v0.31.7) with the contiguous-comment-block
 # detector below. Do not raise this number; lower it as blocks are documented.
-# (54 -> 37 after documenting the 17 loop-bounded io.rs build_gep sites.)
-BASELINE_NON_RUNTIME = 37
+# (54 -> 37 after documenting the 17 loop-bounded io.rs build_gep sites;
+# 37 -> 0 at R6-1058: every remaining non-runtime site documented, the raw
+# string detector fixed against phantom `r"` pairings, and the count
+# re-audited from a true 171.)
+BASELINE_NON_RUNTIME = 0
 
 OPENER = re.compile(r"\bunsafe\b\s*(\{|fn\b|extern\b|impl\b|trait\b|$)")
 SAFETY = re.compile(r"SAFETY", re.IGNORECASE)
@@ -38,7 +41,11 @@ SAFETY = re.compile(r"SAFETY", re.IGNORECASE)
 # message does not false-match. Handles escaped quotes and raw strings
 # (`r#"..."#`, `r##"..."##`) — mimi test sources embed `unsafe { }` blocks as
 # raw-string program text, which are not Rust unsafe and must not count.
-RAW_STRING = re.compile(r'r(#{0,255})"(?s:.*?)"\1')
+# The raw-string opener must not be part of a larger word: a plain string like
+# `"error"` ends in `r"`, which would otherwise open a phantom raw string that
+# eats real code up to the next quote (R6-1058 rust_bind.rs false positive).
+# A `b` byte-string prefix is still accepted (`br"..."`, `br#"..."#`).
+RAW_STRING = re.compile(r'(?:(?<![A-Za-z0-9_])|(?<=b))r(#{0,255})"(?s:.*?)"\1')
 STRING_LIT = re.compile(r'"(?:\\.|[^"\\])*"')
 
 

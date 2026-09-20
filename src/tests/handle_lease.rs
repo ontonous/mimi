@@ -17,6 +17,7 @@ fn map_lease_destroy_waits_active_op() {
     let h = mimi_map_new();
     assert_ne!(h, 0);
     let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+    // SAFETY: `h` is the live map handle from `mimi_map_new` and `key` is a NUL-terminated literal outliving the call.
     unsafe { mimi_map_set(h, key, 7) };
 
     assert_eq!(mimi_map_lease_acquire(h), HANDLE_OK);
@@ -37,6 +38,7 @@ fn map_lease_destroy_waits_active_op() {
     assert_eq!(mimi_map_finish_destroy(h), HANDLE_OK);
 
     let mut sz = 99i64;
+    // SAFETY: destroyed handle — the lease/generation protocol resolves it to the typed HANDLE_ERR_STALE instead of a use-after-free.
     let err = unsafe { mimi_map_try_size(h, &mut sz) };
     assert_eq!(err, HANDLE_ERR_STALE);
     assert_eq!(mimi_handle_last_error(), HANDLE_ERR_STALE);
@@ -47,10 +49,13 @@ fn map_lease_destroy_waits_active_op() {
 fn map_stale_generation_is_typed_error() {
     let h = mimi_map_new();
     let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+    // SAFETY: `h` is the live map handle from `mimi_map_new` and `key` is a NUL-terminated literal outliving the call.
     unsafe { mimi_map_set(h, key, 1) };
+    // SAFETY: `h` is the live map handle created above, destroyed exactly once here.
     unsafe { mimi_map_destroy(h) };
 
     let mut sz = 99i64;
+    // SAFETY: destroyed handle — the generation check resolves the stale handle to a typed error, never a dereference.
     let err = unsafe { mimi_map_try_size(h, &mut sz) };
     assert_eq!(
         err, HANDLE_ERR_STALE,
@@ -58,6 +63,7 @@ fn map_stale_generation_is_typed_error() {
     );
     assert_eq!(mimi_handle_last_error(), HANDLE_ERR_STALE);
     // size() on a stale handle must not abort and must not report a live size.
+    // SAFETY: stale handle — `mimi_map_size` resolves via the generation check and reports 0 without touching freed storage.
     let live_sz = unsafe { mimi_map_size(h) };
     assert_eq!(live_sz, 0);
 }
@@ -75,6 +81,7 @@ fn set_lease_destroy_waits_active_op() {
     assert_eq!(mimi_set_finish_destroy(h), HANDLE_OK);
 
     let mut sz = 99i64;
+    // SAFETY: destroyed handle — the lease/generation protocol resolves it to the typed HANDLE_ERR_STALE instead of a use-after-free.
     let err = unsafe { mimi_set_try_size(h, &mut sz) };
     assert_eq!(err, HANDLE_ERR_STALE);
     assert_eq!(mimi_handle_last_error(), HANDLE_ERR_STALE);
@@ -83,8 +90,10 @@ fn set_lease_destroy_waits_active_op() {
 #[test]
 fn set_stale_generation_is_typed_error() {
     let h = mimi_set_new();
+    // SAFETY: `h` is the live set handle created above, destroyed exactly once here.
     unsafe { mimi_set_destroy(h) };
     let mut sz = 99i64;
+    // SAFETY: destroyed handle — the generation check resolves the stale handle to a typed error, never a dereference.
     let err = unsafe { mimi_set_try_size(h, &mut sz) };
     assert_eq!(err, HANDLE_ERR_STALE);
     assert_eq!(mimi_handle_last_error(), HANDLE_ERR_STALE);

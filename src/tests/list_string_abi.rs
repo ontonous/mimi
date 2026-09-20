@@ -22,6 +22,7 @@ fn list_string_old_cstr_abi_is_rejected() {
 
     let mut out_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
     let mut out_len: i64 = 0;
+    // SAFETY: `old` is a legacy-ABI list fixture; the runtime must reject it through the ABI check (typed error) without reading any element.
     let rc = unsafe { mimi_list_read_string(&old, 0, &mut out_ptr, &mut out_len) };
     assert_eq!(
         rc, MIMI_ERR_OLD_STRING_ABI,
@@ -34,6 +35,7 @@ fn list_string_old_cstr_abi_is_rejected() {
     assert!(out_ptr.is_null());
 
     let sep = b",\0".as_ptr() as *const std::ffi::c_char;
+    // SAFETY: `sep` is a NUL-terminated literal outliving the call; the legacy-ABI list must be rejected, not read.
     let joined = unsafe { mimi_str_join(&old, sep) };
     assert!(
         joined.is_null(),

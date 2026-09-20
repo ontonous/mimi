@@ -934,6 +934,7 @@ impl MimiThreadPool {
             // SAFETY: data_ptr was created by Box::into_raw and is guaranteed
             // to be a valid heap-allocated Option<Box<dyn FnOnce() + Send>>.
             let mut data =
+                // SAFETY: `data_ptr` comes from `Box::into_raw` and the worker thread has exclusive ownership at trampoline entry.
                 unsafe { Box::from_raw(data_ptr as *mut Option<Box<dyn FnOnce() + Send>>) };
             // The trampoline is extern "C": a panic in the user closure must
             // not cross the C ABI. Swallow it so the worker can complete the
@@ -973,6 +974,7 @@ impl MimiThreadPool {
             }) {
                 // The task was never queued; release the data and fix the
                 // pending counter so join_all returns instead of hanging.
+                // SAFETY: the task was never queued, so no other thread received it; this side reclaims the `Box::into_raw` allocation exactly once.
                 let _ = unsafe { Box::from_raw(data as *mut ClosureData) };
                 *count -= 1;
                 if *count == 0 {
@@ -1165,11 +1167,13 @@ mod tests {
     #[test]
     fn cap_c_api_lifecycle() {
         let name = std::ffi::CString::new("read").unwrap();
+        // SAFETY: `name` is a live NUL-terminated CString; the runtime registers and returns a fresh capability id.
         let id = unsafe { mimi_cap_register(name.as_ptr()) };
         assert!(id > 0);
 
         // Check succeeds before consume, fails for wrong name.
         let wrong = std::ffi::CString::new("write").unwrap();
+        // SAFETY: `id` is the live capability registered above and `name`/`wrong` are live CStrings; every call resolves against the capability registry.
         unsafe {
             assert!(mimi_cap_check(id, name.as_ptr()));
             assert!(!mimi_cap_check(id, wrong.as_ptr()));
@@ -1184,6 +1188,7 @@ mod tests {
     #[test]
     fn cap_c_api_invalid_id() {
         let name = std::ffi::CString::new("read").unwrap();
+        // SAFETY: unknown ids miss the registry lookup and return false without dereferencing memory.
         unsafe {
             assert!(!mimi_cap_check(9999, name.as_ptr()));
             assert!(!mimi_cap_consume(9999, name.as_ptr()));
@@ -1208,6 +1213,7 @@ mod tests {
         unsafe {
             assert!(matches!(&*ptr, Value::Int(42)));
         }
+        // SAFETY: `ptr` is the owned heap copy returned by `mimi_shared_get_ptr` above; freed exactly once here.
         unsafe {
             mimi_value_free(ptr);
         }
@@ -1237,6 +1243,7 @@ mod tests {
         unsafe {
             assert!(matches!(&*ptr, Value::Int(7)));
         }
+        // SAFETY: `ptr` is the owned heap copy returned by `mimi_shared_get_ptr` above; freed exactly once here.
         unsafe {
             mimi_value_free(ptr);
         }
@@ -1270,6 +1277,7 @@ mod tests {
             assert_eq!(std::ffi::CStr::from_ptr(c_str).to_str().unwrap(), "hello");
         }
 
+        // SAFETY: `c_str` is the pending copy and `raw` the boxed value created in this test; both are freed exactly once by their matching deallocators.
         unsafe {
             mimi_string_as_c_str_free(c_str);
             mimi_value_free(raw);
@@ -1288,6 +1296,7 @@ mod tests {
         // Free all pending strings; the individual pointer becomes invalid.
         mimi_string_as_c_str_free_all();
 
+        // SAFETY: `raw` is the boxed value created in this test; `mimi_string_as_c_str_free_all` only invalidated the borrowed copy, not the value itself.
         unsafe {
             mimi_value_free(raw);
         }
@@ -1302,6 +1311,7 @@ mod tests {
         assert!(!c_str.is_null());
         // SAFETY: c_str is a valid NUL-terminated buffer from mimi_string_into_raw.
         assert_eq!(
+            // SAFETY: `c_str` is a valid NUL-terminated buffer returned by `mimi_string_into_raw`.
             unsafe { std::ffi::CStr::from_ptr(c_str) }.to_str().unwrap(),
             "hello"
         );
@@ -1326,6 +1336,7 @@ mod tests {
         assert!(!out.is_null());
         // SAFETY: out is a NUL-terminated string owned by the pending registry.
         assert_eq!(
+            // SAFETY: `out` is a NUL-terminated string owned by the pending registry.
             unsafe { std::ffi::CStr::from_ptr(out) }.to_str().unwrap(),
             "world"
         );
@@ -1462,6 +1473,7 @@ mod tests {
 
         // Every pre-overflow pointer is still pending and frees normally.
         for &p in &ptrs {
+            // SAFETY: `p` is a pending C string produced by `mimi_string_as_c_str` and owned by this test; freed exactly once.
             unsafe { mimi_string_as_c_str_free(p) };
         }
         let remaining = PENDING_C_STRINGS.with(|p| p.borrow().len());

@@ -37,6 +37,7 @@ impl Drop for ActorPauseGuard {
 #[test]
 fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     let fields = 0u8;
+    // SAFETY: `fields` is a stack byte that outlives the spawn call and the dispatch fn has the extern "C" ABI; the runtime copies ownership of the fields into the registry.
     let handle = unsafe {
         mimi_actor_spawn(
             &fields as *const u8 as *const c_void,
@@ -51,6 +52,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     let call_handle = handle as usize;
     let call = std::thread::spawn(move || {
         let mut result = 0i64;
+        // SAFETY: the actor handle is live (pinned against drop by the test); the runtime resolves it through the registry and writes only into the caller-provided result buffer.
         let size = unsafe {
             mimi_actor_call(
                 call_handle as *mut c_void,
@@ -76,6 +78,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     let drop_finished_thread = Arc::clone(&drop_finished);
     let dropper = std::thread::spawn(move || {
         drop_started_thread.wait();
+        // SAFETY: the dropper thread drops the live registry handle; the in-flight pinned call above holds its own Arc, which is exactly the ordering this test proves.
         unsafe {
             mimi_actor_drop(drop_handle as *mut c_void);
         }
@@ -83,6 +86,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     });
     drop_started.wait();
 
+    // SAFETY: `mimi_actor_id` is a registry read that returns 0 for dead/detached handles, never a dereference.
     unsafe {
         while mimi_actor_id(handle) != 0 {
             std::thread::yield_now();
@@ -92,6 +96,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     // Once detached, new calls must fail while the already-pinned call remains valid.
     let mut detached_result = 0i64;
     assert_eq!(
+        // SAFETY: calling a detached handle must fail via the registry guard (returns 0), not dereference freed memory.
         unsafe {
             mimi_actor_call(
                 handle,
@@ -134,6 +139,7 @@ fn actor_call_drop_l3_stress() {
     for _ in 0..256 {
         let fields = 0u8;
         let handle =
+            // SAFETY: `fields` is a stack byte that outlives the spawn call and the dispatch fn has the extern "C" ABI; the runtime copies ownership of the fields into the registry.
             unsafe { mimi_actor_spawn(&fields as *const u8 as *const c_void, 1, Some(dispatch)) };
         assert!(!handle.is_null());
         let barrier = Arc::new(Barrier::new(5));
@@ -144,6 +150,7 @@ fn actor_call_drop_l3_stress() {
             callers.push(std::thread::spawn(move || {
                 barrier.wait();
                 let mut result = 0i64;
+                // SAFETY: the actor handle is live (pinned against drop by the test); the runtime resolves it through the registry and writes only into the caller-provided result buffer.
                 let _ = unsafe {
                     mimi_actor_call(
                         call_handle as *mut c_void,
@@ -156,6 +163,7 @@ fn actor_call_drop_l3_stress() {
             }));
         }
         barrier.wait();
+        // SAFETY: dropping the live registry handle while callers are in flight; actor pinning (the invariant under stress) keeps their Arcs alive.
         unsafe {
             mimi_actor_drop(handle);
         }
@@ -200,6 +208,7 @@ unsafe extern "C" fn lifecycle_dispatch(
 #[test]
 fn actor_system_kill_cascades_but_preserves_detached_child() {
     let fields = 0u8;
+    // SAFETY: `fields` is a stack byte that outlives the spawn call and the dispatch fn has the extern "C" ABI; the runtime copies ownership of the fields into the registry.
     let parent = unsafe {
         mimi_actor_spawn(
             &fields as *const u8 as *const c_void,
@@ -212,6 +221,7 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
     let spawn_child = |method_id| {
         let mut child = 0i64;
         assert_eq!(
+            // SAFETY: the actor handle is live (pinned against drop by the test); the runtime resolves it through the registry and writes only into the caller-provided result buffer.
             unsafe {
                 mimi_actor_call(
                     parent,
@@ -228,16 +238,19 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
     let child = spawn_child(0);
     let detached = spawn_child(1);
 
+    // SAFETY: `parent` is the live registry handle from the spawn above; system_kill cascades registered children.
     unsafe {
         mimi_actor_system_kill(parent);
     }
 
     let mut result = 0i64;
+    // SAFETY: `mimi_actor_id` is a registry read that returns 0 for dead/detached handles, never a dereference.
     unsafe {
         assert_eq!(mimi_actor_id(parent), 0);
         assert_eq!(mimi_actor_id(child), 0);
     }
     assert_eq!(
+        // SAFETY: a killed child's handle must fail through the registry guard (returns 0).
         unsafe {
             mimi_actor_call(
                 child,
@@ -249,10 +262,12 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
         },
         0
     );
+    // SAFETY: `mimi_actor_id` is a registry read that returns 0 for dead/detached handles, never a dereference.
     unsafe {
         assert_ne!(mimi_actor_id(detached), 0);
     }
     assert_eq!(
+        // SAFETY: the actor handle is live (pinned against drop by the test); the runtime resolves it through the registry and writes only into the caller-provided result buffer.
         unsafe {
             mimi_actor_call(
                 detached,
@@ -265,6 +280,7 @@ fn actor_system_kill_cascades_but_preserves_detached_child() {
         8
     );
     assert_eq!(result, 42);
+    // SAFETY: `detached` is the live registry-owned child handle; dropped exactly once at the end of the test.
     unsafe {
         mimi_actor_drop(detached);
     }

@@ -57,6 +57,7 @@ pub(crate) fn mark_cold_trap_branch(
     context: &inkwell::context::Context,
     branch: inkwell::values::InstructionValue,
 ) {
+    // SAFETY: `branch` is a live terminator instruction of the module under construction; the metadata APIs operate on the same live context.
     unsafe {
         let kind_id = inkwell::llvm_sys::core::LLVMGetMDKindIDInContext(
             context.raw(),
@@ -84,6 +85,7 @@ pub(crate) fn mark_cold_trap_branch(
 /// 返回值：是否发生了任何重写（供测试/诊断）。
 pub(crate) fn converge_float_finiteness(module: &inkwell::module::Module) -> bool {
     let mut rewritten = false;
+    // SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
     unsafe {
         let mut func = LLVMGetFirstFunction(module.as_mut_ptr());
         while !func.is_null() {
@@ -96,6 +98,7 @@ pub(crate) fn converge_float_finiteness(module: &inkwell::module::Module) -> boo
     rewritten
 }
 
+// SAFETY: caller passes `func` from `LLVMGetFirstFunction`/`LLVMGetNextFunction` on the live module.
 unsafe fn converge_function(func: LLVMValueRef) -> bool {
     // 阶段 1：收集检查点
     let mut checks: Vec<CheckPoint> = Vec::new();
@@ -141,6 +144,7 @@ unsafe fn converge_function(func: LLVMValueRef) -> bool {
 /// 若 `inst` 是 SD-9 检查的条件分支（`br not_finite trap_bb ok_bb`，
 /// `not_finite = or(is_nan=fcmp uno x,x, is_inf)` 且 trap 块非 fallible），
 /// 登记检查点。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn collect_check(
     _func: LLVMValueRef,
     inst: LLVMValueRef,
@@ -197,6 +201,7 @@ unsafe fn collect_check(
 
 /// 判断 `lhs`/`rhs` 是否为 `(fcmp uno x,x, fcmp oeq fabs(x), inf)` 的检查对。
 /// 返回 (is_nan, is_inf)。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn classify_fcmp(
     a: LLVMValueRef,
     b: LLVMValueRef,
@@ -210,6 +215,7 @@ unsafe fn classify_fcmp(
     }
 }
 
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn is_uno(v: LLVMValueRef) -> bool {
     if v.is_null() || LLVMGetInstructionOpcode(v) != LLVMOpcode::LLVMFCmp {
         return false;
@@ -219,6 +225,7 @@ unsafe fn is_uno(v: LLVMValueRef) -> bool {
         && LLVMGetOperand(v, 0) == LLVMGetOperand(v, 1)
 }
 
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn is_inf_cmp(v: LLVMValueRef) -> bool {
     if v.is_null() || LLVMGetInstructionOpcode(v) != LLVMOpcode::LLVMFCmp {
         return false;
@@ -227,6 +234,7 @@ unsafe fn is_inf_cmp(v: LLVMValueRef) -> bool {
 }
 
 /// is_inf 的输入应为 fabs(x) 调用；返回该调用（其 operand 即 x）。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn classify_fabs(is_inf: Option<LLVMValueRef>) -> Option<LLVMValueRef> {
     let is_inf = is_inf?;
     if LLVMGetNumOperands(is_inf) != 2 {
@@ -240,6 +248,7 @@ unsafe fn classify_fabs(is_inf: Option<LLVMValueRef>) -> Option<LLVMValueRef> {
 }
 
 /// trap 块特征：含对 `mimi_trap_float_not_finite` 的调用。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn block_calls_trap(bb: LLVMBasicBlockRef) -> bool {
     if bb.is_null() {
         return false;
@@ -267,6 +276,7 @@ unsafe fn block_calls_trap(bb: LLVMBasicBlockRef) -> bool {
 /// 判断检查点 `cp.x` 是否为链中继点：
 /// 所有用户（排除检查部件 is_nan / fabs(x)）都是"受检 f64/f32 代数 op"，
 /// 或经无逃逸 alloca 转发后汇入链（store→load 对，load 消费皆是链成员）。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn is_relay(cp: &CheckPoint, checked: &HashSet<LLVMValueRef>) -> bool {
     let mut had_real_use = false;
     let mut use_ref = LLVMGetFirstUse(cp.x);
@@ -312,6 +322,7 @@ unsafe fn is_relay(cp: &CheckPoint, checked: &HashSet<LLVMValueRef>) -> bool {
 ///
 /// 因此仅收敛：FAdd/FSub/FMul（纯代数链）、FDiv/FRem 的**被除数**位置，
 /// 以及传播性无例外的 libm 单参函数白名单（`is_propagating_libm_call`）。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn is_chain_op(
     x: LLVMValueRef,
     user: LLVMValueRef,
@@ -338,6 +349,7 @@ unsafe fn is_chain_op(
 /// 不在白名单（传播性有例外，链在此断裂）：exp/exp2（exp(-Inf)=+0.0）、
 /// tanh（tanh(±Inf)=±1）、pow/atan2（特殊值组合回归有限）、random
 /// （恒有限）、用户函数 call（黑盒）。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn is_propagating_libm_call(user: LLVMValueRef) -> bool {
     const SAFE_LIBM: &[&str] = &[
         // 0.35.3 基准与 stdlib 实际生成的 libm 调用名（math.rs 注册表）。
@@ -361,6 +373,7 @@ unsafe fn is_propagating_libm_call(user: LLVMValueRef) -> bool {
 /// store 转发判定：`user` 是 store 指令，所存值 == `cp.x`，目标为无逃逸
 /// alloca（仅此一个 store + 若干 load），且所有 load 结果只被链成员消费。
 /// 语义：x 非有限 → 经 alloca 转发流入链 → 汇入末端检查 trap，等价。
+// SAFETY: all LLVM refs are raw handles into the module being rewritten, valid for the duration of this pass and never mutated concurrently.
 unsafe fn stores_into_forwardable_alloca(
     user: LLVMValueRef,
     cp: &CheckPoint,

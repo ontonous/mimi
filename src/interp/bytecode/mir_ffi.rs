@@ -570,6 +570,7 @@ impl CanonicalMirFfiRuntime {
                 "canonical MIR FFI library cache index {lib_idx} is out of range"
             ));
         };
+        // SAFETY: `library` is a live loaded dynamic library from the `loaded_libs` cache; `get` only resolves the symbol by name.
         let raw_symbol: libloading::Symbol<*mut c_void> = unsafe {
             library.get(descriptor.symbol.as_bytes()).map_err(|error| {
                 format!(

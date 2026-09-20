@@ -1721,6 +1721,7 @@ fn builtin_shadow_alloc(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         _ => return Err(InterpError::new("shadow_alloc: label must be string")),
     };
     let c_label = std::ffi::CString::new(label.as_str()).unwrap_or_default();
+    // SAFETY: `c_label` is a live NUL-terminated CString outliving the call; the runtime allocates a fresh shadow-tracked buffer and returns it.
     let ptr = unsafe { crate::runtime::mimi_shadow_alloc(size, tag, c_label.as_ptr()) };
     Ok(Value::Int(ptr as i64))
 }
@@ -1735,6 +1736,7 @@ fn builtin_shadow_tag(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
         _ => return Err(InterpError::new("shadow_tag: tag must be int")),
     };
     Ok(Value::Int(
+        // SAFETY: `ptr` was returned by `mimi_shadow_alloc`; the tag write updates that buffer's shadow metadata only.
         unsafe { crate::runtime::mimi_shadow_tag(ptr, tag) } as i64,
     ))
 }
@@ -1749,6 +1751,7 @@ fn builtin_shadow_check(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         _ => return Err(InterpError::new("shadow_check: tag must be int")),
     };
     Ok(Value::Bool(
+        // SAFETY: `ptr` was returned by `mimi_shadow_alloc`; the check reads its shadow metadata and never dereferences user memory.
         unsafe { crate::runtime::mimi_shadow_check(ptr, tag) } == 1,
     ))
 }
@@ -1758,6 +1761,7 @@ fn builtin_shadow_free(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
         Value::Int(n) => *n as *mut u8,
         _ => return Err(InterpError::new("shadow_free: ptr must be int")),
     };
+    // SAFETY: `ptr` was returned by `mimi_shadow_alloc` and is freed exactly once here.
     unsafe { crate::runtime::mimi_shadow_free(ptr) };
     Ok(Value::Unit)
 }
@@ -1803,6 +1807,7 @@ fn builtin_lexer(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
         .ok_or_else(|| InterpError::new("lexer expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("lexer: source contains null bytes"))?;
+    // SAFETY: `c_source` is a live NUL-terminated CString outliving the call; the runtime returns a malloc'd NUL-terminated result or NULL.
     let result_ptr = unsafe { crate::runtime::mimi_lexer_tokenize(c_source.as_ptr()) };
     if result_ptr.is_null() {
         return Ok(Value::String(Arc::new("[]".to_string())));
@@ -1820,6 +1825,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .ok_or_else(|| InterpError::new("parse expects a string source"))?;
     let c_source = std::ffi::CString::new(source)
         .map_err(|_| InterpError::new("parse: source contains null bytes"))?;
+    // SAFETY: `c_source` is a live NUL-terminated CString outliving the call; the runtime returns a malloc'd NUL-terminated result or NULL.
     let result_ptr = unsafe { crate::runtime::mimi_parse_source(c_source.as_ptr()) };
     if result_ptr.is_null() {
         return Ok(Value::String(Arc::new(

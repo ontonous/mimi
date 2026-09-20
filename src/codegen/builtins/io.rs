@@ -6687,6 +6687,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_int_z_extend(disc_i8, i64_ty, "list_res_set_disc_i64")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                // SAFETY: in-bounds GEP into the Result payload struct laid out by this function; index 1 is the declared ok slot.
                 let ok_slot = unsafe {
                     self.builder
                         .build_gep(
@@ -6702,6 +6703,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_load(i64_ty, ok_slot, "list_res_set_ok_h")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?
                     .into_int_value();
+                // SAFETY: in-bounds GEP into the Result payload struct laid out by this function; index 2 is the declared err slot.
                 let err_slot = unsafe {
                     self.builder
                         .build_gep(
@@ -6797,6 +6799,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .builder
                     .build_int_z_extend(disc_i8, i64_ty, "list_opt_set_disc_i64")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                // SAFETY: in-bounds GEP into the Option payload struct laid out by this function; index 1 is the declared payload slot.
                 let pay_slot = unsafe {
                     self.builder
                         .build_gep(
