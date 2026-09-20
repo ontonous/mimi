@@ -830,6 +830,23 @@ pub fn has_unsupported_generic_list_facade_candidate(program: &CheckedProgram) -
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
+    // R6-1054: the float bind face opens only inside a function that carries
+    // the f64 print face — the same per-function contract
+    // `ScalarCollectionValidator` enforces on the materialized graph.  The
+    // bind site appears textually before the println that evidences the
+    // face, so the scan runs twice: the discovery pass records which
+    // callables contain an admitted float println, and the classification
+    // pass applies the bind exemption from that set.  Both passes walk the
+    // identical bodies, so the exemption can never drift from the evidence
+    // the island gate later re-proves per materialized function.
+    let discovery = scan_scalar_collection_once(program, BTreeSet::new());
+    scan_scalar_collection_once(program, discovery.float_print_functions)
+}
+
+fn scan_scalar_collection_once(
+    program: &CheckedProgram,
+    float_print_functions: BTreeSet<NodeId>,
+) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
         has_candidate: false,
@@ -838,6 +855,8 @@ fn scan_scalar_collection_admission(
         has_unsupported_generic_list_facade_candidate: false,
         mixed: false,
         seen_types: BTreeSet::new(),
+        float_print_functions,
+        current_callable: None,
     };
 
     // R6-1052: the automatically merged prelude is a compatibility source,
@@ -847,11 +866,11 @@ fn scan_scalar_collection_admission(
     // `is_prelude_origin`. Calls from user code into prelude callables stay
     // an explicit mixed boundary below so a graph that still depends on a
     // compatibility body keeps the legacy route.
-    for callable in program
-        .callables()
-        .values()
-        .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
-    {
+    for (owner, callable) in program.callables() {
+        if is_prelude_origin(program, &callable.body.root.origin) {
+            continue;
+        }
+        scanner.current_callable = Some(owner.clone());
         let concrete = callable.signature.generic_parameters.is_empty();
         if !callable.signature.effects.is_empty()
             || callable.signature.parameters.iter().any(|parameter| {
@@ -895,6 +914,11 @@ struct ScalarCollectionAdmissionScanner<'a> {
     has_unsupported_generic_list_facade_candidate: bool,
     mixed: bool,
     seen_types: BTreeSet<crate::core::ResolvedTypeId>,
+    /// Callables whose bodies contain an admitted f64 println.  Populated by
+    /// the discovery pass and consulted by the classification pass for the
+    /// float bind exemption (R6-1054).
+    float_print_functions: BTreeSet<NodeId>,
+    current_callable: Option<NodeId>,
 }
 
 impl<'a> ScalarCollectionAdmissionScanner<'a> {
@@ -907,27 +931,27 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         }
     }
 
-    fn visit_pattern(&mut self, pattern: &ResolvedPattern, concrete: bool) {
-        if concrete {
+    fn visit_pattern(&mut self, pattern: &ResolvedPattern, concrete: bool, exempt_root_type: bool) {
+        if concrete && !exempt_root_type {
             self.require_profile_type(&pattern.ty);
         }
         match &pattern.kind {
             ResolvedPatternKind::Constructor { fields, .. } => {
                 for (_, field) in fields {
-                    self.visit_pattern(field, concrete);
+                    self.visit_pattern(field, concrete, false);
                 }
             }
             ResolvedPatternKind::Tuple(items) | ResolvedPatternKind::Array(items) => {
                 for item in items {
-                    self.visit_pattern(item, concrete);
+                    self.visit_pattern(item, concrete, false);
                 }
             }
             ResolvedPatternKind::Slice { prefix, rest } => {
                 for item in prefix {
-                    self.visit_pattern(item, concrete);
+                    self.visit_pattern(item, concrete, false);
                 }
                 if let Some(rest) = rest {
-                    self.visit_pattern(rest, concrete);
+                    self.visit_pattern(rest, concrete, false);
                 }
             }
             ResolvedPatternKind::Wildcard
@@ -949,12 +973,46 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     pattern,
                     initializer,
                 } => {
-                    self.visit_pattern(pattern, concrete);
+                    // R6-1054: a float literal bind opens as a print-face
+                    // value only inside a function whose float println will
+                    // materialize the exact consumption shape.  Every other
+                    // f64 origin (call result, arithmetic, second-hand local)
+                    // still takes the profile-type floor below.
+                    let float_literal_initializer = matches!(
+                        initializer.as_ref().map(|value| &value.kind),
+                        Some(ResolvedExprKind::Literal(
+                            crate::core::ResolvedLiteral::FloatBits(_)
+                        ))
+                    );
+                    let printing_function = self
+                        .current_callable
+                        .as_ref()
+                        .is_some_and(|owner| self.float_print_functions.contains(owner));
+                    self.visit_pattern(
+                        pattern,
+                        concrete,
+                        float_literal_initializer && printing_function,
+                    );
                     if let Some(initializer) = initializer {
                         self.visit_expr(initializer, concrete);
                     }
                 }
-                ResolvedStmtKind::Assign { value, .. } => self.visit_expr(value, concrete),
+                ResolvedStmtKind::Assign { value, .. } => {
+                    // R6-1054: float assign targets are outside the MIR Phase
+                    // 0 scalar-assign face (the lowerer fails construction on
+                    // them), so the classifier must keep the graph mixed
+                    // instead of luring the canonical route into a
+                    // construction failure.
+                    if concrete
+                        && matches!(
+                            self.program.resolved_types().get(&value.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                    {
+                        self.mixed = true;
+                    }
+                    self.visit_expr(value, concrete)
+                }
                 ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
                     if let Some(value) = value {
                         self.visit_expr(value, concrete);
@@ -971,7 +1029,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     initializer,
                     body,
                 } => {
-                    self.visit_pattern(pattern, concrete);
+                    self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(initializer, concrete);
                     self.visit_block(body, concrete);
                 }
@@ -981,7 +1039,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     then_block,
                     else_block,
                 } => {
-                    self.visit_pattern(pattern, concrete);
+                    self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(initializer, concrete);
                     self.visit_block(then_block, concrete);
                     if let Some(else_block) = else_block {
@@ -996,7 +1054,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     iterable,
                     body,
                 } => {
-                    self.visit_pattern(pattern, concrete);
+                    self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(iterable, concrete);
                     self.visit_block(body, concrete);
                 }
@@ -1135,13 +1193,30 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 {
                     self.has_candidate = true;
                 }
+                // R6-1054: a float println call both evidences the enclosing
+                // function's print face (the bind exemption the island gate
+                // re-proves per materialized function) and admits its own
+                // direct value argument below.
+                let float_print_call = is_scalar_println_call(self.program, call)
+                    && call.arguments.first().is_some_and(|argument| {
+                        matches!(
+                            self.program.resolved_types().get(&argument.value.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                    });
+                if float_print_call {
+                    if let Some(owner) = self.current_callable.clone() {
+                        self.float_print_functions.insert(owner);
+                    }
+                }
                 // Only the closed stdout effects of this island (signed
                 // integers, bool, and — since R6-1050/R6-1053 — the
-                // StringHandle and f64 literal print faces) are Canonical MIR
-                // nodes here. Other println shapes (float bindings, float
-                // arithmetic, aggregate, multi-arg) remain on the explicit
-                // mixed compatibility route until their output ABI and effect
-                // contract is independently materialized.
+                // StringHandle and f64 print faces) are Canonical MIR
+                // nodes here. Other println shapes (aggregate, multi-arg)
+                // remain on the explicit mixed compatibility route; float
+                // arithmetic and float assigns keep their own mixed floors
+                // (Binary operand recheck; the Assign statement arm) until
+                // their contracts are independently materialized.
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
@@ -1176,6 +1251,23 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.mixed = true;
                 }
                 for argument in &call.arguments {
+                    if float_print_call
+                        && matches!(
+                            &argument.value.kind,
+                            ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_))
+                                | ResolvedExprKind::Load(_)
+                        )
+                    {
+                        // The f64 value shape was admitted by
+                        // `is_scalar_println_call`; a float literal or a
+                        // plain local read has no nested expression left to
+                        // police, so skip the value-type floor the way the
+                        // literal exemption does.  Any other argument root
+                        // (call result, arithmetic, projection) keeps its
+                        // normal floor — its inner f64 origin must stay
+                        // outside this face.
+                        continue;
+                    }
                     self.visit_expr(&argument.value, concrete);
                 }
             }
@@ -1363,9 +1455,11 @@ fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::Reso
                 // print admission here — leaving it as mixed shape would turn
                 // previously compatible programs into hard route rejections.
                 | Some(ResolvedType::Primitive(PrimitiveType::String))
-                // R6-1053: the f64 literal print face is differential-pinned
-                // through the shared shortest round-trip runtime formatter,
-                // so a complete float-stdout-only graph routes canonical.
+                // R6-1053: the f64 print face is differential-pinned
+                // through the shared shortest round-trip runtime formatter;
+                // R6-1054 admits the print-face local read beside the
+                // literal, so a complete float-stdout-only graph routes
+                // canonical.
                 | Some(ResolvedType::Primitive(PrimitiveType::F64))
         )
     })
@@ -3973,15 +4067,21 @@ impl<'a> ScalarCollectionValidator<'a> {
                     return;
                 };
                 self.require_same_type(&result_ty, &source_ty, subject);
-                if self
+                // R6-1054: the print-face f64 slot read (a local read lowers
+                // as Clone) joins the admitted set exactly while the
+                // surrounding function carries the float println contract —
+                // the same per-function shape the type table, Const, and
+                // PrintlnFloat arms enforce.
+                let admitted = self
                     .program
                     .type_catalog()
                     .validate_copy_scalar(&source_ty)
-                    .is_err()
-                    && !self.is_list_type(&source_ty)
-                    && !self.is_set_type(&source_ty)
-                    && !self.is_owned_record_or_string_type(&source_ty)
-                {
+                    .is_ok()
+                    || (self.function_admits_float_print && self.is_print_face_f64(&source_ty))
+                    || self.is_list_type(&source_ty)
+                    || self.is_set_type(&source_ty)
+                    || self.is_owned_record_or_string_type(&source_ty);
+                if !admitted {
                     self.error(format!(
                         "{subject} Clone source '{}' is outside {SCALAR_COLLECTION_ISLAND}",
                         source_ty.as_str()
@@ -4656,6 +4756,12 @@ impl<'a> ScalarCollectionValidator<'a> {
         role: &str,
     ) {
         if self.program.type_catalog().validate_copy_scalar(ty).is_ok() || self.is_unit_type(ty) {
+            return;
+        }
+        // R6-1054: the print-face f64 bind (Const → Move into the local
+        // slot) carries the same per-function print contract as the Clone
+        // slot read it feeds.
+        if self.function_admits_float_print && self.is_print_face_f64(ty) {
             return;
         }
         if !self.is_list_type(ty)

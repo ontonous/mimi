@@ -802,11 +802,15 @@ pub(crate) fn resolve_zonked_signature(
             suffixes.len()
         ));
     }
-    match suffixes.into_iter().next() {
-        Some(key) => {
-            let sig = zonked_func_types.get(&key).unwrap().clone();
-            Ok(ZonkedResolution::Suffix(sig))
-        }
+    match suffixes
+        .into_iter()
+        .next()
+        .and_then(|key| zonked_func_types.get(&key).cloned())
+    {
+        Some(sig) => Ok(ZonkedResolution::Suffix(sig)),
+        // The suffix list is filtered by `contains_key` above, so absence
+        // here is structurally unreachable; degrading to `None` keeps that
+        // invariant check local instead of panicking on a broken catalog.
         None => Ok(ZonkedResolution::None),
     }
 }

@@ -1,0 +1,11 @@
+// R6-1054 negative pin: a float ASSIGN target is outside the MIR Phase 0
+// scalar-assign face.  The classifier keeps the graph mixed (Assign
+// statement floor), so the default entry keeps the explicit compatibility
+// route and the direct `--mir` entry fails construction with the
+// scalar-assign diagnostic instead of silently mis-lowering.
+func main() -> i32 {
+    let mut x = 0.5
+    x = 1.5
+    println(x)
+    0
+}

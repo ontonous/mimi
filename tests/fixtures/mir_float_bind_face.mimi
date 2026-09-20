@@ -1,0 +1,9 @@
+// R6-1054 float bind face: a float literal bound to a local and read by the
+// f64 println face lowers as Const(FloatBits) -> Move -> Clone -> PrintlnFloat
+// and routes canonical on the default entry (three-consumer differential in
+// src/tests/canonical_float_bind.rs).
+func main() -> i32 {
+    let x = 0.5
+    println(x)
+    0
+}

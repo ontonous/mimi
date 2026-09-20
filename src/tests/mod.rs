@@ -58,6 +58,7 @@ pub(crate) mod build_shared;
 pub(crate) mod builtin_extended;
 pub(crate) mod builtin_registry;
 pub(crate) mod canonical_assign;
+pub(crate) mod canonical_float_bind;
 pub(crate) mod canonical_float_print;
 pub(crate) mod canonical_flow_union;
 pub(crate) mod canonical_plain_scalar_route;

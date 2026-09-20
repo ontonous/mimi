@@ -158,43 +158,27 @@ fn float_print_ensures_contract_verifies_on_mir() {
     );
 }
 
-// The admitted face is the bare f64 literal directly inside println.  A
-// float binding materializes an out-of-profile f64 local (checker pattern
-// type) and float arithmetic re-checks its operand types, so both shapes
-// stay on the explicit mixed compatibility route instead of the island.
+// R6-1054 restatement: the float BIND face this pin used to hold closed now
+// routes canonical (see `canonical_float_bind.rs`); what stays mixed here is
+// float ARITHMETIC — a `+` operand re-checks its f64 type against the profile
+// even when the print face is admitted, because the island has no float
+// arithmetic contract (the MIR verifier keeps floats NotInTrustedSubset).
 #[test]
 fn float_binding_and_arithmetic_stay_mixed() {
-    let cases: &[(&str, &str)] = &[
-        (
-            "float_binding_print",
-            r#"
-                func main() -> i32 {
-                    let x = 0.5
-                    println(x)
-                    0
-                }
-            "#,
-        ),
-        (
-            "float_arithmetic_print",
-            r#"
-                func main() -> i32 {
-                    println(0.5 + 1.5)
-                    0
-                }
-            "#,
-        ),
-    ];
-    for (name, source) in cases {
-        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
-        let file = crate::parser::Parser::new(tokens)
-            .parse_file()
-            .expect("parse");
-        let checked = crate::core::check_program(&file).expect("check");
-        assert_eq!(
-            crate::core::mir::classify_scalar_collection_admission(&checked),
-            crate::core::mir::ScalarCollectionAdmission::MixedCoverage,
-            "{name} must stay on the mixed compatibility route"
-        );
-    }
+    let source = r#"
+        func main() -> i32 {
+            println(0.5 + 1.5)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&checked),
+        crate::core::mir::ScalarCollectionAdmission::MixedCoverage,
+        "float arithmetic must stay on the mixed compatibility route"
+    );
 }
