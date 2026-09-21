@@ -1,0 +1,24 @@
+// R6-1070: the one-edge f64 print closure across function boundaries.
+// showf prints its own f64 parameter (the caller's literal argument joins
+// the callee's print face); ret returns an f64 literal that main prints
+// through the call result; twice returns straight-line symbolic arithmetic
+// over its seeded parameter.  Expected output: 2.5 / 1.5 / 3.
+func showf(v: f64) -> i32 {
+    println(v)
+    0
+}
+
+func ret() -> f64 {
+    1.5
+}
+
+func twice(v: f64) -> f64 {
+    v * 2.0
+}
+
+func main() -> i32 {
+    showf(2.5)
+    println(ret())
+    println(twice(1.5))
+    0
+}

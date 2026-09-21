@@ -852,11 +852,29 @@ fn scan_scalar_collection_admission(
     // pass applies the bind exemption from that set.  Both passes walk the
     // identical bodies, so the exemption can never drift from the evidence
     // the island gate later re-proves per materialized function.
-    let discovery = scan_scalar_collection_once(program, BTreeSet::new(), BTreeSet::new());
+    // R6-1070: the cross-function face needs one more step of the same
+    // discipline.  Which functions sit on the one-edge f64 print closure
+    // (a print function itself, or called directly by one) is only known
+    // after discovery completes — collecting callees during discovery would
+    // be walk-order dependent for calls that textually precede the println
+    // that evidences the face.  So the closure pass runs seeded with the
+    // completed print sets and records direct callees, and the
+    // classification pass runs seeded with print ∪ direct callees.
+    let discovery =
+        scan_scalar_collection_once(program, BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let closure = scan_scalar_collection_once(
+        program,
+        discovery.float_print_functions.clone(),
+        discovery.string_print_functions,
+        BTreeSet::new(),
+    );
+    let mut float_face_callables = discovery.float_print_functions;
+    float_face_callables.extend(closure.direct_float_callees);
     scan_scalar_collection_once(
         program,
-        discovery.float_print_functions,
-        discovery.string_print_functions,
+        closure.float_print_functions,
+        closure.string_print_functions,
+        float_face_callables,
     )
 }
 
@@ -864,6 +882,7 @@ fn scan_scalar_collection_once(
     program: &CheckedProgram,
     float_print_functions: BTreeSet<NodeId>,
     string_print_functions: BTreeSet<NodeId>,
+    float_face_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -875,6 +894,8 @@ fn scan_scalar_collection_once(
         seen_types: BTreeSet::new(),
         float_print_functions,
         string_print_functions,
+        float_face_callables,
+        direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
         int_literal_locals: BTreeMap::new(),
@@ -914,10 +935,46 @@ fn scan_scalar_collection_once(
             scanner.mixed = true;
         }
         if concrete {
+            // R6-1070: an F64 parameter or result of a face-closure callable
+            // is exactly the cross-function print face — the value flows to
+            // (or from) an f64 println one call edge away, and the island
+            // gate re-proves the same closure on the materialized graph.
+            // Every other out-of-profile parameter/result keeps the floor.
+            let float_face = scanner.in_float_face_function();
+            let is_face_f64_type =
+                |scanner: &ScalarCollectionAdmissionScanner<'_>,
+                 ty: &crate::core::ResolvedTypeId| {
+                    float_face
+                        && matches!(
+                            scanner.program.resolved_types().get(ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                };
             for parameter in &callable.signature.parameters {
-                scanner.require_profile_type(&parameter.ty);
+                if !is_face_f64_type(&scanner, &parameter.ty) {
+                    scanner.require_profile_type(&parameter.ty);
+                }
             }
-            scanner.require_profile_type(&callable.signature.result);
+            if !is_face_f64_type(&scanner, &callable.signature.result) {
+                scanner.require_profile_type(&callable.signature.result);
+            }
+            // R6-1070: an F64 parameter of a face-closure callable seeds the
+            // float-symbolic set at the root walk generation — the parameter
+            // load identity is exactly what the body's loads and places
+            // read, so `v * 2.0` as the body's root result joins the same
+            // verifier-backed symbolic domain a literal bind seeds.
+            for (parameter, local) in callable
+                .signature
+                .parameters
+                .iter()
+                .zip(callable.body.parameters.iter())
+            {
+                if is_face_f64_type(&scanner, &parameter.ty) {
+                    scanner
+                        .float_symbolic_locals
+                        .insert(local.clone(), scanner.branch_generation);
+                }
+            }
         }
         scanner.visit_block(&callable.body.root, concrete);
         if concrete {
@@ -950,6 +1007,16 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// Callables whose bodies contain an admitted owned-String println —
     /// the StringHandle mirror of the float bind exemption (R6-1055).
     string_print_functions: BTreeSet<NodeId>,
+    /// R6-1070: callables on the one-edge f64 print closure — the float
+    /// print functions themselves plus the non-prelude functions they call
+    /// directly.  Seeded before the classification pass; consulted for the
+    /// cross-function f64 parameter/result/root exemptions.
+    float_face_callables: BTreeSet<NodeId>,
+    /// R6-1070: non-prelude callees recorded inside float print functions
+    /// during the closure pass.  Only the pass seeded with the completed
+    /// discovery sets fills this meaningfully; the classification pass
+    /// re-records the same identities idempotently.
+    direct_float_callees: BTreeSet<NodeId>,
     current_callable: Option<NodeId>,
     /// R6-1061: locals whose current value the MIR verifier models in the
     /// IEEE symbolic Float domain — bound by a float literal, a second-hand
@@ -987,6 +1054,17 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.float_print_functions.contains(owner))
+    }
+
+    /// R6-1070: is the current callable on the one-edge f64 print closure —
+    /// a float print function itself, or called directly by one?  The
+    /// cross-function f64 shapes (parameter, result, call-result value)
+    /// open only inside this closure, mirroring the island gate's
+    /// `function_in_float_print_closure` envelope on the materialized graph.
+    fn in_float_face_function(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.float_face_callables.contains(owner))
     }
 
     fn in_string_print_function(&self) -> bool {
@@ -1237,7 +1315,20 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
     fn visit_block(&mut self, block: &crate::core::ir::ResolvedBlock, concrete: bool) {
         self.block_depth += 1;
         if concrete {
-            self.require_profile_type(&block.ty);
+            // R6-1070: the root block of a face-closure callable whose type
+            // is the F64 leaf is the cross-function result face — the value
+            // returns into the caller's print one edge away.  Nested blocks
+            // keep the floor (branchy float returns stay fail-closed), as
+            // does every non-face function's block type.
+            let is_face_result_block = self.block_depth == 1
+                && self.in_float_face_function()
+                && matches!(
+                    self.program.resolved_types().get(&block.ty),
+                    Some(ResolvedType::Primitive(PrimitiveType::F64))
+                );
+            if !is_face_result_block {
+                self.require_profile_type(&block.ty);
+            }
         }
         for statement in &block.statements {
             if concrete {
@@ -1549,7 +1640,24 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             }
         }
         if let Some(result) = &block.result {
-            self.visit_expr(result, concrete);
+            // R6-1070: the root result of a face-closure callable joins the
+            // cross-function face when it is an F64-typed float-symbolic
+            // root — the origin predicate only admits literals, tracked
+            // loads and their arithmetic/negate closure, so the skipped
+            // visit can never hide a call or a projection (the same
+            // soundness argument as the comparison face).  The visit would
+            // otherwise floor on the Binary/Load node's own f64 type.
+            let is_face_result_root = self.block_depth == 1
+                && concrete
+                && self.in_float_face_function()
+                && matches!(
+                    self.program.resolved_types().get(&result.ty),
+                    Some(ResolvedType::Primitive(PrimitiveType::F64))
+                )
+                && self.expr_is_float_symbolic_root(result);
+            if !is_face_result_root {
+                self.visit_expr(result, concrete);
+            }
         }
         self.block_depth -= 1;
     }
@@ -1563,12 +1671,29 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // same literal-only exemption to f64 (shortest round-trip print
             // face).  Composite expressions re-check operand types explicitly
             // so the literal cannot hide inside a non-print operation.
+            // R6-1070: a direct call to a face-closure callable whose result
+            // is the F64 leaf joins the same cross-function face — the call
+            // node itself is still walked below (prelude floor, arity,
+            // arguments), only its own out-of-profile type skips the value
+            // floor the way the print-face literal does.
             let is_print_face_literal = matches!(
                 &expression.kind,
                 ResolvedExprKind::Literal(crate::core::ResolvedLiteral::String(_))
                     | ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_))
             );
-            if !is_print_face_literal {
+            let is_float_face_call_result = matches!(
+                &expression.kind,
+                ResolvedExprKind::Call(call)
+                    if matches!(
+                        &call.callee,
+                        ResolvedCallee::Function(owner)
+                            if self.float_face_callables.contains(owner)
+                    )
+            ) && matches!(
+                self.program.resolved_types().get(&expression.ty),
+                Some(ResolvedType::Primitive(PrimitiveType::F64))
+            );
+            if !is_print_face_literal && !is_float_face_call_result {
                 self.require_profile_type(&expression.ty);
             }
         }
@@ -1764,6 +1889,22 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     if let Some(target) = self.program.callables().get(owner) {
                         if is_prelude_origin(self.program, &target.body.root.origin) {
                             self.mixed = true;
+                        }
+                    }
+                }
+                // R6-1070: record the non-prelude functions a float print
+                // function calls directly — the one-edge closure the
+                // classification pass seeds its cross-function f64 face
+                // from.  The closure pass runs seeded with the completed
+                // discovery sets, so this record is walk-order independent;
+                // the classification pass re-records the same identities
+                // idempotently.
+                if self.in_float_print_function() {
+                    if let ResolvedCallee::Function(owner) = &call.callee {
+                        if let Some(target) = self.program.callables().get(owner) {
+                            if !is_prelude_origin(self.program, &target.body.root.origin) {
+                                self.direct_float_callees.insert(owner.clone());
+                            }
                         }
                     }
                 }
@@ -4357,6 +4498,49 @@ fn function_contains_float_comparison(program: &MirProgram, function: &MirFuncti
     })
 }
 
+/// Whether `function` sits in the one-edge f64 print closure (R6-1070): it
+/// prints an f64 itself, or it calls a function whose graph prints an f64,
+/// or a function whose graph prints an f64 calls it.  The cross-function f64
+/// shapes (a literal argument into a print helper, a called helper's f64
+/// parameter/result/root) are exactly modeled by every consumer the same way
+/// the single-function print face is, so the island's value/type admission
+/// leans on this closure instead of the per-function println alone.  One
+/// edge only: a helper of a helper keeps the strict compatibility floor.
+fn function_in_float_print_closure(program: &MirProgram, function: &MirFunction) -> bool {
+    let calls_function = |caller: &MirFunction, owner: &NodeId| {
+        caller.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: ResolvedCallee::Function(target),
+                        ..
+                    } if target == owner
+                )
+            })
+        })
+    };
+    function_contains_println_float(function)
+        || function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                let MirInstructionKind::Call {
+                    callee: ResolvedCallee::Function(owner),
+                    ..
+                } = &instruction.kind
+                else {
+                    return false;
+                };
+                program
+                    .functions()
+                    .get(owner)
+                    .is_some_and(function_contains_println_float)
+            })
+        })
+        || program.functions().values().any(|caller| {
+            function_contains_println_float(caller) && calls_function(caller, &function.owner)
+        })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
@@ -4373,6 +4557,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         function_admits_string_print: false,
         function_admits_float_print: false,
         function_admits_float_comparison: false,
+        function_admits_float_face_closure: false,
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -4390,6 +4575,7 @@ struct ScalarCollectionValidator<'a> {
     function_admits_string_print: bool,
     function_admits_float_print: bool,
     function_admits_float_comparison: bool,
+    function_admits_float_face_closure: bool,
 }
 
 impl<'a> ScalarCollectionValidator<'a> {
@@ -4413,6 +4599,8 @@ impl<'a> ScalarCollectionValidator<'a> {
             self.function_admits_float_print = function_contains_println_float(function);
             self.function_admits_float_comparison =
                 function_contains_float_comparison(self.program, function);
+            self.function_admits_float_face_closure =
+                function_in_float_print_closure(self.program, function);
             self.validate_function(function);
         }
         for instance in self.program.instances().values() {
@@ -4608,7 +4796,12 @@ impl<'a> ScalarCollectionValidator<'a> {
                 // without the print envelope — the predicate is exactly
                 // modeled for any f64 pair — while arithmetic and print
                 // shapes keep leaning on their own per-function contracts.
-                if (self.function_admits_float_print || self.function_admits_float_comparison)
+                // R6-1070: the print side of the envelope widens to the
+                // one-edge f64 print closure, matching the classifier's
+                // cross-function face admission (R6-1048 parity rule).
+                if (self.function_admits_float_print
+                    || self.function_admits_float_comparison
+                    || self.function_admits_float_face_closure)
                     && self.is_print_face_f64(ty)
                 {
                     Ok(())
@@ -4694,7 +4887,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                     ResolvedLiteral::Unit => self.require_unit(&result_ty, subject),
                     ResolvedLiteral::FloatBits(_)
                         if (self.function_admits_float_print
-                            || self.function_admits_float_comparison)
+                            || self.function_admits_float_comparison
+                            || self.function_admits_float_face_closure)
                             && self.is_print_face_f64(&result_ty) => {}
                     ResolvedLiteral::String(_)
                         if (self.allow_owned_record_family
@@ -4748,13 +4942,17 @@ impl<'a> ScalarCollectionValidator<'a> {
                 // as Clone) joins the admitted set exactly while the
                 // surrounding function carries the float println contract —
                 // the same per-function shape the type table, Const, and
-                // PrintlnFloat arms enforce.
+                // PrintlnFloat arms enforce.  R6-1070: the contract widens to
+                // the one-edge f64 print closure so a called helper's f64
+                // slot read stays on the same face the classifier admits.
                 let admitted = self
                     .program
                     .type_catalog()
                     .validate_copy_scalar(&source_ty)
                     .is_ok()
-                    || (self.function_admits_float_print && self.is_print_face_f64(&source_ty))
+                    || ((self.function_admits_float_print
+                        || self.function_admits_float_face_closure)
+                        && self.is_print_face_f64(&source_ty))
                     || self.is_list_type(&source_ty)
                     || self.is_set_type(&source_ty)
                     || self.is_owned_record_or_string_type(&source_ty);
@@ -5462,11 +5660,17 @@ impl<'a> ScalarCollectionValidator<'a> {
         match self.program.type_catalog().validate_copy_scalar(ty) {
             Ok(()) => {}
             Err(message) => {
-                // R6-1057: a Copy-role f64 (the widen-assign Convert result)
-                // carries the same per-function print-contract admission as
-                // the Move/Clone arms (R6-1054); the envelope stays exactly
-                // the classification's float-print function set.
-                if self.function_admits_float_print && self.is_print_face_f64(ty) {
+                // R6-1057: a Copy-role f64 (the widen-assign Convert result,
+                // the float arithmetic operands) carries the same
+                // per-function print-contract admission as the Move/Clone
+                // arms (R6-1054); the envelope stays exactly the
+                // classification's float-print function set.  R6-1070: the
+                // envelope widens to the one-edge f64 print closure so a
+                // called helper's arithmetic leans on the caller's print the
+                // same way the classifier admits it.
+                if (self.function_admits_float_print || self.function_admits_float_face_closure)
+                    && self.is_print_face_f64(ty)
+                {
                     return;
                 }
                 self.error(format!("{subject} {role} rejected: {message}"));
@@ -5485,8 +5689,11 @@ impl<'a> ScalarCollectionValidator<'a> {
         }
         // R6-1054: the print-face f64 bind (Const → Move into the local
         // slot) carries the same per-function print contract as the Clone
-        // slot read it feeds.
-        if self.function_admits_float_print && self.is_print_face_f64(ty) {
+        // slot read it feeds.  R6-1070: the contract widens to the one-edge
+        // f64 print closure, mirroring the Copy-role admission above.
+        if (self.function_admits_float_print || self.function_admits_float_face_closure)
+            && self.is_print_face_f64(ty)
+        {
             return;
         }
         if !self.is_list_type(ty)

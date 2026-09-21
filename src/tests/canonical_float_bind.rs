@@ -37,6 +37,13 @@
 //! divide-by-zero are IEEE-defined non-finite results owned by the runtime
 //! E0813 trap, so unbounded multiply bodies honestly reject) and widens the
 //! body arithmetic face with Multiply/Divide across all consumers.
+//! R6-1070 widens the print envelope itself to the one-edge f64 print
+//! closure: a helper that prints its f64 parameter admits the caller's
+//! literal, a helper returning an f64 literal (or straight-line symbolic
+//! arithmetic over a seeded parameter) admits the caller's println of the
+//! call result, and the island gate mirrors the same closure per
+//! materialized function.  Beyond one edge, non-face parameters, call-result
+//! binds and branchy float returns keep their explicit floors.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -526,6 +533,55 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "-0\n1\n",
         },
+        // R6-1070: the one-edge f64 print closure — the print face crosses
+        // one call edge in both directions.  A helper that prints its own
+        // f64 parameter admits the caller's literal argument (Const in the
+        // caller, parameter + Clone + PrintlnFloat in the callee); a helper
+        // returning an f64 literal admits the caller's PrintlnFloat of the
+        // call result; a helper whose f64-parameter arithmetic is the root
+        // result admits both the parameter seed and the symbolic root.
+        // Beyond one edge, non-face parameters, call-result binds and
+        // branchy float returns keep their explicit floors (the negative
+        // pins below).
+        FloatBindCase {
+            name: "float_cross_function_param_print",
+            source: r#"
+                func showf(v: f64) -> i32 {
+                    println(v)
+                    0
+                }
+                func main() -> i32 {
+                    showf(2.5)
+                }
+            "#,
+            expected_stdout: "2.5\n",
+        },
+        FloatBindCase {
+            name: "float_cross_function_result_print",
+            source: r#"
+                func ret() -> f64 {
+                    1.5
+                }
+                func main() -> i32 {
+                    println(ret())
+                    0
+                }
+            "#,
+            expected_stdout: "1.5\n",
+        },
+        FloatBindCase {
+            name: "float_cross_function_param_arithmetic_result",
+            source: r#"
+                func twice(v: f64) -> f64 {
+                    v * 2.0
+                }
+                func main() -> i32 {
+                    println(twice(1.5))
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -939,6 +995,61 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
+        // R6-1070: the closure is one call edge only.  `mid` sits on main's
+        // print closure, but `inner` is a helper of a helper — its f64
+        // result has no print face one edge away, so its result floor holds.
+        MixedCase {
+            name: "float_two_edge_helper_chain_is_mixed",
+            source: r#"
+                func inner() -> f64 {
+                    2.5
+                }
+                func mid() -> f64 {
+                    inner()
+                }
+                func main() -> i32 {
+                    println(mid())
+                    0
+                }
+            "#,
+        },
+        // R6-1070: the cross-function root face is straight-line only — a
+        // branchy float return hosts its F64 blocks below the root block,
+        // where no exemption exists, so the helper stays mixed.
+        MixedCase {
+            name: "float_branchy_helper_result_is_mixed",
+            source: r#"
+                func twice2(v: f64) -> f64 {
+                    if v > 1.0 {
+                        v * 2.0
+                    } else {
+                        0.0
+                    }
+                }
+                func main() -> i32 {
+                    println(twice2(1.5))
+                    0
+                }
+            "#,
+        },
+        // R6-1070: an f64 parameter floors unless the enclosing callable is
+        // on the FLOAT print closure.  main prints only an integer here, so
+        // the float print set is empty and `area`'s parameter keeps the
+        // per-function envelope floor even though the program is a migrated
+        // candidate overall.
+        MixedCase {
+            name: "float_param_helper_without_float_print_caller_is_mixed",
+            source: r#"
+                func area(w: f64) -> f64 {
+                    w * 2.0
+                }
+                func main() -> i32 {
+                    println(7)
+                    let x = area(2.0)
+                    0
+                }
+            "#,
+        },
     ];
     for case in CASES {
         let label = format!("float bind mixed case {}", case.name);
@@ -951,6 +1062,39 @@ fn float_bind_faces_stay_mixed() {
             "{label} must classify mixed"
         );
     }
+}
+
+// R6-1070: the island gate mirrors the one-edge f64 print closure on the
+// materialized graph.  The two-edge helper chain materializes (the generic
+// constructor does not consult the classifier), but the island gate rejects
+// it exactly on `inner`'s print-face constant — the f64 literal sits in a
+// function the one-edge closure does not reach, so the default route's
+// classifier floor is the only thing between this graph and the mixed
+// compatibility route.
+#[test]
+fn float_print_closure_island_rejects_two_edge_helper() {
+    let source = r#"
+        func inner() -> f64 {
+            2.5
+        }
+        func mid() -> f64 {
+            inner()
+        }
+        func main() -> i32 {
+            println(mid())
+            0
+        }
+    "#;
+    let label = "float closure two-edge island";
+    let mir = materialize_float_bind(source, label);
+    let errors = crate::core::mir::validate_scalar_collection_island(&mir)
+        .expect_err("{label} must reject the two-edge helper chain");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("FloatBits") || error.contains("function:inner")),
+        "{label} must reject the off-closure constant: {errors:?}"
+    );
 }
 
 // R6-1063 Face B: f64 contract values are in-domain for ordering
