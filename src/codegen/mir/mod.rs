@@ -1096,7 +1096,6 @@ mod tests {
     use crate::interp::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
-    use crate::span::Span;
     use inkwell::context::Context;
 
     fn canonical_program(source: &str) -> MirProgram {
@@ -2232,7 +2231,11 @@ func main() -> i32 {
 
     #[test]
     fn native_validator_rejects_before_llvm_declarations() {
-        let program = canonical_program("func main() -> f64 { 1.0 * 2.0 }");
+        // R6-1067 restatement: f64 Multiply joined the finite-only contract,
+        // so the before-LLVM rejection pin moves to a float comparison —
+        // body-level float ordering is still outside every consumer's
+        // binary matrix (surface-expressible, MIR-native-rejected).
+        let program = canonical_program("func main() -> i32 { if 0.5 < 1.5 { println(1) } 0 }");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_validator_test");
 
@@ -2873,25 +2876,19 @@ func main() -> i32 {
 
     #[test]
     fn native_validator_rejects_f64_binary_shapes_outside_finite_only_contract() {
-        for source in ["func main() -> f64 { 1.0 * 2.0 }"] {
-            let program = canonical_program(source);
-            let context = Context::create();
-            let mut generator = CodeGenerator::new(&context, "mir_native_f64_binary_rejected_test");
-            let diagnostics = generator
-                .compile_mir_native(&program)
-                .expect_err("unsupported f64 binary must fail closed");
-            assert!(diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .message
-                    .contains("canonical MIR native backend rejected")
-                    && diagnostic.message.contains("finite-only")
-            }));
-            assert!(diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.message.contains("finite-only"))
-                .all(|diagnostic| diagnostic.span == Span::UNKNOWN));
-            assert!(generator.module.get_function("main").is_none());
-        }
+        // R6-1067 restatement: f64 Multiply/Divide compile natively now;
+        // the surface cannot express float remainder (E0202), so the
+        // validator-level Remainder rejection is pinned directly on the
+        // TypeDesc catalog in core::mir::tests instead.  This test keeps
+        // the positive admission face: the emitter accepts the multiply
+        // program and declares main.
+        let program = canonical_program("func main() -> f64 { 1.0 * 2.0 }");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_f64_binary_rejected_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("R6-1067 admits f64 Multiply into the native emitter");
+        assert!(generator.module.get_function("main").is_some());
     }
 
     #[test]

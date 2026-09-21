@@ -2954,7 +2954,13 @@ impl MirTypeCatalog {
         right_ty: &ResolvedTypeId,
         op: ResolvedBinaryOp,
     ) -> Result<(), String> {
-        if !matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract) {
+        if !matches!(
+            op,
+            ResolvedBinaryOp::Add
+                | ResolvedBinaryOp::Subtract
+                | ResolvedBinaryOp::Multiply
+                | ResolvedBinaryOp::Divide
+        ) {
             return Err(format!(
                 "float binary operator {op:?} is outside the canonical finite-only Copy f64 contract"
             ));

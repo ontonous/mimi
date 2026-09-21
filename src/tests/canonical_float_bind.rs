@@ -31,8 +31,12 @@
 //! extern results) become symbolic IEEE doubles with the E0813 finiteness
 //! obligation at introduction, so contract ordering/equality comparisons
 //! over f64 verify on the MIR entry (`result >= x` proven, `result > x`
-//! disproven).  Contract float arithmetic and float contract literals stay
-//! outside the canonical contract.
+//! disproven).  R6-1065 admits float contract literals as known constants;
+//! R6-1066 admits IEEE negate on both sides; R6-1067 admits float contract
+//! arithmetic (Add/Subtract/Multiply/Divide under RNE — overflow and
+//! divide-by-zero are IEEE-defined non-finite results owned by the runtime
+//! E0813 trap, so unbounded multiply bodies honestly reject) and widens the
+//! body arithmetic face with Multiply/Divide across all consumers.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -227,6 +231,35 @@ fn float_bind_matrix_agrees_across_consumers() {
                 }
             "#,
             expected_stdout: "-0.5\n",
+        },
+        // R6-1067: Multiply/Divide join the finite-only arithmetic face on
+        // the same evidence as Add/Subtract — RNE fpa ops are the exact
+        // fmul/fdiv semantics, and the shared E0813 finiteness trap owns
+        // overflow / divide-by-zero (both are IEEE-defined non-finite
+        // results).
+        FloatBindCase {
+            name: "float_arithmetic_multiply_print",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    println(a * b)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
+        FloatBindCase {
+            name: "float_arithmetic_divide_print",
+            source: r#"
+                func main() -> i32 {
+                    let a = 2.5
+                    let b = 2.0
+                    println(a / b)
+                    0
+                }
+            "#,
+            expected_stdout: "1.25\n",
         },
         // An integer literal operand widens as a known constant before the
         // operation, so it stays inside the symbolic domain (shortest
@@ -710,7 +743,8 @@ fn float_int_read_widen_constant_is_nonzero_on_mir() {
 // known-constant-widen case, now the matrix's int-literal-widen rows.
 // R6-1064 restates the former int-local-operand and literal-provenance
 // widen cases — both verifier-backed now — leaving the call-sourced
-// widen as the opaque-provenance floor.)
+// widen as the opaque-provenance floor.  R6-1067 restates the former
+// multiply mixed case, now the matrix's multiply/divide rows.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -718,23 +752,12 @@ fn float_bind_faces_stay_mixed() {
         source: &'static str,
     }
     const CASES: &[MixedCase] = &[
-        // Multiply/Divide stay construction-rejected — the island matrix
-        // and the verifier fallback both keep them outside the symbolic
-        // domain, so the classification floor must hold.
-        MixedCase {
-            name: "float_multiply_print",
-            source: r#"
-                func main() -> i32 {
-                    let a = 1.5
-                    let b = 2.0
-                    println(a * b)
-                    0
-                }
-            "#,
-        },
-        // R6-1064 restatement: the int-literal-operand case migrated into
-        // the matrix above — a tracked literal join is a verifier-backed
-        // widening.  A call-sourced int keeps the floor: its provenance is
+        // R6-1067 restatement: the former multiply mixed case migrated into
+        // the matrix above (`float_arithmetic_multiply_print`) — the island
+        // matrix, the shared TypeDesc validator, the reference executor,
+        // the VM adapter, the native emitter and the verifier's IEEE
+        // symbolic domain all admit f64 Multiply/Divide on the same E0813
+        // evidence.  A call-sourced int keeps the floor: its provenance is
         // an unmigrated body, so the widening lands opaque and the
         // verifier hard-rejects the operand mix (pinned by the ensures
         // tests below).
@@ -977,6 +1000,99 @@ fn float_contract_negate_is_disproven_without_the_flip() {
     assert!(
         matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
         "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}
+
+// R6-1067: float contract arithmetic joins the R6-1063 comparison face.
+// Multiply proves against a requires-bounded parameter (the E0813 result
+// obligation needs the bound — unbounded x can overflow); Divide proves
+// unbounded because |x/2| stays below |x| for every finite x, so no model
+// can reach the trap.
+#[test]
+fn float_contract_multiply_and_divide_arithmetic_verify_on_mir() {
+    let source = r#"
+        func doubled(x: f64) -> f64 {
+            requires: x >= 0.0
+            requires: x <= 1.0
+            ensures: result == x * 2.0
+            x * 2.0
+        }
+        func half(x: f64) -> f64 {
+            ensures: result == x / 2.0
+            x / 2.0
+        }
+        func main() -> i32 {
+            println(doubled(1.25))
+            println(half(5.0))
+            0
+        }
+    "#;
+    let label = "float contract mul/div arithmetic verifies";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-mul-div".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 2, "{label} obligation count");
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result.status, crate::verifier::VerifStatus::Verified)),
+        "{label} every arithmetic obligation must verify: {results:?}"
+    );
+}
+
+// The non-vacuity pin: without the body's product the same contract is
+// disproven, so `x * 2.0` in the predicate demonstrably constrains the
+// symbolic result instead of matching anything.
+#[test]
+fn float_contract_multiply_is_disproven_without_the_product() {
+    let source = r#"
+        func doubled(x: f64) -> f64 {
+            ensures: result == x * 2.0
+            x
+        }
+        func main() -> i32 {
+            println(doubled(1.25))
+            0
+        }
+    "#;
+    let label = "float contract multiply non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-mul-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}
+
+// The E0813 teeth pin: an unbounded multiply body can overflow to infinity
+// (x near f64::MAX), so the result-finiteness obligation is honestly
+// unreachable — the verifier rejects instead of waving the trap through.
+// This is the dimension Multiply adds over the R6-1061 Add/Subtract
+// probes, which used literal constants.
+#[test]
+fn float_contract_unbounded_multiply_trips_the_finiteness_obligation() {
+    let source = r#"
+        func doubled(x: f64) -> f64 {
+            ensures: result == x * 2.0
+            x * 2.0
+        }
+        func main() -> i32 {
+            println(doubled(1.25))
+            0
+        }
+    "#;
+    let label = "float contract unbounded multiply E0813";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-mul-overflow".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven (E0813 reachable), got {:?}",
         results[0].status
     );
 }

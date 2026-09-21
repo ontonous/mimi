@@ -9112,12 +9112,22 @@ fn evaluate_binary(
     use MirRuntimeValue::{Bool, FloatBits, Int};
     match (op, left, right) {
         (
-            op @ (ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract),
+            op @ (ResolvedBinaryOp::Add
+            | ResolvedBinaryOp::Subtract
+            | ResolvedBinaryOp::Multiply
+            | ResolvedBinaryOp::Divide),
             FloatBits(left),
             FloatBits(right),
         ) if float_width == Some(64) => {
             let left = f64::from_bits(left);
             let right = f64::from_bits(right);
+            // R6-1067: a ±0.0 divisor is the language-level E0801
+            // division-definedness violation — the same face the bytecode
+            // VM reports (`div_by_zero()`), checked before the finiteness
+            // traps exactly like the VM's DivFloat arm.
+            if op == ResolvedBinaryOp::Divide && right == 0.0 {
+                return Err(execution_error(function, "E0801: float division by zero"));
+            }
             if !left.is_finite() || !right.is_finite() {
                 return Err(execution_error(
                     function,
@@ -9127,9 +9137,15 @@ fn evaluate_binary(
                     ),
                 ));
             }
+            // R6-1067: Multiply/Divide join Add/Subtract.  Overflow is
+            // IEEE-defined (±inf) and non-finite, so the result-finiteness
+            // trap below owns it; the zero divisor above is the separate
+            // E0801 violation the small-step semantics rules.
             let value = match op {
                 ResolvedBinaryOp::Add => left + right,
                 ResolvedBinaryOp::Subtract => left - right,
+                ResolvedBinaryOp::Multiply => left * right,
+                ResolvedBinaryOp::Divide => left / right,
                 _ => {
                     return Err(execution_error(
                         function,

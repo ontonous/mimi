@@ -161,15 +161,21 @@ fn float_print_ensures_contract_verifies_on_mir() {
 
 // R6-1054 restatement: the float BIND face this pin used to hold closed now
 // routes canonical (see `canonical_float_bind.rs`).  R6-1061 restatement:
-// float ADD/SUBTRACT joined it too, so what stays mixed here is float
-// MULTIPLY — the island's `binary_supported` matrix keeps multiply outside
-// `copy-scalar-collection-v1` until the reference/bytecode/native triangle
-// grows the operation, and the classifier therefore holds the graph mixed.
+// float ADD/SUBTRACT joined it too.  R6-1067 restatement: the island
+// triangle (reference executor, bytecode VM, native emitter, verifier IEEE
+// domain) grew Multiply/Divide, and the surface cannot even express float
+// remainder (E0202), so the mixed floor that stays here is arithmetic over
+// a call-sourced float — its provenance is an unmigrated body, the operand
+// widening lands opaque, and the verifier hard-rejects the mix.
 #[test]
 fn float_binding_and_arithmetic_stay_mixed() {
     let source = r#"
+        func value() -> f64 {
+            0.5
+        }
         func main() -> i32 {
-            println(0.5 * 1.5)
+            let x = value()
+            println(x * 2.0)
             0
         }
     "#;
@@ -181,6 +187,6 @@ fn float_binding_and_arithmetic_stay_mixed() {
     assert_eq!(
         crate::core::mir::classify_scalar_collection_admission(&checked),
         crate::core::mir::ScalarCollectionAdmission::MixedCoverage,
-        "float multiply must stay on the mixed compatibility route"
+        "arithmetic over a call-sourced float must stay on the mixed compatibility route"
     );
 }

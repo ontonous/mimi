@@ -953,8 +953,9 @@ struct ScalarCollectionAdmissionScanner<'a> {
     current_callable: Option<NodeId>,
     /// R6-1061: locals whose current value the MIR verifier models in the
     /// IEEE symbolic Float domain — bound by a float literal, a second-hand
-    /// float-symbolic read, or an admitted finite-only Add/Subtract of the
-    /// same.  Each entry records the branch generation at which the binding
+    /// float-symbolic read, or an admitted finite-only float arithmetic
+    /// (Add/Subtract/Multiply/Divide, R6-1067) of the same.  Each entry
+    /// records the branch generation at which the binding
     /// was walked; arithmetic operands consult the set only at the same
     /// generation, so a use after any branch or loop can never lean on a
     /// binding a different path may not have established.  An assignment
@@ -1012,8 +1013,13 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             ResolvedExprKind::Binary {
                 op, left, right, ..
             } => {
-                matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract)
-                    && self.expr_is_float_symbolic_operand(left)
+                matches!(
+                    op,
+                    ResolvedBinaryOp::Add
+                        | ResolvedBinaryOp::Subtract
+                        | ResolvedBinaryOp::Multiply
+                        | ResolvedBinaryOp::Divide
+                ) && self.expr_is_float_symbolic_operand(left)
                     && self.expr_is_float_symbolic_operand(right)
             }
             ResolvedExprKind::Load(place) => {
@@ -1257,7 +1263,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             face_active
                         });
                     // R6-1061: an f64 bind whose initializer is an admitted
-                    // finite-only Add/Subtract over float-symbolic roots
+                    // finite-only float arithmetic (Add/Subtract since
+                    // R6-1061, Multiply/Divide since R6-1067) over
+                    // float-symbolic roots
                     // produces a value the MIR verifier holds in the
                     // symbolic Float domain, so the binding joins that set
                     // and the arithmetic skips the profile-type floor
@@ -5475,11 +5483,18 @@ fn binary_supported(
         // traps on non-finite operands/results (E0813 guard), the bytecode
         // VM carries the matching float traps, and the MIR verifier models
         // the operation in its IEEE symbolic domain with the E0813
-        // definedness obligation.
-        ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract => (integer || float) && left == result,
-        ResolvedBinaryOp::Multiply | ResolvedBinaryOp::Divide | ResolvedBinaryOp::Remainder => {
-            integer && left == result
-        }
+        // definedness obligation.  R6-1067: f64 Multiply/Divide join on the
+        // same evidence — overflow stays IEEE-defined (±inf) owned by the
+        // shared E0813 finiteness trap, and the ±0.0 divisor is the
+        // language-level E0801 violation every consumer raises (the
+        // reference executor and native MIR emitter check it explicitly,
+        // the bytecode VM through DivFloat's own guard).  Remainder stays
+        // integer-only (no consumer emits frem).
+        ResolvedBinaryOp::Add
+        | ResolvedBinaryOp::Subtract
+        | ResolvedBinaryOp::Multiply
+        | ResolvedBinaryOp::Divide => (integer || float) && left == result,
+        ResolvedBinaryOp::Remainder => integer && left == result,
         ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
             (integer || boolean) && result_is_bool
         }

@@ -4166,6 +4166,9 @@ fn lowers_f64_add_with_finite_only_copy_float_contract() {
             "{label} must retain E0813 classification: {error}"
         );
     }
+    // R6-1067 restatement: Multiply joined the shared Copy f64 validator
+    // beside Add/Subtract, so the former rejection pin flips to an
+    // admission pin; Remainder is the operator that stays outside.
     assert!(program
         .type_catalog()
         .validate_copy_float_binary(
@@ -4173,6 +4176,15 @@ fn lowers_f64_add_with_finite_only_copy_float_contract() {
             &left_ty,
             &right_ty,
             crate::core::ir::ResolvedBinaryOp::Multiply,
+        )
+        .is_ok());
+    assert!(program
+        .type_catalog()
+        .validate_copy_float_binary(
+            &result_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Remainder,
         )
         .is_err());
 }

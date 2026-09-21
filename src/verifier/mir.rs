@@ -2152,6 +2152,8 @@ fn eval_instruction(
                     *op,
                     crate::core::ir::ResolvedBinaryOp::Add
                         | crate::core::ir::ResolvedBinaryOp::Subtract
+                        | crate::core::ir::ResolvedBinaryOp::Multiply
+                        | crate::core::ir::ResolvedBinaryOp::Divide
                 ) {
                     return Err(format!(
                         "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
@@ -7035,12 +7037,25 @@ fn eval_binary(
             Ok(SymbolicValue::Int(output))
         }
         (SymbolicValue::Float(left), SymbolicValue::Float(right)) => {
-            // LLVM `fadd`/`fsub` and Rust `+`/`-` on f64 both round
-            // nearest-ties-even, so this is the exact runtime semantics.
+            // LLVM `fadd`/`fsub`/`fmul`/`fdiv` and Rust `+`/`-`/`*`/`/` on
+            // f64 all round nearest-ties-even, so this is the exact runtime
+            // semantics.  R6-1067: Multiply/Divide join.  The runtime owns
+            // two distinct traps on this face and the verifier restates
+            // both where the runtime raises them: the ±0.0 divisor is the
+            // E0801 division-definedness violation (same face as the
+            // integer zero divisor), and overflow stays IEEE-defined (±inf)
+            // owned by the E0813 finiteness obligation.
+            if op == Op::Divide {
+                let zero = Float::from_f64(0.0);
+                let divisor_defined = right.eq_fpa(&zero).not();
+                add_definedness(state, divisor_defined, "E0801")?;
+            }
             let rounding = RoundingMode::round_nearest_ties_to_even();
             let output = match op {
                 Op::Add => left.add_with_rounding_mode(&right, &rounding),
                 Op::Subtract => left.sub_with_rounding_mode(&right, &rounding),
+                Op::Multiply => left.mul_with_rounding_mode(&right, &rounding),
+                Op::Divide => left.div_with_rounding_mode(&right, &rounding),
                 _ => {
                     return Err(format!(
                         "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
@@ -7299,6 +7314,10 @@ fn contract_binary(
             // finite-only f64 domain. `eq_fpa` is IEEE equality (+0 == -0,
             // never true on NaN), not structural identity; the finiteness
             // obligation at introduction already excludes NaN models.
+            // R6-1067: float arithmetic joins the face under RNE — the
+            // exact fmul/fdiv runtime semantics; Remainder stays outside
+            // (no consumer emits frem).
+            let rounding = RoundingMode::round_nearest_ties_to_even();
             match op {
                 MirContractBinaryOp::Equal => Ok(SymbolicValue::Bool(left.eq_fpa(&right))),
                 MirContractBinaryOp::NotEqual => {
@@ -7308,6 +7327,18 @@ fn contract_binary(
                 MirContractBinaryOp::Greater => Ok(SymbolicValue::Bool(left.gt(&right))),
                 MirContractBinaryOp::LessEqual => Ok(SymbolicValue::Bool(left.le(&right))),
                 MirContractBinaryOp::GreaterEqual => Ok(SymbolicValue::Bool(left.ge(&right))),
+                MirContractBinaryOp::Add => {
+                    Ok(SymbolicValue::Float(left.add_with_rounding_mode(&right, &rounding)))
+                }
+                MirContractBinaryOp::Subtract => {
+                    Ok(SymbolicValue::Float(left.sub_with_rounding_mode(&right, &rounding)))
+                }
+                MirContractBinaryOp::Multiply => {
+                    Ok(SymbolicValue::Float(left.mul_with_rounding_mode(&right, &rounding)))
+                }
+                MirContractBinaryOp::Divide => {
+                    Ok(SymbolicValue::Float(left.div_with_rounding_mode(&right, &rounding)))
+                }
                 _ => Err(
                     "contract float arithmetic is outside the canonical verifier contract".into(),
                 ),

@@ -1533,25 +1533,32 @@ fn finite_f64_add_verifier_capability_is_closed_before_symbolic_execution() {
     crate::verifier::validate_mir_capabilities(&canonical)
         .expect("finite-only f64 Subtract capability");
 
-    let subtract = parse_memory_source(
+    // R6-1067 restatement: Multiply/Divide joined the finite-only Copy f64
+    // capability beside Add/Subtract, and the surface cannot express float
+    // remainder (E0202 at typecheck), so the residual operator's
+    // rejection is pinned at the TypeDesc validator level in
+    // core::mir::tests instead of through a surface program.
+    let multiply = parse_memory_source(
         "func main() -> f64 { 1.0 * 2.0 }",
         "mir-f64-multiply-capability",
     )
     .expect("parse multiply");
-    let checked = crate::core::check_program(&subtract).expect("typecheck multiply");
+    let checked = crate::core::check_program(&multiply).expect("typecheck multiply");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical f64 multiply MIR");
-    let errors = crate::verifier::validate_mir_capabilities(&canonical)
-        .expect_err("f64 multiply must remain outside the closed Add/Subtract capability");
-    let message = errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        message.contains("finite-only Copy f64 contract"),
-        "unexpected verifier capability rejection: {message}"
-    );
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("finite-only f64 Multiply capability");
+
+    let divide = parse_memory_source(
+        "func main() -> f64 { 1.0 / 2.0 }",
+        "mir-f64-divide-capability",
+    )
+    .expect("parse divide");
+    let checked = crate::core::check_program(&divide).expect("typecheck divide");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical f64 divide MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("finite-only f64 Divide capability");
 }
 
 #[test]
@@ -1581,25 +1588,52 @@ func main() -> i64 { 42 }
 }
 
 #[test]
-fn finite_f64_contract_arithmetic_stays_outside_the_canonical_contract() {
-    // Face B residual boundary: ordering comparisons entered the domain,
-    // but contract arithmetic over f64 still has no symbolic domain.
-    let source = r#"
+fn finite_f64_contract_arithmetic_enters_the_symbolic_domain() {
+    require_z3!();
+    // R6-1067 restatement of the Face B residual boundary: contract
+    // arithmetic over f64 joined the symbolic domain beside the R6-1063
+    // ordering comparisons — RNE fpa ops are the exact fmul/fdiv runtime
+    // semantics.  The bounded add contract verifies; the unbounded twin is
+    // honestly disproven because `left + right` can overflow and reach the
+    // runtime E0813 trap (arithmetic has real finiteness teeth the bare
+    // comparison face never exposed).
+    let bounded = r#"
+func add(left: f64, right: f64) -> f64 {
+    requires: left >= 0.0
+    requires: left <= 1.0
+    requires: right >= 0.0
+    requires: right <= 1.0
+    ensures: result == left + right
+    left + right
+}
+func main() -> i64 { 42 }
+"#;
+    let file = parse_memory_source(bounded, "mir-f64-contract-arithmetic").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("f64 contract arithmetic materializes");
+    crate::verifier::validate_mir_capabilities(&mir).expect("f64 arithmetic capability gate");
+    let results = crate::verifier::verify_mir(&mir, "f64-contract-arithmetic".into())
+        .expect("f64 arithmetic verification");
+    assert_eq!(results.len(), 1, "obligation count");
+    assert_eq!(results[0].status, VerifStatus::Verified);
+
+    let unbounded = r#"
 func add(left: f64, right: f64) -> f64 {
     ensures: result == left + right
     left + right
 }
 func main() -> i64 { 42 }
 "#;
-    let file = parse_memory_source(source, "mir-f64-contract-arithmetic").expect("parse");
-    let checked = crate::core::check_program(&file).expect("typecheck");
-    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("f64 contract arithmetic must remain outside the canonical contract");
-    let message = format!("{error:?}");
-    assert!(
-        message.contains("contract arithmetic requires integer operands"),
-        "unexpected f64 contract arithmetic boundary: {message}"
-    );
+    let file = parse_memory_source(unbounded, "mir-f64-contract-arithmetic-unbounded")
+        .expect("parse unbounded");
+    let checked = crate::core::check_program(&file).expect("typecheck unbounded");
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("unbounded f64 contract arithmetic materializes");
+    let results = crate::verifier::verify_mir(&mir, "f64-contract-arithmetic-unbounded".into())
+        .expect("unbounded f64 arithmetic verification");
+    assert_eq!(results.len(), 1, "unbounded obligation count");
+    assert_eq!(results[0].status, VerifStatus::Disproven);
 }
 
 #[test]

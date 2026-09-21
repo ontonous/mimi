@@ -1,0 +1,21 @@
+// R6-1067 face: float contract Multiply/Divide arithmetic.  `doubled`
+// carries requires bounds so the E0813 result-finiteness obligation is
+// dischargeable (unbounded x * 2.0 can overflow); `half` needs none
+// because |x / 2| < |x| for every finite x.  Both verify on the direct
+// `--mir` entry and the program differentially prints 2.5 twice across
+// default run, explicit --mir run, and the native emitter.
+func doubled(x: f64) -> f64 {
+    requires: x >= 0.0
+    requires: x <= 1.0
+    ensures: result == x * 2.0
+    x * 2.0
+}
+func half(x: f64) -> f64 {
+    ensures: result == x / 2.0
+    x / 2.0
+}
+func main() -> i32 {
+    println(doubled(1.25))
+    println(half(5.0))
+    0
+}

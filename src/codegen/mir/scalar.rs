@@ -197,9 +197,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|message| NativeMirError::new(subject, message))?;
             let left_value = self.value(left, subject)?.into_float_value();
             let right_value = self.value(right, subject)?.into_float_value();
+            // R6-1067: the zero divisor is the language-level E0801
+            // division-definedness violation (small-step §3, SD-8 family) —
+            // the same `mimi_trap_float_div_by_zero` face the AST emitter
+            // and bytecode VM report.  Overflow stays IEEE-defined (±inf)
+            // and is owned by the shared finiteness guard below.
+            if op == ResolvedBinaryOp::Divide {
+                self.emit_float_div_zero_guard(right_value, subject)?;
+            }
             let operation = match op {
                 ResolvedBinaryOp::Add => "add",
                 ResolvedBinaryOp::Subtract => "subtract",
+                ResolvedBinaryOp::Multiply => "mul",
+                ResolvedBinaryOp::Divide => "div",
                 _ => {
                     return Err(NativeMirError::new(
                         subject,
@@ -217,6 +227,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     self.generator
                         .builder
                         .build_float_sub(left_value, right_value, "mir_fsub")
+                }
+                ResolvedBinaryOp::Multiply => {
+                    self.generator
+                        .builder
+                        .build_float_mul(left_value, right_value, "mir_fmul")
+                }
+                ResolvedBinaryOp::Divide => {
+                    self.generator
+                        .builder
+                        .build_float_div(left_value, right_value, "mir_fdiv")
                 }
                 _ => {
                     return Err(NativeMirError::new(
@@ -286,6 +306,51 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let _ = result;
             value
         })
+    }
+
+    /// SD-8 family: a ±0.0 float divisor traps E0801 through the same
+    /// `mimi_trap_float_div_by_zero` runtime face the AST emitter uses, so
+    /// the trap code and wording agree across the bytecode VM, the AST
+    /// native path, and this MIR path.
+    fn emit_float_div_zero_guard(
+        &mut self,
+        right: inkwell::values::FloatValue<'ctx>,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let zero = right.get_type().const_float(0.0);
+        let is_zero = self
+            .generator
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OEQ, right, zero, "mir_fdiv_zero")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let function = self.llvm_function;
+        let trap = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_fdiv_zero_trap");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_fdiv_zero_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(is_zero, trap, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(trap);
+        let trap_fn = self
+            .generator
+            .get_runtime_fn("mimi_trap_float_div_by_zero")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(trap_fn, &[], "mir_fdiv_zero_trap_call")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
     }
 
     fn emit_float_finite_guard(

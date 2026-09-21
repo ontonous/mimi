@@ -328,6 +328,17 @@ fn expr_kind(
                 | MirContractBinaryOp::Remainder => {
                     if left_kind == ContractValueKind::Int && right_kind == ContractValueKind::Int {
                         Ok(ContractValueKind::Int)
+                    // R6-1067: float arithmetic joins the R6-1063 comparison
+                    // face — RNE fpa ops are the exact fmul/fdiv runtime
+                    // semantics, and the runtime owns the traps (overflow /
+                    // non-finite results are the E0813 finiteness trap, the
+                    // ±0.0 divisor the E0801 division-definedness
+                    // violation).  Remainder stays integer-only.
+                    } else if left_kind == ContractValueKind::Float
+                        && right_kind == ContractValueKind::Float
+                        && !matches!(op, MirContractBinaryOp::Remainder)
+                    {
+                        Ok(ContractValueKind::Float)
                     } else {
                         Err("contract arithmetic requires integer operands".into())
                     }
