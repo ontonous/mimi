@@ -867,3 +867,62 @@ fn float_param_result_ordering_strict_inequality_is_disproven_on_mir() {
         results[0].status
     );
 }
+
+// R6-1065: an f64 contract literal lowers to `MirContractExpr::Float(bits)`
+// and the verifier evaluates it as a known finite constant.  A
+// constant-returning body proves both an equality and an ordering against
+// literals — the literal genuinely participates in the predicate.
+#[test]
+fn float_contract_literal_equality_and_ordering_verify_on_mir() {
+    let source = r#"
+        func one() -> f64 {
+            ensures: result == 1.5
+            ensures: result >= 1.0
+            1.5
+        }
+        func main() -> i32 {
+            ensures: result == 0
+            println(one())
+            0
+        }
+    "#;
+    let label = "float contract literal verifies";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-literal".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 2, "{label} obligation count");
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result.status, crate::verifier::VerifStatus::Verified)),
+        "{label} every literal obligation must verify: {results:?}"
+    );
+}
+
+// The non-vacuity pin for the literal face: `result >= 0.0` against a
+// symbolic identity body is disproven (the parameter can be negative), so
+// the literal constant demonstrably enters the comparison instead of the
+// obligation holding vacuously.
+#[test]
+fn float_contract_literal_ordering_is_disproven_against_symbolic_identity() {
+    let source = r#"
+        func identity(x: f64) -> f64 {
+            ensures: result >= 0.0
+            x
+        }
+        func main() -> i32 {
+            println(identity(-1.5))
+            0
+        }
+    "#;
+    let label = "float contract literal non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-literal-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}

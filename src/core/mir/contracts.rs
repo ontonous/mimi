@@ -81,6 +81,12 @@ pub enum MirContractExpr {
     },
     Int(i64),
     Bool(bool),
+    /// R6-1065: an f64 literal carried as raw IEEE bits — the exact form the
+    /// resolved literal holds, so the canonical text (and digest) is stable.
+    /// The Z3 verifier evaluates it as a known constant in the finite-only
+    /// Float domain; the runtime FFI predicate evaluator has no float slot
+    /// and rejects it at construction (`contains_float_leaf`).
+    Float(u64),
     Unary {
         op: MirContractUnaryOp,
         operand: Box<Self>,
@@ -107,6 +113,7 @@ impl MirContractExpr {
             }
             Self::Int(value) => value.to_string(),
             Self::Bool(value) => value.to_string(),
+            Self::Float(bits) => format!("float({})", f64::from_bits(*bits)),
             Self::Unary { op, operand } => {
                 let name = match op {
                     MirContractUnaryOp::Negate => "neg",
@@ -264,6 +271,7 @@ fn expression_type(
         }
         MirContractExpr::Int(_)
         | MirContractExpr::Bool(_)
+        | MirContractExpr::Float(_)
         | MirContractExpr::Unary { .. }
         | MirContractExpr::Binary { .. } => {
             Err("contract expression has no aggregate projection type".into())
@@ -294,6 +302,7 @@ fn expr_kind(
         }
         MirContractExpr::Int(_) => Ok(ContractValueKind::Int),
         MirContractExpr::Bool(_) => Ok(ContractValueKind::Bool),
+        MirContractExpr::Float(_) => Ok(ContractValueKind::Float),
         MirContractExpr::Unary { op, operand } => {
             let kind = expr_kind(operand, function, catalog)?;
             match (op, kind.clone()) {
@@ -373,6 +382,9 @@ fn contains_float_leaf(
             )
         }
         MirContractExpr::Int(_) | MirContractExpr::Bool(_) => false,
+        // R6-1065: a float literal is a float leaf by construction — the
+        // runtime FFI evaluator could not evaluate it.
+        MirContractExpr::Float(_) => true,
         MirContractExpr::Unary { operand, .. } => contains_float_leaf(operand, function, catalog),
         MirContractExpr::Binary { left, right, .. } => {
             contains_float_leaf(left, function, catalog)
@@ -401,6 +413,9 @@ pub(crate) fn validate_ffi_requires(
                 Err(format!("extern requires value '{value}' is not a call argument"))
             }
             MirContractExpr::Value(_) | MirContractExpr::Int(_) | MirContractExpr::Bool(_) => Ok(()),
+            // A float literal is a literal leaf; its kind is rejected by the
+            // contains_float_leaf guard that runs after this walk.
+            MirContractExpr::Float(_) => Ok(()),
             MirContractExpr::Unary { operand, .. } => validate_leaves(operand, arguments),
             MirContractExpr::Binary { left, right, .. } => {
                 validate_leaves(left, arguments)?;
@@ -449,6 +464,9 @@ pub(crate) fn validate_ffi_ensures(
             MirContractExpr::Value(_)
             | MirContractExpr::Int(_)
             | MirContractExpr::Bool(_) => Ok(()),
+            // A float literal is a literal leaf; its kind is rejected by the
+            // contains_float_leaf guard that runs after this walk.
+            MirContractExpr::Float(_) => Ok(()),
             MirContractExpr::Unary { operand, .. } => {
                 validate_leaves(operand, arguments, result)
             }
@@ -542,6 +560,9 @@ pub(crate) fn validate_ffi_runtime_contracts(
             }
             MirContractExpr::Int(_) => Ok(RuntimeContractKind::Int),
             MirContractExpr::Bool(_) => Ok(RuntimeContractKind::Bool),
+            MirContractExpr::Float(_) => Err(format!(
+                "extern {phase} predicate cannot evaluate float literals"
+            )),
             MirContractExpr::Unary { op, operand } => {
                 let kind = expression_kind(
                     operand,
@@ -707,6 +728,7 @@ fn contains_result(expression: &MirContractExpr) -> bool {
         MirContractExpr::Project { base, .. } => contains_result(base),
         MirContractExpr::Value(_)
         | MirContractExpr::Old(_)
+        | MirContractExpr::Float(_)
         | MirContractExpr::Int(_)
         | MirContractExpr::Bool(_) => false,
     }
@@ -798,6 +820,12 @@ fn evaluate_ffi_contract(
             MirContractExpr::Value(id) => argument(id).map_err(MirFfiContractError::Invalid),
             MirContractExpr::Int(value) => Ok(Int(*value)),
             MirContractExpr::Bool(value) => Ok(Bool(*value)),
+            // R6-1065: rejected at construction by `contains_float_leaf`;
+            // this arm keeps the evaluator total for programs that bypass
+            // the constructor validation.
+            MirContractExpr::Float(_) => {
+                Err(format!("FFI {phase} predicate cannot evaluate float leaves").into())
+            }
             MirContractExpr::Unary { op, operand } => {
                 match (op, evaluate(operand, argument, phase)?) {
                     (MirContractUnaryOp::Not, Bool(value)) => Ok(Bool(!value)),
@@ -878,7 +906,8 @@ fn contains_invalid_old(function: &MirFunction, expression: &MirContractExpr) ->
         MirContractExpr::Value(_)
         | MirContractExpr::Result
         | MirContractExpr::Int(_)
-        | MirContractExpr::Bool(_) => false,
+        | MirContractExpr::Bool(_)
+        | MirContractExpr::Float(_) => false,
     }
 }
 
@@ -950,6 +979,13 @@ pub(crate) fn lower_contract_expr(
         ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) => Ok(MirContractExpr::Int(*value)),
         ResolvedExprKind::Literal(ResolvedLiteral::Bool(value)) => {
             Ok(MirContractExpr::Bool(*value))
+        }
+        // R6-1065: an f64 contract literal lowers to its raw IEEE bits —
+        // exactly what the resolved literal holds — so the canonical text
+        // and digest are deterministic and the verifier widens it as a
+        // known finite constant.
+        ResolvedExprKind::Literal(ResolvedLiteral::FloatBits(bits)) => {
+            Ok(MirContractExpr::Float(*bits))
         }
         ResolvedExprKind::Load(place) => lower_contract_place(place, function, body, false),
         ResolvedExprKind::Old(inner) => {

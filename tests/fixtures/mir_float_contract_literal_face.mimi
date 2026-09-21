@@ -1,0 +1,18 @@
+// R6-1065 face fixture: an f64 contract literal (`result == 1.5`,
+// `result >= 1.0`) lowers to `MirContractExpr::Float(bits)` and the MIR
+// verifier evaluates it as a known finite constant — a constant-returning
+// body proves both obligations.  The default route keeps its explicit
+// compatibility disposition (the call-result print root is still a
+// registered mixed floor), while the direct `mimi verify --mir` entry
+// proves the contracts.
+func one() -> f64 {
+    ensures: result == 1.5
+    ensures: result >= 1.0
+    1.5
+}
+
+func main() -> i32 {
+    ensures: result == 0
+    println(one())
+    0
+}

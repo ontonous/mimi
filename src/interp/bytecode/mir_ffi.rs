@@ -1666,4 +1666,22 @@ mod tests {
         assert!(error.to_string().contains("outside i32"), "{error}");
         assert!(runtime.loaded_libs.is_empty());
     }
+
+    // R6-1065: the contract expression domain gains `Float(bits)` literals
+    // for the symbolic verifier, but the runtime FFI predicate evaluator has
+    // no float slot — the leaf must be rejected, not silently coerced.
+    #[test]
+    fn scalar_ffi_runtime_rejects_float_contract_literal_leaves() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.requires = Some(crate::core::mir::MirContractExpr::Float((1.5f64).to_bits()));
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("a float contract literal must not reach the runtime evaluator");
+        assert!(
+            error.to_string().contains("cannot evaluate float literals"),
+            "{error}"
+        );
+        assert!(runtime.loaded_libs.is_empty());
+    }
 }

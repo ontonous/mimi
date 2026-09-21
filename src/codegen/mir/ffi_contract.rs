@@ -297,6 +297,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )?;
                 Ok(value)
             }
+            // R6-1065: rejected at construction by `contains_float_leaf`;
+            // this arm keeps the emitter total for programs that bypass the
+            // constructor validation.
+            Expr::Float(_) => Err(NativeMirError::new(
+                subject,
+                "FFI predicate cannot evaluate float literals",
+            )),
             Expr::Result | Expr::Old(_) | Expr::Project { .. } => Err(NativeMirError::new(
                 subject,
                 "unsupported FFI predicate expression",

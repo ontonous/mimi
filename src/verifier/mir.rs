@@ -7135,6 +7135,12 @@ fn contract_term(
         }
         MirContractExpr::Int(value) => Ok(SymbolicValue::Int(Int::from_i64(*value))),
         MirContractExpr::Bool(value) => Ok(SymbolicValue::Bool(Bool::from_bool(*value))),
+        // R6-1065: a float contract literal is a known constant in the
+        // finite-only Float domain — the same exact widening the verifier
+        // applies to known integer Convert operands.
+        MirContractExpr::Float(bits) => {
+            Ok(SymbolicValue::Float(Float::from_f64(f64::from_bits(*bits))))
+        }
         MirContractExpr::Unary { op, operand } => {
             let operand = contract_term(operand, values, old_values, result)?;
             match (op, operand) {
@@ -7165,6 +7171,8 @@ fn ffi_contract_term(
 ) -> Result<(SymbolicValue, Bool), String> {
     use MirContractBinaryOp as Op;
     match expression {
+        // R6-1065: float literals never reach this encoder — the FFI
+        // construction guard rejects float leaves before consumers run.
         MirContractExpr::Value(_) | MirContractExpr::Int(_) | MirContractExpr::Bool(_) => Ok((
             contract_term(expression, values, values, None)?,
             Bool::from_bool(true),
@@ -7229,6 +7237,9 @@ fn ffi_contract_term(
             }
             Ok((output, defined))
         }
+        MirContractExpr::Float(_) => Err(format!(
+            "FFI {phase} predicate cannot evaluate float literals"
+        )),
         MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
             Err(format!("unsupported FFI {phase} expression"))
         }

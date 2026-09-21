@@ -22633,6 +22633,91 @@ fn canonical_mir_float_contract_value_verifies_on_mir_entry() {
     );
 }
 
+// R6-1065: an f64 contract literal face.  `result == 1.5` and
+// `result >= 1.0` lower to `MirContractExpr::Float(bits)`; the direct
+// `mimi verify --mir` entry proves both on a constant-returning body, the
+// default run executes byte-identically across entries while keeping its
+// explicit compatibility disposition (the call-result print root is still
+// a registered mixed floor), and the native `build --mir` binary agrees.
+#[test]
+fn canonical_mir_float_contract_literal_verifies_on_mir_entry() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_float_contract_literal_face.mimi");
+    let expected = b"1.5\n";
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "float literal contract fixture must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, expected);
+    assert!(
+        stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "float literal fixture must keep the compatibility default route: {stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&source)
+        .output()
+        .unwrap();
+    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    assert!(
+        verify.status.success(),
+        "MIR verifier entry must succeed: {verify_out}"
+    );
+    assert!(
+        verify_out.contains("2/2 verified"),
+        "both literal obligations must verify on the MIR entry: {verify_out}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .unwrap();
+    assert!(mir_run.status.success());
+    assert_eq!(mir_run.stdout, expected, "explicit MIR run");
+
+    let native = project_root().join("target").join(format!(
+        "mir_float_contract_literal_native_{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, expected);
+    let _ = fs::remove_file(&native);
+}
+
 // R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal
 // bound to a local and read by the owned-String println face lowers as
 // Const(String) -> Move -> Clone -> PrintlnString, routes canonical on the
