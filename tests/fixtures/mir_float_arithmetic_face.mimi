@@ -1,0 +1,15 @@
+// R6-1061: finite-only f64 Add/Subtract arithmetic over float-symbolic
+// roots routes canonical across the default run entry, the routed
+// `mimi verify` entry (the MIR verifier's IEEE symbolic domain proves the
+// ensures contract) and the native `build --mir` entry.
+func main() -> i32 {
+    ensures: result == 0
+    let a = 1.5
+    let b = 2.0
+    println(a - b)
+    println(2 + 1.5)
+    println(a + b - 0.5)
+    let z = a + b
+    println(z)
+    0
+}

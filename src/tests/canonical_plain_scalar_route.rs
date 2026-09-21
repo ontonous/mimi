@@ -61,7 +61,11 @@ fn checked_program_of(source: &str) -> (crate::core::CheckedProgram, PreludeExcl
 // bind joined it too (R6-1060 opened Load-root print-face bind roots), so
 // the mixed representative below uses a dead float bind in a
 // non-printing function — the per-function contract boundary the bind
-// exemption still respects.
+// exemption still respects.  R6-1061 restatement: float Add/Subtract over
+// float-symbolic roots joined the complete set under the same per-function
+// contract (its differential matrix lives in canonical_float_bind.rs);
+// the representative here still carries no float println, so the
+// per-function envelope keeps it mixed.
 #[test]
 fn plain_scalar_admission_matrix_pins_the_flip_set() {
     let complete_shapes = [

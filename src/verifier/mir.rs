@@ -21,7 +21,7 @@ use crate::core::mir::{
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
 };
-use z3::ast::{Bool, Int, Set as Z3Set};
+use z3::ast::{Bool, Float, Int, RoundingMode, Set as Z3Set};
 use z3::SatResult;
 use z3::Sort;
 
@@ -29,6 +29,14 @@ use z3::Sort;
 enum SymbolicValue {
     Int(Int),
     Bool(Bool),
+    /// An IEEE-754 double in Z3's floating-point theory (11 exponent / 53
+    /// significand bits, round-nearest-ties-even — the exact semantics the
+    /// reference executor and native `fadd`/`fsub` share).  The finite-only
+    /// SD-9 boundary stays intact: every arithmetic introduction carries an
+    /// E0813 definedness obligation that operands and result are finite,
+    /// mirroring the runtime operand/result traps, so an infinite/NaN value
+    /// is unreachable on any proven path rather than silently modeled.
+    Float(Float),
     Unit,
     /// A value whose payload is intentionally opaque to the arithmetic
     /// contract domain.  The exact TypeDesc identity is retained so the
@@ -1897,7 +1905,7 @@ fn eval_instruction(
                     };
                     SymbolicValue::Bool(Bool::from_bool(*value))
                 }
-                crate::core::ir::ResolvedLiteral::FloatBits(_) => {
+                crate::core::ir::ResolvedLiteral::FloatBits(bits) => {
                     let descriptor = catalog
                         .get(&result_ty)
                         .ok_or_else(|| "MIR float const result TypeDesc is absent".to_string())?;
@@ -1906,7 +1914,15 @@ fn eval_instruction(
                     {
                         return Err("MIR float const literal disagrees with TypeDesc ABI".into());
                     }
-                    SymbolicValue::Opaque { ty: result_ty }
+                    if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
+                        // The scalar slice is f64-only: literal doubles enter
+                        // the IEEE symbolic domain and are finite by
+                        // construction (source syntax rejects inf/NaN
+                        // spellings), so no E0813 obligation is owed here.
+                        SymbolicValue::Float(Float::from_f64(f64::from_bits(*bits)))
+                    } else {
+                        SymbolicValue::Opaque { ty: result_ty }
+                    }
                 }
                 crate::core::ir::ResolvedLiteral::String(_) => {
                     catalog.validate_owned_string(&result_ty)?;
@@ -2076,11 +2092,29 @@ fn eval_instruction(
             });
             if float_shape {
                 catalog.validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)?;
-                return Err(format!(
-                    "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
-                    crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
-                    crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
-                ));
+                if !matches!(
+                    *op,
+                    crate::core::ir::ResolvedBinaryOp::Add
+                        | crate::core::ir::ResolvedBinaryOp::Subtract
+                ) {
+                    return Err(format!(
+                        "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                        crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
+                        crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
+                    ));
+                }
+                let left =
+                    state.values.get(left).cloned().ok_or_else(|| {
+                        format!("MIR binary left value '{}' is not defined", left)
+                    })?;
+                let right =
+                    state.values.get(right).cloned().ok_or_else(|| {
+                        format!("MIR binary right value '{}' is not defined", right)
+                    })?;
+                let output = eval_binary(function, catalog, state, *op, left, right, result)?;
+                ensure_result_shape(function, catalog, result, &output)?;
+                state.values.insert(result.clone(), output);
+                return Ok(());
             }
             let left = state
                 .values
@@ -2135,6 +2169,12 @@ fn eval_instruction(
                     if descriptor.abi != (MirAbiClass::Float { bits: 64 }) {
                         return Err("MIR builtin 'println' received a non-f64 value".into());
                     }
+                    SymbolicValue::Unit
+                }
+                (MirBuiltinKind::PrintlnFloat, [SymbolicValue::Float(_)]) => {
+                    // IEEE-domain floats carry their E0813 finiteness
+                    // obligations at the arithmetic that produced them, so
+                    // the line itself is just an opaque side effect.
                     SymbolicValue::Unit
                 }
                 (MirBuiltinKind::PrintlnString, [argument]) => {
@@ -2335,10 +2375,15 @@ fn eval_instruction(
                 },
                 crate::core::mir::types::MirConversionKind::SignedI32ToFloat64
                 | crate::core::mir::types::MirConversionKind::SignedI64ToFloat64 => match value {
-                    // The verifier's symbolic domain deliberately has no
-                    // IEEE float sort (SD-9 finite-only boundary), so the
-                    // widened payload becomes opaque with the f64 identity.
-                    SymbolicValue::Int(_) => SymbolicValue::Opaque { ty: result_ty },
+                    // A known integer constant widens exactly as the runtime
+                    // does (`as f64` / `sitofp` both round nearest), so it
+                    // joins the IEEE domain directly.  A non-constant integer
+                    // stays opaque: z3 0.20 exposes no int→float bridge and
+                    // inventing one is out of the verifier's contract.
+                    SymbolicValue::Int(_) => match state.known_ints.get(source) {
+                        Some(constant) => SymbolicValue::Float(Float::from_f64(*constant as f64)),
+                        None => SymbolicValue::Opaque { ty: result_ty },
+                    },
                     SymbolicValue::Opaque { .. } => SymbolicValue::Opaque { ty: result_ty },
                     _ => {
                         return Err(format!(
@@ -2348,7 +2393,13 @@ fn eval_instruction(
                     }
                 },
                 crate::core::mir::types::MirConversionKind::Float64ToFloat32 => match value {
-                    SymbolicValue::Opaque { .. } => SymbolicValue::Opaque { ty: result_ty },
+                    // f32 has no symbolic domain (bits:32 stays opaque at
+                    // every construction point), so the narrowing lands
+                    // opaque regardless of how precisely the f64 source is
+                    // modeled.
+                    SymbolicValue::Opaque { .. } | SymbolicValue::Float(_) => {
+                        SymbolicValue::Opaque { ty: result_ty }
+                    }
                     _ => {
                         return Err(format!(
                             "MIR conversion '{}' received a non-float symbolic value",
@@ -4582,6 +4633,9 @@ fn eval_materialized_variant_projection_fallback_call(
         (SymbolicValue::Bool(selected), SymbolicValue::Bool(fallback)) => {
             SymbolicValue::Bool(active_some.ite(&selected, &fallback))
         }
+        (SymbolicValue::Float(selected), SymbolicValue::Float(fallback)) => {
+            SymbolicValue::Float(active_some.ite(&selected, &fallback))
+        }
         (
             SymbolicValue::List { length: selected },
             SymbolicValue::List { length: fallback },
@@ -5289,7 +5343,10 @@ fn symbolic_zero_for_type(
         MirAbiClass::Bool if descriptor.is_canonical_copy_scalar(false) => {
             Ok(SymbolicValue::Bool(Bool::from_bool(false)))
         }
-        MirAbiClass::Float { bits: 32 | 64 } if descriptor.is_canonical_copy_scalar(true) => {
+        MirAbiClass::Float { bits: 64 } if descriptor.is_canonical_copy_scalar(true) => {
+            Ok(SymbolicValue::Float(Float::from_f64(0.0)))
+        }
+        MirAbiClass::Float { bits: 32 } if descriptor.is_canonical_copy_scalar(true) => {
             Ok(SymbolicValue::Opaque { ty: ty.clone() })
         }
         _ => Err(format!(
@@ -5358,6 +5415,9 @@ fn merge_symbolic_scalars(
         }
         (SymbolicValue::Bool(when_true), SymbolicValue::Bool(when_false)) => {
             Ok(SymbolicValue::Bool(condition.ite(&when_true, &when_false)))
+        }
+        (SymbolicValue::Float(when_true), SymbolicValue::Float(when_false)) => {
+            Ok(SymbolicValue::Float(condition.ite(&when_true, &when_false)))
         }
         (SymbolicValue::Opaque { ty: when_true }, SymbolicValue::Opaque { ty: when_false })
             if when_true == when_false =>
@@ -6639,6 +6699,7 @@ fn symbolic_matches_type(
             MirAbiClass::Float { bits: 32 | 64 },
             SymbolicValue::Opaque { ty: actual_ty },
         ) => actual_ty == ty,
+        (MirLayout::Scalar, MirAbiClass::Float { bits: 64 }, SymbolicValue::Float(_)) => true,
         (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_owned_string(ty).is_ok()
         }
@@ -6917,6 +6978,36 @@ fn eval_binary(
             }
             Ok(SymbolicValue::Int(output))
         }
+        (SymbolicValue::Float(left), SymbolicValue::Float(right)) => {
+            // LLVM `fadd`/`fsub` and Rust `+`/`-` on f64 both round
+            // nearest-ties-even, so this is the exact runtime semantics.
+            let rounding = RoundingMode::round_nearest_ties_to_even();
+            let output = match op {
+                Op::Add => left.add_with_rounding_mode(&right, &rounding),
+                Op::Subtract => left.sub_with_rounding_mode(&right, &rounding),
+                _ => {
+                    return Err(format!(
+                        "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                        crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
+                        crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
+                    ))
+                }
+            };
+            // The reference executor and native emitter both trap unless the
+            // operands and the result are finite; restate the full trap
+            // predicate here so E0813 stays owned by the operation that the
+            // runtime traps at, not by the introduction argument.
+            let finite = Bool::and(&[
+                &float_is_finite(&left),
+                &Bool::and(&[&float_is_finite(&right), &float_is_finite(&output)]),
+            ]);
+            add_definedness(
+                state,
+                finite,
+                crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE,
+            )?;
+            Ok(SymbolicValue::Float(output))
+        }
         (SymbolicValue::Bool(left), SymbolicValue::Bool(right)) => match op {
             Op::Equal => Ok(SymbolicValue::Bool(left.eq(&right))),
             Op::NotEqual => Ok(SymbolicValue::Bool(left.eq(&right).not())),
@@ -6926,6 +7017,12 @@ fn eval_binary(
         },
         _ => Err("MIR binary operands have incompatible scalar kinds".into()),
     }
+}
+
+/// The IEEE finite-only predicate: neither NaN nor an infinity.  This is the
+/// exact negation of the runtime E0813 trap condition (SD-9).
+fn float_is_finite(value: &Float) -> Bool {
+    Bool::and(&[&value.is_nan().not(), &value.is_infinite().not()])
 }
 
 fn add_definedness(state: &mut SymbolicState, defined: Bool, code: &str) -> Result<(), String> {
@@ -6943,6 +7040,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
         SymbolicValue::Int(_)
+        | SymbolicValue::Float(_)
         | SymbolicValue::Unit
         | SymbolicValue::Opaque { .. }
         | SymbolicValue::Tuple(_)

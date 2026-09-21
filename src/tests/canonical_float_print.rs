@@ -7,9 +7,10 @@
 //! so reference and native stdout are byte-identical by construction.  The
 //! differential matrix pins three-consumer equivalence (reference
 //! interpreter, AST-free bytecode VM, native emitter on one shared
-//! `MirProgram`) plus the Z3 symbolic contract path.  The face is
-//! deliberately literal-only: float bindings and float arithmetic stay on
-//! the mixed compatibility route, which the closing pins assert.
+//! `MirProgram`) plus the Z3 symbolic contract path.  The face was
+//! deliberately literal-only at R6-1053; R6-1054/R6-1061 migrated float
+//! bindings and Add/Subtract arithmetic to `canonical_float_bind.rs`, and
+//! what stays mixed here (multiply) is pinned by the closing test.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -159,15 +160,16 @@ fn float_print_ensures_contract_verifies_on_mir() {
 }
 
 // R6-1054 restatement: the float BIND face this pin used to hold closed now
-// routes canonical (see `canonical_float_bind.rs`); what stays mixed here is
-// float ARITHMETIC — a `+` operand re-checks its f64 type against the profile
-// even when the print face is admitted, because the island has no float
-// arithmetic contract (the MIR verifier keeps floats NotInTrustedSubset).
+// routes canonical (see `canonical_float_bind.rs`).  R6-1061 restatement:
+// float ADD/SUBTRACT joined it too, so what stays mixed here is float
+// MULTIPLY — the island's `binary_supported` matrix keeps multiply outside
+// `copy-scalar-collection-v1` until the reference/bytecode/native triangle
+// grows the operation, and the classifier therefore holds the graph mixed.
 #[test]
 fn float_binding_and_arithmetic_stay_mixed() {
     let source = r#"
         func main() -> i32 {
-            println(0.5 + 1.5)
+            println(0.5 * 1.5)
             0
         }
     "#;
@@ -179,6 +181,6 @@ fn float_binding_and_arithmetic_stay_mixed() {
     assert_eq!(
         crate::core::mir::classify_scalar_collection_admission(&checked),
         crate::core::mir::ScalarCollectionAdmission::MixedCoverage,
-        "float arithmetic must stay on the mixed compatibility route"
+        "float multiply must stay on the mixed compatibility route"
     );
 }

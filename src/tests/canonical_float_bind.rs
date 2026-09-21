@@ -1,6 +1,7 @@
 //! Canonical float-bind differential tests (R6-1054; R6-1057 widens the
 //! face with float assigns; R6-1059 widens it with second-hand assign
-//! roots; R6-1060 widens it with second-hand bind roots).
+//! roots; R6-1060 widens it with second-hand bind roots; R6-1061 widens it
+//! with finite-only f64 Add/Subtract arithmetic).
 //!
 //! A float literal bound to a local and read by `println` lowers as
 //! `Const(FloatBits)` → `Move` into the slot → `Clone` slot read →
@@ -12,12 +13,16 @@
 //! reassignment into the same face (Copy f64 targets need no drop glue, so
 //! the Move replacement cannot leak).  R6-1059 admits a second-hand assign
 //! root (`x = y` with a plain local read as RHS) and R6-1060 the mirror
-//! second-hand bind root (`let y = x`): inside a concrete island an f64
-//! local can only originate in an admitted literal bind, so a local read
-//! adds no unclassified provenance.  Float arithmetic and call-result
-//! binds keep their explicit mixed floors (Binary operand recheck; the
-//! call-result provenance is an unmigrated body) until their contracts are
-//! independently materialized.
+//! second-hand bind root (`let y = x`).  R6-1061 admits Add/Subtract over
+//! float-symbolic roots: the verifier models the operation in an IEEE
+//! symbolic Float domain (round-nearest-ties-even, the exact `fadd`/`fsub`
+//! semantics) with an E0813 finiteness definedness obligation mirroring the
+//! runtime operand/result traps, the classification tracks float-symbolic
+//! locals with branch-generation stamps, and the island gate's binary
+//! matrix admits f64 Add/Subtract beside its integer rows.  Call-result
+//! binds, Multiply/Divide, arithmetic on opaque-widen locals and uses that
+//! cross a branch boundary keep their explicit mixed floors until their
+//! contracts are independently materialized.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -184,6 +189,110 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "0.5\n",
         },
+        // R6-1061: finite-only f64 Add/Subtract over float-symbolic roots
+        // prints through the same face.  Reference and native share
+        // round-nearest-ties-even `fadd`/`fsub` semantics (the verifier's
+        // IEEE symbolic domain models exactly that), and the bytecode VM
+        // carries the matching float traps.
+        FloatBindCase {
+            name: "float_arithmetic_add_print",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    println(a + b)
+                    0
+                }
+            "#,
+            expected_stdout: "3.5\n",
+        },
+        FloatBindCase {
+            name: "float_arithmetic_subtract_print",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    println(a - b)
+                    0
+                }
+            "#,
+            expected_stdout: "-0.5\n",
+        },
+        // An integer literal operand widens as a known constant before the
+        // operation, so it stays inside the symbolic domain (shortest
+        // round-trip renders 3.5 without a trailing fraction).
+        FloatBindCase {
+            name: "float_arithmetic_literal_coerce",
+            source: r#"
+                func main() -> i32 {
+                    println(2 + 1.5)
+                    0
+                }
+            "#,
+            expected_stdout: "3.5\n",
+        },
+        FloatBindCase {
+            name: "float_arithmetic_chain",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    println(a + b - 0.5)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
+        // A bind whose initializer is admitted arithmetic produces a new
+        // float-symbolic local — the result feeds the print face through
+        // the same root vocabulary as any other local read.
+        FloatBindCase {
+            name: "float_arithmetic_bind_result",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    let z = a + b
+                    println(z)
+                    0
+                }
+            "#,
+            expected_stdout: "3.5\n",
+        },
+        // Second-hand chains and nested arithmetic compose: the operands of
+        // the outer Add are a second-hand read of an arithmetic bind and a
+        // literal-origin local.
+        FloatBindCase {
+            name: "float_arithmetic_second_hand_operand",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    let b = 2.0
+                    let c = a + b
+                    let d = c
+                    println(d + a)
+                    0
+                }
+            "#,
+            expected_stdout: "5\n",
+        },
+        // Arithmetic hosted inside a branch region is visible only within
+        // that region (branch-generation stamps), so the per-path state the
+        // verifier explores is exactly the state each path establishes.
+        FloatBindCase {
+            name: "float_arithmetic_in_branch",
+            source: r#"
+                func main() -> i32 {
+                    if 1 > 0 {
+                        let a = 1.5
+                        let b = 2.0
+                        println(a + b)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "3.5\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -239,8 +348,9 @@ fn float_bind_matrix_agrees_across_consumers() {
 }
 
 // The bind face graph (Const → Move → Clone → PrintlnFloat) carries no
-// float arithmetic, so the MIR verifier — which keeps float operations
-// NotInTrustedSubset — still proves the contract obligations end to end.
+// float arithmetic, so the MIR verifier proves the contract obligations
+// end to end — since R6-1061 in the IEEE symbolic domain, before that in
+// the opaque-value domain.
 #[test]
 fn float_bind_ensures_contract_verifies_on_mir() {
     let source = r#"
@@ -324,12 +434,79 @@ fn float_second_hand_bind_ensures_verifies_on_mir() {
     );
 }
 
-// The bind face is print-face-scoped: float arithmetic, call-result binds
-// and dead float binds in non-printing functions all keep the graph on the
-// explicit mixed compatibility route.  (R6-1057 restated the former literal
+// R6-1061: the arithmetic graph carries float Binary operations, so this is
+// the proof that the MIR verifier's IEEE symbolic domain closes the face —
+// Add/Subtract evaluate as round-nearest-ties-even FP arithmetic with an
+// E0813 finiteness definedness obligation (the mirror of the runtime
+// operand/result traps), and the contract proves on the routed MIR path
+// the default `mimi verify` entry reaches.
+#[test]
+fn float_arithmetic_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            let a = 1.5
+            let b = 2.0
+            println(a - b)
+            println(2 + 1.5)
+            println(a + b - 0.5)
+            let z = a + b
+            println(z)
+            0
+        }
+    "#;
+    let label = "float arithmetic ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-arithmetic-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// R6-1061: arithmetic hosted inside a branch region verifies per path —
+// the Branch exploration keeps each arm's symbolic state separate, so the
+// float-symbolic facts the branch establishes are exactly the facts its
+// path proves.
+#[test]
+fn float_arithmetic_in_branch_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            if 1 > 0 {
+                let a = 1.5
+                let b = 2.0
+                println(a + b)
+            }
+            0
+        }
+    "#;
+    let label = "float arithmetic in branch ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-arithmetic-branch-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The bind face is print-face-scoped: float operations outside the
+// symbolic domain (Multiply), arithmetic over opaque-widen provenance,
+// uses that cross a branch boundary, call-result binds and dead float
+// binds in non-printing functions all keep the graph on the explicit
+// mixed compatibility route.  (R6-1057 restated the former literal
 // float-assign mixed case, R6-1059 the second-hand float-assign case and
 // R6-1060 the second-hand float-bind case: all migrated into the matrix
-// above.)
+// above.  R6-1061 restates the former float-arithmetic case, which is now
+// the matrix's add/subtract rows.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -337,14 +514,76 @@ fn float_bind_faces_stay_mixed() {
         source: &'static str,
     }
     const CASES: &[MixedCase] = &[
-        // Arithmetic keeps its Binary operand floor.
+        // Multiply/Divide stay construction-rejected — the island matrix
+        // and the verifier fallback both keep them outside the symbolic
+        // domain, so the classification floor must hold.
         MixedCase {
-            name: "float_arithmetic_print",
+            name: "float_multiply_print",
             source: r#"
                 func main() -> i32 {
                     let a = 1.5
                     let b = 2.0
-                    println(a + b)
+                    println(a * b)
+                    0
+                }
+            "#,
+        },
+        // An int-typed local read is not a float-symbolic operand: its
+        // widening is an opaque Convert the verifier cannot model, so the
+        // operand floor keeps the shape mixed instead of luring the route
+        // into a verifier hard error.
+        MixedCase {
+            name: "float_arithmetic_int_local_operand",
+            source: r#"
+                func main() -> i32 {
+                    let n = 2
+                    let a = 1.5
+                    println(n + a)
+                    0
+                }
+            "#,
+        },
+        // An assign from opaque provenance removes the target from the
+        // float-symbolic set in walk order — the stale fact can never
+        // outlive the value that replaced it.
+        MixedCase {
+            name: "float_arithmetic_after_opaque_reassign",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.5
+                    let n = 3
+                    x = n
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+        },
+        // The known-constant widen assign is verifier-supported but not yet
+        // classified (the symbolic set only tracks f64-domain roots); the
+        // conservative envelope pins the gap until the widen face joins.
+        MixedCase {
+            name: "float_arithmetic_after_int_literal_assign",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.5
+                    x = 2
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+        },
+        // A use after any branch boundary cannot lean on a binding a
+        // different path may not have established (branch-generation
+        // stamps), so the use floors and the shape stays mixed.
+        MixedCase {
+            name: "float_arithmetic_use_after_branch",
+            source: r#"
+                func main() -> i32 {
+                    let a = 1.5
+                    if 1 > 0 {
+                        println(7)
+                    }
+                    println(a + 1.0)
                     0
                 }
             "#,

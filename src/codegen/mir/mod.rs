@@ -8126,7 +8126,7 @@ func main() -> i32 {
     }
 
     #[test]
-    fn f64_cross_state_flow_receipt_shares_one_mir_and_preserves_verifier_boundary() {
+    fn f64_cross_state_flow_receipt_shares_one_mir_and_proves_through_the_verifier() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi"
         ));
@@ -8167,14 +8167,16 @@ func main() -> i32 {
             .iter()
             .find(|result| result.func_name == owner.0)
             .expect("f64 recoverable Flow verifier result for main");
-        assert_eq!(
-            main_result.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
-        );
-        assert!(main_result
-            .message
-            .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE));
-        assert!(main_result.artifact.is_none());
+        // R6-1061 restatement: the transition's `self.balance + 1.0` now
+        // carries the Z3 IEEE Float symbolic domain, so the receipt proves
+        // on the canonical engine instead of reporting the float boundary.
+        assert_eq!(main_result.status, crate::verifier::VerifStatus::Proven);
+        assert!(main_result.constraint_count > 0);
+        let artifact = main_result
+            .artifact
+            .as_ref()
+            .expect("f64 recoverable Flow proof artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_f64_cross_state_flow_receipt");

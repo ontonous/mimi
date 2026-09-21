@@ -475,6 +475,7 @@ pub use islands::{
     has_unsupported_generic_record_update_candidate,
     has_unsupported_generic_result_projection_candidate,
     has_unsupported_generic_result_projection_fallback_candidate,
+    has_unsupported_generic_set_facade_candidate,
     has_unsupported_generic_variant_predicate_candidate, has_unsupported_list_concat_candidate,
     has_unsupported_list_reverse_candidate, multi_target_flow_union_face_closed,
     validate_managed_result_call_island, validate_scalar_collection_island,

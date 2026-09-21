@@ -9,7 +9,7 @@
 //! unrelated declarations; only types and operations that actually cross the
 //! executable MIR graph are inspected here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
@@ -827,6 +827,19 @@ pub fn has_unsupported_generic_list_facade_candidate(program: &CheckedProgram) -
     scan_scalar_collection_admission(program).has_unsupported_generic_list_facade_candidate
 }
 
+/// Return whether user-owned resolved bodies declare a generic `Set<T>` facade
+/// callable. No user-facing generic Set shape materializes a supported scalar
+/// MIR graph today, so a construction failure under a Complete admission must
+/// fail closed instead of re-entering the legacy route (the nested-assign
+/// coverage-scan false complete keeps its compatibility disposition because it
+/// carries no such callable).
+pub fn has_unsupported_generic_set_facade_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        !is_prelude_origin(program, &callable.body.root.origin)
+            && is_generic_set_facade_callable(program, callable)
+    })
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -863,6 +876,8 @@ fn scan_scalar_collection_once(
         float_print_functions,
         string_print_functions,
         current_callable: None,
+        float_symbolic_locals: BTreeMap::new(),
+        branch_generation: 0,
     };
 
     // R6-1052: the automatically merged prelude is a compatibility source,
@@ -877,6 +892,10 @@ fn scan_scalar_collection_once(
             continue;
         }
         scanner.current_callable = Some(owner.clone());
+        // R6-1061: the float-symbolic set is a per-callable, in-order walk
+        // fact — nothing survives across callable boundaries.
+        scanner.float_symbolic_locals.clear();
+        scanner.branch_generation = 0;
         let concrete = callable.signature.generic_parameters.is_empty();
         if !callable.signature.effects.is_empty()
             || callable.signature.parameters.iter().any(|parameter| {
@@ -928,6 +947,19 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// the StringHandle mirror of the float bind exemption (R6-1055).
     string_print_functions: BTreeSet<NodeId>,
     current_callable: Option<NodeId>,
+    /// R6-1061: locals whose current value the MIR verifier models in the
+    /// IEEE symbolic Float domain — bound by a float literal, a second-hand
+    /// float-symbolic read, or an admitted finite-only Add/Subtract of the
+    /// same.  Each entry records the branch generation at which the binding
+    /// was walked; arithmetic operands consult the set only at the same
+    /// generation, so a use after any branch or loop can never lean on a
+    /// binding a different path may not have established.  An assignment
+    /// from outside the domain removes the target outright.
+    float_symbolic_locals: BTreeMap<crate::core::ir::ResolvedLocalId, u64>,
+    /// Monotonic walk generation: bumped on every branch/loop entry and
+    /// never decremented, so straight-line code shares one generation and
+    /// anything hosted in a branch is visible only inside that region.
+    branch_generation: u64,
 }
 
 impl<'a> ScalarCollectionAdmissionScanner<'a> {
@@ -941,6 +973,96 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.string_print_functions.contains(owner))
+    }
+
+    /// R6-1061: is this expression something the MIR verifier models in the
+    /// symbolic Float domain?  A float literal, an integer literal (the
+    /// lowering widens it as a known constant), a projection-free read of a
+    /// float-symbolic local at the current walk generation, or a nested
+    /// admitted Add/Subtract of the same.  Load operands are checked against
+    /// the float-symbolic set so an int-typed local read (`n + 1.5`, whose
+    /// widening the verifier cannot model) never licenses an admission the
+    /// verifier would hard-reject.
+    fn expr_is_float_symbolic_operand(&self, expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::Literal(ResolvedLiteral::FloatBits(_) | ResolvedLiteral::Int(_)) => {
+                true
+            }
+            ResolvedExprKind::Binary {
+                op, left, right, ..
+            } => {
+                matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract)
+                    && self.expr_is_float_symbolic_operand(left)
+                    && self.expr_is_float_symbolic_operand(right)
+            }
+            ResolvedExprKind::Load(place) => {
+                place.projections.is_empty()
+                    && self
+                        .float_symbolic_locals
+                        .get(&place.base)
+                        .is_some_and(|generation| *generation == self.branch_generation)
+            }
+            _ => false,
+        }
+    }
+
+    /// The root-position variant of the operand predicate: the same domain,
+    /// minus the bare integer literal (which only carries float identity as
+    /// a binary operand, never as a bound/printed value of its own).
+    fn expr_is_float_symbolic_root(&self, expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(_)) => false,
+            _ => self.expr_is_float_symbolic_operand(expression),
+        }
+    }
+
+    /// Record every plain binding of an F64-typed pattern as float-symbolic
+    /// at the current walk generation.  Reference bindings are excluded:
+    /// they alias instead of transferring the value the set models.
+    fn introduce_float_symbolic_bindings(&mut self, pattern: &ResolvedPattern) {
+        if !matches!(
+            self.program.resolved_types().get(&pattern.ty),
+            Some(ResolvedType::Primitive(PrimitiveType::F64))
+        ) {
+            return;
+        }
+        match &pattern.kind {
+            ResolvedPatternKind::Binding {
+                local,
+                by_reference,
+            } => {
+                if by_reference.is_none() {
+                    self.float_symbolic_locals
+                        .insert(local.clone(), self.branch_generation);
+                }
+            }
+            ResolvedPatternKind::Constructor { fields, .. } => {
+                for (_, field) in fields {
+                    self.introduce_float_symbolic_bindings(field);
+                }
+            }
+            ResolvedPatternKind::Tuple(items) | ResolvedPatternKind::Array(items) => {
+                for item in items {
+                    self.introduce_float_symbolic_bindings(item);
+                }
+            }
+            ResolvedPatternKind::Slice { prefix, rest } => {
+                for item in prefix {
+                    self.introduce_float_symbolic_bindings(item);
+                }
+                if let Some(rest) = rest {
+                    self.introduce_float_symbolic_bindings(rest);
+                }
+            }
+            ResolvedPatternKind::Wildcard | ResolvedPatternKind::Literal(_) => {}
+        }
+    }
+
+    /// R6-1061: every branch/loop entry raises the walk generation so
+    /// float-symbolic facts established outside (or inside) can never be
+    /// consulted across the region boundary.
+    fn enter_branch_region(&mut self) {
+        self.branch_generation += 1;
     }
 
     fn require_profile_type(&mut self, id: &crate::core::ResolvedTypeId) {
@@ -1039,18 +1161,49 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             };
                             face_active
                         });
+                    // R6-1061: an f64 bind whose initializer is an admitted
+                    // finite-only Add/Subtract over float-symbolic roots
+                    // produces a value the MIR verifier holds in the
+                    // symbolic Float domain, so the binding joins that set
+                    // and the arithmetic skips the profile-type floor
+                    // exactly like the literal and second-hand roots.  The
+                    // per-function float print contract still envelopes the
+                    // whole face.
+                    let arithmetic_print_face_root = concrete
+                        && self.in_float_print_function()
+                        && matches!(
+                            self.program.resolved_types().get(&pattern.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                        && initializer
+                            .as_ref()
+                            .is_some_and(|value| self.expr_is_float_symbolic_root(value));
+                    if arithmetic_print_face_root {
+                        self.introduce_float_symbolic_bindings(pattern);
+                    }
                     self.visit_pattern(
                         pattern,
                         concrete,
-                        print_face_literal_initializer || second_hand_print_face_root,
+                        print_face_literal_initializer
+                            || second_hand_print_face_root
+                            || arithmetic_print_face_root,
                     );
                     if let Some(initializer) = initializer {
-                        if !second_hand_print_face_root {
+                        // Literal and second-hand roots keep their existing
+                        // walk (the literal exemption floors nothing); only
+                        // the new arithmetic root must bypass the visit,
+                        // because its Binary node carries an out-of-profile
+                        // type the top floor would reject.
+                        if !second_hand_print_face_root && !arithmetic_print_face_root {
                             self.visit_expr(initializer, concrete);
                         }
                     }
                 }
-                ResolvedStmtKind::Assign { value, .. } => {
+                ResolvedStmtKind::Assign {
+                    target,
+                    value,
+                    conversion,
+                } => {
                     // R6-1055: owned-String assign targets are outside the
                     // MIR Phase 0 scalar-assign face
                     // (`resolved_assign_is_admitted_scalar_shape` admits
@@ -1095,7 +1248,33 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             Some(ResolvedType::Primitive(PrimitiveType::F64))
                         )
                         && resolved_assign_is_admitted_scalar_shape(self.program, statement);
-                    if !second_hand_float_root {
+                    // R6-1061: an assign whose RHS is an admitted
+                    // finite-only Add/Subtract over float-symbolic roots
+                    // (or a float literal / second-hand read) keeps the
+                    // target in the symbolic Float domain — the island
+                    // gate re-proves the shape on the materialized graph.
+                    // Every other RHS removes the target from the set:
+                    // after `x = n` (an opaque widen) arithmetic on x must
+                    // floor again, in walk order, so a stale symbolic fact
+                    // can never outlive the value that replaced it.
+                    let conversion_target_is_f64 = matches!(
+                        self.program.resolved_types().get(&conversion.to),
+                        Some(ResolvedType::Primitive(PrimitiveType::F64))
+                    );
+                    let float_symbolic_assign = concrete
+                        && self.in_float_print_function()
+                        && conversion_target_is_f64
+                        && resolved_assign_is_admitted_scalar_shape(self.program, statement)
+                        && self.expr_is_float_symbolic_root(value);
+                    if target.projections.is_empty() {
+                        if float_symbolic_assign {
+                            self.float_symbolic_locals
+                                .insert(target.base.clone(), self.branch_generation);
+                        } else {
+                            self.float_symbolic_locals.remove(&target.base);
+                        }
+                    }
+                    if !second_hand_float_root && !float_symbolic_assign {
                         self.visit_expr(value, concrete);
                     }
                 }
@@ -1107,6 +1286,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 ResolvedStmtKind::Continue => {}
                 ResolvedStmtKind::Expr(value) => self.visit_expr(value, concrete),
                 ResolvedStmtKind::While { condition, body } => {
+                    self.enter_branch_region();
                     self.visit_expr(condition, concrete);
                     self.visit_block(body, concrete);
                 }
@@ -1115,6 +1295,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     initializer,
                     body,
                 } => {
+                    self.enter_branch_region();
                     self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(initializer, concrete);
                     self.visit_block(body, concrete);
@@ -1125,6 +1306,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     then_block,
                     else_block,
                 } => {
+                    self.enter_branch_region();
                     self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(initializer, concrete);
                     self.visit_block(then_block, concrete);
@@ -1140,6 +1322,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     iterable,
                     body,
                 } => {
+                    self.enter_branch_region();
                     self.visit_pattern(pattern, concrete, false);
                     self.visit_expr(iterable, concrete);
                     self.visit_block(body, concrete);
@@ -1154,6 +1337,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     }
                 }
                 ResolvedStmtKind::Pinned { value, body, .. } => {
+                    self.enter_branch_region();
                     self.visit_expr(value, concrete);
                     self.visit_block(body, concrete);
                 }
@@ -1313,9 +1497,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 // StringHandle and f64 print faces) are Canonical MIR
                 // nodes here. Other println shapes (aggregate, multi-arg)
                 // remain on the explicit mixed compatibility route; float
-                // arithmetic keeps its Binary operand mixed floor until its
-                // contract is independently materialized (R6-1057 migrated
-                // the float assign face, so assigns no longer floor here).
+                // arithmetic joins the f64 print face through the
+                // float-symbolic root admission below (R6-1061), while
+                // any other float shape keeps its Binary operand floor.
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
@@ -1356,6 +1540,11 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             true,
                         )
                         | (ResolvedExprKind::Load(_), true) => true,
+                        // R6-1061: an admitted finite-only Add/Subtract
+                        // over float-symbolic roots prints through the
+                        // same face; the recursion polices every operand
+                        // against the float-symbolic domain so the Binary
+                        // node never reaches the profile-type floor.
                         _ => {
                             string_print_call
                                 && matches!(
@@ -1364,6 +1553,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                                         crate::core::ResolvedLiteral::String(_)
                                     ) | ResolvedExprKind::Load(_)
                                 )
+                                || float_print_call
+                                    && matches!(
+                                        &argument.value.kind,
+                                        ResolvedExprKind::Binary { .. }
+                                    )
+                                    && self.expr_is_float_symbolic_root(&argument.value)
                         }
                     };
                     if print_face_value_root {
@@ -1429,11 +1624,13 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 then_block,
                 else_block,
             } => {
+                self.enter_branch_region();
                 self.visit_expr(condition, concrete);
                 self.visit_block(then_block, concrete);
                 self.visit_block(else_block, concrete);
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
+                self.enter_branch_region();
                 self.visit_expr(scrutinee, concrete);
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
@@ -1457,7 +1654,10 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 }
             }
             ResolvedExprKind::Cast { value, .. } => self.visit_expr(value, concrete),
-            ResolvedExprKind::Lambda(lambda) => self.visit_block(&lambda.body, concrete),
+            ResolvedExprKind::Lambda(lambda) => {
+                self.enter_branch_region();
+                self.visit_block(&lambda.body, concrete)
+            }
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::Load(_)
             | ResolvedExprKind::Constant(_)
@@ -1692,6 +1892,13 @@ fn generic_list_operation_facade_body(
     let Some(callable) = program.callable(template) else {
         return false;
     };
+    generic_list_body_has_operation(&callable.body.root)
+}
+
+/// Body-level walker shared by the call-site facade predicate and the
+/// callable-level mixedness whitelist: does this block contain a direct List
+/// `len`/`reverse`/`concat` operation, nested inside any expression shape?
+fn generic_list_body_has_operation(root: &crate::core::ir::ResolvedBlock) -> bool {
     fn expr_has_operation(expression: &ResolvedExpr) -> bool {
         match &expression.kind {
             ResolvedExprKind::Call(call) => {
@@ -1838,7 +2045,7 @@ fn generic_list_operation_facade_body(
                 .as_ref()
                 .is_some_and(|value| expr_has_operation(value))
     }
-    block_has_operation(&callable.body.root)
+    block_has_operation(root)
 }
 
 /// Return whether a generic List facade body constructs a List value. This is
@@ -1856,6 +2063,13 @@ fn generic_list_construction_facade_body(
     let Some(callable) = program.callable(template) else {
         return false;
     };
+    generic_list_body_has_construction(&callable.body.root)
+}
+
+/// Body-level walker shared by the call-site construction predicate and the
+/// callable-level mixedness whitelist: does this block construct a List
+/// value, nested inside any expression shape?
+fn generic_list_body_has_construction(root: &crate::core::ir::ResolvedBlock) -> bool {
     fn expr_has_construction(expression: &ResolvedExpr) -> bool {
         match &expression.kind {
             ResolvedExprKind::List(_) => true,
@@ -1990,7 +2204,45 @@ fn generic_list_construction_facade_body(
                 .as_ref()
                 .is_some_and(|value| expr_has_construction(value))
     }
-    block_has_construction(&callable.body.root)
+    block_has_construction(root)
+}
+
+/// Callable-level mirror of the admitted generic List facade call shape: one
+/// generic parameter, a `List<T>`-mentioning signature, and a body whose
+/// direct List operation or List construction the island scanner already
+/// admits at the call site.  The shared declaration-mixedness floor uses this
+/// to keep an admitted facade distinct from an unrelated generic function
+/// that merely mentions `List<T>`.
+fn is_generic_list_facade_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    callable.signature.generic_parameters.len() == 1
+        && mentions_generic_list(
+            program,
+            &callable.signature.parameters,
+            &callable.signature.result,
+            &callable.signature.generic_parameters,
+        )
+        && (generic_list_body_has_operation(&callable.body.root)
+            || generic_list_body_has_construction(&callable.body.root))
+}
+
+/// Callable-level mirror of `is_scalar_set_facade_call`: one generic
+/// parameter over a `Set<T>`-mentioning signature.  Shape-only by design —
+/// the call-site scan independently flags unsupported element instantiations
+/// before any route decision consumes the coverage floor.
+fn is_generic_set_facade_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    callable.signature.generic_parameters.len() == 1
+        && mentions_generic_set(
+            program,
+            &callable.signature.parameters,
+            &callable.signature.result,
+            &callable.signature.generic_parameters,
+        )
 }
 
 fn mentions_generic_list(
@@ -3165,6 +3417,8 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                             || is_generic_option_projection_fallback_callable(program, callable)
                             || is_generic_result_projection_callable(program, callable)
                             || is_generic_result_projection_fallback_callable(program, callable)
+                            || is_generic_list_facade_callable(program, callable)
+                            || is_generic_set_facade_callable(program, callable)
                     });
                 ((!generic_record_callable && !generic_variant_callable)
                     && !function.generics.is_empty())
@@ -3189,6 +3443,8 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     && !is_generic_option_projection_fallback_callable(program, callable)
                     && !is_generic_result_projection_callable(program, callable)
                     && !is_generic_result_projection_fallback_callable(program, callable)
+                    && !is_generic_list_facade_callable(program, callable)
+                    && !is_generic_set_facade_callable(program, callable)
                     && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()
@@ -5037,6 +5293,7 @@ fn binary_supported(
 ) -> bool {
     let integer = is_signed_integer(&validator.program.type_catalog(), left);
     let boolean = is_bool(&validator.program.type_catalog(), left);
+    let float = is_f64(validator.program.type_catalog(), left);
     let result_is_bool = is_bool(&validator.program.type_catalog(), result);
     match op {
         // Keep this matrix identical to the native MIR validator and the
@@ -5047,12 +5304,16 @@ fn binary_supported(
         // signed integers are admitted by both consumer gates (checked
         // overflow and MIN/-1 / zero-divide traps, SD-7/SD-8) and R6-1052's
         // prelude decoupling made real programs with them visible to this
-        // matrix for the first time.
-        ResolvedBinaryOp::Add
-        | ResolvedBinaryOp::Subtract
-        | ResolvedBinaryOp::Multiply
-        | ResolvedBinaryOp::Divide
-        | ResolvedBinaryOp::Remainder => integer && left == result,
+        // matrix for the first time.  R6-1061: the finite-only f64
+        // Add/Subtract face joins under the same rule — the native emitter
+        // traps on non-finite operands/results (E0813 guard), the bytecode
+        // VM carries the matching float traps, and the MIR verifier models
+        // the operation in its IEEE symbolic domain with the E0813
+        // definedness obligation.
+        ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract => (integer || float) && left == result,
+        ResolvedBinaryOp::Multiply | ResolvedBinaryOp::Divide | ResolvedBinaryOp::Remainder => {
+            integer && left == result
+        }
         ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
             (integer || boolean) && result_is_bool
         }

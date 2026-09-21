@@ -692,6 +692,23 @@ pub(crate) fn select_default_route(
                     "canonical generic List facade candidate did not materialize a supported scalar MIR shape",
                 );
             }
+            // A generic Set facade admitted under a Complete scan carries no
+            // compatibility floor: a construction failure means the facade
+            // graph itself did not lower, so it must fail closed instead of
+            // re-entering the legacy route.  A Complete scan without such a
+            // callable is the nested-assign coverage-scan false complete and
+            // keeps its designed compatibility disposition.
+            if complete_collection_candidate
+                && mimi::core::mir::has_unsupported_generic_set_facade_candidate(checked)
+            {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    true,
+                    false,
+                    false,
+                    "canonical MIR construction failed",
+                );
+            }
             if record_hint && generic_record_projection_unsupported_hint {
                 return reject_migrated_candidates(
                     flow_candidate,
@@ -4184,9 +4201,13 @@ mod tests {
             .expect("parse");
         mimi::loader::merge_prelude_into(&mut file);
         let checked = mimi::core::check_program(&file).expect("check");
+        // R6-1052 restatement: the prelude is filtered out of mixed coverage,
+        // so this fixture's all-island graph (list literal + reverse/len
+        // builtins + drop + arithmetic) now classifies as a Complete
+        // admission; the route assertion below is unchanged.
         assert_eq!(
             mimi::core::mir::classify_scalar_collection_admission(&checked),
-            mimi::core::mir::ScalarCollectionAdmission::MixedCoverage
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
         );
         assert!(matches!(
             select_default_route(&checked, &file),
@@ -4369,9 +4390,12 @@ mod tests {
 
     #[test]
     fn standalone_unsupported_println_stays_outside_migrated_route() {
+        // R6-1052 restatement: a single-argument String println is a migrated
+        // plain-scalar face, so the standalone boundary pin uses the still
+        // unsupported multi-argument println shape.
         let source = r#"
             func main() -> i32 {
-                println("legacy")
+                println("legacy", 1)
                 0
             }
         "#;
@@ -4388,11 +4412,14 @@ mod tests {
 
     #[test]
     fn scalar_collection_with_unsupported_println_stays_on_explicit_compatibility_route() {
+        // R6-1052 restatement: the unsupported println is the multi-argument
+        // shape; a single String argument now prints through the migrated
+        // owned-String stdout face instead of flooring the graph.
         let source = r#"
             func main() -> i32 {
                 let values = {4, 1, 1}
                 println(contains(values, 1))
-                println("legacy")
+                println("legacy", 1)
                 0
             }
         "#;

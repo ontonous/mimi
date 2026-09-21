@@ -1415,7 +1415,7 @@ fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
 }
 
 #[test]
-fn public_checked_verifier_reports_f64_flow_float_boundary_from_mir() {
+fn public_checked_verifier_proves_f64_flow_arithmetic_from_mir() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
     let file = parse_memory_source(source, "mir-f64-flow-source-receipt-public-api")
@@ -1432,13 +1432,14 @@ fn public_checked_verifier_reports_f64_flow_float_boundary_from_mir() {
     let result = results
         .iter()
         .find(|result| result.func_name == "main")
-        .expect("f64 Flow verifier boundary result");
-    assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
-    assert_eq!(result.constraint_count, 0);
-    assert!(result
-        .message
-        .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE));
-    assert!(result.artifact.is_none());
+        .expect("f64 Flow verifier result");
+    // R6-1061 restatement: the transition's `self.balance + 1.0` now carries
+    // the Z3 IEEE Float symbolic domain, so the recoverable receipt proves
+    // on the canonical engine instead of reporting the float boundary.
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
 }
 
 #[test]

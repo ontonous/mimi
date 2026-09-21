@@ -20081,7 +20081,7 @@ fn canonical_mir_m1_m3_cli_acceptance_has_real_proofs_and_business_observations(
 }
 
 #[test]
-fn canonical_f64_flow_cli_uses_mir_execution_and_reports_float_verifier_boundary() {
+fn canonical_f64_flow_cli_uses_mir_execution_and_proves_the_contract() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -20141,10 +20141,13 @@ fn canonical_f64_flow_cli_uses_mir_execution_and_reports_float_verifier_boundary
         String::from_utf8_lossy(&verification.stdout)
     );
     let verify_stdout = String::from_utf8_lossy(&verification.stdout);
-    assert!(verify_stdout.contains("MIR-VERIFIER-FLOAT-001"));
-    assert!(verify_stdout.contains("0/1 verified"));
-    assert!(!verify_stdout.contains("No contracts to verify"));
-    assert!(!verify_stdout.contains("canonical MIR ensures contract proven"));
+    // R6-1061 restatement: the transition's float arithmetic now carries the
+    // Z3 IEEE Float symbolic domain, so the routed verifier proves the
+    // contract instead of reporting the runtime-only float boundary.
+    assert!(verify_stdout.contains("1/1 verified"));
+    assert!(verify_stdout.contains("canonical MIR ensures contract proven"));
+    assert!(!verify_stdout.contains("MIR-VERIFIER-FLOAT-001"));
+    assert!(!verify_stdout.contains("0/1 verified"));
 
     let mir = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -22340,6 +22343,78 @@ fn canonical_mir_second_hand_bind_routes_canonical_with_proof() {
 
     let native = project_root().join("target").join(format!(
         "mir_second_hand_bind_native_{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, expected);
+    let _ = fs::remove_file(&native);
+}
+
+// R6-1061 face opening: finite-only f64 Add/Subtract over float-symbolic
+// roots (literal binds, second-hand reads, arithmetic binds, known-constant
+// literal coercion) routes canonical on the default entry, the routed
+// `mimi verify` entry proves the ensures contract through the MIR
+// verifier's IEEE symbolic domain, and the native `build --mir` binary
+// agrees byte for byte.
+#[test]
+fn canonical_mir_float_arithmetic_routes_canonical_with_proof() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_float_arithmetic_face.mimi");
+    let expected = b"-0.5\n3.5\n3\n3.5\n";
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "float arithmetic program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, expected);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "float arithmetic program must route canonical on the default entry: {stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .unwrap();
+    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    assert!(
+        verify.status.success(),
+        "routed verify must prove the contract: {verify_out}"
+    );
+    assert!(
+        verify_out.contains("1/1 verified"),
+        "routed verify must prove exactly the main contract: {verify_out}"
+    );
+
+    let native = project_root().join("target").join(format!(
+        "mir_float_arithmetic_native_{}",
         std::process::id()
     ));
     let build = Command::new(mimi_bin())
