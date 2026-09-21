@@ -164,17 +164,24 @@ fn float_print_ensures_contract_verifies_on_mir() {
 // float ADD/SUBTRACT joined it too.  R6-1067 restatement: the island
 // triangle (reference executor, bytecode VM, native emitter, verifier IEEE
 // domain) grew Multiply/Divide, and the surface cannot even express float
-// remainder (E0202), so the mixed floor that stays here is arithmetic over
-// a call-sourced float — its provenance is an unmigrated body, the operand
-// widening lands opaque, and the verifier hard-rejects the mix.
+// remainder (E0202).  R6-1071 restatement: arithmetic over a call-sourced
+// float whose callee sits on the one-edge print closure routes canonical
+// too — the verifier symbolically executes the callee body, so the binding
+// is exactly modeled.  The mixed floor that stays here is arithmetic over a
+// TWO-EDGE call-sourced float: `mid` sits on main's print closure, but its
+// own body calls `inner`, which the closure does not reach — mid's root
+// call-result floors, and the composition stays mixed.
 #[test]
 fn float_binding_and_arithmetic_stay_mixed() {
     let source = r#"
-        func value() -> f64 {
+        func inner() -> f64 {
             0.5
         }
+        func mid() -> f64 {
+            inner()
+        }
         func main() -> i32 {
-            let x = value()
+            let x = mid()
             println(x * 2.0)
             0
         }
@@ -187,6 +194,6 @@ fn float_binding_and_arithmetic_stay_mixed() {
     assert_eq!(
         crate::core::mir::classify_scalar_collection_admission(&checked),
         crate::core::mir::ScalarCollectionAdmission::MixedCoverage,
-        "arithmetic over a call-sourced float must stay on the mixed compatibility route"
+        "arithmetic over a two-edge call-sourced float must stay on the mixed compatibility route"
     );
 }

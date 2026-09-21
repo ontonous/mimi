@@ -1,0 +1,28 @@
+// R6-1071: the bind side of the one-edge f64 print closure.  A face-closure
+// callee's returned f64 binds into a local (verified by the verifier's
+// symbolic execution of the callee body), the seeded binding feeds later
+// arithmetic through the symbolic root vocabulary, and helpers on the
+// closure bind their own f64 literals and parameter arithmetic.  Expected
+// output: 0.5 / 1 / 1.5 / 3.
+func value() -> f64 {
+    0.5
+}
+
+func lit() -> f64 {
+    let w = 1.5
+    w
+}
+
+func scale(v: f64) -> f64 {
+    let w = v * 2.0
+    w
+}
+
+func main() -> i32 {
+    let x = value()
+    println(x)
+    println(x * 2.0)
+    println(lit())
+    println(scale(1.5))
+    0
+}

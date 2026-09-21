@@ -1345,11 +1345,16 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // exact consumption shape.  Every other out-of-profile
                     // origin (call result, arithmetic, second-hand local)
                     // still takes the profile-type floor below.
+                    // R6-1071: the f64 half of the literal face follows the
+                    // one-edge f64 print closure — a helper on a caller's
+                    // print closure binds its own f64 literal under the same
+                    // contract the island gate re-proves per function.  The
+                    // owned-String half stays print-function-scoped.
                     let print_face_literal_initializer =
                         match initializer.as_ref().map(|value| &value.kind) {
                             Some(ResolvedExprKind::Literal(
                                 crate::core::ResolvedLiteral::FloatBits(_),
-                            )) => self.in_float_print_function(),
+                            )) => self.in_float_face_function(),
                             Some(ResolvedExprKind::Literal(
                                 crate::core::ResolvedLiteral::String(_),
                             )) => self.in_string_print_function(),
@@ -1360,13 +1365,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // joins the same face under the same per-function print
                     // contract — the mirror of the R6-1059 assign root.
                     // Inside a concrete island a local of these types can
-                    // only originate in an admitted literal bind (call
-                    // results, parameters and arithmetic floor the whole
-                    // program before this point), so the read adds no
-                    // unclassified provenance; the island gate's Clone arm
-                    // re-proves the contract on the materialized graph.
-                    // Call-result roots stay floored (they are not Load
-                    // nodes and their provenance is an unmigrated body).
+                    // only originate in an admitted literal bind, a seeded
+                    // parameter or an admitted call-result bind (everything
+                    // else floors the whole program before this point), so
+                    // the read adds no unclassified provenance; the island
+                    // gate's Clone arm re-proves the contract on the
+                    // materialized graph.  R6-1071: the f64 half widens to
+                    // the one-edge print closure; the owned-String half
+                    // stays print-function-scoped.
                     let second_hand_print_face_root = concrete
                         && initializer.as_ref().is_some_and(|value| {
                             let face_active = match &value.kind {
@@ -1374,7 +1380,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                                     matches!(
                                         self.program.resolved_types().get(&value.ty),
                                         Some(ResolvedType::Primitive(PrimitiveType::F64))
-                                    ) && self.in_float_print_function()
+                                    ) && self.in_float_face_function()
                                         || matches!(
                                             self.program.resolved_types().get(&value.ty),
                                             Some(ResolvedType::Primitive(PrimitiveType::String))
@@ -1393,9 +1399,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // and the arithmetic skips the profile-type floor
                     // exactly like the literal and second-hand roots.  The
                     // per-function float print contract still envelopes the
-                    // whole face.
+                    // whole face.  R6-1071: the envelope widens to the
+                    // one-edge f64 print closure — a called helper's
+                    // straight-line arithmetic over its seeded parameter is
+                    // exactly what the closure face materializes.
                     let arithmetic_print_face_root = concrete
-                        && self.in_float_print_function()
+                        && self.in_float_face_function()
                         && matches!(
                             self.program.resolved_types().get(&pattern.ty),
                             Some(ResolvedType::Primitive(PrimitiveType::F64))
@@ -1404,6 +1413,33 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             .as_ref()
                             .is_some_and(|value| self.expr_is_float_symbolic_root(value));
                     if arithmetic_print_face_root {
+                        self.introduce_float_symbolic_bindings(pattern);
+                    }
+                    // R6-1071: a call-result bind whose callee sits on the
+                    // one-edge f64 print closure joins the face — the value
+                    // returns from a callable the closure already proves
+                    // (parameter/result face), so the binding is a plain
+                    // Move of an exactly-modeled f64.  The binding joins the
+                    // float-symbolic set so later arithmetic over it stays
+                    // in the same verifier-modeled domain every runtime
+                    // consumer computes identically (E0813 owns finiteness).
+                    // Off-closure callees keep the pattern floor: their f64
+                    // provenance has no print face one edge away.
+                    let float_call_result_bind_root = concrete
+                        && matches!(
+                            self.program.resolved_types().get(&pattern.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::F64))
+                        )
+                        && matches!(
+                            initializer.as_ref().map(|value| &value.kind),
+                            Some(ResolvedExprKind::Call(call))
+                                if matches!(
+                                    &call.callee,
+                                    ResolvedCallee::Function(owner)
+                                        if self.float_face_callables.contains(owner)
+                                )
+                        );
+                    if float_call_result_bind_root {
                         self.introduce_float_symbolic_bindings(pattern);
                     }
                     // R6-1064: an int-typed bind of a literal initializer
@@ -1426,14 +1462,18 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         concrete,
                         print_face_literal_initializer
                             || second_hand_print_face_root
-                            || arithmetic_print_face_root,
+                            || arithmetic_print_face_root
+                            || float_call_result_bind_root,
                     );
                     if let Some(initializer) = initializer {
                         // Literal and second-hand roots keep their existing
                         // walk (the literal exemption floors nothing); only
-                        // the new arithmetic root must bypass the visit,
-                        // because its Binary node carries an out-of-profile
-                        // type the top floor would reject.
+                        // the arithmetic root must bypass the visit, because
+                        // its Binary node carries an out-of-profile type the
+                        // top floor would reject.  The call-result root walks
+                        // normally: the visit_expr call-result face admits
+                        // the call's own f64 type while the Call arm still
+                        // polices the prelude floor, arity and arguments.
                         if !second_hand_print_face_root && !arithmetic_print_face_root {
                             self.visit_expr(initializer, concrete);
                         }

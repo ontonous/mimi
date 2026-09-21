@@ -18404,6 +18404,63 @@ fn canonical_mir_f64_cross_function_print_routes_canonical_and_matches_native() 
 }
 
 #[test]
+fn canonical_mir_f64_cross_function_bind_routes_canonical_and_matches_native() {
+    // R6-1071: the bind side of the one-edge f64 print closure routes
+    // canonical on the default entry — a face-closure callee's returned f64
+    // binds into a local and feeds later arithmetic, and closure helpers
+    // bind their own f64 literals and parameter arithmetic — with the
+    // native MIR binary agreeing with the default backend on every shape.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_cross_function_bind.mimi");
+    let expected = "0.5\n1\n1.5\n3\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-f64-cross-bind-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn cross-function f64 bind native build");
+    assert!(
+        build.status.success(),
+        "the admitted cross-function f64 bind face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run cross-function f64 bind fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the cross-function bind face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted cross-function bind face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")

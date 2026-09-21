@@ -20,9 +20,9 @@
 //! runtime operand/result traps, the classification tracks float-symbolic
 //! locals with branch-generation stamps, and the island gate's binary
 //! matrix admits f64 Add/Subtract beside its integer rows.  Call-result
-//! binds, Multiply/Divide, arithmetic on opaque-widen locals and uses that
-//! cross a branch boundary keep their explicit mixed floors until their
-//! contracts are independently materialized.
+//! binds from off-closure callees, arithmetic on opaque-widen locals and
+//! uses that cross a branch boundary keep their explicit mixed floors
+//! until their contracts are independently materialized.
 //! R6-1062 admits the integer-literal widen assign (`x = 2` into an F64
 //! target): its `assign_numeric_convert` sources the literal const
 //! directly, so the verifier widens the known constant exactly and the
@@ -44,6 +44,13 @@
 //! call result, and the island gate mirrors the same closure per
 //! materialized function.  Beyond one edge, non-face parameters, call-result
 //! binds and branchy float returns keep their explicit floors.
+//! R6-1071 completes the bind side of the same closure: a call-result bind
+//! whose callee sits on the closure joins the face (the verifier
+//! symbolically executes the callee body, so the binding is exactly
+//! modeled), and the literal/second-hand/arithmetic f64 bind roots widen
+//! from the per-function print contract to the closure — a helper on a
+//! caller's print closure binds its own f64 literal and arithmetic.  The
+//! owned-String bind half stays print-function-scoped.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -533,6 +540,26 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "-0\n1\n",
         },
+        // R6-1071: a call-result bind whose callee sits on the one-edge f64
+        // print closure joins the face — the verifier symbolically executes
+        // the callee body, so the binding is a plain Move of an exactly
+        // modeled f64 and the seeded binding feeds later arithmetic through
+        // the ordinary symbolic root vocabulary.
+        FloatBindCase {
+            name: "float_call_result_bind_and_arithmetic_print",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func main() -> i32 {
+                    let x = value()
+                    println(x)
+                    println(x * 2.0)
+                    0
+                }
+            "#,
+            expected_stdout: "0.5\n1\n",
+        },
         // R6-1070: the one-edge f64 print closure — the print face crosses
         // one call edge in both directions.  A helper that prints its own
         // f64 parameter admits the caller's literal argument (Const in the
@@ -882,9 +909,8 @@ fn float_int_read_widen_constant_is_nonzero_on_mir() {
 
 // The bind face is print-face-scoped: float operations outside the
 // symbolic domain (Multiply), arithmetic over call-sourced widen
-// provenance, uses that cross a branch boundary, call-result binds and
-// dead float binds in non-printing functions all keep the graph on the
-// explicit mixed compatibility route.  (R6-1057 restated the former
+// provenance and uses that cross a branch boundary all keep the graph on
+// the explicit mixed compatibility route.  (R6-1057 restated the former
 // literal float-assign mixed case, R6-1059 the second-hand float-assign
 // case and R6-1060 the second-hand float-bind case: all migrated into the
 // matrix above.  R6-1061 restates the former float-arithmetic case, which
@@ -893,7 +919,10 @@ fn float_int_read_widen_constant_is_nonzero_on_mir() {
 // R6-1064 restates the former int-local-operand and literal-provenance
 // widen cases — both verifier-backed now — leaving the call-sourced
 // widen as the opaque-provenance floor.  R6-1067 restates the former
-// multiply mixed case, now the matrix's multiply/divide rows.)
+// multiply mixed case, now the matrix's multiply/divide rows.
+// R6-1071 restates the former call-result bind case — a face-closure
+// callee's returned f64 is exactly modeled — leaving the two-edge
+// provenance as the off-closure floor.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -962,18 +991,25 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // R6-1060 restatement: the second-hand float bind migrated into
-        // the matrix above.  A call-result root is never a plain local
-        // read — its provenance is an unmigrated body, so the bind pattern
-        // still floors on its f64 type.
+        // R6-1071 restatement: the former call-result bind mixed case
+        // migrated into the matrix above (`float_call_result_bind_and_
+        // arithmetic_print`) — the verifier symbolically executes the callee
+        // body, so a face-closure callee's returned f64 is exactly modeled.
+        // The floor that stays is the TWO-EDGE provenance: `mid` sits on
+        // main's print closure, but its own body calls `inner`, which the
+        // closure does not reach — mid's root call-result floors and the
+        // bind composition keeps the whole program mixed.
         MixedCase {
-            name: "float_bind_from_call_is_mixed",
+            name: "float_two_edge_call_result_bind_is_mixed",
             source: r#"
-                func value() -> f64 {
+                func inner() -> f64 {
                     0.5
                 }
+                func mid() -> f64 {
+                    inner()
+                }
                 func main() -> i32 {
-                    let x = value()
+                    let x = mid()
                     println(x)
                     0
                 }
