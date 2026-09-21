@@ -1,5 +1,0 @@
-// Canonical MIR accepts scalar f64 constants and finite-only Add/Subtract/
-// Multiply/Divide (R6-1067), but a body-level float ordering comparison is
-// still outside every consumer's binary matrix and must fail before LLVM
-// declarations.
-func main() -> i32 { if 0.5 < 1.5 { println(1) } 0 }

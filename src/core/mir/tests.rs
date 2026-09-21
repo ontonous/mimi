@@ -4189,6 +4189,87 @@ fn lowers_f64_add_with_finite_only_copy_float_contract() {
         .is_err());
 }
 
+// R6-1068: the comparison face — f64×f64 → Bool — is admitted by the
+// shared validator, and the reference executor and bytecode VM both answer
+// the IEEE predicate.  The -0.0 operand is the teeth: the runtime bit
+// patterns of `-1.0 * 0.0` and `0.0` differ, so a consumer comparing
+// bit patterns instead of decoded f64 values answers 0 where IEEE
+// equality (and both AST backends) answer 1.
+#[test]
+fn executes_f64_comparisons_with_ieee_decoding_across_consumers() {
+    let source = r#"
+        func is_zero(a: f64) -> i32 {
+            if a == 0.0 {
+                1
+            } else {
+                0
+            }
+        }
+        func main() -> i32 { is_zero(-1.0 * 0.0) }
+    "#;
+    let program =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("f64 comparison MIR lowers");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:is_zero".into()))
+        .expect("is_zero MIR function");
+    let (result_ty, left_ty, right_ty) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Binary {
+                result,
+                op: crate::core::ir::ResolvedBinaryOp::Equal,
+                left,
+                right,
+            } => Some((
+                function.values.get(result)?.ty.clone(),
+                function.values.get(left)?.ty.clone(),
+                function.values.get(right)?.ty.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical f64 Equal instruction");
+    let catalog = program.type_catalog();
+    catalog
+        .validate_copy_float_binary(
+            &result_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Equal,
+        )
+        .expect("f64 Equal comparison TypeDesc contract");
+    // Validator teeth: a comparison whose result is not the Bool TypeDesc
+    // stays outside the face (the f64-result shape is arithmetic-only).
+    assert!(catalog
+        .validate_copy_float_binary(
+            &left_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Equal,
+        )
+        .is_err());
+
+    let owner = crate::core::NodeId("function:is_zero".into());
+    let negzero = crate::core::mir::reference::MirRuntimeValue::FloatBits((-0.0f64).to_bits());
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, std::slice::from_ref(&negzero))
+        .expect("reference f64 comparison execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(1)
+    );
+    let bytecode = crate::interp::bytecode::BytecodeVM::new(
+        crate::interp::bytecode::compile_mir_program(&program)
+            .expect("f64 comparison MIR bytecode"),
+    )
+    .run_value()
+    .expect("bytecode f64 comparison execution");
+    assert_eq!(bytecode, crate::interp::Value::Int(1));
+}
+
 #[test]
 fn lowers_f64_subtract_with_finite_only_copy_float_contract() {
     let source = include_str!("../../../tests/fixtures/mir_native_f64_subtract.mimi");

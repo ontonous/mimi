@@ -18238,13 +18238,19 @@ fn canonical_mir_native_rejects_recursive_tuple_with_list_without_fallback() {
 }
 
 #[test]
-fn canonical_mir_native_build_rejects_unsupported_shape_without_fallback() {
+fn canonical_mir_native_f64_comparisons_differentially_accepted_without_fallback() {
+    // R6-1068 restatement: the f64 comparison face this pin used to hold
+    // closed is admitted across the consumer triangle, so the pin flips to
+    // positive differential admission — the fixture builds natively and
+    // agrees with the default backend on all four predicates, including the
+    // +0.0 == -0.0 identity.  The without-fallback rejection property stays
+    // pinned by the recursive-tuple, record, and min-builtin fixtures.
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_native_f64_rejected.mimi");
+        .join("mir_native_f64_compare.mimi");
     let binary = std::env::temp_dir().join(format!(
-        "mimi-canonical-native-rejected-{}",
+        "mimi-canonical-native-f64-compare-{}",
         std::process::id()
     ));
     let build = Command::new(mimi_bin())
@@ -18255,26 +18261,29 @@ fn canonical_mir_native_build_rejects_unsupported_shape_without_fallback() {
         .arg("-o")
         .arg(&binary)
         .output()
-        .expect("failed to spawn rejected canonical MIR native build");
+        .expect("failed to spawn f64 comparison native build");
+    assert!(
+        build.status.success(),
+        "the admitted f64 comparison face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
     let _ = fs::remove_file(&binary);
-    assert!(
-        !build.status.success(),
-        "unsupported native MIR must fail closed"
-    );
-    let stderr = String::from_utf8_lossy(&build.stderr);
-    assert!(
-        stderr.contains("canonical MIR native backend rejected")
-            && stderr.contains("binary operator")
-            && stderr.contains("finite-only Copy f64 contract"),
-        "unexpected canonical native rejection:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("canonical MIR native backend capability check failed"),
-        "rejection must identify the canonical MIR gate:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("bytecode runtime error"),
-        "native MIR rejection must not fall back to another backend:\n{stderr}"
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, "1\n1\n1\n1\n");
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run f64 comparison fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the comparison face"
     );
 }
 

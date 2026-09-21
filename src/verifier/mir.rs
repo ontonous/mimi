@@ -2154,6 +2154,12 @@ fn eval_instruction(
                         | crate::core::ir::ResolvedBinaryOp::Subtract
                         | crate::core::ir::ResolvedBinaryOp::Multiply
                         | crate::core::ir::ResolvedBinaryOp::Divide
+                        | crate::core::ir::ResolvedBinaryOp::Equal
+                        | crate::core::ir::ResolvedBinaryOp::NotEqual
+                        | crate::core::ir::ResolvedBinaryOp::Less
+                        | crate::core::ir::ResolvedBinaryOp::Greater
+                        | crate::core::ir::ResolvedBinaryOp::LessEqual
+                        | crate::core::ir::ResolvedBinaryOp::GreaterEqual
                 ) {
                     return Err(format!(
                         "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
@@ -7037,6 +7043,23 @@ fn eval_binary(
             Ok(SymbolicValue::Int(output))
         }
         (SymbolicValue::Float(left), SymbolicValue::Float(right)) => {
+            // R6-1068: the comparison face produces the plain IEEE ordered
+            // predicate with no definedness obligation — the runtime
+            // consumers trap nothing here (the AST VM's generic Eq/Ne and
+            // float ordering opcodes, the native OEQ/UNE/OLT/OGT/OLE/OGE
+            // fcmp), and the fpa predicates are exact on the finite domain
+            // the entry/E0813 obligations maintain.  `eq_fpa` is IEEE
+            // equality (+0 == -0, never true on NaN); `!=` is its exact
+            // negation.
+            match op {
+                Op::Equal => return Ok(SymbolicValue::Bool(left.eq_fpa(&right))),
+                Op::NotEqual => return Ok(SymbolicValue::Bool(left.eq_fpa(&right).not())),
+                Op::Less => return Ok(SymbolicValue::Bool(left.lt(&right))),
+                Op::Greater => return Ok(SymbolicValue::Bool(left.gt(&right))),
+                Op::LessEqual => return Ok(SymbolicValue::Bool(left.le(&right))),
+                Op::GreaterEqual => return Ok(SymbolicValue::Bool(left.ge(&right))),
+                _ => {}
+            }
             // LLVM `fadd`/`fsub`/`fmul`/`fdiv` and Rust `+`/`-`/`*`/`/` on
             // f64 all round nearest-ties-even, so this is the exact runtime
             // semantics.  R6-1067: Multiply/Divide join.  The runtime owns

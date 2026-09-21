@@ -2941,12 +2941,18 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate the finite-only f64 binary arithmetic contract shared by
-    /// reference, bytecode, native, and verifier capability consumers.  The
-    /// three values retain one checker-owned TypeDesc identity, the ABI is a
-    /// Copy f64 scalar with no-op glue, and only `Add`/`Subtract` are admitted.
-    /// runtime definedness policy is explicit: a non-finite operand or result
-    /// traps with [`MIR_FLOAT_NOT_FINITE_TRAP_CODE`].
+    /// Validate the finite-only f64 binary contract shared by reference,
+    /// bytecode, native, and verifier capability consumers.  The three values
+    /// retain one checker-owned TypeDesc identity, the ABI is a Copy f64
+    /// scalar with no-op glue, and two shapes are admitted: the arithmetic
+    /// `Add`/`Subtract`/`Multiply`/`Divide` face (f64×f64 → f64, R6-1067) and
+    /// the R6-1068 comparison face `Equal`/`NotEqual`/`Less`/`Greater`/
+    /// `LessEqual`/`GreaterEqual` (f64×f64 → Bool).  runtime definedness
+    /// policy is explicit: arithmetic traps on a non-finite operand or result
+    /// ([`MIR_FLOAT_NOT_FINITE_TRAP_CODE`]) and on a ±0.0 divisor (E0801);
+    /// comparisons trap on nothing — every consumer computes the plain IEEE
+    /// ordered predicate the AST backends emit (NaN orders false), so the
+    /// verifier models them obligation-free.
     pub fn validate_copy_float_binary(
         &self,
         result_ty: &ResolvedTypeId,
@@ -2954,6 +2960,34 @@ impl MirTypeCatalog {
         right_ty: &ResolvedTypeId,
         op: ResolvedBinaryOp,
     ) -> Result<(), String> {
+        if matches!(
+            op,
+            ResolvedBinaryOp::Equal
+                | ResolvedBinaryOp::NotEqual
+                | ResolvedBinaryOp::Less
+                | ResolvedBinaryOp::Greater
+                | ResolvedBinaryOp::LessEqual
+                | ResolvedBinaryOp::GreaterEqual
+        ) {
+            if left_ty != right_ty {
+                return Err("float comparison operand TypeDesc identities disagree".into());
+            }
+            self.validate_copy_float_scalar(left_ty)?;
+            self.validate_copy_scalar_with_float(result_ty, true)?;
+            let result_descriptor = self.get(result_ty).ok_or_else(|| {
+                format!(
+                    "type '{}' is absent from MIR TypeDesc catalog",
+                    result_ty.as_str()
+                )
+            })?;
+            if result_descriptor.abi != MirAbiClass::Bool {
+                return Err(format!(
+                    "type '{}' is not a Bool result for a Copy f64 comparison",
+                    result_ty.as_str()
+                ));
+            }
+            return Ok(());
+        }
         if !matches!(
             op,
             ResolvedBinaryOp::Add

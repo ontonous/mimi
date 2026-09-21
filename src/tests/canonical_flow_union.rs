@@ -438,16 +438,14 @@ int64_t mir_ffi_expect_f64(double x) { return x == 7.5 ? 42 : -1; }
 }
 
 #[test]
-fn binary_float_comparison_stays_outside_the_canonical_binary_contract() {
-    // R6-1043 restatement of the R6-1042 negative pin.  The conversion
-    // contract now admits signed (i32|i64) -> f64, so the int operand
+fn binary_float_comparison_enters_the_canonical_binary_contract() {
+    // R6-1068 restatement of the R6-1043 restatement.  The conversion
+    // contract admits signed (i32|i64) -> f64, so the int operand
     // materializes as an explicit Convert and the old stale-identity
-    // rejection is gone — but the float comparison itself is still outside
-    // the canonical finite-only Copy f64 binary contract (Add/Subtract
-    // only), so the capability gate must keep rejecting the program with
-    // the operator rejection.  Widening this face is a separate contract
-    // extension (all consumers plus the SD-9/SD-10 comparison semantics),
-    // not part of the conversion domain.
+    // rejection stays gone; the R6-1068 comparison face now admits the
+    // f64×f64 → Bool predicate too, so the widened flow-guard comparison
+    // passes the capability gate outright instead of being rejected with
+    // the operator rejection.
     let source = r#"
         flow F {
             state S { v: i64 }
@@ -471,20 +469,8 @@ fn binary_float_comparison_stays_outside_the_canonical_binary_contract() {
         }
     "#;
     let mir = materialize(source, "float-comparison boundary fixture");
-    let capability_error = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("capability gate must keep rejecting float comparisons");
-    assert!(
-        capability_error.iter().any(|error| error.contains(
-            "float binary operator Greater is outside the canonical finite-only Copy f64 contract"
-        )),
-        "the rejection must name the float operator, not a stale operand identity: {capability_error:?}"
-    );
-    assert!(
-        !capability_error
-            .iter()
-            .any(|error| error.contains("binary operands have different TypeDesc identities")),
-        "the int->f64 conversion must have materialized: {capability_error:?}"
-    );
+    crate::verifier::validate_mir_capabilities(&mir)
+        .expect("R6-1068 admits the widened f64 comparison into the capability gate");
 }
 
 #[test]
@@ -2203,13 +2189,12 @@ func main() -> i64 {{
     }
 }
 
-// The float equality guard is still outside the canonical finite-only Copy
-// f64 binary contract (Add|Subtract only). The mixed-width operand now
-// materializes as an explicit Convert, so the rejection must name the
-// operator — Equal here, complementing the Greater pin above — and never the
-// stale operand-identity message.
+// R6-1068 restatement: the comparison face admits f64 equality beside the
+// ordering operators, so the mixed-width flow guard now passes the
+// capability gate outright (the int operand still materializes as an
+// explicit Convert; the predicate is exactly modeled by every consumer).
 #[test]
-fn float_equality_comparison_stays_outside_the_canonical_binary_contract() {
+fn float_equality_comparison_enters_the_canonical_binary_contract() {
     let source = r#"
         flow F {
             state S { v: i64 }
@@ -2235,14 +2220,8 @@ fn float_equality_comparison_stays_outside_the_canonical_binary_contract() {
         }
     "#;
     let mir = materialize(source, "float-equality boundary fixture");
-    let capability_error = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("capability gate must keep rejecting float equality");
-    assert!(
-        capability_error.iter().any(|error| error.contains(
-            "float binary operator Equal is outside the canonical finite-only Copy f64 contract"
-        )),
-        "the rejection must name the float operator: {capability_error:?}"
-    );
+    crate::verifier::validate_mir_capabilities(&mir)
+        .expect("R6-1068 admits the f64 equality flow guard into the capability gate");
 }
 
 // R6-1045: cross-consumer operator-face audit. After R6-1044 repaired the
@@ -2252,11 +2231,76 @@ fn float_equality_comparison_stays_outside_the_canonical_binary_contract() {
 // executors). The audit found no further asymmetry in the route-breaking
 // direction: unary faces are admitted everywhere (f64 negate, int negate,
 // bool not — pinned below) or rejected at the checker before MIR exists
-// (f32 negate, E0201 — pinned below), and the remaining binary faces (float
-// ordering/equality comparisons, shifts and bitwise/power operators, string
-// concatenation) are fail-closed at the capability gate even where the
-// bytecode VM carries latent implementations. The pins below freeze those
-// dispositions so future consumer drift fails a test instead of a user.
+// (f32 negate, E0201 — pinned below).  R6-1068 restatement: the f64
+// ordering/equality comparisons joined the admitted contract (positive
+// matrix pinned below), while the remaining binary faces (shifts and
+// bitwise/power operators, string concatenation) stay fail-closed at the
+// capability gate even where the bytecode VM carries latent
+// implementations. The pins below freeze those dispositions so future
+// consumer drift fails a test instead of a user.
+
+#[test]
+fn operator_face_audit_float_comparisons_enter_the_capability_contract() {
+    // R6-1068 restatement of the former out-of-contract rows: all six f64
+    // comparison operators join the canonical finite-only Copy f64 binary
+    // contract at the flow-guard admission point, so the capability gate
+    // admits them outright.  Greater and Equal keep their dedicated
+    // boundary pins above; this matrix completes the set so every
+    // comparison operator's guard-face admission stays pinned.
+    struct ComparisonCase {
+        name: &'static str,
+        guard: &'static str,
+    }
+    const CASES: &[ComparisonCase] = &[
+        ComparisonCase {
+            name: "float_less",
+            guard: "if self.v < 1.5 { return Big { w: 1 } }",
+        },
+        ComparisonCase {
+            name: "float_less_equal",
+            guard: "if self.v <= 1.5 { return Big { w: 1 } }",
+        },
+        ComparisonCase {
+            name: "float_greater_equal",
+            guard: "if self.v >= 1.5 { return Big { w: 1 } }",
+        },
+        ComparisonCase {
+            name: "float_not_equal",
+            guard: "if self.v != 1.5 { return Big { w: 1 } }",
+        },
+    ];
+    for case in CASES {
+        let source = format!(
+            r#"
+flow F {{
+    state S {{ v: i64 }}
+    state Big {{ w: i64 }}
+    transition go(S) -> S | Big | Fault {{
+        {body}
+        return S {{ v: self.v }}
+    }}
+}}
+
+func main() -> i64 {{
+    let s = S {{ v: 150 }}
+    let r = F::go(s)
+    let v = match r {{
+        S {{ v }} => v
+        Big {{ w }} => w
+        Fault {{ last_state: _, unexpected_event: _, snapshot: _, trace: _ }} => 9999 as i64
+    }}
+    println(v)
+    0
+}}
+"#,
+            body = case.guard,
+        );
+        let label = format!("admitted comparison face {}", case.name);
+        let mir = materialize(&source, &label);
+        crate::verifier::validate_mir_capabilities(&mir)
+            .unwrap_or_else(|errors| panic!("{label} must enter the capability contract: {errors:?}"));
+    }
+}
 
 #[test]
 fn operator_face_audit_keeps_out_of_contract_faces_fail_closed() {
@@ -2266,34 +2310,13 @@ fn operator_face_audit_keeps_out_of_contract_faces_fail_closed() {
         expected_fragment: &'static str,
     }
     const CASES: &[OutOfContractCase] = &[
-        // Float ordering and inequality comparisons: the finite-only Copy
-        // f64 binary contract admits Add|Subtract only (SD-9/SD-10). Greater
-        // and Equal have dedicated pins above; these four complete the set.
-        OutOfContractCase {
-            name: "float_less",
-            transition_body: "if self.v < 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
-            expected_fragment: "float binary operator Less is outside the canonical finite-only Copy f64 contract",
-        },
-        OutOfContractCase {
-            name: "float_less_equal",
-            transition_body: "if self.v <= 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
-            expected_fragment: "float binary operator LessEqual is outside the canonical finite-only Copy f64 contract",
-        },
-        OutOfContractCase {
-            name: "float_greater_equal",
-            transition_body: "if self.v >= 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
-            expected_fragment: "float binary operator GreaterEqual is outside the canonical finite-only Copy f64 contract",
-        },
-        OutOfContractCase {
-            name: "float_not_equal",
-            transition_body: "if self.v != 1.5 { return Big { w: 1 } }\nreturn S { v: self.v }",
-            expected_fragment: "float binary operator NotEqual is outside the canonical finite-only Copy f64 contract",
-        },
         // Shifts: outside the verifier capability entirely. The bytecode VM
         // and reference executor carry latent wrapping implementations, but
         // no default-route program can reach them; if this face is ever
         // admitted it needs SD-7-style checked (trap) semantics first, not
-        // the latent wrapping shapes.
+        // the latent wrapping shapes.  The float comparison rows that used
+        // to live beside them are admitted since R6-1068 (positive matrix
+        // pinned above).
         OutOfContractCase {
             name: "shift_left",
             transition_body: "if 100 < self.v { let bumped = self.v << 1\nreturn Big { w: bumped } }\nreturn S { v: self.v }",

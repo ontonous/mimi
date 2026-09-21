@@ -2129,6 +2129,17 @@ impl<'a> FunctionEmitter<'a> {
                 // E0813 result check subsumes operand finiteness.
                 ResolvedBinaryOp::Multiply => Op::MulFloat { rd, ra, rb },
                 ResolvedBinaryOp::Divide => Op::DivFloat { rd, ra, rb },
+                // R6-1068: the comparison face mirrors the AST float binop
+                // lowering exactly — ordering through the dedicated float
+                // opcodes, equality through the generic Eq/Ne (Rust f64
+                // PartialEq, i.e. OEQ / its negation), with no finiteness
+                // trap on any of them.
+                ResolvedBinaryOp::Equal => Op::Eq { rd, ra, rb },
+                ResolvedBinaryOp::NotEqual => Op::Ne { rd, ra, rb },
+                ResolvedBinaryOp::Less => Op::LtFloat { rd, ra, rb },
+                ResolvedBinaryOp::Greater => Op::GtFloat { rd, ra, rb },
+                ResolvedBinaryOp::LessEqual => Op::LeFloat { rd, ra, rb },
+                ResolvedBinaryOp::GreaterEqual => Op::GeFloat { rd, ra, rb },
                 _ => {
                     self.error(format!("operator {op:?} is outside scalar bytecode slice"));
                     return;

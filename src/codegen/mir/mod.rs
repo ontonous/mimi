@@ -2230,28 +2230,27 @@ func main() -> i32 {
     }
 
     #[test]
-    fn native_validator_rejects_before_llvm_declarations() {
-        // R6-1067 restatement: f64 Multiply joined the finite-only contract,
-        // so the before-LLVM rejection pin moves to a float comparison —
-        // body-level float ordering is still outside every consumer's
-        // binary matrix (surface-expressible, MIR-native-rejected).
+    fn native_validator_admits_f64_comparisons_with_llvm_declarations() {
+        // R6-1068 restatement: the f64 comparison face this pin used to hold
+        // closed now compiles natively, so the pin flips to positive
+        // admission — main is declared and the module verifies.  The
+        // fail-before-LLVM-emission property stays pinned by
+        // `native_validator_rejects_record_with_unsupported_child_before_llvm_declarations`.
         let program = canonical_program("func main() -> i32 { if 0.5 < 1.5 { println(1) } 0 }");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_validator_test");
 
-        let diagnostics = generator
+        generator
             .compile_mir_native(&program)
-            .expect_err("unsupported MIR must fail before native emission");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("canonical MIR native backend rejected")
-                && diagnostic.message.contains("binary operator")
-        }));
+            .expect("R6-1068 admits f64 comparisons into the native emitter");
         assert!(
-            generator.module.get_function("main").is_none(),
-            "L2 requires validation before LLVM function declarations"
+            generator.module.get_function("main").is_some(),
+            "the admitted comparison face declares main"
         );
+        generator
+            .module
+            .verify()
+            .expect("the comparison face emits a verifiable module");
     }
 
     #[test]

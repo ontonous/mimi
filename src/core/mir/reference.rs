@@ -9247,6 +9247,29 @@ fn evaluate_binary(
                     .ok_or_else(|| execution_error(function, "integer remainder overflow"))
             }
         }
+        // R6-1068: f64 comparisons decode to IEEE predicates instead of
+        // comparing the runtime bit patterns — `0.0 == -0.0` is true and
+        // NaN equalities are false, matching the AST VM's generic Eq/Ne
+        // and the native OEQ fcmp.  No finiteness trap: the AST backends
+        // trap nothing here either.
+        (ResolvedBinaryOp::Equal, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) == f64::from_bits(right)))
+        }
+        (ResolvedBinaryOp::NotEqual, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) != f64::from_bits(right)))
+        }
+        (ResolvedBinaryOp::Less, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) < f64::from_bits(right)))
+        }
+        (ResolvedBinaryOp::Greater, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) > f64::from_bits(right)))
+        }
+        (ResolvedBinaryOp::LessEqual, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) <= f64::from_bits(right)))
+        }
+        (ResolvedBinaryOp::GreaterEqual, FloatBits(left), FloatBits(right)) => {
+            Ok(Bool(f64::from_bits(left) >= f64::from_bits(right)))
+        }
         (ResolvedBinaryOp::Equal, left, right) => Ok(Bool(left == right)),
         (ResolvedBinaryOp::NotEqual, left, right) => Ok(Bool(left != right)),
         (ResolvedBinaryOp::Less, Int(left), Int(right)) => Ok(Bool(left < right)),

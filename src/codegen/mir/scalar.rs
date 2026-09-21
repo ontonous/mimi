@@ -197,6 +197,30 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|message| NativeMirError::new(subject, message))?;
             let left_value = self.value(left, subject)?.into_float_value();
             let right_value = self.value(right, subject)?.into_float_value();
+            // R6-1068: comparisons emit the plain IEEE ordered fcmp the AST
+            // native emitter produces (OLT/OGT/OLE/OGE and OEQ for `==`;
+            // `!=` is emitted as UNE — the exact negation of OEQ — matching
+            // the bytecode VM's generic Ne and the verifier's eq_fpa.not()
+            // model; the AST native's ONE differs only on NaN, which
+            // default-mode programs cannot materialize).  No finiteness
+            // guard: the AST backends trap nothing on comparisons either.
+            let predicate = match op {
+                ResolvedBinaryOp::Equal => Some(inkwell::FloatPredicate::OEQ),
+                ResolvedBinaryOp::NotEqual => Some(inkwell::FloatPredicate::UNE),
+                ResolvedBinaryOp::Less => Some(inkwell::FloatPredicate::OLT),
+                ResolvedBinaryOp::Greater => Some(inkwell::FloatPredicate::OGT),
+                ResolvedBinaryOp::LessEqual => Some(inkwell::FloatPredicate::OLE),
+                ResolvedBinaryOp::GreaterEqual => Some(inkwell::FloatPredicate::OGE),
+                _ => None,
+            };
+            if let Some(predicate) = predicate {
+                let compared = self
+                    .generator
+                    .builder
+                    .build_float_compare(predicate, left_value, right_value, "mir_fcmp")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                return Ok(compared.into());
+            }
             // R6-1067: the zero divisor is the language-level E0801
             // division-definedness violation (small-step §3, SD-8 family) —
             // the same `mimi_trap_float_div_by_zero` face the AST emitter

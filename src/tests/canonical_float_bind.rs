@@ -261,6 +261,54 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "1.25\n",
         },
+        // R6-1068: the comparison face joins — plain IEEE ordered
+        // predicates with no finiteness trap.  The `x == 0.0` case is the
+        // sharpest one: `0.0 - 1.0 * 0.0` produces -0.0, whose runtime bit
+        // patterns differ from `0.0`, so every consumer must decode to f64
+        // before comparing (a bit-pattern comparison would answer 0).
+        // Shortest round-trip renders the printed -0.0 as "0".
+        FloatBindCase {
+            name: "float_comparison_equal_negzero",
+            source: r#"
+                func main() -> i32 {
+                    let x = 0.0 - 1.0 * 0.0
+                    println(x)
+                    if x == 0.0 {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "0\n1\n",
+        },
+        // Ordering, not-equal, and a Bool-typed bind of a comparison
+        // result feeding a branch — the bind face takes the Bool the
+        // compare produces like any other Copy scalar.
+        FloatBindCase {
+            name: "float_comparison_ordering_ne_bind",
+            source: r#"
+                func main() -> i32 {
+                    let a = 0.5
+                    let b = 1.5
+                    println(a)
+                    let hit = a < b
+                    if hit {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    if a != b {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "0.5\n1\n1\n",
+        },
         // An integer literal operand widens as a known constant before the
         // operation, so it stays inside the symbolic domain (shortest
         // round-trip renders 3.5 without a trailing fraction).
@@ -1093,6 +1141,75 @@ fn float_contract_unbounded_multiply_trips_the_finiteness_obligation() {
     assert!(
         matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
         "{label} must be disproven (E0813 reachable), got {:?}",
+        results[0].status
+    );
+}
+
+// R6-1068: a body-level comparison feeds the branch the verifier walks —
+// the Binary(Less) instruction produces the branch's Bool through the same
+// fpa predicate the runtime computes, so the bounded parameter forces the
+// then-arm and `result == 1` proves.
+#[test]
+fn float_body_comparison_branch_verifies_on_mir() {
+    let source = r#"
+        func check(x: f64) -> i32 {
+            requires: x >= 0.0
+            requires: x <= 1.0
+            ensures: result == 1
+            if x < 1.5 {
+                1
+            } else {
+                0
+            }
+        }
+        func main() -> i32 {
+            println(check(0.5))
+            0
+        }
+    "#;
+    let label = "float body comparison branch verifies";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-body-compare".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        results[0].status
+    );
+}
+
+// The non-vacuity pin: against the negated ensures the same body
+// disproves, so the modeled comparison demonstrably drives the branch
+// instead of both arms matching any contract.
+#[test]
+fn float_body_comparison_branch_is_disproven_against_the_false_ensures() {
+    let source = r#"
+        func check(x: f64) -> i32 {
+            requires: x >= 0.0
+            requires: x <= 1.0
+            ensures: result == 0
+            if x < 1.5 {
+                1
+            } else {
+                0
+            }
+        }
+        func main() -> i32 {
+            println(check(0.5))
+            0
+        }
+    "#;
+    let label = "float body comparison branch non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-body-compare-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
         results[0].status
     );
 }

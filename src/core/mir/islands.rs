@@ -1006,6 +1006,28 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
     /// verifier-backed.  Untracked int local reads (`n + 1.5` where n came
     /// from a call) still license nothing: their widening lands opaque.
     fn expr_is_float_symbolic_operand(&self, expression: &ResolvedExpr) -> bool {
+        self.expr_is_float_origin_operand_inner(expression, true)
+    }
+
+    /// R6-1068: the comparison face's operand predicate.  It is the same
+    /// origin domain as `expr_is_float_symbolic_operand` but WITHOUT the
+    /// branch-generation stamp: a comparison consumes no symbolic fact —
+    /// every consumer computes the plain IEEE ordered predicate from the
+    /// runtime values the paths hold — so it needs only the walk-order
+    /// origin admission the tracked sets already maintain (an out-of-face
+    /// assign removes the target outright, so membership never outlives
+    /// the classified provenance).
+    fn expr_is_float_comparison_operand(&self, expression: &ResolvedExpr) -> bool {
+        self.expr_is_float_origin_operand_inner(expression, false)
+    }
+
+    fn expr_is_float_origin_operand_inner(
+        &self,
+        expression: &ResolvedExpr,
+        require_current_generation: bool,
+    ) -> bool {
+        let generation_matches =
+            |generation: &u64| !require_current_generation || *generation == self.branch_generation;
         match &expression.kind {
             ResolvedExprKind::Literal(ResolvedLiteral::FloatBits(_) | ResolvedLiteral::Int(_)) => {
                 true
@@ -1019,20 +1041,20 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         | ResolvedBinaryOp::Subtract
                         | ResolvedBinaryOp::Multiply
                         | ResolvedBinaryOp::Divide
-                ) && self.expr_is_float_symbolic_operand(left)
-                    && self.expr_is_float_symbolic_operand(right)
+                ) && self.expr_is_float_origin_operand_inner(left, require_current_generation)
+                    && self.expr_is_float_origin_operand_inner(right, require_current_generation)
             }
             ResolvedExprKind::Load(place) => {
                 place.projections.is_empty()
                     && self
                         .float_symbolic_locals
                         .get(&place.base)
-                        .is_some_and(|generation| *generation == self.branch_generation)
+                        .is_some_and(generation_matches)
                     || place.projections.is_empty()
                         && self
                             .int_literal_locals
                             .get(&place.base)
-                            .is_some_and(|generation| *generation == self.branch_generation)
+                            .is_some_and(generation_matches)
             }
             _ => false,
         }
@@ -1564,17 +1586,45 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.visit_expr(index, concrete);
                 }
             }
-            ResolvedExprKind::Binary { left, right, .. } => {
-                if concrete {
-                    // R6-1052 guard: a string literal operand must not
-                    // smuggle a String operation (comparison, concat) into a
-                    // complete admission; only the scalar print face admits
-                    // string values.
-                    self.require_profile_type(&left.ty);
-                    self.require_profile_type(&right.ty);
+            ResolvedExprKind::Binary {
+                op, left, right, ..
+            } => {
+                // R6-1068: a comparison over the float-symbolic domain is
+                // exactly modeled by every consumer — the plain IEEE
+                // ordered predicate, with no symbolic fact to keep fresh —
+                // so its operands skip the profile-type floor the way
+                // print-face roots do.  The operand check is the
+                // generation-agnostic origin predicate: the consumers hold
+                // no symbolic fact across the branch boundary, so a
+                // comparison after a branch leans on walk-order origin
+                // membership, never on a stale generation stamp.
+                // `expr_is_float_comparison_operand` admits only
+                // loads/literals/arithmetic of those, so the skipped
+                // subtree can never hide a call or a projection.
+                // R6-1052 guard: outside that face a string literal
+                // operand must not smuggle a String operation (comparison,
+                // concat) into a complete admission; only the scalar print
+                // face admits string values.
+                let comparison_over_float_domain = concrete
+                    && matches!(
+                        op,
+                        ResolvedBinaryOp::Equal
+                            | ResolvedBinaryOp::NotEqual
+                            | ResolvedBinaryOp::Less
+                            | ResolvedBinaryOp::Greater
+                            | ResolvedBinaryOp::LessEqual
+                            | ResolvedBinaryOp::GreaterEqual
+                    )
+                    && self.expr_is_float_comparison_operand(left)
+                    && self.expr_is_float_comparison_operand(right);
+                if !comparison_over_float_domain {
+                    if concrete {
+                        self.require_profile_type(&left.ty);
+                        self.require_profile_type(&right.ty);
+                    }
+                    self.visit_expr(left, concrete);
+                    self.visit_expr(right, concrete);
                 }
-                self.visit_expr(left, concrete);
-                self.visit_expr(right, concrete);
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Old(operand)
@@ -1798,8 +1848,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 then_block,
                 else_block,
             } => {
-                self.enter_branch_region();
+                // R6-1068: the condition evaluates in the environment the
+                // branch ENTERS with, so it is visited before the walk
+                // generation bumps — a float-symbolic local bound outside
+                // stays admissible evidence for a comparison condition.
+                // The comparison admission carries no symbolic fact across
+                // the boundary (the consumers compute the predicate from
+                // whatever values the paths hold), so this cannot stale.
                 self.visit_expr(condition, concrete);
+                self.enter_branch_region();
                 self.visit_block(then_block, concrete);
                 self.visit_block(else_block, concrete);
             }
@@ -4231,6 +4288,51 @@ fn function_contains_println_float(function: &MirFunction) -> bool {
     })
 }
 
+/// R6-1068: whether this function's executable graph contains an f64
+/// comparison (f64×f64 → Bool).  The comparison face leans on no
+/// per-function print envelope — every consumer computes the plain IEEE
+/// ordered predicate from the runtime values — so the f64 values and
+/// literals that feed it are admitted without the float-print contract the
+/// arithmetic and print faces require.  The per-operation checks stay
+/// strict: an f64 arithmetic or print shape in the same function still
+/// floors on its own envelope.
+fn function_contains_float_comparison(program: &MirProgram, function: &MirFunction) -> bool {
+    function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            let MirInstructionKind::Binary {
+                result,
+                op,
+                left,
+                right,
+            } = &instruction.kind
+            else {
+                return false;
+            };
+            if !matches!(
+                op,
+                ResolvedBinaryOp::Equal
+                    | ResolvedBinaryOp::NotEqual
+                    | ResolvedBinaryOp::Less
+                    | ResolvedBinaryOp::Greater
+                    | ResolvedBinaryOp::LessEqual
+                    | ResolvedBinaryOp::GreaterEqual
+            ) {
+                return false;
+            }
+            let ty_of = |value: &MirValueId| function.values.get(value).map(|value| &value.ty);
+            let (Some(result_ty), Some(left_ty), Some(right_ty)) =
+                (ty_of(result), ty_of(left), ty_of(right))
+            else {
+                return false;
+            };
+            program
+                .type_catalog()
+                .validate_copy_float_binary(result_ty, left_ty, right_ty, *op)
+                .is_ok()
+        })
+    })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
@@ -4246,6 +4348,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         allow_owned_record_family: contains_owned_record_projection_candidate(program),
         function_admits_string_print: false,
         function_admits_float_print: false,
+        function_admits_float_comparison: false,
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -4262,6 +4365,7 @@ struct ScalarCollectionValidator<'a> {
     allow_owned_record_family: bool,
     function_admits_string_print: bool,
     function_admits_float_print: bool,
+    function_admits_float_comparison: bool,
 }
 
 impl<'a> ScalarCollectionValidator<'a> {
@@ -4283,6 +4387,8 @@ impl<'a> ScalarCollectionValidator<'a> {
         for function in self.program.functions().values() {
             self.function_admits_string_print = function_contains_println_string(function);
             self.function_admits_float_print = function_contains_println_float(function);
+            self.function_admits_float_comparison =
+                function_contains_float_comparison(self.program, function);
             self.validate_function(function);
         }
         for instance in self.program.instances().values() {
@@ -4474,7 +4580,13 @@ impl<'a> ScalarCollectionValidator<'a> {
                 }
             }
             MirLayout::Scalar => {
-                if self.function_admits_float_print && self.is_print_face_f64(ty) {
+                // R6-1068: the f64 comparison face admits the Copy f64 leaf
+                // without the print envelope — the predicate is exactly
+                // modeled for any f64 pair — while arithmetic and print
+                // shapes keep leaning on their own per-function contracts.
+                if (self.function_admits_float_print || self.function_admits_float_comparison)
+                    && self.is_print_face_f64(ty)
+                {
                     Ok(())
                 } else {
                     self.program.type_catalog().validate_copy_scalar(ty)
@@ -4557,7 +4669,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                     }
                     ResolvedLiteral::Unit => self.require_unit(&result_ty, subject),
                     ResolvedLiteral::FloatBits(_)
-                        if self.function_admits_float_print
+                        if (self.function_admits_float_print
+                            || self.function_admits_float_comparison)
                             && self.is_print_face_f64(&result_ty) => {}
                     ResolvedLiteral::String(_)
                         if (self.allow_owned_record_family
@@ -4805,9 +4918,31 @@ impl<'a> ScalarCollectionValidator<'a> {
                 ) else {
                     return;
                 };
-                self.require_copy_scalar(&left_ty, subject, "binary left operand");
-                self.require_copy_scalar(&right_ty, subject, "binary right operand");
-                self.require_copy_scalar(&result_ty, subject, "binary result");
+                // R6-1068: the f64 comparison face (f64×f64 → Bool) is
+                // admitted on the shared validator contract — the same
+                // identity the native validator and the verifier capability
+                // gate enforce — so its operands do not lean on the
+                // per-function float-print envelope the arithmetic faces
+                // use: the predicate is exactly modeled for any f64 pair,
+                // symbolic or not.
+                let float_comparison_face = matches!(
+                    op,
+                    ResolvedBinaryOp::Equal
+                        | ResolvedBinaryOp::NotEqual
+                        | ResolvedBinaryOp::Less
+                        | ResolvedBinaryOp::Greater
+                        | ResolvedBinaryOp::LessEqual
+                        | ResolvedBinaryOp::GreaterEqual
+                ) && self
+                    .program
+                    .type_catalog()
+                    .validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)
+                    .is_ok();
+                if !float_comparison_face {
+                    self.require_copy_scalar(&left_ty, subject, "binary left operand");
+                    self.require_copy_scalar(&right_ty, subject, "binary right operand");
+                    self.require_copy_scalar(&result_ty, subject, "binary result");
+                }
                 if left_ty != right_ty || !binary_supported(*op, &left_ty, &result_ty, self) {
                     self.error(format!(
                         "{subject} binary operator {op:?} is outside {SCALAR_COLLECTION_ISLAND}"
@@ -5488,7 +5623,12 @@ fn binary_supported(
         // shared E0813 finiteness trap, and the ±0.0 divisor is the
         // language-level E0801 violation every consumer raises (the
         // reference executor and native MIR emitter check it explicitly,
-        // the bytecode VM through DivFloat's own guard).  Remainder stays
+        // the bytecode VM through DivFloat's own guard).  R6-1068: the
+        // f64 comparison face joins — every consumer computes the plain
+        // IEEE ordered predicate with no finiteness trap (the AST VM's
+        // LtFloat/GtFloat/LeFloat/GeFloat plus generic Eq/Ne, the AST
+        // native's OLT/OGT/OLE/OGE plus OEQ fcmp), so f64×f64 → Bool
+        // shapes are admitted obligation-free.  Remainder stays
         // integer-only (no consumer emits frem).
         ResolvedBinaryOp::Add
         | ResolvedBinaryOp::Subtract
@@ -5496,12 +5636,12 @@ fn binary_supported(
         | ResolvedBinaryOp::Divide => (integer || float) && left == result,
         ResolvedBinaryOp::Remainder => integer && left == result,
         ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
-            (integer || boolean) && result_is_bool
+            (integer || boolean || float) && result_is_bool
         }
         ResolvedBinaryOp::Less
         | ResolvedBinaryOp::Greater
         | ResolvedBinaryOp::LessEqual
-        | ResolvedBinaryOp::GreaterEqual => integer && result_is_bool,
+        | ResolvedBinaryOp::GreaterEqual => (integer || float) && result_is_bool,
         ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr => boolean && result_is_bool,
         _ => false,
     }
