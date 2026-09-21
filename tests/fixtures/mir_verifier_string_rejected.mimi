@@ -1,0 +1,14 @@
+// string contract values remain outside the canonical scalar verifier
+// contract: the ABI gate fails closed on the stringHandle leaf before any
+// consumer sees the program, with no fallback to another verifier.
+// (The f64 comparison face this file originally carried opened in
+// R6-1063 — see mir_float_contract_face.mimi for its positive pin.)
+func shout(s: string) -> string {
+    requires: true
+    ensures: result == s
+    s
+}
+
+func main() -> i32 {
+    0
+}

@@ -27,6 +27,12 @@
 //! target): its `assign_numeric_convert` sources the literal const
 //! directly, so the verifier widens the known constant exactly and the
 //! target keeps its symbolic Float identity.
+//! R6-1063 opens Face B on the contract side: f64 entry values (parameters,
+//! extern results) become symbolic IEEE doubles with the E0813 finiteness
+//! obligation at introduction, so contract ordering/equality comparisons
+//! over f64 verify on the MIR entry (`result >= x` proven, `result > x`
+//! disproven).  Contract float arithmetic and float contract literals stay
+//! outside the canonical contract.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -707,4 +713,35 @@ fn float_bind_faces_stay_mixed() {
             "{label} must classify mixed"
         );
     }
+}
+
+// R6-1063 Face B: f64 contract values are in-domain for ordering
+// comparisons.  The strict form doubles as the non-vacuity pin — the same
+// identity body disproves `result > x` while proving `result >= x`, so the
+// comparison predicates demonstrably evaluate instead of trivially holding.
+#[test]
+fn float_param_result_ordering_strict_inequality_is_disproven_on_mir() {
+    let source = r#"
+        func same(x: f64) -> f64 {
+            ensures: result > x
+            x
+        }
+        func main() -> i32 {
+            let y = same(1.5)
+            println(y)
+            0
+        }
+    "#;
+    let label = "float param strict ordering";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-param-strict-ordering".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    // Only `same` carries a contract; main has none, so exactly one
+    // obligation is collected.
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
 }

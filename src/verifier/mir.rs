@@ -946,7 +946,18 @@ fn symbolic_value_for_type(
                     ))
                 }
                 MirAbiClass::Bool => Ok((SymbolicValue::Bool(Bool::new_const(name)), Vec::new())),
-                MirAbiClass::Float { bits: 32 | 64 } => {
+                MirAbiClass::Float { bits: 64 } => {
+                    // Face B (R6-1063): f64 entry values are symbolic IEEE
+                    // doubles under the finite-only domain. The E0813
+                    // obligation is owed at introduction — every float value
+                    // a caller hands over is finite in the compositional
+                    // contract, which is what makes contract ordering
+                    // comparisons exact (no NaN models).
+                    let symbol = Float::new_const_double(name);
+                    let finite = float_is_finite(&symbol);
+                    Ok((SymbolicValue::Float(symbol), vec![finite]))
+                }
+                MirAbiClass::Float { bits: 32 } => {
                     Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()))
                 }
                 abi => Err(format!(
@@ -7220,6 +7231,25 @@ fn contract_binary(
             MirContractBinaryOp::LogicalOr => Ok(SymbolicValue::Bool(Bool::or(&[&left, &right]))),
             _ => Err("contract boolean operands do not support this operator".into()),
         },
+        (SymbolicValue::Float(left), SymbolicValue::Float(right)) => {
+            // Face B (R6-1063): IEEE ordering predicates over the
+            // finite-only f64 domain. `eq_fpa` is IEEE equality (+0 == -0,
+            // never true on NaN), not structural identity; the finiteness
+            // obligation at introduction already excludes NaN models.
+            match op {
+                MirContractBinaryOp::Equal => Ok(SymbolicValue::Bool(left.eq_fpa(&right))),
+                MirContractBinaryOp::NotEqual => {
+                    Ok(SymbolicValue::Bool(left.eq_fpa(&right).not()))
+                }
+                MirContractBinaryOp::Less => Ok(SymbolicValue::Bool(left.lt(&right))),
+                MirContractBinaryOp::Greater => Ok(SymbolicValue::Bool(left.gt(&right))),
+                MirContractBinaryOp::LessEqual => Ok(SymbolicValue::Bool(left.le(&right))),
+                MirContractBinaryOp::GreaterEqual => Ok(SymbolicValue::Bool(left.ge(&right))),
+                _ => Err(
+                    "contract float arithmetic is outside the canonical verifier contract".into(),
+                ),
+            }
+        }
         _ => Err("contract operands have incompatible symbolic kinds".into()),
     }
 }

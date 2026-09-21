@@ -20367,10 +20367,13 @@ fn canonical_mir_verifier_reports_reachable_checked_arithmetic_trap() {
 
 #[test]
 fn canonical_mir_verifier_rejects_unsupported_abi_without_fallback() {
+    // R6-1063 restatement: the f64 comparison contract this pin originally
+    // carried is now inside the verifier domain (Face B), so the
+    // fail-closed-without-fallback vehicle is a String contract leaf.
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_verifier_f64_rejected.mimi");
+        .join("mir_verifier_string_rejected.mimi");
     let output = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("verify")
@@ -22505,6 +22508,57 @@ fn canonical_mir_int_widen_arithmetic_routes_canonical_with_proof() {
     assert!(native_run.status.success());
     assert_eq!(native_run.stdout, expected);
     let _ = fs::remove_file(&native);
+}
+
+// R6-1063 Face B: an f64 contract value face.  The `carry` helper compares
+// its f64 parameter and result in an ensures clause; the direct
+// `mimi verify --mir` entry proves it in the finite-only IEEE float domain
+// while the default route keeps its explicit legacy disposition (the
+// call-result print root stays a registered mixed floor — this pins the
+// verifier entry, not a route flip).
+#[test]
+fn canonical_mir_float_contract_value_verifies_on_mir_entry() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_float_contract_face.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "float contract fixture must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, b"1.5\n");
+    assert!(
+        stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "float contract fixture must keep the compatibility default route: {stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&source)
+        .output()
+        .unwrap();
+    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    assert!(
+        verify.status.success(),
+        "MIR verifier entry must succeed: {verify_out}"
+    );
+    assert!(
+        verify_out.contains("2/2 verified"),
+        "both f64 comparison contracts must verify on the MIR entry: {verify_out}"
+    );
 }
 
 // R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal

@@ -1,0 +1,17 @@
+// R6-1063 Face B: f64 contract values.  The `carry` helper compares its
+// f64 parameter and result in an ensures clause — construction lowers the
+// comparison into the canonical contract language, and `mimi verify --mir`
+// proves it in the finite-only IEEE float domain (the E0813 finiteness
+// obligation at parameter introduction excludes the NaN models).  The
+// default route keeps the explicit compatibility disposition: the
+// call-result print root is still a registered mixed floor, so this pins
+// the verifier entry, not a route flip.
+func carry(x: f64) -> f64 {
+    ensures: result >= x
+    x
+}
+func main() -> i32 {
+    ensures: result == 0
+    println(carry(1.5))
+    0
+}

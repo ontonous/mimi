@@ -167,6 +167,9 @@ impl MirContract {
 enum ContractValueKind {
     Int,
     Bool,
+    /// R6-1063 Face B: a finite-only IEEE f64 value. Ordering/equality
+    /// comparisons are admitted; arithmetic stays integer-only below.
+    Float,
     Aggregate(crate::core::ir::ResolvedTypeId),
 }
 
@@ -186,6 +189,7 @@ fn type_kind(
             signed: true,
         } => Ok(ContractValueKind::Int),
         MirAbiClass::Bool => Ok(ContractValueKind::Bool),
+        MirAbiClass::Float { bits: 64 } => Ok(ContractValueKind::Float),
         _ if matches!(
             descriptor.layout,
             MirLayout::Tuple(_) | MirLayout::Record { .. }
@@ -326,6 +330,7 @@ fn expr_kind(
                         (left_kind, right_kind),
                         (ContractValueKind::Int, ContractValueKind::Int)
                             | (ContractValueKind::Bool, ContractValueKind::Bool)
+                            | (ContractValueKind::Float, ContractValueKind::Float)
                     ) {
                         Ok(ContractValueKind::Bool)
                     } else {
@@ -336,13 +341,45 @@ fn expr_kind(
                 | MirContractBinaryOp::Greater
                 | MirContractBinaryOp::LessEqual
                 | MirContractBinaryOp::GreaterEqual => {
-                    if left_kind == ContractValueKind::Int && right_kind == ContractValueKind::Int {
+                    if matches!(
+                        (left_kind, right_kind),
+                        (ContractValueKind::Int, ContractValueKind::Int)
+                            | (ContractValueKind::Float, ContractValueKind::Float)
+                    ) {
                         Ok(ContractValueKind::Bool)
                     } else {
-                        Err("contract ordering requires integer operands".into())
+                        Err("contract ordering requires integer or finite-float operands".into())
                     }
                 }
             }
+        }
+    }
+}
+
+/// Face B keeps the runtime FFI predicate evaluator integer/boolean: float
+/// leaves have no checked runtime scalar slot (`MirContractScalar`), so an
+/// extern contract must not admit them even though function contracts now
+/// compare finite f64 values symbolically.
+fn contains_float_leaf(
+    expression: &MirContractExpr,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+) -> bool {
+    match expression {
+        MirContractExpr::Value(value) => {
+            matches!(
+                value_kind(function, catalog, value),
+                Ok(ContractValueKind::Float)
+            )
+        }
+        MirContractExpr::Int(_) | MirContractExpr::Bool(_) => false,
+        MirContractExpr::Unary { operand, .. } => contains_float_leaf(operand, function, catalog),
+        MirContractExpr::Binary { left, right, .. } => {
+            contains_float_leaf(left, function, catalog)
+                || contains_float_leaf(right, function, catalog)
+        }
+        MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
+            false
         }
     }
 }
@@ -378,6 +415,11 @@ pub(crate) fn validate_ffi_requires(
         return Ok(());
     };
     validate_leaves(condition, &receipt.arguments)?;
+    if contains_float_leaf(condition, function, catalog) {
+        return Err(
+            "extern requires float leaves are outside the runtime FFI predicate contract".into(),
+        );
+    }
     if expr_kind(condition, function, catalog)? != ContractValueKind::Bool {
         return Err("extern requires condition must be boolean".into());
     }
@@ -426,6 +468,11 @@ pub(crate) fn validate_ffi_ensures(
         return Ok(());
     };
     validate_leaves(condition, &receipt.arguments, receipt.result.as_ref())?;
+    if contains_float_leaf(condition, function, catalog) {
+        return Err(
+            "extern ensures float leaves are outside the runtime FFI predicate contract".into(),
+        );
+    }
     if expr_kind(condition, function, catalog)? != ContractValueKind::Bool {
         return Err("extern ensures condition must be boolean".into());
     }

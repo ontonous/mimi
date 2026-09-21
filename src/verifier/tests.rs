@@ -1555,26 +1555,50 @@ fn finite_f64_add_verifier_capability_is_closed_before_symbolic_execution() {
 }
 
 #[test]
-fn finite_f64_add_contract_is_rejected_before_symbolic_execution_without_float_model() {
+fn finite_f64_contract_comparison_enters_the_symbolic_domain() {
+    require_z3!();
+    // R6-1063 Face B: f64 contract values are in-domain for ordering
+    // comparisons.  The E0813 finiteness obligation at parameter
+    // introduction is load-bearing here — without it the NaN model would
+    // falsify the reflexive ordering and the proof would fail.
+    let source = r#"
+func carry(x: f64) -> f64 {
+    ensures: result >= x
+    x
+}
+func main() -> i64 { 42 }
+"#;
+    let file = parse_memory_source(source, "mir-f64-contract-comparison").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("f64 comparison contracts materialize");
+    crate::verifier::validate_mir_capabilities(&mir).expect("f64 comparison capability gate");
+    let results = crate::verifier::verify_mir(&mir, "f64-contract-comparison".into())
+        .expect("f64 comparison verification");
+    // Only `carry` carries a contract, so exactly one obligation comes back.
+    assert_eq!(results.len(), 1, "obligation count");
+    assert_eq!(results[0].status, VerifStatus::Verified);
+}
+
+#[test]
+fn finite_f64_contract_arithmetic_stays_outside_the_canonical_contract() {
+    // Face B residual boundary: ordering comparisons entered the domain,
+    // but contract arithmetic over f64 still has no symbolic domain.
     let source = r#"
 func add(left: f64, right: f64) -> f64 {
-    requires: left == left
-    ensures: result == result
+    ensures: result == left + right
     left + right
 }
 func main() -> i64 { 42 }
 "#;
-    let file = parse_memory_source(source, "mir-f64-add-symbolic-boundary").expect("parse");
+    let file = parse_memory_source(source, "mir-f64-contract-arithmetic").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("f64 contracts must remain outside the canonical verifier domain");
+        .expect_err("f64 contract arithmetic must remain outside the canonical contract");
     let message = format!("{error:?}");
     assert!(
-        message.contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE)
-            && message.contains("ABI Float")
-            && message.contains("canonical scalar verifier contract")
-            && message.contains(crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE),
-        "unexpected f64 contract boundary: {message}"
+        message.contains("contract arithmetic requires integer operands"),
+        "unexpected f64 contract arithmetic boundary: {message}"
     );
 }
 

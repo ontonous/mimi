@@ -13241,7 +13241,7 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
                 nonnegative(Expr::Old(receipt.arguments[0].clone())),
                 "pre-call scalar",
             ),
-            (nonnegative(Expr::Bool(true)), "integer operands"),
+            (nonnegative(Expr::Bool(true)), "ordering requires"),
         ] {
             let mut receipts = canonical.ffi_calls().clone();
             receipts.values_mut().next().unwrap().requires = Some(condition.clone());
