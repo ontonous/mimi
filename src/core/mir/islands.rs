@@ -1143,21 +1143,25 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             .get(&place.base)
                             .is_some_and(generation_matches)
             }
-            // R6-1072: the comparison variant only — the generation-stamped
-            // symbolic variant stays call-free — admits a direct call to a
-            // float-face-closure callable from inside a face function.  The
-            // callee's f64 result is one face edge from an admitted print,
-            // the verifier symbolically executes the callee body
-            // (`eval_direct_scalar_call`), and every consumer computes the
-            // ordered predicate from the runtime value.  Comparing a call
-            // requires calling it, so the callee is by construction a direct
-            // callee of (or inside) the print closure — the two-edge floor
-            // is unreachable here by shape.  The enclosure guard keeps
+            // R6-1072: admits a direct call to a float-face-closure callable
+            // from inside a face function — R6-1075 extends the arm to both
+            // variants of this predicate.  The callee's f64 result is one
+            // face edge from an admitted print, the verifier symbolically
+            // executes the callee body (`eval_direct_scalar_call`), and
+            // every consumer computes from the runtime value.  Comparing a
+            // call requires calling it and a fresh call result carries no
+            // symbolic fact to go stale, so the callee is by construction a
+            // direct callee of (or inside) the print closure — the two-edge
+            // floor is unreachable here by shape.  The enclosure guard keeps
             // classifier admission and island capability aligned per
-            // function (R6-1048): a non-face function's comparison over a
+            // function (R6-1048): a non-face function's expression over a
             // face call result would otherwise be admitted here and then
-            // hard-rejected by the island envelope.
-            ResolvedExprKind::Call(call) if !require_current_generation => {
+            // hard-rejected by the island envelope.  Every consumer that
+            // skips `visit_expr` on an admitted root walks its call leaves
+            // (`visit_float_origin_call_leaves`), so the predicate admitting
+            // a call never becomes the way an unpoliced call enters the
+            // graph.
+            ResolvedExprKind::Call(call) => {
                 self.in_float_face_function()
                     && matches!(
                         self.program.resolved_types().get(&expression.ty),
@@ -1183,22 +1187,24 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         }
     }
 
-    /// R6-1072: walk an operand subtree already admitted by the float-origin
+    /// R6-1072: walk a subtree already admitted by the float-origin
     /// predicate and visit only its call leaves.  Literals, tracked loads,
     /// arithmetic and negates carry nothing to police (their own types are
     /// exempted by the face admission), but a call leaf must reach
     /// `visit_expr` so the Call arm keeps policing the prelude floor, arity
     /// and arguments — the predicate admitting a call must not become the
-    /// way an unpoliced call enters the graph.
-    fn visit_comparison_call_leaves(&mut self, expression: &ResolvedExpr, concrete: bool) {
+    /// way an unpoliced call enters the graph.  R6-1075: the stamped
+    /// symbolic faces share the Call arm, so their `visit_expr`-skipping
+    /// consumers walk the same leaves instead of skipping wholesale.
+    fn visit_float_origin_call_leaves(&mut self, expression: &ResolvedExpr, concrete: bool) {
         match &expression.kind {
             ResolvedExprKind::Call(_) => self.visit_expr(expression, concrete),
             ResolvedExprKind::Binary { left, right, .. } => {
-                self.visit_comparison_call_leaves(left, concrete);
-                self.visit_comparison_call_leaves(right, concrete);
+                self.visit_float_origin_call_leaves(left, concrete);
+                self.visit_float_origin_call_leaves(right, concrete);
             }
             ResolvedExprKind::Unary { operand, .. } => {
-                self.visit_comparison_call_leaves(operand, concrete)
+                self.visit_float_origin_call_leaves(operand, concrete)
             }
             _ => {}
         }
@@ -1521,8 +1527,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         // normally: the visit_expr call-result face admits
                         // the call's own f64 type while the Call arm still
                         // polices the prelude floor, arity and arguments.
+                        // R6-1075: the skipped arithmetic root can now
+                        // contain call leaves, so it walks exactly those.
                         if !second_hand_print_face_root && !arithmetic_print_face_root {
                             self.visit_expr(initializer, concrete);
+                        } else if arithmetic_print_face_root {
+                            self.visit_float_origin_call_leaves(initializer, concrete);
                         }
                     }
                 }
@@ -1658,6 +1668,10 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         && !int_literal_widen_assign
                     {
                         self.visit_expr(value, concrete);
+                    } else if float_symbolic_assign {
+                        // R6-1075: the admitted symbolic RHS can now contain
+                        // call leaves; second-hand and literal roots cannot.
+                        self.visit_float_origin_call_leaves(value, concrete);
                     }
                 }
                 ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
@@ -1729,11 +1743,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         if let Some(result) = &block.result {
             // R6-1070: the root result of a face-closure callable joins the
             // cross-function face when it is an F64-typed float-symbolic
-            // root — the origin predicate only admits literals, tracked
-            // loads and their arithmetic/negate closure, so the skipped
-            // visit can never hide a call or a projection (the same
-            // soundness argument as the comparison face).  The visit would
-            // otherwise floor on the Binary/Load node's own f64 type.
+            // root — the origin predicate admits literals, tracked loads
+            // and their arithmetic/negate closure, so the skipped visit
+            // can never hide a projection; R6-1075 adds call leaves to the
+            // same closure, and they are walked explicitly below (the
+            // visit would otherwise floor on the Binary/Load node's own
+            // f64 type).
             let is_face_result_root = self.block_depth == 1
                 && concrete
                 && self.in_float_face_function()
@@ -1744,6 +1759,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 && self.expr_is_float_symbolic_root(result);
             if !is_face_result_root {
                 self.visit_expr(result, concrete);
+            } else {
+                self.visit_float_origin_call_leaves(result, concrete);
             }
         }
         self.block_depth -= 1;
@@ -1842,8 +1859,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     && self.expr_is_float_comparison_operand(left)
                     && self.expr_is_float_comparison_operand(right);
                 if comparison_over_float_domain {
-                    self.visit_comparison_call_leaves(left, concrete);
-                    self.visit_comparison_call_leaves(right, concrete);
+                    self.visit_float_origin_call_leaves(left, concrete);
+                    self.visit_float_origin_call_leaves(right, concrete);
                 } else {
                     if concrete {
                         self.require_profile_type(&left.ty);
@@ -1861,14 +1878,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // unclassified provenance.  The operand check is the
             // generation-agnostic origin predicate — R6-1072 lets it admit
             // enclosure-guarded face-closure calls, and the operand walk
-            // goes through `visit_comparison_call_leaves` so call leaves
+            // goes through `visit_float_origin_call_leaves` so call leaves
             // keep their policing while the rest of the subtree stays
             // exempt.
             ResolvedExprKind::Unary {
                 op: ResolvedUnaryOp::Negate,
                 operand,
             } if concrete && self.expr_is_float_comparison_operand(operand) => {
-                self.visit_comparison_call_leaves(operand, concrete)
+                self.visit_float_origin_call_leaves(operand, concrete)
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Old(operand)
@@ -2041,6 +2058,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                                     && matches!(
                                         &argument.value.kind,
                                         ResolvedExprKind::Binary { .. }
+                                            | ResolvedExprKind::Unary { .. }
                                     )
                                     && self.expr_is_float_symbolic_root(&argument.value)
                         }
@@ -2050,10 +2068,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         // `is_scalar_println_call`; a print-face literal or a
                         // plain local read has no nested expression left to
                         // police, so skip the value-type floor the way the
-                        // literal exemption does.  Any other argument root
-                        // (call result, arithmetic, projection) keeps its
-                        // normal floor — its inner out-of-profile origin
-                        // must stay outside this face.
+                        // literal exemption does.  R6-1075: the admitted
+                        // arithmetic root can contain call leaves, so the
+                        // walk visits exactly those (a no-op for literals and
+                        // loads).  Any other argument root (call result,
+                        // arithmetic, projection) keeps its normal floor —
+                        // its inner out-of-profile origin must stay outside
+                        // this face.
+                        self.visit_float_origin_call_leaves(&argument.value, concrete);
                         continue;
                     }
                     self.visit_expr(&argument.value, concrete);

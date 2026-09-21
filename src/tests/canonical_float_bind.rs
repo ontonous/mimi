@@ -65,6 +65,13 @@
 //! String callees verify in contract-bearing functions — while List
 //! callees and recursive callees keep the registered floor (the recursion
 //! guard is load-bearing there: the evaluator does not re-check it).
+//! R6-1075 makes the comparison variant's call arm variant-agnostic: the
+//! stamped symbolic faces (bind root, assign root, result root, print
+//! argument) admit arithmetic and negate over face-closure calls too, and
+//! every visit-skipping consumer walks its call leaves instead of
+//! skipping wholesale.  The print-argument face also admits the Unary
+//! shape R6-1069 already put in the origin predicate, closing the
+//! pre-existing `println(-x)` floor.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -385,6 +392,49 @@ fn float_bind_matrix_agrees_across_consumers() {
                 }
             "#,
             expected_stdout: "0.5\n1\n1\n",
+        },
+        // R6-1075: the stamped symbolic faces share R6-1072's call arm — a
+        // fresh call result carries no symbolic fact to go stale, so the
+        // bind root and the print root admit arithmetic over a face-closure
+        // call.  Every consumer that skips the visit on an admitted root
+        // walks its call leaves, so the call's prelude floor, arity and
+        // arguments stay policed.
+        FloatBindCase {
+            name: "float_arithmetic_call_bind_and_print_root",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func main() -> i32 {
+                    let y = value() * 2.0
+                    println(y)
+                    println(value() + 0.25)
+                    0
+                }
+            "#,
+            expected_stdout: "1\n0.75\n",
+        },
+        // R6-1075: negate over a call joins the print root and bind faces by
+        // the same arm, and the print-argument face now admits the Unary
+        // shape R6-1069 already put in the origin predicate — closing the
+        // pre-existing `println(-x)` floor for tracked locals too.  IEEE
+        // sign-bit negation is exact, so the sign survives every consumer.
+        FloatBindCase {
+            name: "float_negate_call_and_local_print_root",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func main() -> i32 {
+                    println(-value())
+                    let y = -value()
+                    println(y)
+                    let x = 0.5
+                    println(-x)
+                    0
+                }
+            "#,
+            expected_stdout: "-0.5\n-0.5\n-0.5\n",
         },
         // An integer literal operand widens as a known constant before the
         // operation, so it stays inside the symbolic domain (shortest
@@ -1179,6 +1229,53 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
+        // R6-1075: the stamped faces inherit R6-1072's enclosure guard —
+        // the arithmetic bind over a face-closure call result must live in
+        // a face-closure function.  `value` IS on the closure here (main
+        // prints a float and calls it), but the bind sits in `inner`, two
+        // call edges below main's print, so the bind root refuses and the
+        // program stays mixed (R6-1048 alignment: the classifier must not
+        // admit what the island envelope hard-rejects).
+        MixedCase {
+            name: "float_arithmetic_call_off_face_bind_is_mixed",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func inner() -> i32 {
+                    let y = value() * 2.0
+                    println(7)
+                    0
+                }
+                func mid() -> i32 {
+                    inner()
+                }
+                func main() -> i32 {
+                    println(0.5)
+                    mid()
+                }
+            "#,
+        },
+        // R6-1075: the call arm requires the callee itself to sit on the
+        // one-edge print closure.  `outer` is a direct callee of main's
+        // float print, but `inner` is two edges away, so `outer`'s result
+        // root `inner() * 3.0` keeps the floor even though `outer` is on
+        // the closure.
+        MixedCase {
+            name: "float_arithmetic_two_edge_callee_is_mixed",
+            source: r#"
+                func inner() -> f64 {
+                    0.25
+                }
+                func outer() -> f64 {
+                    inner() * 3.0
+                }
+                func main() -> i32 {
+                    println(outer() * 2.0)
+                    0
+                }
+            "#,
+        },
     ];
     for case in CASES {
         let label = format!("float bind mixed case {}", case.name);
@@ -1675,6 +1772,37 @@ fn float_comparison_call_in_contract_verifies_on_mir() {
     crate::verifier::validate_mir_capabilities(&mir)
         .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
     let results = crate::verifier::verify_mir(&mir, "float-compare-call-contract".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        results[0].status
+    );
+}
+
+// R6-1075: the arithmetic print root over a face-closure call rides the
+// same vertical — the stamped faces admit `println(value() * 2.0)`, the
+// capability gate routes the call (R6-1073), and the MIR verifier models
+// the multiply over the proven symbolic call result, so the contract
+// proves end-to-end.
+#[test]
+fn float_arithmetic_call_print_root_in_contract_verifies_on_mir() {
+    let source = r#"
+        func value() -> f64 {
+            0.5
+        }
+        func main() -> i32 {
+            ensures: result == 1
+            println(value() * 2.0)
+            1
+        }
+    "#;
+    let label = "float arithmetic call print root in contract verifies";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-arith-call-contract".into())
         .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
     assert_eq!(results.len(), 1, "{label} obligation count");
     assert!(

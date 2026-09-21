@@ -1,0 +1,13 @@
+func value() -> f64 {
+    0.5
+}
+func main() -> i32 {
+    let y = value() * 2.0
+    println(y)
+    println(value() + 0.25)
+    println(-value())
+    let z = -value()
+    println(z)
+    println(7)
+    0
+}
