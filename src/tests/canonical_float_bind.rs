@@ -51,6 +51,12 @@
 //! from the per-function print contract to the closure — a helper on a
 //! caller's print closure binds its own f64 literal and arithmetic.  The
 //! owned-String bind half stays print-function-scoped.
+//! R6-1072 opens the comparison operand domain to face-closure calls:
+//! comparing a call requires calling it, so the callee is by construction
+//! one face edge from a print, the comparison must live inside the face
+//! itself (the enclosure guard keeps classifier admission and island
+//! capability aligned per function), and the operand walk visits call
+//! leaves so the prelude floor, arity and arguments stay policed.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -317,6 +323,55 @@ fn float_bind_matrix_agrees_across_consumers() {
                         println(1)
                     } else {
                         println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "0.5\n1\n1\n",
+        },
+        // R6-1072: the comparison operand domain admits a direct call to a
+        // float-face-closure callable — comparing a call requires calling
+        // it, so the callee is by construction one face edge from the print
+        // (the two-edge floor is unreachable here by shape).  The verifier
+        // symbolically executes the callee body, so the ordered predicate
+        // is computed over a proven symbolic float, and the walk still
+        // polices the call's prelude floor, arity and arguments.
+        FloatBindCase {
+            name: "float_comparison_call_operand",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func main() -> i32 {
+                    println(0.5)
+                    if value() < 1.5 {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "0.5\n1\n",
+        },
+        // Arithmetic and negate over the call result ride the same operand
+        // recursion (`value() * 2.0 < 1.5` is true, `-value() < 0.0` is
+        // true); the walker visits only the call leaves for policing.
+        FloatBindCase {
+            name: "float_comparison_call_arithmetic_negate_operand",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func main() -> i32 {
+                    println(0.5)
+                    if value() * 2.0 < 1.5 {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    if -value() < 0.0 {
+                        println(1)
                     }
                     0
                 }
@@ -1086,6 +1141,36 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
+        // R6-1072: the comparison Call operand is enclosure-guarded — the
+        // comparison must live in a face-closure function.  Here the
+        // compared callee `value` IS on the closure (main prints a float
+        // and calls it), but the comparison sits in `inner`, which is two
+        // call edges below main's print, so the origin predicate's
+        // enclosure guard refuses and the program stays mixed.  This is
+        // the R6-1048 alignment guard: without it the classifier would
+        // admit what the island envelope (per-function closure) then
+        // hard-rejects on the default entry.
+        MixedCase {
+            name: "float_comparison_call_off_face_enclosure_is_mixed",
+            source: r#"
+                func value() -> f64 {
+                    0.5
+                }
+                func inner() -> i32 {
+                    if value() < 1.5 {
+                        println(7)
+                    }
+                    0
+                }
+                func mid() -> i32 {
+                    inner()
+                }
+                func main() -> i32 {
+                    println(0.5)
+                    mid()
+                }
+            "#,
+        },
     ];
     for case in CASES {
         let label = format!("float bind mixed case {}", case.name);
@@ -1545,6 +1630,78 @@ fn float_body_comparison_branch_is_disproven_against_the_false_ensures() {
     let label = "float body comparison branch non-vacuity";
     let mir = materialize_float_bind(source, label);
     let results = crate::verifier::verify_mir(&mir, "float-body-compare-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}
+
+// R6-1072: a comparison operand that is a face-closure call is decided by
+// the verifier's symbolic execution of the callee body
+// (`eval_direct_scalar_call` — explore_block, merged returns, recursion and
+// type_arguments rejected), not by an assumption.  The contract-face keeps
+// its registered floor though: the S6 whole-program capability gate lists
+// ordinary calls inside contract-bearing functions as outside the verifier
+// capability (pre-existing boundary — the R6-1068 comparison tests keep
+// their contracts on call-free bodies).  So the runtime routes (default,
+// native) carry this slice while the verifier's contract face stays where
+// it was; the evaluator itself models the shape exactly, as the
+// non-vacuity twin below proves.
+#[test]
+fn float_comparison_call_operand_capability_gate_keeps_contract_face_floor() {
+    let source = r#"
+        func value() -> f64 {
+            0.5
+        }
+        func main() -> i32 {
+            ensures: result == 1
+            println(value())
+            if value() < 1.0 {
+                1
+            } else {
+                0
+            }
+        }
+    "#;
+    let label = "float comparison call operand capability floor";
+    let mir = materialize_float_bind(source, label);
+    let errors = crate::verifier::validate_mir_capabilities(&mir)
+        .expect_err("{label}: contract-bearing call faces keep the registered floor");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("outside the verifier capability")),
+        "{label} must pin the capability floor, got {errors:?}"
+    );
+}
+
+// The non-vacuity pin for the call-operand comparison: against the negated
+// ensures the same body disproves — `verify_mir`'s symbolic evaluator
+// executes the callee body exactly (the symbolic 0.5 forces the then-arm),
+// demonstrating the modeling is real even while the separate capability
+// gate keeps the contract-face floor registered above.
+#[test]
+fn float_comparison_call_operand_branch_is_disproven_against_the_false_ensures() {
+    let source = r#"
+        func value() -> f64 {
+            0.5
+        }
+        func main() -> i32 {
+            ensures: result == 0
+            println(value())
+            if value() < 1.0 {
+                1
+            } else {
+                0
+            }
+        }
+    "#;
+    let label = "float comparison call operand branch non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-compare-call-nv".into())
         .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
     assert_eq!(results.len(), 1, "{label} obligation count");
     assert!(

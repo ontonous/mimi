@@ -18461,6 +18461,64 @@ fn canonical_mir_f64_cross_function_bind_routes_canonical_and_matches_native() {
 }
 
 #[test]
+fn canonical_mir_f64_compare_call_routes_canonical_and_matches_native() {
+    // R6-1072: the comparison operand domain admits face-closure calls —
+    // a direct comparison, arithmetic over the call result, and a negate
+    // over it all route canonical on the default entry, with the native
+    // MIR binary agreeing byte-for-byte.  Comparing a call requires
+    // calling it, so the callee is by construction one face edge from the
+    // print receipt.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_compare_call.mimi");
+    let expected = "0.5\n7\n8\n11\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-f64-compare-call-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn f64 compare-call native build");
+    assert!(
+        build.status.success(),
+        "the admitted f64 compare-call face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run f64 compare-call fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the compare-call face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted compare-call face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")

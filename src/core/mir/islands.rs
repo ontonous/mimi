@@ -1143,6 +1143,32 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             .get(&place.base)
                             .is_some_and(generation_matches)
             }
+            // R6-1072: the comparison variant only — the generation-stamped
+            // symbolic variant stays call-free — admits a direct call to a
+            // float-face-closure callable from inside a face function.  The
+            // callee's f64 result is one face edge from an admitted print,
+            // the verifier symbolically executes the callee body
+            // (`eval_direct_scalar_call`), and every consumer computes the
+            // ordered predicate from the runtime value.  Comparing a call
+            // requires calling it, so the callee is by construction a direct
+            // callee of (or inside) the print closure — the two-edge floor
+            // is unreachable here by shape.  The enclosure guard keeps
+            // classifier admission and island capability aligned per
+            // function (R6-1048): a non-face function's comparison over a
+            // face call result would otherwise be admitted here and then
+            // hard-rejected by the island envelope.
+            ResolvedExprKind::Call(call) if !require_current_generation => {
+                self.in_float_face_function()
+                    && matches!(
+                        self.program.resolved_types().get(&expression.ty),
+                        Some(ResolvedType::Primitive(PrimitiveType::F64))
+                    )
+                    && matches!(
+                        &call.callee,
+                        ResolvedCallee::Function(owner)
+                            if self.float_face_callables.contains(owner)
+                    )
+            }
             _ => false,
         }
     }
@@ -1154,6 +1180,27 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         match &expression.kind {
             ResolvedExprKind::Literal(ResolvedLiteral::Int(_)) => false,
             _ => self.expr_is_float_symbolic_operand(expression),
+        }
+    }
+
+    /// R6-1072: walk an operand subtree already admitted by the float-origin
+    /// predicate and visit only its call leaves.  Literals, tracked loads,
+    /// arithmetic and negates carry nothing to police (their own types are
+    /// exempted by the face admission), but a call leaf must reach
+    /// `visit_expr` so the Call arm keeps policing the prelude floor, arity
+    /// and arguments — the predicate admitting a call must not become the
+    /// way an unpoliced call enters the graph.
+    fn visit_comparison_call_leaves(&mut self, expression: &ResolvedExpr, concrete: bool) {
+        match &expression.kind {
+            ResolvedExprKind::Call(_) => self.visit_expr(expression, concrete),
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.visit_comparison_call_leaves(left, concrete);
+                self.visit_comparison_call_leaves(right, concrete);
+            }
+            ResolvedExprKind::Unary { operand, .. } => {
+                self.visit_comparison_call_leaves(operand, concrete)
+            }
+            _ => {}
         }
     }
 
@@ -1772,9 +1819,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 // no symbolic fact across the branch boundary, so a
                 // comparison after a branch leans on walk-order origin
                 // membership, never on a stale generation stamp.
-                // `expr_is_float_comparison_operand` admits only
-                // loads/literals/arithmetic of those, so the skipped
-                // subtree can never hide a call or a projection.
+                // R6-1072: the predicate can also admit a call to a
+                // float-face-closure callable (enclosure-guarded), so the
+                // skipped operands are not wholesale — call leaves are
+                // visited for their prelude floor, arity and argument
+                // policing; literals/loads/arithmetic/negates carry nothing
+                // to police.
                 // R6-1052 guard: outside that face a string literal
                 // operand must not smuggle a String operation (comparison,
                 // concat) into a complete admission; only the scalar print
@@ -1791,7 +1841,10 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     )
                     && self.expr_is_float_comparison_operand(left)
                     && self.expr_is_float_comparison_operand(right);
-                if !comparison_over_float_domain {
+                if comparison_over_float_domain {
+                    self.visit_comparison_call_leaves(left, concrete);
+                    self.visit_comparison_call_leaves(right, concrete);
+                } else {
                     if concrete {
                         self.require_profile_type(&left.ty);
                         self.require_profile_type(&right.ty);
@@ -1806,14 +1859,16 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // (`validate_copy_float_unary` admission; the verifier adds no
             // obligation), so the unary node's f64 type carries no
             // unclassified provenance.  The operand check is the
-            // generation-agnostic origin predicate — its subtree can only be
-            // literals, loads, arithmetic or negates of those, never a call
-            // or a projection.
+            // generation-agnostic origin predicate — R6-1072 lets it admit
+            // enclosure-guarded face-closure calls, and the operand walk
+            // goes through `visit_comparison_call_leaves` so call leaves
+            // keep their policing while the rest of the subtree stays
+            // exempt.
             ResolvedExprKind::Unary {
                 op: ResolvedUnaryOp::Negate,
                 operand,
             } if concrete && self.expr_is_float_comparison_operand(operand) => {
-                self.visit_expr(operand, concrete)
+                self.visit_comparison_call_leaves(operand, concrete)
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Old(operand)
