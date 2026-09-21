@@ -4,9 +4,9 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.6--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-5400%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-7700%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -56,7 +56,7 @@ flow Order {
 | `requires / ensures` | 可动态检查或静态证明的合约 |
 | `component / foreign` | 跨语言边界，带类型化所有权、错误和 effect |
 
-Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），通过 `mimi promote` 提升为 Mimi。
+Mimi 是生产编译后端。MimiSpec（`.mms`）已于 0.1.8 移除；直接编写生产 Mimi（`.mimi`）。
 
 ---
 
@@ -163,7 +163,8 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 git clone https://github.com/ontonous/mimi
 cd mimi
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo build --release --features llvm18-host-dynamic
 ```
 
 ### Hello, Flow
@@ -206,7 +207,8 @@ func main() -> i32 {
 ### 运行测试
 
 ```bash
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic
 ```
 
 ---
@@ -215,7 +217,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
 ### CheckedProgram：语义中枢
 
-所有后端（解释器、LLVM codegen、Z3 验证器）消费唯一真值源：**CheckedProgram**。没有后端重查 AST 或重猜类型。
+所有后端消费唯一真值源：**CheckedProgram**，其类型化函数体 Lowering 为 **Canonical MIR**——当前 0.1.11 战役的唯一语义主干。reference executor、MIR-bytecode 编译器、native/LLVM emitter 与 Z3 验证器都是同一 `MirProgram` 的机械消费者，由三方差分 harness 对拍固定。
 
 ```
 Source → Lexer → Parser → AST
@@ -223,18 +225,20 @@ Source → Lexer → Parser → AST
     → Typed Resolved IR（canonical 签名、目录、物化类型）
     → CFG（per-callable 控制流图）
     → Resource Analysis（线性资源动作）
+    → Canonical MIR（类型化函数、所有权事件、glue 合同）
       ↓
-  ┌───────────┼───────────┐
-  解释器        Codegen      验证器
-  (from_checked) (compile_checked) (verify_checked)
+  ┌─────────────┬─────────────┬─────────────┬─────────────┐
+  Reference      Bytecode      Native LLVM    Z3 验证器
+  Executor       VM            Emitter        (MIR 引擎)
 ```
 
-**铁律**：后端不能回退 raw AST。声明层（签名、Flow 转移、Actor/Session、ownership、CFG）全量从 CheckedProgram 安装；函数体经 per-function dispatch 编译（resolved native emitter + 显式可观测 legacy arm）。`CheckedProgram::raw_ast()` 为 crate 内部，仅限 3 个永久 consumer（codegen 第五遍 / 解释器 / Z3 验证器）。
+**铁律**：后端不能回退 raw AST。0.1.11 战役起，生产 `raw_ast()` 调用点为 **零**。默认 `run`/`build`/`verify` 按 island 逐个切换到 Canonical MIR 路由：程序只有在全部消费者预检通过后才走默认 canonical 路由；未建模形状一律 fail-closed 拒绝（绝不静默错译），保留显式 legacy emitter，其剩余调用点（当前 8 个）处于单调下降的删除门禁之下。
 
 ### 依赖主链
 
 ```
 Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
+  → Canonical MIR → reference / bytecode / native / verifier 机械消费者
   → Flow generation/turn → Actor/Session/resource → semantic trace
   → Verified Core
   → Component IR → Native ABI → Wire → Rust SDK / XPU FFI
@@ -250,6 +254,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | **TypeFolder** | `src/core/type_folder.rs` | Binder-aware 类型折叠（SurfaceTy / InferTy / ZonkedTy / BackendTy） |
 | **CFG** | `src/core/cfg/` | Per-callable 控制流图，stable-ID CallableCfg |
 | **Resource Analysis** | `src/core/ownership.rs` | 线性资源 ledger（Introduce / Move / Drop / Return + borrow），canonical 动作类型 |
+| **Canonical MIR** | `src/core/mir/` | 类型化语义主干：`MirFunction` / `MirTypeDesc`、结构 validator、确定性 canonical text、所有权事件投影、island 合同 |
 | **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin；NodeIdBuilder 稳定身份 |
 
 ### 编译器内部 Flow 范式
@@ -303,6 +308,8 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | `mimi fmt <files>` | 格式化代码（`--check` 用于 CI） |
 | `mimi lint <files>` | 静态分析（`--fail-on-warnings`） |
 | `mimi verify <path>` | Z3 形式化验证 |
+| `mimi mir <path>` | Lowering 为 canonical MIR 并打印确定性形式（`--receipt` 输出路由回执 manifest，`--all` 包含导入模块） |
+| `mimi disasm <file>` | 反汇编为字节码（调试用） |
 | `mimi lsp` | 启动 LSP 服务器（stdin/stdout） |
 | `mimi init [name]` | 初始化 `mimi.toml` |
 | `mimi add <name>` | 添加依赖（`--version`、`--git`、`--path`） |
@@ -314,11 +321,12 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | `mimi publish` | 发布到本地 registry |
 | `mimi search <query>` | 搜索包 |
 | `mimi doc <path>` | 生成文档 |
-| `mimi promote <path>` | 提升 `.mms` → `.mimi` |
-| `mimi mms <files>` | 处理 MimiSpec 文件 |
+| `mimi promote <path>` | 提升 legacy `.mms` 草稿 → `.mimi`（0.1.8 起已从用户可见面移除） |
 | `mimi stats <path>` | 使用统计 |
 | `mimi stat <path>` | 目录分析 |
 | `mimi bindgen <path>` | 生成多语言 FFI 绑定 |
+| `mimi abi core\|export\|validate\|hash\|diff\|check\|emit-c\|emit-rust\|emit-go\|emit-node\|emit-py\|emit-java\|emit-cpp` | 导出/校验/生成/检查 Component `.mimiabi` JSON |
+| `mimi wire encode\|decode\|validate-schema <file>` | 封装/解封/校验 Component Wire 数据 |
 | `mimi emit-*-bindings` | 语言特定 FFI 绑定生成（C/C++/Rust/Go/Node.js/Java/Python） |
 
 ---
@@ -327,7 +335,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 
 ```
 mimi/
-├── src/                        # Rust 编译器（366 文件，~305k LOC）
+├── src/                        # Rust 编译器（477 文件，约 600k LOC，含测试）
 │   ├── main.rs                 # CLI 入口（clap derive）
 │   ├── lib.rs                  # 库入口
 │   ├── ast.rs                  # AST：FlowDef, StateDef, TransitionDef, ProtocolDef, ...
@@ -343,16 +351,18 @@ mimi/
 │   ├── core/                   # 类型推断与检查 → CheckedProgram
 │   │   ├── checker/            # 类型检查器 → CheckedProgram 语义中枢
 │   │   ├── resolved/           # Typed Resolved IR（canonical 声明）
+│   │   ├── mir/                # Canonical MIR：数据模型、validator、lowering、reference executor、island 合同
 │   │   ├── unification.rs      # HM 统一（undo trail + TypeScheme）
 │   │   ├── type_folder.rs      # Binder-aware 类型折叠
 │   │   ├── cfg/                # Per-callable 控制流图
 │   │   ├── ownership.rs        # 线性资源分析（canonical 动作）
 │   │   └── infer/              # HM 类型推断 + 合约推导
 │   ├── interp/                 # Bytecode VM（0.1.3 起唯一解释器）
-│   │   └── bytecode/           # Bytecode 编译器 + VM + builtin 注册表
+│   │   └── bytecode/           # Bytecode 编译器 + VM + builtin 注册表（+ MIR 消费者）
 │   ├── codegen/                # LLVM 18 codegen（compile_checked）
+│   │   ├── mir/                # MIR → LLVM 机械 lowering（--mir opt-in + 闭合岛默认路由）
 │   │   └── builtins/           # 内建函数 codegen（io, string, json, ...）
-│   ├── verifier/               # Z3 合约验证器（verify_checked）
+│   ├── verifier/               # Z3 合约验证器（verify_checked + MIR 引擎）
 │   ├── ffi/                    # 多语言绑定生成（7 种语言）
 │   ├── lsp/                    # LSP 服务器（严格 Flow）
 │   ├── loader/                 # 模块加载器（严格 Flow）
@@ -361,11 +371,11 @@ mimi/
 │   ├── lint.rs                 # 静态分析器
 │   ├── main/                   # CLI 子命令实现（24 个命令）
 │   ├── diagnostic/             # 错误码与格式化
-│   └── tests/                  # 4500+ 测试
+│   └── tests/                  # 测试套件（7700+ 个 #[test] 函数）
 ├── std/                        # 标准库（24 个模块）
 ├── examples/                   # 示例程序（28 个）
 ├── demos/                      # 演示程序（23 个）
-├── tests/real_world/           # MCDD 真实程序双后端套件（69 个程序）
+├── tests/real_world/           # MCDD 真实程序双后端套件（136 个程序）
 ├── scripts/                    # 构建与 CI 脚本
 ├── Cargo.toml
 └── CHANGELOG.md
@@ -394,31 +404,36 @@ mimi/
 
 ```bash
 # 全量测试
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic
 
 # 双后端等价性（L1）
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test dual_
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic dual_
 
 # 类型系统健全性（L2）
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic "typecheck::"
 
 # 真实程序 MCDD 套件
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test real_world
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic real_world
 
 # Clippy（零警告门禁）
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo clippy --features llvm18-host-dynamic --all-targets -- -D warnings
 
 # 格式化
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **测试提示**：完成测试性能优化后，日常全量门禁为 `ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=4`（约 42 秒）。Z3 验证子集仍使用单线程；极端内存受限环境可退回 `--test-threads=1`。debug 模式仍可使用约 12 GB 内存。详见 [AGENTS.md](AGENTS.md)。
+> **测试提示**：32 核机器上 `--test-threads=4` 全量约 40 秒；实测峰值 RSS 约 300 MB，`--test-threads=16` 是吞吐拐点。Z3 验证子集保持单线程（Z3 arena 不向 OS 归还内存）；`ulimit -v 20000000` 防护保留为保险。详见 [AGENTS.md](AGENTS.md)。
 
 ---
 
 ## 状态
 
-**当前版本**：0.1.9-dev。0.1.7 已发布（2026-08-19）：Wave-3 基建诚实收口；0.1.8 门禁全绿（语义诚实 + 身份纯度：L1 spawn、生产 dual、Narrow、值 ABI、Flow S / Actor A / Session K）；0.1.9 进行中（linear T + 权限闭环）。尚未宣称 VM≡native。
+**当前版本**：0.1.10-dev。0.1.9 已发布（2026-08-28）：线性种类 + 权限闭环（cap 真 move + std、小步语义、E0439）；0.40.x 交付 fat-ABI bug-hunt 收口（F-001–F-024）、所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 **Canonical MIR 架构战役**（内部 sprint 0.41，目标 0.1.11）：唯一语义核心（Canonical MIR）由 reference executor、bytecode VM、native/LLVM emitter 与 verifier 机械消费，按 island 逐个迁移、显式能力门禁、未建模形状 fail-closed。2026-09-06 执行计划里程碑 **M0–M3 已全部验收**（稳定化复采、家族组合矩阵、默认入口迁移 + 物理 legacy 删除、Flow 失败闭环），scalar FFI 已在四消费者端到端闭合。删除门禁现状（2026-09-21）：生产 `raw_ast()` 调用点 **0**，legacy emitter 降至 **8** 个调用点，**4** 类兼容 owner 待清。语言语义（内核卡）不变；默认 `run`/`build`/`verify` 只对已证明完整闭合的 island 切换。尚未宣称 VM≡native。
 
 
 ### 文档索引与外部盲审
@@ -428,20 +443,18 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ---
 
-
 ## 版本历史
 
 ### 1. 当前版本
-- **0.1.9-dev**（当前）：在 0.1.8 语义诚实 + 身份纯度基础上，延续至 linear T + 权限闭环（0.1.9）。见 CHANGELOG.md。
+- **0.1.10-dev**（当前）：真实痛点修复 + FFI 组件符号闭合（M-004 `extern "C" const` 导出、M-001 导出前缀）；0.40.x 交付所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 Canonical MIR 架构战役（内部 sprint 0.41，目标 0.1.11）；M0–M3 里程碑已验收，生产 raw-AST 调用点清零。见 CHANGELOG.md。
 
 ### 2. 当前大版本（0.1.x）
-- **0.1.0 → 0.1.8**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、  核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）。逐 minor 细节见 CHANGELOG.md。
+- **0.1.0 → 0.1.9**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）、语义诚实 + 身份纯度（0.1.8）、线性种类 + 权限闭环（0.1.9）。逐 minor 细节见 CHANGELOG.md。
 
-### 3. PRE0.1（v0.7 – v0.30）
-- v0.7（Z3 + FFI codegen）→ v0.30（止血，清零 15 项架构债务）。1863 commits、  66 个 `mimi-v*` tag。详细历史见 CHANGELOG.md。
+### 3. PRE-0.1（v0.7 – v0.30）
+- v0.7（Z3 + FFI codegen）→ v0.30（止血，清零 15 项架构债务）。1863 commits、66 个 `mimi-v*` tag。详细历史见 CHANGELOG.md。
 
 > 完整变更日志：[CHANGELOG.md](CHANGELOG.md)。
-
 
 ---
 

@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-5400%2B-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-7700%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 [![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
@@ -217,7 +217,7 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 
 ### CheckedProgram: The Semantic Hub
 
-All backends (interpreter, LLVM codegen, Z3 verifier) consume a single source of truth: **CheckedProgram**. No backend re-parses AST or re-guesses types.
+All backends consume a single source of truth: **CheckedProgram**, whose typed function bodies lower into **Canonical MIR** — the one semantic trunk of the current 0.1.11 campaign. The reference executor, the MIR-bytecode compiler, the native/LLVM emitter and the Z3 verifier are mechanical consumers of the same `MirProgram`, pinned together by a three-consumer differential harness.
 
 ```
 Source → Lexer → Parser → AST
@@ -225,18 +225,20 @@ Source → Lexer → Parser → AST
     → Typed Resolved IR (canonical signatures, catalogs, materialized types)
     → CFG (per-callable control flow graph)
     → Resource Analysis (linear resource actions)
+    → Canonical MIR (typed functions, ownership events, glue contracts)
       ↓
-  ┌───────────┼───────────┐
-  Interpreter   Codegen     Verifier
-  (from_checked) (compile_checked) (verify_checked)
+  ┌─────────────┬─────────────┬─────────────┬─────────────┐
+  Reference      Bytecode      Native LLVM    Z3 Verifier
+  Executor       VM            Emitter        (MIR engine)
 ```
 
-**Iron rule**: backends cannot fall back to raw AST. Declaration layer (signatures, Flow transitions, Actor/Session, ownership, CFG) is fully installed from CheckedProgram; function bodies compile via per-function dispatch (resolved native emitter with an explicit, observable legacy arm). `CheckedProgram::raw_ast()` is crate-internal and limited to 3 permanent consumers (codegen pass 5 / interpreter / Z3 verifier).
+**Iron rule**: backends cannot fall back to raw AST. As of the 0.1.11 campaign, production `raw_ast()` call sites are **zero**. Default `run`/`build`/`verify` route through Canonical MIR island-by-island: a program takes the default canonical route only after all consumers pre-admit it; unmodeled shapes are rejected fail-closed (never silently mis-executed) and keep the explicit legacy emitter, whose remaining call sites (currently 8) sit under a monotonic deletion gate.
 
 ### Dependency Chain
 
 ```
 Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
+  → Canonical MIR → reference / bytecode / native / verifier mechanical consumers
   → Flow generation/turn → Actor/Session/resource → semantic trace
   → Verified Core
   → Component IR → Native ABI → Wire → Rust SDK / XPU FFI
@@ -252,6 +254,7 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | **TypeFolder** | `src/core/type_folder.rs` | Binder-aware type folding (SurfaceTy / InferTy / ZonkedTy / BackendTy) |
 | **CFG** | `src/core/cfg/` | Per-callable control flow graph, stable-ID CallableCfg |
 | **Resource Analysis** | `src/core/ownership.rs` | Linear resource ledger (Introduce / Move / Drop / Return + borrow) with canonical action kinds |
+| **Canonical MIR** | `src/core/mir/` | Typed semantic trunk: `MirFunction` / `MirTypeDesc`, structural validator, deterministic canonical text, ownership-event projection, island contracts |
 | **AstNodeMeta** | `src/span.rs` | SourceId + Span + AstOrigin; NodeIdBuilder stable identity |
 
 ### Compiler Internal Flow Paradigm
@@ -305,6 +308,8 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | `mimi fmt <files>` | Format code (`--check` for CI) |
 | `mimi lint <files>` | Static analysis (`--fail-on-warnings`) |
 | `mimi verify <path>` | Z3 formal verification |
+| `mimi mir <path>` | Lower to canonical MIR and print the deterministic form (`--receipt` for the route manifest, `--all` to include imported modules) |
+| `mimi disasm <file>` | Disassemble to bytecode (debugging) |
 | `mimi lsp` | Start LSP server (stdin/stdout) |
 | `mimi init [name]` | Initialize `mimi.toml` |
 | `mimi add <name>` | Add dependency (`--version`, `--git`, `--path`) |
@@ -330,7 +335,7 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 
 ```
 mimi/
-├── src/                        # Rust compiler (366 files, ~305k LOC)
+├── src/                        # Rust compiler (477 files, ~600k LOC incl. tests)
 │   ├── main.rs                 # CLI entry point (clap derive)
 │   ├── lib.rs                  # Library entry point
 │   ├── ast.rs                  # AST: FlowDef, StateDef, TransitionDef, ProtocolDef, ...
@@ -346,16 +351,18 @@ mimi/
 │   ├── core/                   # Type inference & checking → CheckedProgram
 │   │   ├── checker/            # Type checker → CheckedProgram semantic hub
 │   │   ├── resolved/           # Typed Resolved IR (canonical declarations)
+│   │   ├── mir/                # Canonical MIR: data model, validator, lowering, reference executor, islands
 │   │   ├── unification.rs      # HM unification (undo trail + TypeScheme)
 │   │   ├── type_folder.rs      # Binder-aware type folding
 │   │   ├── cfg/                # Per-callable control flow graph
 │   │   ├── ownership.rs        # Linear resource analysis (canonical actions)
 │   │   └── infer/              # HM type inference + contract derivation
 │   ├── interp/                 # Bytecode VM (sole interpreter since 0.1.3)
-│   │   └── bytecode/           # Bytecode compiler + VM + builtin registry
+│   │   └── bytecode/           # Bytecode compiler + VM + builtin registry (+ MIR consumer)
 │   ├── codegen/                # LLVM 18 codegen (compile_checked)
+│   │   ├── mir/                # MIR → LLVM mechanical lowering (--mir opt-in + closed-island default route)
 │   │   └── builtins/           # Builtin function codegen (io, string, json, ...)
-│   ├── verifier/               # Z3 contract verifier (verify_checked)
+│   ├── verifier/               # Z3 contract verifier (verify_checked + MIR engine)
 │   ├── ffi/                    # Multi-language binding generation (7 langs)
 │   ├── lsp/                    # LSP server (strict Flow)
 │   ├── loader/                 # Module loader (strict Flow)
@@ -364,11 +371,11 @@ mimi/
 │   ├── lint.rs                 # Static linter
 │   ├── main/                   # CLI subcommand implementations (24 commands)
 │   ├── diagnostic/             # Error codes & formatting
-│   └── tests/                  # 4500+ tests
+│   └── tests/                  # Test suites (7700+ #[test] functions)
 ├── std/                        # Standard library (24 modules)
 ├── examples/                   # Example programs (28)
 ├── demos/                      # Demo programs (23)
-├── tests/real_world/           # MCDD real-world dual-backend suite (69 programs)
+├── tests/real_world/           # MCDD real-world dual-backend suite (136 programs)
 ├── scripts/                    # Build & CI scripts
 ├── Cargo.toml
 └── CHANGELOG.md
@@ -420,13 +427,13 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **Test note**: after the test-performance work, the normal full gate is `ulimit -v 20000000 && LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test -- --test-threads=4` (about 42 seconds). Keep Z3 verification subsets single-threaded; extremely memory-constrained systems may fall back to `--test-threads=1`. Debug builds can still use about 12 GB RAM. See [AGENTS.md](AGENTS.md) for details.
+> **Test note**: the full suite runs in roughly 40 seconds at `--test-threads=4` on a 32-core machine; measured peak RSS is ~300 MB, and `--test-threads=16` is the throughput inflection point. Keep Z3 verification subsets single-threaded (Z3 arenas never return memory to the OS); the `ulimit -v 20000000` guard stays as insurance. See [AGENTS.md](AGENTS.md) for details.
 
 ---
 
 ## Status
 
-**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.1.10-dev in progress — 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2), and since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): one semantic core (Canonical MIR) consumed mechanically by the reference executor, bytecode VM, native/LLVM emitter and verifier, migrated island-by-island behind explicit capability gates with fail-closed rejection of unmodeled shapes. Language semantics (kernel card) are unchanged; default `run`/`build`/`verify` routes switch only for proven-complete islands. Does not yet claim VM≡native.
+**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): one semantic core (Canonical MIR) consumed mechanically by the reference executor, bytecode VM, native/LLVM emitter and verifier, migrated island-by-island behind explicit capability gates with fail-closed rejection of unmodeled shapes. The 2026-09-06 execution plan milestones **M0–M3 are all accepted** (stability re-sampling, family combination matrices, default-entry migration with physical legacy deletions, Flow failure closure), and scalar FFI is closed end-to-end across the four consumers. Deletion-gate status (2026-09-21): production `raw_ast()` call sites **0**, legacy emitter down to **8** call sites, **4** compatibility owners still pending. Language semantics (kernel card) are unchanged; default `run`/`build`/`verify` routes switch only for proven-complete islands. Does not yet claim VM≡native.
 
 
 ### References & External Reviews
@@ -444,7 +451,8 @@ CHANGELOG.md.
 - **0.1.10-dev** (current): real-world pain-point repairs and FFI component-symbol closure
   (M-004 `extern "C" const` export, M-001 export-prefix); 0.40.x added ownership-metadata
   single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline
-  is the Canonical MIR architecture campaign (internal sprint 0.41, targeting 0.1.11).
+  is the Canonical MIR architecture campaign (internal sprint 0.41, targeting 0.1.11);
+  M0–M3 execution-plan milestones are accepted and production raw-AST call sites are at zero.
   See CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)

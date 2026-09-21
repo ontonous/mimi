@@ -2,6 +2,52 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-21，游标 R6-22 → R6-1063）
+
+按 `devdocs/MIR_EXECUTION_PLAN_2026-09-06.md`（M0 稳定化 → M1 家族组合 → M2 默认迁移/
+物理删除 → M3 Flow 失败闭环）完成首轮全部里程碑验收，随后按 §8 队列推进 R6 系列切片。
+语言语义面持续零变化（kernel-card 不变）；逐切片台账见 `devdocs/v0.41/`（本地审计文档）。
+
+- **M0 稳定化**：固定构建配置下 generic_record 170/0、generic_list 33/0；历史 stop-ship
+  全量复采，13 项失败逐项归因至沙箱 seccomp 网络 EPERM，旧 66 项登记 `unreproduced`
+  不冒充关闭；固定差分 22/0，M1 native Valgrind 19 allocs/19 frees、0 errors。
+- **M2 默认入口迁移 + 物理删除**：C1 默认 `run`/`build`/`verify`、`--mir`、direct native
+  与 public verifier 同合同；旧 resolved Map/Set lowering 与多条 legacy native entry
+  物理删除；route disposition 显式化，选择器在四消费者预检通过后才切默认，绝不 fallback。
+- **M3 Flow 失败闭环**：真实失败/source 归还/安全重试四消费者合同、默认 CLI、E0423
+  复用负例；F1 `flow_order_system` 全链、F2 recoverable failure tuple direct
+  destructuring、F2 跨状态失败稳定化与完整回归复采（verifier 正例 `Proven`、反例
+  `Disproven` 均非空）。
+- **union 合同扩张**：非 Copy multi-target union → canonical tagged-union 合同、多字段
+  变体 union、Fault absorption payloads 提升、out-of-contract union payload fail-close
+  （E0446）、Flow union 符号 verifier 域。
+- **scalar FFI 端到端闭合**：checker-owned FFI receipt（symbol/C ABI/result identity +
+  canonical digest + L2 伪造拒绝）、同一 MIR 的 reference/bytecode/native/verifier 四
+  消费者对拍、候选库 load+symbol 逐个探测与符号级 fallback、forged receipt 的 host
+  不可达性显式证明、非标量 FFI 声明边界在 legacy fallback 与 host binding 之前
+  fail-closed（独立诊断码 `MIR-FFI-DECLARATION-001`）、递归 helper 图统一拒绝、
+  `mimi mir`/`mir --receipt` 纯表示入口保留非标量形状。
+- **island 默认路由扩张（R6-1049–1063）**：root-level scalar assign、`PrintlnString`
+  一等 canonical builtin、scalar literal switch 三消费者、f64 literal println、float
+  bind/assign/Add/Subtract canonical face（Z3 IEEE symbolic domain）、int-literal widen
+  assign 算术面、f64 合约比较域、plain-scalar island route candidacy + prelude 解耦。
+- **门禁与工具**：real_world `run_suite` 已知差距 drift 检测（R6-1056）；unsafe SAFETY
+  gate 基线 37→0（R6-1058）。
+- **可移植性探查**：Android 四目标（aarch64/armv7/i686/x86_64）cfg check 通过（需
+  `blake3/pure`，不宣称链接或运行）；wasm32 保持上游依赖层阻断记录。
+- **删除门禁现状（2026-09-21）**：`raw_ast()` 生产调用点 **0**；`compile_func_legacy`
+  匹配 **8**；四类兼容 owner **4/0/8/4** 未清零，物理删除条件未满足前不删。
+
+不变量类别：L1（同一 `MirProgram` 的 reference/bytecode/native/verifier 可观察等价 +
+三方差分 harness）/ L2（validator 与 route selector 在任何后端消费前拒绝非法/未建模
+MIR，禁止隐式 fallback）/ L3（drop/clone/transfer 由 TypeDesc + 显式 MIR 操作 + glue
+合同共同证明；native Valgrind 定向 0 errors）。
+
+测试：src 内 `#[test]` 函数 6,456 → 约 7,736；新鲜 all-target 基线（2026-09-18，
+R6-1028 时点）lib 7,408/0/10 ignored、main 203/0、builtin 4/0、real_world 33/0、
+real_world_cli 289/0、stress 62/0/28 ignored、trap 2/0；每切片附正/负 fixture 与
+CLI 门禁，不再次 push、不发布、不打 tag。
+
 ### Canonical MIR 架构战役（内部 sprint 0.41.x，2026-08-31 – 2026-09-05，s0–s144）
 
 主线自 2026-08-31 起转入语义架构升级：把 checker 产出的类型、控制流、ABI、所有权与

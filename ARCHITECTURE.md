@@ -1,6 +1,6 @@
 # Mimi Runtime Architecture
 
-> 500-word runtime architecture overview（v0.31.22 盲审修正，v0.33 当前）
+> 500-word runtime architecture overview（v0.31.22 盲审修正，0.1.10-dev 当前；native runtime 是 Canonical MIR native emitter 的下游消费者）
 
 ## Overview
 
@@ -88,7 +88,7 @@ extern "C" functions use passport types:
 
 - Contract violations → `abort()` (async-signal-safe)
 - Environment failures → `Result<T, E>` or error codes
-- **Typed errors (FsError, JsonError, etc.)**: Not implemented (deferred to post-1.0)
+- **Typed errors (FsError, JsonError, etc.)**: ✅ Landed at the language level (`std/errors.mimi`, `net.mimi` `Result<T, NetError>`); the native runtime contract-violation path remains `abort()`
 
 ## Optimization Levels
 
@@ -111,7 +111,7 @@ extern "C" functions use passport types:
 
 ## Future Work
 
-- **Component IR / Native ABI / fat pointers / opaque handles**: Deferred (Phase C of 0.1.1 partially scoped down)
-- **Value clone elimination**: Partially addressed by bytecode VM (0.33), full fix deferred to 0.1.4+
-- **Typed errors / Error algebra**: Deferred to post-1.0
+- **Component IR / Native ABI / fat pointers / opaque handles**: ✅ Delivered (0.1.1 Phase C; fat-ABI bug-hunt F-001–F-024 closed in 0.40.x with A1 ownership-metadata single-sourcing)
+- **Value clone elimination**: ✅ Derived value drop/clone glue landed (0.40.3 A2, `MIMI_VALUE_GLUE` opt-in, driven by canonical ownership/layout metadata; unproven storage shapes stay fail-closed). Deeper elimination continues under the Canonical MIR campaign (0.1.11)
+- **Typed errors / Error algebra**: Language-level typed error enums landed (`std/errors.mimi`); full error algebra remains deferred
 - **Comptime purity / defer LIFO**: Deferred
