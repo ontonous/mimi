@@ -2906,9 +2906,22 @@ pub(crate) fn is_owned_string_return_candidate(
     function: &MirFunction,
     type_catalog: &types::MirTypeCatalog,
 ) -> bool {
-    type_catalog.validate_owned_string(&function.result).is_ok()
-        && (has_direct_owned_string_return_glue(function, type_catalog)
-            || has_string_branch_merge(function, type_catalog))
+    if type_catalog
+        .validate_owned_string(&function.result)
+        .is_err()
+    {
+        return false;
+    }
+    // R6-1076: a one-block `Const "…" → Return` graph with no String
+    // parameters is the closed constant face of the same contract — the
+    // ledger below proves its liveness exactly (the constant is live from
+    // the Const to the Return), so it joins the candidate set beside the
+    // Move/Clone returns without weakening the glue-only pre-filter.
+    if has_direct_owned_string_constant_return(function, type_catalog) {
+        return true;
+    }
+    (has_direct_owned_string_return_glue(function, type_catalog)
+        || has_string_branch_merge(function, type_catalog))
         && function
             .blocks
             .values()
@@ -2930,6 +2943,50 @@ pub(crate) fn is_owned_string_return_candidate(
                     .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok()),
                 _ => false,
             })
+}
+
+/// R6-1076: whether the function's single block consists of exactly one
+/// instruction — the canonical String constant defining the returned value —
+/// and holds no String parameters.  This is the materialized shape of an
+/// owned-String constant callable; the return-shape ledger proves that its
+/// result is live exactly from the constant to the Return.  Any additional
+/// instruction (a second constant, glue on another slot, a call) leaves the
+/// constant face and keeps the glue-only pre-filter.
+fn has_direct_owned_string_constant_return(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> bool {
+    if function.blocks.len() != 1 {
+        return false;
+    }
+    if function.parameters.iter().any(|parameter| {
+        function
+            .values
+            .get(parameter)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+    }) {
+        return false;
+    }
+    function.blocks.values().any(|block| {
+        let MirTerminator::Return {
+            value: Some(return_value),
+        } = &block.terminator
+        else {
+            return false;
+        };
+        function
+            .values
+            .get(return_value)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+            && block.instructions.len() == 1
+            && matches!(
+                block.instructions.first().map(|instruction| &instruction.kind),
+                Some(MirInstructionKind::Const {
+                    result,
+                    literal: crate::core::ResolvedLiteral::String(_),
+                }) if result == return_value
+            )
+    })
 }
 
 fn has_direct_owned_string_return_glue(

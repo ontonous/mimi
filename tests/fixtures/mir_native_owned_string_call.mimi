@@ -1,0 +1,10 @@
+func greet() -> string {
+    "hi"
+}
+func main() -> i32 {
+    let s = greet()
+    println(s)
+    println(greet())
+    println(7)
+    0
+}

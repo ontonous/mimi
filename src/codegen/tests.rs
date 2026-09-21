@@ -593,7 +593,14 @@ fn direct_native_entry_rejects_complete_record_materialization_failure() {
 
 #[test]
 fn direct_native_entry_rejects_a_mixed_scalar_collection_candidate() {
-    let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }";
+    // R6-1076 restatement: the former pin rode on the island gate's String
+    // print-face envelope, which this slice reduced to the canonical
+    // StringHandle contract itself (the value/const arms are now
+    // per-instruction contracts).  The narrowest managed value still
+    // outside the envelope is the f64 leaf without its print face, so the
+    // recognized mixed candidate keeps its cannot-re-enter-legacy
+    // rejection.
+    let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = 1.5 drop(text) count }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()

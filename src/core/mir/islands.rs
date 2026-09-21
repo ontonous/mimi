@@ -840,6 +840,49 @@ pub fn has_unsupported_generic_set_facade_candidate(program: &CheckedProgram) ->
     })
 }
 
+/// R6-1076: the owned-String constant callable face — a concrete, effect-free
+/// user callable whose entire body is a string-literal result.  This is the
+/// checker-side mirror of `validate_owned_string_return_shape`'s constant
+/// ledger and of `eval_direct_owned_string_call`'s routing class: the
+/// materialized graph is one block of `Const "…" → Return`, every consumer
+/// computes the same owned StringHandle, and no provenance escapes the
+/// literal.  Anything else a body could do with a String (arithmetic, second
+/// hands, String parameters, branches, calls) keeps its existing floor.
+fn is_owned_string_constant_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if is_prelude_origin(program, &callable.body.root.origin) {
+        return false;
+    }
+    if !callable.signature.generic_parameters.is_empty()
+        || !callable.signature.effects.is_empty()
+        || callable.signature.parameters.iter().any(|parameter| {
+            matches!(
+                parameter.permission,
+                Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+            )
+        })
+        || !callable.body.captures.is_empty()
+        || !callable.body.default_values.is_empty()
+    {
+        return false;
+    }
+    if !matches!(
+        program.resolved_types().get(&callable.signature.result),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    callable.body.root.statements.is_empty()
+        && callable.body.root.result.as_ref().is_some_and(|result| {
+            matches!(
+                &result.kind,
+                ResolvedExprKind::Literal(crate::core::ResolvedLiteral::String(_))
+            )
+        })
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -860,21 +903,38 @@ fn scan_scalar_collection_admission(
     // that evidences the face.  So the closure pass runs seeded with the
     // completed print sets and records direct callees, and the
     // classification pass runs seeded with print ∪ direct callees.
-    let discovery =
-        scan_scalar_collection_once(program, BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let discovery = scan_scalar_collection_once(
+        program,
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    );
     let closure = scan_scalar_collection_once(
         program,
         discovery.float_print_functions.clone(),
         discovery.string_print_functions,
         BTreeSet::new(),
+        BTreeSet::new(),
     );
     let mut float_face_callables = discovery.float_print_functions;
     float_face_callables.extend(closure.direct_float_callees);
+    // R6-1076: the owned-String constant callable set is shape-derived from
+    // checker-owned bodies, so — unlike the print-evidence faces — it needs
+    // no discovery pass and can never drift with walk order.  Every pass
+    // sees the identical set.
+    let owned_string_callables = program
+        .callables()
+        .iter()
+        .filter(|(_, callable)| is_owned_string_constant_callable(program, callable))
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
     scan_scalar_collection_once(
         program,
         closure.float_print_functions,
         closure.string_print_functions,
         float_face_callables,
+        owned_string_callables,
     )
 }
 
@@ -883,6 +943,7 @@ fn scan_scalar_collection_once(
     float_print_functions: BTreeSet<NodeId>,
     string_print_functions: BTreeSet<NodeId>,
     float_face_callables: BTreeSet<NodeId>,
+    owned_string_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -895,6 +956,7 @@ fn scan_scalar_collection_once(
         float_print_functions,
         string_print_functions,
         float_face_callables,
+        owned_string_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
@@ -955,7 +1017,23 @@ fn scan_scalar_collection_once(
                     scanner.require_profile_type(&parameter.ty);
                 }
             }
-            if !is_face_f64_type(&scanner, &callable.signature.result) {
+            // R6-1076: an owned-String constant callable's String result is
+            // the closed one-block literal face itself — the value returns
+            // from a `Const "…" → Return` graph the island gate re-proves
+            // through `validate_owned_string_return_shape`.  Every other
+            // out-of-profile result keeps the floor.
+            let is_owned_string_constant_result =
+                |scanner: &ScalarCollectionAdmissionScanner<'_>,
+                 ty: &crate::core::ResolvedTypeId| {
+                    scanner.in_owned_string_constant_callable()
+                        && matches!(
+                            scanner.program.resolved_types().get(ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        )
+                };
+            if !is_face_f64_type(&scanner, &callable.signature.result)
+                && !is_owned_string_constant_result(&scanner, &callable.signature.result)
+            {
                 scanner.require_profile_type(&callable.signature.result);
             }
             // R6-1070: an F64 parameter of a face-closure callable seeds the
@@ -1012,6 +1090,10 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// directly.  Seeded before the classification pass; consulted for the
     /// cross-function f64 parameter/result/root exemptions.
     float_face_callables: BTreeSet<NodeId>,
+    /// R6-1076: callables whose whole body is a string-literal result (the
+    /// owned-String constant face).  Shape-derived before any walk; see
+    /// `is_owned_string_constant_callable`.
+    owned_string_callables: BTreeSet<NodeId>,
     /// R6-1070: non-prelude callees recorded inside float print functions
     /// during the closure pass.  Only the pass seeded with the completed
     /// discovery sets fills this meaningfully; the classification pass
@@ -1071,6 +1153,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.string_print_functions.contains(owner))
+    }
+
+    /// R6-1076: is the current callable an owned-String constant callable —
+    /// the closed one-block literal face the island gate re-proves through
+    /// `validate_owned_string_return_shape` on the materialized graph.
+    fn in_owned_string_constant_callable(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.owned_string_callables.contains(owner))
     }
 
     /// R6-1061: is this expression something the MIR verifier models in the
@@ -1372,13 +1463,22 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // is the F64 leaf is the cross-function result face — the value
             // returns into the caller's print one edge away.  Nested blocks
             // keep the floor (branchy float returns stay fail-closed), as
-            // does every non-face function's block type.
+            // does every non-face function's block type.  R6-1076: the root
+            // block of an owned-String constant callable joins the same
+            // result-face shape — its literal result is the closed face
+            // itself; branchy String returns still floor through nested
+            // blocks.
             let is_face_result_block = self.block_depth == 1
-                && self.in_float_face_function()
-                && matches!(
-                    self.program.resolved_types().get(&block.ty),
-                    Some(ResolvedType::Primitive(PrimitiveType::F64))
-                );
+                && (self.in_float_face_function()
+                    && matches!(
+                        self.program.resolved_types().get(&block.ty),
+                        Some(ResolvedType::Primitive(PrimitiveType::F64))
+                    )
+                    || self.in_owned_string_constant_callable()
+                        && matches!(
+                            self.program.resolved_types().get(&block.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        ));
             if !is_face_result_block {
                 self.require_profile_type(&block.ty);
             }
@@ -1495,6 +1595,29 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     if float_call_result_bind_root {
                         self.introduce_float_symbolic_bindings(pattern);
                     }
+                    // R6-1076: a call-result bind whose callee is an
+                    // owned-String constant callable joins the same closed
+                    // face — the value is the callee's materialized
+                    // `Const "…" → Return` StringHandle, the island gate
+                    // re-proves the ledger per materialized function, and
+                    // the binding is a plain Move of an exactly-modeled
+                    // owned String.  Off-shape callees (non-literal bodies,
+                    // one-edge wrappers, branches) keep the pattern floor:
+                    // their String provenance has no closed face.
+                    let string_call_result_bind_root = concrete
+                        && matches!(
+                            self.program.resolved_types().get(&pattern.ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        )
+                        && matches!(
+                            initializer.as_ref().map(|value| &value.kind),
+                            Some(ResolvedExprKind::Call(call))
+                                if matches!(
+                                    &call.callee,
+                                    ResolvedCallee::Function(owner)
+                                        if self.owned_string_callables.contains(owner)
+                                )
+                        );
                     // R6-1064: an int-typed bind of a literal initializer
                     // seeds the int-literal provenance set — the widening
                     // face's mirror of the arithmetic seed above.  The set
@@ -1516,19 +1639,21 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         print_face_literal_initializer
                             || second_hand_print_face_root
                             || arithmetic_print_face_root
-                            || float_call_result_bind_root,
+                            || float_call_result_bind_root
+                            || string_call_result_bind_root,
                     );
                     if let Some(initializer) = initializer {
                         // Literal and second-hand roots keep their existing
                         // walk (the literal exemption floors nothing); only
                         // the arithmetic root must bypass the visit, because
                         // its Binary node carries an out-of-profile type the
-                        // top floor would reject.  The call-result root walks
-                        // normally: the visit_expr call-result face admits
-                        // the call's own f64 type while the Call arm still
-                        // polices the prelude floor, arity and arguments.
-                        // R6-1075: the skipped arithmetic root can now
-                        // contain call leaves, so it walks exactly those.
+                        // top floor would reject.  The float and owned-String
+                        // call-result roots walk normally: the visit_expr
+                        // call-result face admits the call's own type while
+                        // the Call arm still polices the prelude floor,
+                        // arity and arguments.  R6-1075: the skipped
+                        // arithmetic root can now contain call leaves, so it
+                        // walks exactly those.
                         if !second_hand_print_face_root && !arithmetic_print_face_root {
                             self.visit_expr(initializer, concrete);
                         } else if arithmetic_print_face_root {
@@ -1797,7 +1922,26 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 self.program.resolved_types().get(&expression.ty),
                 Some(ResolvedType::Primitive(PrimitiveType::F64))
             );
-            if !is_print_face_literal && !is_float_face_call_result {
+            // R6-1076: a direct call to an owned-String constant callable
+            // joins the same cross-function face — the call node's own
+            // out-of-profile String type skips the value floor exactly like
+            // the print-face literal, while the Call arm below still polices
+            // the prelude floor, arity and arguments.  The callee's
+            // materialized `Const "…" → Return` graph is the closed face the
+            // island gate re-proves per function.
+            let is_string_call_result = matches!(
+                &expression.kind,
+                ResolvedExprKind::Call(call)
+                    if matches!(
+                        &call.callee,
+                        ResolvedCallee::Function(owner)
+                            if self.owned_string_callables.contains(owner)
+                    )
+            ) && matches!(
+                self.program.resolved_types().get(&expression.ty),
+                Some(ResolvedType::Primitive(PrimitiveType::String))
+            );
+            if !is_print_face_literal && !is_float_face_call_result && !is_string_call_result {
                 self.require_profile_type(&expression.ty);
             }
         }
@@ -4531,26 +4675,6 @@ pub fn multi_target_flow_union_face_closed(program: &MirProgram) -> bool {
         })
 }
 
-/// Whether this function's executable graph contains the owned `PrintlnString`
-/// print face.  When it does, the island's value/literal/clone/move admission
-/// accepts the canonical owned StringHandle values the face materializes
-/// (print constant, argument clone): the checker-level island classifier
-/// admits exactly the same face, so admission and capability can never
-/// disagree (the R6-1048 parity rule, one layer deeper).
-fn function_contains_println_string(function: &MirFunction) -> bool {
-    function.blocks.values().any(|block| {
-        block.instructions.iter().any(|instruction| {
-            matches!(
-                &instruction.kind,
-                MirInstructionKind::BuiltinCall {
-                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnString,
-                    ..
-                }
-            )
-        })
-    })
-}
-
 /// Whether this function's executable graph contains the f64 literal
 /// `PrintlnFloat` print face (R6-1053).  Like the StringHandle face, the
 /// island's value/literal admission accepts exactly the Copy f64 values this
@@ -4671,7 +4795,6 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         errors: BTreeSet::new(),
         checked_types: BTreeSet::new(),
         allow_owned_record_family: contains_owned_record_projection_candidate(program),
-        function_admits_string_print: false,
         function_admits_float_print: false,
         function_admits_float_comparison: false,
         function_admits_float_face_closure: false,
@@ -4689,7 +4812,6 @@ struct ScalarCollectionValidator<'a> {
     errors: BTreeSet<String>,
     checked_types: BTreeSet<crate::core::ResolvedTypeId>,
     allow_owned_record_family: bool,
-    function_admits_string_print: bool,
     function_admits_float_print: bool,
     function_admits_float_comparison: bool,
     function_admits_float_face_closure: bool,
@@ -4712,7 +4834,6 @@ impl<'a> ScalarCollectionValidator<'a> {
         // sound whole-program boundary; unmaterialized checker declarations
         // are intentionally not part of this scan.
         for function in self.program.functions().values() {
-            self.function_admits_string_print = function_contains_println_string(function);
             self.function_admits_float_print = function_contains_println_float(function);
             self.function_admits_float_comparison =
                 function_contains_float_comparison(self.program, function);
@@ -4944,13 +5065,20 @@ impl<'a> ScalarCollectionValidator<'a> {
                         .type_catalog()
                         .validate_aggregate_glue(ty, MirGlueOperation::Drop)
                 }),
+            // R6-1076: the canonical owned StringHandle contract is admitted
+            // beside the Copy scalars.  The former print-face/owned-record
+            // flags narrowed exactly this same `validate_owned_string`
+            // predicate; provenance policing stays with the checker-side
+            // admission (only string-constant callables, string print faces
+            // and admitted literal binds open a String value) and with the
+            // per-instruction Move/Clone/Drop/PrintlnString/Call arms below,
+            // so a graph cannot create a String value outside those shapes.
             MirLayout::Handle
-                if (self.allow_owned_record_family || self.function_admits_string_print)
-                    && self
-                        .program
-                        .type_catalog()
-                        .validate_owned_string(ty)
-                        .is_ok() =>
+                if self
+                    .program
+                    .type_catalog()
+                    .validate_owned_string(ty)
+                    .is_ok() =>
             {
                 Ok(())
             }
@@ -5007,14 +5135,17 @@ impl<'a> ScalarCollectionValidator<'a> {
                             || self.function_admits_float_comparison
                             || self.function_admits_float_face_closure)
                             && self.is_print_face_f64(&result_ty) => {}
+                    // R6-1076: a String constant is admitted whenever it
+                    // carries the canonical owned StringHandle contract —
+                    // the same reduction as the Handle arm above; the
+                    // literal's provenance (string-constant callables,
+                    // string print faces) is the admission scan's contract.
                     ResolvedLiteral::String(_)
-                        if (self.allow_owned_record_family
-                            || self.function_admits_string_print)
-                            && self
-                                .program
-                                .type_catalog()
-                                .validate_owned_string(&result_ty)
-                                .is_ok() => {}
+                        if self
+                            .program
+                            .type_catalog()
+                            .validate_owned_string(&result_ty)
+                            .is_ok() => {}
                     ResolvedLiteral::FloatBits(_) | ResolvedLiteral::String(_) => {
                         self.error(format!(
                             "{subject} literal {literal:?} is outside {SCALAR_COLLECTION_ISLAND}"
@@ -5854,12 +5985,15 @@ impl<'a> ScalarCollectionValidator<'a> {
     }
 
     fn is_owned_record_or_string_type(&self, ty: &crate::core::ResolvedTypeId) -> bool {
+        // R6-1076: the owned-String half is the canonical StringHandle
+        // contract itself (same reduction as the Handle value arm) — the
+        // per-instruction arms keep policing every Move/Clone/Drop/print of
+        // the value, so the flag envelope added no second proof here.
         if self
             .program
             .type_catalog()
             .validate_owned_string(ty)
             .is_ok()
-            && (self.allow_owned_record_family || self.function_admits_string_print)
         {
             return true;
         }
@@ -6038,16 +6172,32 @@ mod tests {
 
     #[test]
     fn rejects_a_managed_value_mixed_into_the_collection_graph() {
-        let program = canonical(
-            "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }",
-        );
+        // R6-1076 restatement: the former pin used an owned StringHandle
+        // constant whose value/const arms this slice reduced to the
+        // canonical StringHandle contract itself (provenance policing moved
+        // to the checker-side admission floor, pinned right below).  The
+        // narrowest value still outside the island envelope is the f64 leaf
+        // without its print/comparison face.
+        let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = 1.5 drop(text) count }";
+        let program = canonical(source);
         let errors = validate_scalar_collection_island(&program)
             .expect_err("managed values must stay outside the scalar collection island");
         assert!(
-            errors.iter().any(|error| {
-                error.contains("outside") || error.contains("String") || error.contains("Handle")
-            }),
+            errors.iter().any(|error| error.contains("outside")
+                || error.contains("Float")
+                || error.contains("f64")),
             "{SCALAR_COLLECTION_ISLAND}: {errors:?}"
+        );
+        // The checker-side provenance floor holds for both shapes: a String
+        // constant bound outside any string print face stays mixed.
+        let string_source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }";
+        let tokens = Lexer::new(string_source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::MixedCoverage,
+            "an un-faced String constant bind must keep the compatibility route"
         );
     }
 

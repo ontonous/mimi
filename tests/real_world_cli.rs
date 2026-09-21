@@ -18643,6 +18643,122 @@ fn canonical_mir_f64_arith_call_routes_canonical_and_matches_native() {
 }
 
 #[test]
+fn canonical_mir_owned_string_call_routes_canonical_and_matches_native() {
+    // R6-1076: the owned-String constant callable face — a constant callable
+    // whose whole body is a string-literal result — admits its call-result
+    // binds and print-argument calls on the default entry, with the native
+    // MIR binary agreeing byte-for-byte.  The same shape previously stayed
+    // on the legacy route with reason
+    // mixed-coverage-without-materialized-candidate.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_call.mimi");
+    let expected = "hi\nhi\n7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-call-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string call native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String call face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string call fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String call face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String call face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
+fn canonical_mir_owned_string_call_contract_verifies_single_engine() {
+    // R6-1076: without an extern declaration the same ensures-bearing shape
+    // is a complete scalar-island program, so the default verify route is
+    // the canonical MIR verifier directly — the R6-1074 dual-engine E0439
+    // floor is gone because there is no legacy engine left to merge.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_owned_string_call_verify_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create owned-string call verify directory");
+    let source = dir.join("owned_string_call.mimi");
+    fs::write(
+        &source,
+        concat!(
+            "func greet() -> string {\n",
+            "    \"hi\"\n",
+            "}\n",
+            "func main() -> i32 {\n",
+            "    ensures: result == 1\n",
+            "    let s = greet()\n",
+            "    println(7)\n",
+            "    1\n",
+            "}\n",
+        ),
+    )
+    .expect("write owned-string call verify source");
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .expect("owned-string call verify");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        verify.status.success(),
+        "the owned-String call contract must verify:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "the owned-String call contract must not verify through the legacy route:\n{stderr}"
+    );
+    assert!(!stdout.contains("E0439"), "{stdout}");
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")

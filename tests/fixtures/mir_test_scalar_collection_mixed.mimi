@@ -1,8 +1,13 @@
+// R6-1076 restatement: the former out-of-envelope value here was an owned
+// String constant + drop glue, which this slice admits through the island
+// gate's reduced StringHandle contract (the checker-side mixed floor for the
+// String shape is pinned in islands.rs).  The narrowest value still outside
+// the island envelope is the un-faced f64 leaf.
 func test_list_len_mixed() -> i32 {
     let values = [10, 20, 30]
     let count = len(values)
     drop(values)
-    let text = "managed"
+    let text = 1.5
     drop(text)
     if count == 3 { 1 } else { 0 }
 }
