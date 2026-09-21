@@ -2111,6 +2111,13 @@ fn eval_instruction(
                     add_definedness(state, defined, "E0802")?;
                     SymbolicValue::Int(value.unary_minus())
                 }
+                // R6-1066: IEEE negation is exact for every finite operand —
+                // only the sign bit flips — so unlike integer negate there
+                // is no MIN-edge definedness to prove, and the Float
+                // domain's entry obligation already excludes NaN.
+                (crate::core::ir::ResolvedUnaryOp::Negate, SymbolicValue::Float(value)) => {
+                    SymbolicValue::Float(value.unary_neg())
+                }
                 (crate::core::ir::ResolvedUnaryOp::Not, SymbolicValue::Bool(value)) => {
                     SymbolicValue::Bool(value.not())
                 }
@@ -7146,6 +7153,13 @@ fn contract_term(
             match (op, operand) {
                 (MirContractUnaryOp::Negate, SymbolicValue::Int(value)) => {
                     Ok(SymbolicValue::Int(value.unary_minus()))
+                }
+                // R6-1066: IEEE negation in the finite-only Float domain —
+                // Z3_mk_fpa_neg is exact for every finite input (only the
+                // sign bit flips), so no extra definedness obligation is
+                // needed beyond the domain's entry finiteness.
+                (MirContractUnaryOp::Negate, SymbolicValue::Float(value)) => {
+                    Ok(SymbolicValue::Float(value.unary_neg()))
                 }
                 (MirContractUnaryOp::Not, SymbolicValue::Bool(value)) => {
                     Ok(SymbolicValue::Bool(value.not()))

@@ -1,0 +1,15 @@
+// R6-1066 face fixture: IEEE negation is exact for finite operands, so
+// the runtime symbolic interpreter admits a float Unary negate and the
+// contract expression domain admits `-(x)` over a symbolic f64 value.
+// The body/contract round-trip proves on the direct `mimi verify --mir`
+// entry; the default route keeps its compatibility disposition (the
+// call-result print root is still a registered mixed floor).
+func mirrored(x: f64) -> f64 {
+    ensures: result == -(x)
+    -x
+}
+
+func main() -> i32 {
+    println(mirrored(1.5))
+    0
+}

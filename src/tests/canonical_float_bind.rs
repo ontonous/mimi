@@ -926,3 +926,57 @@ fn float_contract_literal_ordering_is_disproven_against_symbolic_identity() {
         results[0].status
     );
 }
+
+// R6-1066: IEEE negation joins both the runtime symbolic interpreter and
+// the contract expression domain — a body negation and a contract
+// negation compose into an exact round-trip identity over the symbolic
+// parameter.
+#[test]
+fn float_contract_negate_roundtrip_verifies_on_mir() {
+    let source = r#"
+        func mirrored(x: f64) -> f64 {
+            ensures: result == -(x)
+            -x
+        }
+        func main() -> i32 {
+            println(mirrored(1.5))
+            0
+        }
+    "#;
+    let label = "float contract negate roundtrip";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-negate".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The non-vacuity pin: without the body's negation the same contract is
+// disproven, so `-(x)` in the predicate demonstrably flips the sign of
+// the symbolic operand instead of matching anything.
+#[test]
+fn float_contract_negate_is_disproven_without_the_flip() {
+    let source = r#"
+        func mirrored(x: f64) -> f64 {
+            ensures: result == -(x)
+            x
+        }
+        func main() -> i32 {
+            println(mirrored(1.5))
+            0
+        }
+    "#;
+    let label = "float contract negate non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-contract-negate-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}

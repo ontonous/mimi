@@ -306,7 +306,13 @@ fn expr_kind(
         MirContractExpr::Unary { op, operand } => {
             let kind = expr_kind(operand, function, catalog)?;
             match (op, kind.clone()) {
+                // R6-1066: IEEE negation over a finite-only Float value —
+                // the same exact `Z3_mk_fpa_neg` semantics the verifier
+                // applies; the runtime FFI evaluator stays integer-only
+                // (its contains_float_leaf guard rejects the operand
+                // before this walk could admit it).
                 (MirContractUnaryOp::Negate, ContractValueKind::Int)
+                | (MirContractUnaryOp::Negate, ContractValueKind::Float)
                 | (MirContractUnaryOp::Not, ContractValueKind::Bool) => Ok(kind),
                 _ => Err("contract unary operator has an incompatible scalar operand".into()),
             }
