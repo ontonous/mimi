@@ -61,7 +61,10 @@
 //! capability gate mirrors the direct-scalar evaluation routing, so an
 //! ordinary Copy-scalar call inside an ensures-bearing function verifies
 //! (the evaluator executes the callee body and propagates its trap
-//! obligations); aggregate/String callees keep the registered floor.
+//! obligations).  R6-1074 extends the mirror to the owned-String route —
+//! String callees verify in contract-bearing functions — while List
+//! callees and recursive callees keep the registered floor (the recursion
+//! guard is load-bearing there: the evaluator does not re-check it).
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -1681,13 +1684,13 @@ fn float_comparison_call_in_contract_verifies_on_mir() {
     );
 }
 
-// The new narrowest floor: an ensures-bearing function calling an
-// aggregate-returning (owned String) callee stays outside the verifier
-// capability — the direct-scalar routing mirror admits only Copy scalar
-// (or unit) callees, so the registered fail-closed floor keeps guarding
-// exactly the shapes the evaluator does not route.
+// R6-1074 restatement: the aggregate-callee floor this pin used to register
+// is open for the owned-String class — the gate mirrors
+// `eval_direct_owned_string_call`'s routing (owned-String return shape,
+// result register, no recursion), so an ensures-bearing caller of a String
+// callee passes the capability gate and verifies end-to-end.
 #[test]
-fn contract_call_with_aggregate_callee_keeps_capability_floor() {
+fn contract_call_with_string_callee_verifies_on_mir() {
     let source = r#"
         func greet() -> string {
             "hi"
@@ -1699,10 +1702,69 @@ fn contract_call_with_aggregate_callee_keeps_capability_floor() {
             1
         }
     "#;
-    let label = "contract call aggregate callee capability floor";
+    let label = "contract call string callee verifies";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "contract-string-call".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        results[0].status
+    );
+}
+
+// The new narrowest floor: a List-returning callee stays outside the
+// verifier capability — it is neither Copy scalar nor owned String, so no
+// direct-call evaluator routes it.
+#[test]
+fn contract_call_with_list_callee_keeps_capability_floor() {
+    let source = r#"
+        func items() -> List<i32> {
+            [1, 2]
+        }
+        func main() -> i32 {
+            ensures: result == 1
+            let xs = items()
+            println(7)
+            1
+        }
+    "#;
+    let label = "contract call list callee capability floor";
     let mir = materialize_float_bind(source, label);
     let errors = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("{label}: aggregate callees keep the registered floor");
+        .expect_err("{label}: list callees keep the registered floor");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("outside the verifier capability")),
+        "{label} must pin the capability floor, got {errors:?}"
+    );
+}
+
+// The recursion guard is load-bearing on the owned-String route: the checker
+// admits recursive bodies, and the owned-String evaluator does not re-check
+// reachability itself, so the gate must keep a contract-bearing caller of a
+// recursive String callee fail-closed — opening it would send the evaluator
+// into unbounded exploration.
+#[test]
+fn contract_call_with_recursive_string_callee_keeps_capability_floor() {
+    let source = r#"
+        func a() -> string {
+            a()
+        }
+        func main() -> i32 {
+            ensures: result == 0
+            let s = a()
+            0
+        }
+    "#;
+    let label = "contract call recursive string callee capability floor";
+    let mir = materialize_float_bind(source, label);
+    let errors = crate::verifier::validate_mir_capabilities(&mir)
+        .expect_err("{label}: recursive callees keep the registered floor");
     assert!(
         errors
             .iter()

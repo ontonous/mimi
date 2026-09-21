@@ -1806,6 +1806,7 @@ impl<'a> CapabilityGate<'a> {
             // the evaluator would not route: aggregate/String callees keep
             // the registered floor.
             && !self.call_routes_to_direct_scalar_evaluation(function, target, result)
+            && !self.call_routes_to_direct_owned_string_evaluation(function, target, result)
         {
             self.error(format!(
                 "{subject} ordinary call in a contract-bearing function is outside the verifier capability"
@@ -1863,6 +1864,34 @@ impl<'a> CapabilityGate<'a> {
                 || catalog
                     .get(&target.result)
                     .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit()))
+    }
+
+    /// R6-1074: mirror of the verifier's direct owned-String call routing.
+    /// `eval_direct_owned_string_call` validates the owned-String return
+    /// shape, consumes non-Copy arguments with MoveOut glue, executes the
+    /// callee body, and requires exactly one trap-free return path — so an
+    /// owned-String callee is exactly modeled in a contract-bearing
+    /// function too.  The recursion guard is load-bearing here (unlike the
+    /// scalar route, whose evaluator re-checks it): the checker admits
+    /// recursive bodies, and without the guard a contract-bearing caller of
+    /// a recursive String callee would send the evaluator into unbounded
+    /// exploration — the gate keeps that shape fail-closed.
+    fn call_routes_to_direct_owned_string_evaluation(
+        &self,
+        function: &MirFunction,
+        target: &MirFunction,
+        result: Option<&MirValueId>,
+    ) -> bool {
+        let catalog = self.program.type_catalog();
+        catalog.validate_owned_string(&target.result).is_ok()
+            && crate::core::mir::validate_owned_string_return_shape(target, catalog).is_ok()
+            && !crate::verifier::mir::direct_call_graph_reaches(
+                self.program,
+                &target.owner,
+                &function.owner,
+                &mut BTreeSet::new(),
+            )
+            && result.is_some()
     }
 
     fn validate_identity_instance(&mut self, function: &MirFunction, subject: &str) {

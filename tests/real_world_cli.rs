@@ -18519,6 +18519,73 @@ fn canonical_mir_f64_compare_call_routes_canonical_and_matches_native() {
 }
 
 #[test]
+fn canonical_mir_owned_string_call_contract_verifies_on_default_route() {
+    // R6-1074: the verifier capability gate mirrors the MIR evaluator's
+    // owned-String call routing, so a closed scalar-FFI program whose
+    // ensures-bearing main also calls an owned-String helper no longer dies
+    // at route admission — the identical shape previously failed the gate
+    // with "ordinary call in a contract-bearing function is outside the
+    // verifier capability" and now routes canonical and proves.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_owned_string_contract_verify_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create owned-string contract verify directory");
+    let source = dir.join("owned_string_contract.mimi");
+    fs::write(
+        &source,
+        concat!(
+            "extern \"C\" { func mir_ffi_owned_string_probe(value: i32) -> i32; }\n",
+            "func greet() -> string {\n",
+            "    \"hi\"\n",
+            "}\n",
+            "func main() -> i32 {\n",
+            "    ensures: result == 1\n",
+            "    let s = greet()\n",
+            "    let v = mir_ffi_owned_string_probe(2)\n",
+            "    1\n",
+            "}\n",
+        ),
+    )
+    .expect("write owned-string contract verify source");
+
+    let verify = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("owned-string contract verify {explicit_mir}: {error}"))
+    };
+    for output in &[verify(false), verify(true)] {
+        assert!(
+            output.status.success(),
+            "the admitted owned-String call contract must verify:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("canonical MIR ensures contract proven"),
+            "{stdout}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("canonical route disposition: legacy") && !stderr.contains("E0439"),
+            "{stderr}"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")
