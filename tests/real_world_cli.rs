@@ -22510,6 +22510,78 @@ fn canonical_mir_int_widen_arithmetic_routes_canonical_with_proof() {
     let _ = fs::remove_file(&native);
 }
 
+// R6-1064 face opening: a second-hand int read widening into an F64
+// assign target (`x = n` where `n` is a literal-bound local).  The
+// verifier propagates the bind's known constant through Load into the
+// Convert widen, so the target is an exactly-modeled constant: the shape
+// routes canonical on the default entry, the routed `mimi verify` entry
+// proves the ensures contract, and the native `build --mir` binary agrees
+// byte for byte.
+#[test]
+fn canonical_mir_int_read_widen_routes_canonical_with_proof() {
+    let source = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_int_read_widen_arithmetic_face.mimi");
+    let expected = b"3\n";
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        run.status.success(),
+        "int read widen program must execute: {stderr}"
+    );
+    assert_eq!(run.stdout, expected);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "int read widen program must route canonical on the default entry: {stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .unwrap();
+    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    assert!(
+        verify.status.success(),
+        "routed verify must prove the contract: {verify_out}"
+    );
+    assert!(
+        verify_out.contains("1/1 verified"),
+        "routed verify must prove exactly the main contract: {verify_out}"
+    );
+
+    let native = project_root()
+        .join("target")
+        .join(format!("mir_int_read_widen_native_{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native)
+        .output()
+        .unwrap();
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "native MIR build must succeed: {build_stderr}"
+    );
+    let native_run = Command::new(&native).output().unwrap();
+    assert!(native_run.status.success());
+    assert_eq!(native_run.stdout, expected);
+    let _ = fs::remove_file(&native);
+}
+
 // R6-1063 Face B: an f64 contract value face.  The `carry` helper compares
 // its f64 parameter and result in an ensures clause; the direct
 // `mimi verify --mir` entry proves it in the finite-only IEEE float domain

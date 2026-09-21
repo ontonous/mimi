@@ -1961,6 +1961,19 @@ fn eval_instruction(
                 value = symbolic_project(value, &projection)?;
             }
             ensure_result_shape(function, catalog, result, &value)?;
+            // R6-1064: a projected read is not the slot's whole constant.
+            if place.projections.is_empty() {
+                match state.known_ints.get(&source) {
+                    Some(known) => {
+                        state.known_ints.insert(result.clone(), *known);
+                    }
+                    None => {
+                        state.known_ints.remove(result);
+                    }
+                }
+            } else {
+                state.known_ints.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Copy { result, source } => {
@@ -1975,6 +1988,14 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             if let Some(shape) = list_shape_for(state, source) {
                 state.list_shapes.insert(result.clone(), shape);
+            }
+            match state.known_ints.get(source) {
+                Some(known) => {
+                    state.known_ints.insert(result.clone(), *known);
+                }
+                None => {
+                    state.known_ints.remove(result);
+                }
             }
             state.values.insert(result.clone(), value);
         }
@@ -2003,6 +2024,15 @@ fn eval_instruction(
                     state.list_shapes.remove(source);
                 }
             }
+            if let Some(known) = state.known_ints.get(source) {
+                let known = *known;
+                if !is_copy {
+                    state.known_ints.remove(source);
+                }
+                state.known_ints.insert(result.clone(), known);
+            } else {
+                state.known_ints.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Clone { result, source } => {
@@ -2022,6 +2052,14 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             if let Some(shape) = list_shape_for(state, source) {
                 state.list_shapes.insert(result.clone(), shape);
+            }
+            match state.known_ints.get(source) {
+                Some(known) => {
+                    state.known_ints.insert(result.clone(), *known);
+                }
+                None => {
+                    state.known_ints.remove(result);
+                }
             }
             state.values.insert(result.clone(), value);
         }

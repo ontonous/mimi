@@ -877,6 +877,7 @@ fn scan_scalar_collection_once(
         string_print_functions,
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
+        int_literal_locals: BTreeMap::new(),
         branch_generation: 0,
         block_depth: 0,
     };
@@ -896,6 +897,7 @@ fn scan_scalar_collection_once(
         // R6-1061: the float-symbolic set is a per-callable, in-order walk
         // fact — nothing survives across callable boundaries.
         scanner.float_symbolic_locals.clear();
+        scanner.int_literal_locals.clear();
         scanner.branch_generation = 0;
         scanner.block_depth = 0;
         let concrete = callable.signature.generic_parameters.is_empty();
@@ -958,6 +960,15 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// binding a different path may not have established.  An assignment
     /// from outside the domain removes the target outright.
     float_symbolic_locals: BTreeMap<crate::core::ir::ResolvedLocalId, u64>,
+    /// R6-1064: int-typed locals whose current value is derived from an
+    /// integer literal — bound by a literal initializer or refreshed by a
+    /// literal assign.  These are exactly the reads whose int→f64 widening
+    /// the MIR verifier evaluates as a known constant (the verifier
+    /// propagates the constant through Load/Copy/Move/Clone into the
+    /// Convert widen), so they join the float-symbolic operand domain at
+    /// the same walk-generation discipline as `float_symbolic_locals`.  A
+    /// non-literal assign removes the target outright.
+    int_literal_locals: BTreeMap<crate::core::ir::ResolvedLocalId, u64>,
     /// Monotonic walk generation: bumped on every branch/loop entry and
     /// never decremented, so straight-line code shares one generation and
     /// anything hosted in a branch is visible only inside that region.
@@ -987,10 +998,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
     /// symbolic Float domain?  A float literal, an integer literal (the
     /// lowering widens it as a known constant), a projection-free read of a
     /// float-symbolic local at the current walk generation, or a nested
-    /// admitted Add/Subtract of the same.  Load operands are checked against
-    /// the float-symbolic set so an int-typed local read (`n + 1.5`, whose
-    /// widening the verifier cannot model) never licenses an admission the
-    /// verifier would hard-reject.
+    /// admitted Add/Subtract of the same.  R6-1064: a projection-free read
+    /// of an int-literal local (tracked in `int_literal_locals`) joins the
+    /// operand domain — its widening is a known constant the verifier
+    /// propagates through Load/Copy/Move/Clone, so the admission is
+    /// verifier-backed.  Untracked int local reads (`n + 1.5` where n came
+    /// from a call) still license nothing: their widening lands opaque.
     fn expr_is_float_symbolic_operand(&self, expression: &ResolvedExpr) -> bool {
         match &expression.kind {
             ResolvedExprKind::Literal(ResolvedLiteral::FloatBits(_) | ResolvedLiteral::Int(_)) => {
@@ -1009,6 +1022,11 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         .float_symbolic_locals
                         .get(&place.base)
                         .is_some_and(|generation| *generation == self.branch_generation)
+                    || place.projections.is_empty()
+                        && self
+                            .int_literal_locals
+                            .get(&place.base)
+                            .is_some_and(|generation| *generation == self.branch_generation)
             }
             _ => false,
         }
@@ -1021,6 +1039,26 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         match &expression.kind {
             ResolvedExprKind::Literal(ResolvedLiteral::Int(_)) => false,
             _ => self.expr_is_float_symbolic_operand(expression),
+        }
+    }
+
+    /// R6-1064: is this expression an integer value derived from a literal —
+    /// a literal itself, or a projection-free read of a tracked int-literal
+    /// local at the current walk generation?  This is the RHS predicate for
+    /// widening assigns (`x = n` into an f64 target) whose Convert the
+    /// verifier evaluates as a known constant.  Call-sourced ints never
+    /// qualify: their widening is opaque.
+    fn expr_is_int_literal_provenance(&self, expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(_)) => true,
+            ResolvedExprKind::Load(place) => {
+                place.projections.is_empty()
+                    && self
+                        .int_literal_locals
+                        .get(&place.base)
+                        .is_some_and(|generation| *generation == self.branch_generation)
+            }
+            _ => false,
         }
     }
 
@@ -1060,6 +1098,54 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 }
                 if let Some(rest) = rest {
                     self.introduce_float_symbolic_bindings(rest);
+                }
+            }
+            ResolvedPatternKind::Wildcard | ResolvedPatternKind::Literal(_) => {}
+        }
+    }
+
+    /// R6-1064: record every plain binding of an I32/I64-typed pattern as
+    /// int-literal provenance at the current walk generation — the mirror
+    /// of `introduce_float_symbolic_bindings` for the widening face.  Only
+    /// called when the initializer is an integer literal, so the set never
+    /// claims a call- or arithmetic-sourced value.  Reference bindings are
+    /// excluded: they alias instead of transferring the value the set
+    /// models.
+    fn introduce_int_literal_bindings(&mut self, pattern: &ResolvedPattern) {
+        if !matches!(
+            self.program.resolved_types().get(&pattern.ty),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64
+            ))
+        ) {
+            return;
+        }
+        match &pattern.kind {
+            ResolvedPatternKind::Binding {
+                local,
+                by_reference,
+            } => {
+                if by_reference.is_none() {
+                    self.int_literal_locals
+                        .insert(local.clone(), self.branch_generation);
+                }
+            }
+            ResolvedPatternKind::Constructor { fields, .. } => {
+                for (_, field) in fields {
+                    self.introduce_int_literal_bindings(field);
+                }
+            }
+            ResolvedPatternKind::Tuple(items) | ResolvedPatternKind::Array(items) => {
+                for item in items {
+                    self.introduce_int_literal_bindings(item);
+                }
+            }
+            ResolvedPatternKind::Slice { prefix, rest } => {
+                for item in prefix {
+                    self.introduce_int_literal_bindings(item);
+                }
+                if let Some(rest) = rest {
+                    self.introduce_int_literal_bindings(rest);
                 }
             }
             ResolvedPatternKind::Wildcard | ResolvedPatternKind::Literal(_) => {}
@@ -1190,6 +1276,21 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     if arithmetic_print_face_root {
                         self.introduce_float_symbolic_bindings(pattern);
                     }
+                    // R6-1064: an int-typed bind of a literal initializer
+                    // seeds the int-literal provenance set — the widening
+                    // face's mirror of the arithmetic seed above.  The set
+                    // is only consulted by verifier-backed predicates (the
+                    // widening assign and the float-symbolic operand
+                    // domain), and only inside a float print function.
+                    let int_literal_bind = concrete
+                        && self.in_float_print_function()
+                        && matches!(
+                            initializer.as_ref().map(|value| &value.kind),
+                            Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(_)))
+                        );
+                    if int_literal_bind {
+                        self.introduce_int_literal_bindings(pattern);
+                    }
                     self.visit_pattern(
                         pattern,
                         concrete,
@@ -1286,17 +1387,37 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // widen as `assign_numeric_convert` sourced directly
                     // from the literal const, and the MIR verifier widens
                     // that known constant exactly (`Float::from_f64`), so
-                    // the target keeps its symbolic Float identity.  A
-                    // non-constant integer RHS (`x = n`) stays outside:
-                    // its widen lands opaque in the verifier (no int→float
-                    // bridge), and a stale symbolic fact must never outlive
-                    // an unmodeled replacement.  Top-level-only, like every
-                    // scalar-assign face shape.
+                    // the target keeps its symbolic Float identity.
+                    // R6-1064: a second-hand int read (`x = n` where n
+                    // carries literal provenance) joins too — the verifier
+                    // propagates the constant through Load into the widen,
+                    // so the target is still a known constant in the
+                    // Float domain.  A non-constant integer RHS (`x =
+                    // f()`) stays outside: its widen lands opaque in the
+                    // verifier, and a stale symbolic fact must never
+                    // outlive an unmodeled replacement.  Top-level-only,
+                    // like every scalar-assign face shape.
                     let int_literal_widen_assign = concrete
                         && self.block_depth == 1
                         && self.in_float_print_function()
                         && conversion_target_is_f64
                         && resolved_assign_is_admitted_scalar_shape(self.program, statement)
+                        && self.expr_is_int_literal_provenance(value);
+                    // R6-1064: maintain the int-literal provenance set in
+                    // walk order.  A literal RHS into an int-typed slot
+                    // (re)seeds the target; every other RHS — including
+                    // the widening assign above, whose target is an F64
+                    // slot — removes it, so provenance can never outlive
+                    // the value that replaced it.
+                    let int_slot_literal_assign = concrete
+                        && self.block_depth == 1
+                        && self.in_float_print_function()
+                        && matches!(
+                            self.program.resolved_types().get(&conversion.to),
+                            Some(ResolvedType::Primitive(
+                                PrimitiveType::I32 | PrimitiveType::I64
+                            ))
+                        )
                         && matches!(
                             &value.kind,
                             ResolvedExprKind::Literal(ResolvedLiteral::Int(_))
@@ -1307,6 +1428,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                                 .insert(target.base.clone(), self.branch_generation);
                         } else {
                             self.float_symbolic_locals.remove(&target.base);
+                        }
+                        if int_slot_literal_assign {
+                            self.int_literal_locals
+                                .insert(target.base.clone(), self.branch_generation);
+                        } else {
+                            self.int_literal_locals.remove(&target.base);
                         }
                     }
                     if !second_hand_float_root

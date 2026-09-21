@@ -335,6 +335,71 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "3.5\n",
         },
+        // R6-1064: a second-hand int read widening into an F64 assign
+        // target — the RHS carries literal provenance (`let n = 2`), the
+        // verifier propagates the constant through Load into the Convert
+        // widen, so the target is still an exactly-modeled known constant
+        // and the arithmetic that follows stays admitted.
+        FloatBindCase {
+            name: "float_arithmetic_after_int_read_widen",
+            source: r#"
+                func main() -> i32 {
+                    let n = 2
+                    let mut x = 0.5
+                    x = n
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
+        // R6-1064: the int-literal operand floor flips — an int-typed local
+        // read whose provenance is a tracked literal join is a
+        // verifier-backed widening, so it licenses the admission the
+        // opaque-read floor used to deny.
+        FloatBindCase {
+            name: "float_arithmetic_int_local_operand",
+            source: r#"
+                func main() -> i32 {
+                    let n = 2
+                    let a = 1.5
+                    println(n + a)
+                    0
+                }
+            "#,
+            expected_stdout: "3.5\n",
+        },
+        // R6-1064: a direct int-literal bind used as a float-arithmetic
+        // operand — the bind seeds the provenance set and the binary's
+        // operand read of it widens as the known constant 2.
+        FloatBindCase {
+            name: "float_arithmetic_direct_int_bind_operand",
+            source: r#"
+                func main() -> i32 {
+                    let x = 2
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
+        // R6-1064: the widened target itself becomes an arithmetic bind
+        // result — the symbolic Float identity the widen assign grants
+        // feeds the bind face through the ordinary root vocabulary.
+        FloatBindCase {
+            name: "float_arithmetic_int_read_widen_rebind",
+            source: r#"
+                func main() -> i32 {
+                    let n = 2
+                    let mut x = 0.5
+                    x = n
+                    let y = x + 1.0
+                    println(y)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -570,16 +635,82 @@ fn float_int_literal_widen_ensures_verifies_on_mir() {
     );
 }
 
+// R6-1064: a second-hand int read widening into f64 arithmetic.  The
+// verifier propagates the bind's known constant through Load into the
+// Convert widen, so `x + n` lands in the Float domain and the ordering
+// obligation proves against the symbolic parameter.
+#[test]
+fn float_int_read_widen_ensures_verifies_on_mir() {
+    let source = r#"
+        func widen(x: f64) -> f64 {
+            ensures: result >= x
+            let n = 2
+            let y = x + n
+            y
+        }
+        func main() -> i32 {
+            let w = widen(1.5)
+            println(w)
+            0
+        }
+    "#;
+    let label = "float int read widen ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-int-read-widen-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The non-vacuity pin for the same face: the widened constant genuinely
+// participates — `result == x` (true only if n contributed zero) is
+// disproven, so the propagated constant is exactly 2, not an opaque value
+// silently accepted or a vacuous hold.
+#[test]
+fn float_int_read_widen_constant_is_nonzero_on_mir() {
+    let source = r#"
+        func widen(x: f64) -> f64 {
+            ensures: result == x
+            let n = 2
+            let y = x + n
+            y
+        }
+        func main() -> i32 {
+            let w = widen(1.5)
+            println(w)
+            0
+        }
+    "#;
+    let label = "float int read widen nonzero constant";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-int-read-widen-nonzero".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}
+
 // The bind face is print-face-scoped: float operations outside the
-// symbolic domain (Multiply), arithmetic over opaque-widen provenance,
-// uses that cross a branch boundary, call-result binds and dead float
-// binds in non-printing functions all keep the graph on the explicit
-// mixed compatibility route.  (R6-1057 restated the former literal
-// float-assign mixed case, R6-1059 the second-hand float-assign case and
-// R6-1060 the second-hand float-bind case: all migrated into the matrix
-// above.  R6-1061 restates the former float-arithmetic case, which is now
-// the matrix's add/subtract rows.  R6-1062 restates the former
-// known-constant-widen case, now the matrix's int-literal-widen rows.)
+// symbolic domain (Multiply), arithmetic over call-sourced widen
+// provenance, uses that cross a branch boundary, call-result binds and
+// dead float binds in non-printing functions all keep the graph on the
+// explicit mixed compatibility route.  (R6-1057 restated the former
+// literal float-assign mixed case, R6-1059 the second-hand float-assign
+// case and R6-1060 the second-hand float-bind case: all migrated into the
+// matrix above.  R6-1061 restates the former float-arithmetic case, which
+// is now the matrix's add/subtract rows.  R6-1062 restates the former
+// known-constant-widen case, now the matrix's int-literal-widen rows.
+// R6-1064 restates the former int-local-operand and literal-provenance
+// widen cases — both verifier-backed now — leaving the call-sourced
+// widen as the opaque-provenance floor.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -601,30 +732,21 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // An int-typed local read is not a float-symbolic operand: its
-        // widening is an opaque Convert the verifier cannot model, so the
-        // operand floor keeps the shape mixed instead of luring the route
-        // into a verifier hard error.
+        // R6-1064 restatement: the int-literal-operand case migrated into
+        // the matrix above — a tracked literal join is a verifier-backed
+        // widening.  A call-sourced int keeps the floor: its provenance is
+        // an unmigrated body, so the widening lands opaque and the
+        // verifier hard-rejects the operand mix (pinned by the ensures
+        // tests below).
         MixedCase {
-            name: "float_arithmetic_int_local_operand",
+            name: "float_arithmetic_after_call_sourced_widen",
             source: r#"
-                func main() -> i32 {
-                    let n = 2
-                    let a = 1.5
-                    println(n + a)
-                    0
+                func source() -> i64 {
+                    3
                 }
-            "#,
-        },
-        // An assign from opaque provenance removes the target from the
-        // float-symbolic set in walk order — the stale fact can never
-        // outlive the value that replaced it.
-        MixedCase {
-            name: "float_arithmetic_after_opaque_reassign",
-            source: r#"
                 func main() -> i32 {
                     let mut x = 0.5
-                    let n = 3
+                    let n = source()
                     x = n
                     println(x + 1.0)
                     0

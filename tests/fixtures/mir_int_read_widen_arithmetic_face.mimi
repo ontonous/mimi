@@ -1,0 +1,14 @@
+// R6-1064 face fixture: an int literal bind seeds the int-literal
+// provenance set, the second-hand read widens into the f64 assign target
+// as a verifier-known constant (Load → Convert propagation), and the
+// arithmetic that follows prints through the float face.  The default
+// route materializes this island canonically; the routed verifier proves
+// the ensures contract over the exactly-propagated constant.
+func main() -> i32 {
+    ensures: result == 0
+    let n = 2
+    let mut x = 0.5
+    x = n
+    println(x + 1.0)
+    0
+}
