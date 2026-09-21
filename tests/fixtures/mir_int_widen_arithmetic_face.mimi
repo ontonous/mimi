@@ -1,0 +1,15 @@
+// R6-1062: an integer literal widening into an F64 assign target
+// (`x = 2`) keeps the target in the symbolic Float domain — the lowering
+// carries the widen as `assign_numeric_convert` sourced directly from the
+// literal const — so the arithmetic that follows routes canonical across
+// the default run entry, the routed `mimi verify` entry (the MIR verifier
+// widens the known constant exactly and proves the ensures contract) and
+// the native `build --mir` entry.
+func main() -> i32 {
+    ensures: result == 0
+    let mut x = 0.5
+    x = 2
+    println(x)
+    println(x + 1.0)
+    0
+}

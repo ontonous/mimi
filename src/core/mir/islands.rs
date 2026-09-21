@@ -878,6 +878,7 @@ fn scan_scalar_collection_once(
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
         branch_generation: 0,
+        block_depth: 0,
     };
 
     // R6-1052: the automatically merged prelude is a compatibility source,
@@ -896,6 +897,7 @@ fn scan_scalar_collection_once(
         // fact — nothing survives across callable boundaries.
         scanner.float_symbolic_locals.clear();
         scanner.branch_generation = 0;
+        scanner.block_depth = 0;
         let concrete = callable.signature.generic_parameters.is_empty();
         if !callable.signature.effects.is_empty()
             || callable.signature.parameters.iter().any(|parameter| {
@@ -960,6 +962,12 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// never decremented, so straight-line code shares one generation and
     /// anything hosted in a branch is visible only inside that region.
     branch_generation: u64,
+    /// Current nesting depth of `visit_block` (the callable's root block is
+    /// depth 1).  The MIR Phase 0 scalar-assign face is top-level-only —
+    /// construction rejects any assign inside a nested block — so the
+    /// assign-face predicates consult this to keep classification honest
+    /// about the shapes construction accepts (the R6-1048 parity rule).
+    block_depth: usize,
 }
 
 impl<'a> ScalarCollectionAdmissionScanner<'a> {
@@ -1104,6 +1112,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
     }
 
     fn visit_block(&mut self, block: &crate::core::ir::ResolvedBlock, concrete: bool) {
+        self.block_depth += 1;
         if concrete {
             self.require_profile_type(&block.ty);
         }
@@ -1239,8 +1248,13 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // (parameters, results and call returns floor the whole
                     // program before this point), so the read has no
                     // unclassified provenance left to police.  Every other
-                    // RHS root keeps its normal floor.
+                    // RHS root keeps its normal floor.  R6-1062: the
+                    // scalar-assign face is top-level-only (construction
+                    // rejects assigns inside nested blocks), so the
+                    // `block_depth == 1` gate keeps the classification from
+                    // admitting a shape construction would reject.
                     let second_hand_float_root = concrete
+                        && self.block_depth == 1
                         && self.in_float_print_function()
                         && matches!(&value.kind, ResolvedExprKind::Load(_))
                         && matches!(
@@ -1262,19 +1276,43 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         Some(ResolvedType::Primitive(PrimitiveType::F64))
                     );
                     let float_symbolic_assign = concrete
+                        && self.block_depth == 1
                         && self.in_float_print_function()
                         && conversion_target_is_f64
                         && resolved_assign_is_admitted_scalar_shape(self.program, statement)
                         && self.expr_is_float_symbolic_root(value);
+                    // R6-1062: an integer literal widening into an F64
+                    // target joins the same face.  The lowering carries the
+                    // widen as `assign_numeric_convert` sourced directly
+                    // from the literal const, and the MIR verifier widens
+                    // that known constant exactly (`Float::from_f64`), so
+                    // the target keeps its symbolic Float identity.  A
+                    // non-constant integer RHS (`x = n`) stays outside:
+                    // its widen lands opaque in the verifier (no int→float
+                    // bridge), and a stale symbolic fact must never outlive
+                    // an unmodeled replacement.  Top-level-only, like every
+                    // scalar-assign face shape.
+                    let int_literal_widen_assign = concrete
+                        && self.block_depth == 1
+                        && self.in_float_print_function()
+                        && conversion_target_is_f64
+                        && resolved_assign_is_admitted_scalar_shape(self.program, statement)
+                        && matches!(
+                            &value.kind,
+                            ResolvedExprKind::Literal(ResolvedLiteral::Int(_))
+                        );
                     if target.projections.is_empty() {
-                        if float_symbolic_assign {
+                        if float_symbolic_assign || int_literal_widen_assign {
                             self.float_symbolic_locals
                                 .insert(target.base.clone(), self.branch_generation);
                         } else {
                             self.float_symbolic_locals.remove(&target.base);
                         }
                     }
-                    if !second_hand_float_root && !float_symbolic_assign {
+                    if !second_hand_float_root
+                        && !float_symbolic_assign
+                        && !int_literal_widen_assign
+                    {
                         self.visit_expr(value, concrete);
                     }
                 }
@@ -1347,6 +1385,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         if let Some(result) = &block.result {
             self.visit_expr(result, concrete);
         }
+        self.block_depth -= 1;
     }
 
     fn visit_expr(&mut self, expression: &ResolvedExpr, concrete: bool) {

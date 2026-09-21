@@ -23,6 +23,10 @@
 //! binds, Multiply/Divide, arithmetic on opaque-widen locals and uses that
 //! cross a branch boundary keep their explicit mixed floors until their
 //! contracts are independently materialized.
+//! R6-1062 admits the integer-literal widen assign (`x = 2` into an F64
+//! target): its `assign_numeric_convert` sources the literal const
+//! directly, so the verifier widens the known constant exactly and the
+//! target keeps its symbolic Float identity.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -230,6 +234,38 @@ fn float_bind_matrix_agrees_across_consumers() {
                 }
             "#,
             expected_stdout: "3.5\n",
+        },
+        // R6-1062: an integer literal widening into an F64 assign target
+        // keeps the target in the symbolic domain — the lowering carries the
+        // widen as `assign_numeric_convert` sourced directly from the
+        // literal const, which the MIR verifier widens exactly, so the
+        // arithmetic that follows stays admitted.
+        FloatBindCase {
+            name: "float_arithmetic_after_int_literal_widen",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.5
+                    x = 2
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+            expected_stdout: "3\n",
+        },
+        // Sequential literal widen assigns compose: each replacement is an
+        // exactly-modeled constant, so the symbolic fact never goes stale.
+        FloatBindCase {
+            name: "float_arithmetic_after_sequential_widens",
+            source: r#"
+                func main() -> i32 {
+                    let mut x = 0.0
+                    x = 2
+                    x = 3
+                    println(x + 1.0)
+                    0
+                }
+            "#,
+            expected_stdout: "4\n",
         },
         FloatBindCase {
             name: "float_arithmetic_chain",
@@ -498,6 +534,36 @@ fn float_arithmetic_in_branch_ensures_verifies_on_mir() {
     );
 }
 
+// R6-1062: the integer-literal widen assign joins the proof surface.  The
+// graph carries `assign_numeric_convert` sourced directly from the literal
+// const, so the MIR verifier widens the known constant exactly
+// (`Float::from_f64`) and the following Add/Subtract obligations prove in
+// the IEEE symbolic domain — the same routed path the default `mimi verify`
+// entry reaches now that the face classifies complete.
+#[test]
+fn float_int_literal_widen_ensures_verifies_on_mir() {
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 0
+            let mut x = 0.5
+            x = 2
+            println(x + 1.0)
+            0
+        }
+    "#;
+    let label = "float int literal widen ensures";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-int-widen-ensures".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
 // The bind face is print-face-scoped: float operations outside the
 // symbolic domain (Multiply), arithmetic over opaque-widen provenance,
 // uses that cross a branch boundary, call-result binds and dead float
@@ -506,7 +572,8 @@ fn float_arithmetic_in_branch_ensures_verifies_on_mir() {
 // float-assign mixed case, R6-1059 the second-hand float-assign case and
 // R6-1060 the second-hand float-bind case: all migrated into the matrix
 // above.  R6-1061 restates the former float-arithmetic case, which is now
-// the matrix's add/subtract rows.)
+// the matrix's add/subtract rows.  R6-1062 restates the former
+// known-constant-widen case, now the matrix's int-literal-widen rows.)
 #[test]
 fn float_bind_faces_stay_mixed() {
     struct MixedCase {
@@ -558,16 +625,23 @@ fn float_bind_faces_stay_mixed() {
                 }
             "#,
         },
-        // The known-constant widen assign is verifier-supported but not yet
-        // classified (the symbolic set only tracks f64-domain roots); the
-        // conservative envelope pins the gap until the widen face joins.
+        // R6-1062 restatement: the known-constant widen assign migrated into
+        // the matrix above (its Convert source is the literal const, which
+        // the verifier widens exactly).  An assign hosted inside a branch
+        // region keeps the whole composition on the conservative envelope —
+        // this predates the widen face (the plain Identity float assign in
+        // the same position floors identically), so the widen face must not
+        // open a branch-position envelope the established assign face
+        // doesn't already have.
         MixedCase {
-            name: "float_arithmetic_after_int_literal_assign",
+            name: "float_arithmetic_after_widen_in_branch",
             source: r#"
                 func main() -> i32 {
-                    let mut x = 0.5
-                    x = 2
-                    println(x + 1.0)
+                    let mut x = 0.0
+                    if 1 > 0 {
+                        x = 2
+                        println(x + 1.0)
+                    }
                     0
                 }
             "#,
