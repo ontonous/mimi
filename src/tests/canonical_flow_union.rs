@@ -2297,8 +2297,9 @@ func main() -> i64 {{
         );
         let label = format!("admitted comparison face {}", case.name);
         let mir = materialize(&source, &label);
-        crate::verifier::validate_mir_capabilities(&mir)
-            .unwrap_or_else(|errors| panic!("{label} must enter the capability contract: {errors:?}"));
+        crate::verifier::validate_mir_capabilities(&mir).unwrap_or_else(|errors| {
+            panic!("{label} must enter the capability contract: {errors:?}")
+        });
     }
 }
 

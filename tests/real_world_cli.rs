@@ -18288,6 +18288,64 @@ fn canonical_mir_native_f64_comparisons_differentially_accepted_without_fallback
 }
 
 #[test]
+fn canonical_mir_body_f64_negate_routes_canonical_and_matches_native() {
+    // R6-1069: the body-level f64 unary negate face routes canonical on the
+    // default entry — no legacy disposition under MIMI_VERBOSE — and the
+    // native MIR binary agrees with the default backend on every shape:
+    // literal negate binds, a second-hand negate chain through a tracked
+    // local, negates inside comparison operands, and the -(0.0) identity
+    // (IEEE-equal to +0.0, printed with its sign).
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_negate_body.mimi");
+    let expected = "-1.5\n1.5\n0\n-0\n1\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-f64-negate-body-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn f64 negate native build");
+    assert!(
+        build.status.success(),
+        "the admitted f64 negate face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run f64 negate fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the negate face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted negate face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")

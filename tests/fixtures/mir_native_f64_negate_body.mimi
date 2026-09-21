@@ -1,0 +1,25 @@
+// R6-1069 body face fixture: IEEE sign-bit negation is exact for every
+// finite operand, so literal negate binds, second-hand negates of tracked
+// locals, and negates inside comparison operands all route canonical on
+// the default entry and agree with the native MIR backend.  The -(0.0)
+// identity keeps both IEEE truths on one page: -0.0 == 0.0 compares equal
+// while the shortest round-trip print keeps the sign ("-0").
+func main() -> i32 {
+    let x = -(1.5)
+    println(x)
+    let y = -x
+    println(y)
+    if -x == -1.5 {
+        println(1)
+    } else {
+        println(0)
+    }
+    let z = -(0.0)
+    println(z)
+    if z == 0.0 {
+        println(1)
+    } else {
+        println(0)
+    }
+    0
+}

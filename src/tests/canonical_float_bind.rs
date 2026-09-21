@@ -481,6 +481,51 @@ fn float_bind_matrix_agrees_across_consumers() {
             "#,
             expected_stdout: "3\n",
         },
+        // R6-1069: the unary negate face joins the float-origin domain —
+        // IEEE sign-bit negation is exact for every finite operand and the
+        // verifier's (Negate, Float) evaluator adds no obligation, so a
+        // literal negate bind, a second-hand negate of a tracked local, and
+        // negates inside comparison operands all classify complete.  The
+        // `-x == -1.5` case answers false (1.5 != -1.5): the consumer
+        // triangle must not lose the sign anywhere along the chain.
+        FloatBindCase {
+            name: "float_negate_literal_bind_chain",
+            source: r#"
+                func main() -> i32 {
+                    let x = -(1.5)
+                    println(x)
+                    let y = -x
+                    println(y)
+                    if -x == -1.5 {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "-1.5\n1.5\n0\n",
+        },
+        // R6-1069: negating +0.0 produces -0.0 — shortest round-trip keeps
+        // the sign ("-0") while the IEEE equality still compares equal to
+        // +0.0, so the print face and the comparison face disagree on the
+        // surface exactly as IEEE dictates, on every consumer.
+        FloatBindCase {
+            name: "float_negate_negzero_identity",
+            source: r#"
+                func main() -> i32 {
+                    let z = -(0.0)
+                    println(z)
+                    if z == 0.0 {
+                        println(1)
+                    } else {
+                        println(0)
+                    }
+                    0
+                }
+            "#,
+            expected_stdout: "-0\n1\n",
+        },
     ];
     for case in CASES {
         let label = format!("float bind case {}", case.name);
@@ -1049,6 +1094,121 @@ fn float_contract_negate_is_disproven_without_the_flip() {
         matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
         "{label} must be disproven, got {:?}",
         results[0].status
+    );
+}
+
+// R6-1069: the negate bind chain verifies through the symbolic domain —
+// the body stores `-(x)` into a tracked local and re-negates it on the way
+// out, so the verifier must model the negate through StoreLocal/Load
+// exactly (double negation recovers x, not -x).
+#[test]
+fn float_body_negate_bind_chain_verifies_on_mir() {
+    let source = r#"
+        func mirrored(x: f64) -> f64 {
+            ensures: result == x
+            let y = -x
+            -y
+        }
+        func main() -> i32 {
+            println(mirrored(1.5))
+            0
+        }
+    "#;
+    let label = "float body negate bind chain";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-body-negate-chain".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify: {results:?}"
+    );
+}
+
+// The non-vacuity pin: against the identity ensures, the same bind chain
+// is disproven — the chain demonstrably produces x, not -x, so the
+// verifier models the intermediate store instead of matching anything.
+#[test]
+fn float_body_negate_bind_chain_is_disproven_against_the_flipped_ensures() {
+    let source = r#"
+        func mirrored(x: f64) -> f64 {
+            ensures: result == -(x)
+            let y = -x
+            -y
+        }
+        func main() -> i32 {
+            println(mirrored(1.5))
+            0
+        }
+    "#;
+    let label = "float body negate bind chain non-vacuity";
+    let mir = materialize_float_bind(source, label);
+    let results = crate::verifier::verify_mir(&mir, "float-body-negate-chain-nv".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Disproven),
+        "{label} must be disproven, got {:?}",
+        results[0].status
+    );
+}
+
+// R6-1069: a negate-sourced zero divisor keeps the E0801 trap contract.
+// `-(0.0)` is -0.0, and a ±0.0 divisor is a language-level
+// division-definedness violation (small-step §3), not an IEEE ±inf result
+// owned by the E0813 finiteness obligation — the R6-1067 trap parity
+// extends verbatim to divisors that only become zero through negation.
+#[test]
+fn float_negate_zero_divisor_traps_on_mir_consumers() {
+    let source = r#"
+        func main() -> i32 {
+            let z = -(0.0)
+            println(1.0 / z)
+            0
+        }
+    "#;
+    let label = "float negate zero divisor trap";
+    let mir = materialize_float_bind(source, label);
+    let Err(reference_error) = MirReferenceInterpreter::new(&mir)
+        .execute_with_output(&NodeId("function:main".into()), &[])
+    else {
+        panic!("{label} reference must trap on the -0.0 divisor")
+    };
+    assert!(
+        reference_error.message.contains("E0801")
+            && reference_error.message.contains("division by zero"),
+        "{label} reference trap must be the E0801 division-definedness violation: {reference_error}"
+    );
+
+    let bytecode = compile_mir_program(&mir)
+        .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+    assert!(bytecode.ast.is_none(), "{label} bytecode must be AST-free");
+    let mut vm = BytecodeVM::new(bytecode);
+    let Err(vm_error) = vm.run_value() else {
+        panic!("{label} VM must trap on the -0.0 divisor")
+    };
+    assert!(
+        matches!(
+            vm_error,
+            crate::interp::error::InterpError::DivisionByZero(_)
+        ),
+        "{label} VM trap must be the E0801 division-definedness violation: {vm_error:?}"
+    );
+
+    if !can_link() {
+        return;
+    }
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_float_negate_zero_div");
+    generator
+        .compile_mir_native(&mir)
+        .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+    let native = link_and_observe_canonical_mir(&generator)
+        .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+    assert_eq!(native.exit_code, Some(1), "{label} native exit");
+    assert!(
+        native.stderr.contains("division by zero"),
+        "{label} native trap must report division by zero: {native:?}"
     );
 }
 

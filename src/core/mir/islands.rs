@@ -1044,6 +1044,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 ) && self.expr_is_float_origin_operand_inner(left, require_current_generation)
                     && self.expr_is_float_origin_operand_inner(right, require_current_generation)
             }
+            // R6-1069: IEEE sign-bit negation is exact for every finite
+            // operand and every consumer models it (`validate_copy_float_unary`
+            // admission; the verifier's `(Negate, Float)` evaluator adds no
+            // obligation), so a negate of a float-origin operand stays in the
+            // float-origin domain under both variants of this predicate.
+            ResolvedExprKind::Unary {
+                op: ResolvedUnaryOp::Negate,
+                operand,
+            } => self.expr_is_float_origin_operand_inner(operand, require_current_generation),
             ResolvedExprKind::Load(place) => {
                 place.projections.is_empty()
                     && self
@@ -1625,6 +1634,21 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.visit_expr(left, concrete);
                     self.visit_expr(right, concrete);
                 }
+            }
+            // R6-1069: a negate over the float-origin domain skips the
+            // own-type profile floor exactly like the comparison face: every
+            // consumer models IEEE sign-bit negation from the runtime value
+            // (`validate_copy_float_unary` admission; the verifier adds no
+            // obligation), so the unary node's f64 type carries no
+            // unclassified provenance.  The operand check is the
+            // generation-agnostic origin predicate — its subtree can only be
+            // literals, loads, arithmetic or negates of those, never a call
+            // or a projection.
+            ResolvedExprKind::Unary {
+                op: ResolvedUnaryOp::Negate,
+                operand,
+            } if concrete && self.expr_is_float_comparison_operand(operand) => {
+                self.visit_expr(operand, concrete)
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Old(operand)
@@ -4962,14 +4986,30 @@ impl<'a> ScalarCollectionValidator<'a> {
                 };
                 match op {
                     ResolvedUnaryOp::Negate => {
-                        self.require_copy_scalar(&operand_ty, subject, "negate operand");
-                        self.require_copy_scalar(&result_ty, subject, "negate result");
-                        if result_ty != operand_ty
-                            || !is_signed_integer(&self.program.type_catalog(), &operand_ty)
-                        {
-                            self.error(format!(
-                                "{subject} negate is outside {SCALAR_COLLECTION_ISLAND}"
-                            ));
+                        // R6-1069: the f64 negate face is admitted on the
+                        // shared validator contract — the same identity the
+                        // native validator and the verifier capability gate
+                        // enforce — so it does not lean on the per-function
+                        // float-print envelope the arithmetic faces use: IEEE
+                        // negation is exactly modeled for any finite f64,
+                        // symbolic or not.  Everything else (f32, mixed
+                        // widths, non-f64 leaves) keeps the strict
+                        // signed-integer face below.
+                        let float_negate_face = self
+                            .program
+                            .type_catalog()
+                            .validate_copy_float_unary(&result_ty, &operand_ty, *op)
+                            .is_ok();
+                        if !float_negate_face {
+                            self.require_copy_scalar(&operand_ty, subject, "negate operand");
+                            self.require_copy_scalar(&result_ty, subject, "negate result");
+                            if result_ty != operand_ty
+                                || !is_signed_integer(&self.program.type_catalog(), &operand_ty)
+                            {
+                                self.error(format!(
+                                    "{subject} negate is outside {SCALAR_COLLECTION_ISLAND}"
+                                ));
+                            }
                         }
                     }
                     ResolvedUnaryOp::Not => {
