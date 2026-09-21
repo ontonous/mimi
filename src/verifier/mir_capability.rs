@@ -1795,6 +1795,17 @@ impl<'a> CapabilityGate<'a> {
                                 .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
                         })
             })
+            // R6-1073: unless the call routes to the direct-scalar evaluator.
+            // `eval_direct_scalar_call` symbolically executes the callee body
+            // (explore_block, merged return paths), propagates the callee's
+            // trap and FFI obligations into this function's accounting, and
+            // rejects recursion, arity drift and out-of-ABI types itself — so
+            // a Copy-scalar (or unit) call whose graph cannot reach back into
+            // this function is exactly modeled even here.  The gate mirrors
+            // the evaluator's own routing preconditions and admits nothing
+            // the evaluator would not route: aggregate/String callees keep
+            // the registered floor.
+            && !self.call_routes_to_direct_scalar_evaluation(function, target, result)
         {
             self.error(format!(
                 "{subject} ordinary call in a contract-bearing function is outside the verifier capability"
@@ -1824,6 +1835,34 @@ impl<'a> CapabilityGate<'a> {
             }
             _ => {}
         }
+    }
+
+    /// R6-1073: mirror of the verifier's direct-scalar call routing.  The
+    /// evaluator routes a non-instance call with no type arguments to
+    /// `eval_direct_scalar_call` exactly when the callee result is inside
+    /// the Copy scalar ABI (or unit) — and that evaluator refuses recursion
+    /// and unit-result mismatches itself.  The gate re-checks the same
+    /// preconditions so it admits only calls the evaluator actually routes,
+    /// keeping the capability gate and the symbolic engine aligned instead
+    /// of fail-closed against something the engine models.
+    fn call_routes_to_direct_scalar_evaluation(
+        &self,
+        function: &MirFunction,
+        target: &MirFunction,
+        result: Option<&MirValueId>,
+    ) -> bool {
+        let catalog = self.program.type_catalog();
+        crate::verifier::mir::is_direct_scalar_call_type(catalog, &target.result)
+            && !crate::verifier::mir::direct_call_graph_reaches(
+                self.program,
+                &target.owner,
+                &function.owner,
+                &mut BTreeSet::new(),
+            )
+            && (result.is_some()
+                || catalog
+                    .get(&target.result)
+                    .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit()))
     }
 
     fn validate_identity_instance(&mut self, function: &MirFunction, subject: &str) {

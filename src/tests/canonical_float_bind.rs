@@ -57,6 +57,11 @@
 //! itself (the enclosure guard keeps classifier admission and island
 //! capability aligned per function), and the operand walk visits call
 //! leaves so the prelude floor, arity and arguments stay policed.
+//! R6-1073 opens the verifier's contract face to the same calls: the S6
+//! capability gate mirrors the direct-scalar evaluation routing, so an
+//! ordinary Copy-scalar call inside an ensures-bearing function verifies
+//! (the evaluator executes the callee body and propagates its trap
+//! obligations); aggregate/String callees keep the registered floor.
 
 use super::*;
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter};
@@ -1639,19 +1644,15 @@ fn float_body_comparison_branch_is_disproven_against_the_false_ensures() {
     );
 }
 
-// R6-1072: a comparison operand that is a face-closure call is decided by
-// the verifier's symbolic execution of the callee body
-// (`eval_direct_scalar_call` — explore_block, merged returns, recursion and
-// type_arguments rejected), not by an assumption.  The contract-face keeps
-// its registered floor though: the S6 whole-program capability gate lists
-// ordinary calls inside contract-bearing functions as outside the verifier
-// capability (pre-existing boundary — the R6-1068 comparison tests keep
-// their contracts on call-free bodies).  So the runtime routes (default,
-// native) carry this slice while the verifier's contract face stays where
-// it was; the evaluator itself models the shape exactly, as the
-// non-vacuity twin below proves.
+// R6-1073 restatement: the S6 capability floor this pin used to register
+// (ordinary calls inside contract-bearing functions) is open for the
+// direct-scalar class — the gate now mirrors the evaluator's routing
+// preconditions, and the same shape that used to be rejected verifies
+// end-to-end: the capability gate passes and the proven symbolic 0.5
+// (executed callee body) forces `value() < 1.0` into the then-arm, so
+// `result == 1` proves.
 #[test]
-fn float_comparison_call_operand_capability_gate_keeps_contract_face_floor() {
+fn float_comparison_call_in_contract_verifies_on_mir() {
     let source = r#"
         func value() -> f64 {
             0.5
@@ -1666,10 +1667,42 @@ fn float_comparison_call_operand_capability_gate_keeps_contract_face_floor() {
             }
         }
     "#;
-    let label = "float comparison call operand capability floor";
+    let label = "float comparison call in contract verifies";
+    let mir = materialize_float_bind(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "float-compare-call-contract".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        results[0].status
+    );
+}
+
+// The new narrowest floor: an ensures-bearing function calling an
+// aggregate-returning (owned String) callee stays outside the verifier
+// capability — the direct-scalar routing mirror admits only Copy scalar
+// (or unit) callees, so the registered fail-closed floor keeps guarding
+// exactly the shapes the evaluator does not route.
+#[test]
+fn contract_call_with_aggregate_callee_keeps_capability_floor() {
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            ensures: result == 1
+            let s = greet()
+            println(7)
+            1
+        }
+    "#;
+    let label = "contract call aggregate callee capability floor";
     let mir = materialize_float_bind(source, label);
     let errors = crate::verifier::validate_mir_capabilities(&mir)
-        .expect_err("{label}: contract-bearing call faces keep the registered floor");
+        .expect_err("{label}: aggregate callees keep the registered floor");
     assert!(
         errors
             .iter()
@@ -1681,8 +1714,8 @@ fn float_comparison_call_operand_capability_gate_keeps_contract_face_floor() {
 // The non-vacuity pin for the call-operand comparison: against the negated
 // ensures the same body disproves — `verify_mir`'s symbolic evaluator
 // executes the callee body exactly (the symbolic 0.5 forces the then-arm),
-// demonstrating the modeling is real even while the separate capability
-// gate keeps the contract-face floor registered above.
+// demonstrating the modeling is real.  R6-1073 opened the capability gate
+// to exactly this class, so the pin and the gate now agree.
 #[test]
 fn float_comparison_call_operand_branch_is_disproven_against_the_false_ensures() {
     let source = r#"

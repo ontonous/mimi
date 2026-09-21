@@ -4271,7 +4271,7 @@ fn eval_materialized_call(
     }
 }
 
-fn is_direct_scalar_call_type(
+pub(crate) fn is_direct_scalar_call_type(
     catalog: &crate::core::mir::types::MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> bool {
@@ -4282,7 +4282,7 @@ fn is_direct_scalar_call_type(
             .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit())
 }
 
-fn direct_call_graph_reaches(
+pub(crate) fn direct_call_graph_reaches(
     program: &MirProgram,
     from: &crate::core::NodeId,
     sought: &crate::core::NodeId,
