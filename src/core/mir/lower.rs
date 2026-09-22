@@ -239,6 +239,15 @@ fn lower_body_impl(
         return Err(lowerer.errors);
     }
 
+    // R6-1085: multi-block bodies (branch or loop tails) settle their
+    // owned-String ledger per Return site through the conservative
+    // entry-prefix/never-consumed pass; the single-block body already
+    // settled inline at the root return.
+    lowerer.settle_multiblock_owned_string_drops(&entry, &parameters);
+    if !lowerer.errors.is_empty() {
+        return Err(lowerer.errors);
+    }
+
     let blocks = lowerer.finish_blocks(&entry);
     if !lowerer.errors.is_empty() {
         return Err(lowerer.errors);
@@ -9627,6 +9636,133 @@ impl<'a> Lowerer<'a> {
                 &format!("drop.{index}"),
                 MirInstructionKind::Drop { value: target },
             );
+        }
+    }
+
+    /// R6-1085: settle the owned-String ledger for multi-block bodies.  The
+    /// single-block glue (`emit_end_of_body_owned_string_drops`) relies on a
+    /// path-insensitive consumed set, which is only sound on a straight-line
+    /// graph — a value consumed in one branch must not be dropped at a join
+    /// on behalf of the other path.  This pass therefore admits only the
+    /// shape where the branch structure cannot hide a consumption: the value
+    /// is introduced by the entry block's straight-line prefix (an owned
+    /// String parameter or a top-level bind `Move` result) and no
+    /// instruction anywhere in the function ever consumes it.  Such a value
+    /// is definitely live at every Return, so each Return site drops the
+    /// remaining set (that site's own return value excluded — returning a
+    /// value is its transfer).  Drop roles are indexed and anchored at the
+    /// owning block's id so instruction identities stay unique across
+    /// return sites.
+    fn settle_multiblock_owned_string_drops(
+        &mut self,
+        entry: &MirBlockId,
+        parameters: &[MirValueId],
+    ) {
+        let Some(catalog) = self.type_catalog else {
+            return;
+        };
+        if self.blocks.len() <= 1 {
+            return;
+        }
+        let mut seeds: BTreeSet<MirValueId> = parameters
+            .iter()
+            .filter(|value| {
+                self.values
+                    .get(*value)
+                    .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
+            })
+            .cloned()
+            .collect();
+        if let Some(entry_block) = self.blocks.get(entry) {
+            for instruction in &entry_block.instructions {
+                if let MirInstructionKind::Move { result, .. } = &instruction.kind {
+                    if result.0.starts_with("local:")
+                        && self
+                            .values
+                            .get(result)
+                            .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
+                    {
+                        seeds.insert(result.clone());
+                    }
+                }
+            }
+        } else {
+            return;
+        }
+        if seeds.is_empty() {
+            return;
+        }
+        let mut consumed: BTreeSet<MirValueId> = BTreeSet::new();
+        for block in self.blocks.values() {
+            for instruction in &block.instructions {
+                match &instruction.kind {
+                    MirInstructionKind::Move { source, .. }
+                    | MirInstructionKind::Drop { value: source }
+                    | MirInstructionKind::MoveProject { base: source, .. }
+                    | MirInstructionKind::MoveProjectDrop { base: source, .. }
+                    | MirInstructionKind::Convert { source, .. } => {
+                        consumed.insert(source.clone());
+                    }
+                    MirInstructionKind::UpdateRecord { base, fields, .. } => {
+                        consumed.insert(base.clone());
+                        consumed.extend(fields.iter().cloned());
+                    }
+                    MirInstructionKind::ConstructVariantMove { fields, .. } => {
+                        consumed.extend(fields.iter().map(|(_, value)| value.clone()));
+                    }
+                    MirInstructionKind::Call { arguments, .. }
+                    | MirInstructionKind::BuiltinCall { arguments, .. }
+                    | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        consumed.extend(arguments.iter().cloned());
+                    }
+                    MirInstructionKind::SessionCall {
+                        endpoint, payload, ..
+                    } => {
+                        consumed.insert(endpoint.clone());
+                        if let Some(payload) = payload {
+                            consumed.insert(payload.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        seeds.retain(|value| !consumed.contains(value));
+        if seeds.is_empty() {
+            return;
+        }
+        let block_ids: Vec<MirBlockId> = self.blocks.keys().cloned().collect();
+        for block_id in block_ids {
+            let Some(return_value) = self.blocks.get(&block_id).and_then(|block| {
+                block
+                    .terminator
+                    .as_ref()
+                    .and_then(|terminator| match terminator {
+                        MirTerminator::Return { value: Some(value) } => Some(value.clone()),
+                        _ => None,
+                    })
+            }) else {
+                continue;
+            };
+            let drops: Vec<MirValueId> = seeds
+                .iter()
+                .filter(|value| **value != return_value)
+                .cloned()
+                .collect();
+            let Some(block) = self.blocks.get_mut(&block_id) else {
+                continue;
+            };
+            for (index, target) in drops.into_iter().enumerate() {
+                let Ok(id) =
+                    super::MirInstructionId::new(format!("inst:drop.mb.{index}:{}", block_id.0))
+                else {
+                    continue;
+                };
+                block.instructions.push(MirInstruction {
+                    id,
+                    kind: MirInstructionKind::Drop { value: target },
+                });
+            }
         }
     }
 

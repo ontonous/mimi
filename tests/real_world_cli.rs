@@ -19141,6 +19141,86 @@ fn canonical_mir_owned_string_rebind_routes_canonical_and_verifies() {
 }
 
 #[test]
+fn canonical_mir_owned_string_branch_settles_canonical_and_verifies() {
+    // R6-1085: the multi-block settlement — a branch-tailed main whose
+    // rebind leftovers are entry-prefix-introduced and never consumed
+    // anywhere is definitely live at every Return, so the per-return-site
+    // pass drops them (`drop.mb.*`) and the previously leaking binary
+    // (valgrind: 6 bytes in 2 blocks) runs clean.  The face routes
+    // canonical with the native MIR binary agreeing byte-for-byte, and
+    // the ensures contract verifies on the single canonical engine.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_branch.mimi");
+    let expected = "7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-branch-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string branch native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String branch face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string branch fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String branch face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String branch face must not fall back to legacy:\n{default_stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("owned-string branch verify");
+    assert!(
+        verify.status.success(),
+        "the owned-String branch contract must verify:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        verify_stdout.contains("canonical MIR ensures contract proven"),
+        "{verify_stdout}"
+    );
+    assert!(!verify_stdout.contains("flow_ast"), "{verify_stdout}");
+}
+
+#[test]
 fn canonical_mir_owned_string_param_rebind_routes_canonical_and_verifies() {
     // R6-1083: the parameter-rebind face — `let v = s; v` copies the
     // parameter once and the lowerer's end-of-body drop glue discharges the

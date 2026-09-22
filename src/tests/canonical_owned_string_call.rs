@@ -84,6 +84,17 @@
 //! byte-identical), and glue Drops anchor at the root node with indexed
 //! roles (`drop.0`, `drop.1`, …) so instruction identities stay unique.
 //!
+//! R6-1085: the settlement widened to multi-block bodies — per Return
+//! site, through a deliberately conservative path-insensitive face: the
+//! value must be introduced by the entry block's straight-line prefix
+//! (String parameter or top-level bind) and consumed by no instruction
+//! anywhere, which makes it definitely live at every Return; each return
+//! site then drops the remaining set (`drop.mb.*` anchored at the owning
+//! block).  A value consumed on any path (an explicit branch-local
+//! `drop(s)`) holds the pass entirely — soundness over coverage, the
+//! unreleased path keeps its leak as a documented boundary until a real
+//! must-liveness dataflow replaces the shape predicate.
+//!
 //! R6-1083: the parameter-rebind body joins the set and the ledger gains
 //! end-of-body drop glue.  The lowerer now discharges the original handles
 //! a single-block owned-String body copied or left unused (`Drop` before the
@@ -521,6 +532,94 @@ fn main_side_leftover_strings_close_their_ledger() {
     BytecodeVM::new(bytecode)
         .run()
         .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn multiblock_leftover_strings_settle_per_return_site() {
+    // R6-1085: the settlement widened to multi-block (branch-tailed)
+    // bodies for the shape where branch structure cannot hide a
+    // consumption — the leftover is introduced by the entry prefix and
+    // no instruction anywhere consumes it, so it is definitely live at
+    // every Return and each return site drops the remaining set.  The
+    // branchy rebind main used to leak 6 bytes in 2 blocks under
+    // valgrind; the graph now carries `drop.mb.*` at the return block
+    // and all consumers agree.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            let t = s
+            if 1 > 0 {
+                println(7)
+            } else {
+                println(8)
+            }
+            0
+        }
+    "#;
+    let label = "multiblock leftover";
+    let mir = assert_admitted(source, label);
+    let main = mir
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main function present");
+    let text = main.canonical_text();
+    assert!(text.contains("inst:drop.mb.0:"), "{text}");
+    assert!(text.contains("inst:drop.mb.1:"), "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn multiblock_explicit_drop_holds_settlement_conservatively() {
+    // R6-1085 boundary: an explicit `drop(s)` inside one branch puts the
+    // value in the global consumed set, so the pass holds entirely — the
+    // join/exit return site must not drop a value the other path already
+    // released.  The unreleased path keeps the leak (documented
+    // boundary); the pin holds the pass to its conservative face.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            if 1 > 0 {
+                drop(s)
+            } else {
+                println(8)
+            }
+            0
+        }
+    "#;
+    let label = "multiblock explicit drop hold";
+    let mir = assert_admitted(source, label);
+    let main = mir
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main function present");
+    let text = main.canonical_text();
+    assert!(!text.contains("inst:drop.mb."), "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
 }
 
 #[test]
