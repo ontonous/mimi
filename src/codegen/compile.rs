@@ -584,6 +584,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // narrow native Float contract and poison the graph before emission.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
         let excluded_sources = if admission.copy_option_f64_complete()
+            // R6-1091 parity: a complete copy-Option (i32/bool/i64) admission
+            // must see the same prelude-free graph the CLI dispatch wrapper
+            // builds. Its recognized match face (R6-1089) otherwise dies on
+            // preloaded prelude bodies MIR Phase 0 cannot lower before the
+            // island validator ever runs.
+            || admission.copy_option_i32_complete()
+            || admission.copy_option_bool_complete()
+            || admission.copy_option_i64_complete()
             || admission.copy_result_i32_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()

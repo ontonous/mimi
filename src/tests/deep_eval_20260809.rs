@@ -143,6 +143,79 @@ func main() -> i32 {
     );
 }
 
+// ── R6-1091: complete copy-Option match through the direct probe ──────────
+// The copy-Option island admits the match face (R6-1089), so a complete
+// Option<primitive> island is a recognized canonical candidate. The CLI
+// dispatch wrapper excludes the prelude unconditionally, but the direct
+// `compile_checked` probe only exempted the Float/Result/Flow/record islands:
+// a complete Option i32/bool/i64 candidate still built its MIR graph over
+// prelude bodies (repeat_action/times nested assigns) that MIR Phase 0
+// cannot lower and hard-failed MIR-COVERAGE-001 before the island validator
+// ever ran. (Recognized-but-mixed candidates fail closed by design — S114 —
+// so these pins use complete straight-line shapes: the closure face has no
+// if/cast/output, and the exit code pins the decoded payloads.)
+
+#[test]
+fn deep_eval_option_i32_match_complete_island_codegen_dual() {
+    assert_dual(
+        r#"
+func pick(v: Option<i32>) -> i32 {
+    ensures: result >= 0
+    match v {
+        Some(x) => x + 34,
+        None => 0
+    }
+}
+func main() -> i32 {
+    let a: Option<i32> = Some(7)
+    let b: Option<i32> = None
+    pick(a) + pick(b) - 41
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn deep_eval_option_bool_match_complete_island_codegen_dual() {
+    assert_dual(
+        r#"
+func flag(v: Option<bool>) -> i32 {
+    ensures: result == 41
+    match v {
+        Some(b) => 41,
+        None => 0
+    }
+}
+func main() -> i32 {
+    let a: Option<bool> = Some(true)
+    flag(a) - 41
+}
+"#,
+        "",
+    );
+}
+
+#[test]
+fn deep_eval_option_i64_match_complete_island_codegen_dual() {
+    assert_dual(
+        r#"
+func big(v: Option<i64>) -> i64 {
+    ensures: result >= 0
+    match v {
+        Some(n) => n,
+        None => 0 as i64
+    }
+}
+func main() -> i64 {
+    let a: Option<i64> = Some(11)
+    big(a) - 11
+}
+"#,
+        "",
+    );
+}
+
 // ── B2a/B2b: resolved string return probe + heap slot null-init ───────────
 // 04_adt_match describe_point family: a resolved enum match returning string
 // in a conditional branch; the heap-alloc registration in an untaken branch
