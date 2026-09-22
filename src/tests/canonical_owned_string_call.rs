@@ -52,6 +52,13 @@
 //! once).  `wrap() { echo("hi") }` and direct `echo("x")` binds now flip
 //! the default run/build route; a String parameter in any other position
 //! and a second-hand (non-literal) String argument keep the floor.
+//!
+//! R6-1080: the one-statement constant-bind body joins the set.  A
+//! concrete, effect-free, non-prelude callable whose whole body is one
+//! String-literal bind returned whole (`let a = "x"; a`) lowers to the
+//! `Const → Move → Return` glue the ledger's shape validation proves, so
+//! the scanner admits the same exactly-one-statement shape; a parameter,
+//! a second bind, or a call-result initializer keeps the floor.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -319,11 +326,15 @@ fn cyclic_owned_string_wrapper_keeps_the_compatibility_floor() {
 
 #[test]
 fn wrapper_composing_an_off_shape_callee_keeps_the_floor() {
-    // The closure composes proven callees only: a wrapper over a
-    // multi-statement callee inherits no closed face of its own.
+    // R6-1080 restatement: the closure composes proven callees only.  The
+    // former off-shape callee (`let a = "x"; a`) is now the admitted
+    // constant-bind face, so the floor rides a callee that still escapes
+    // every closed shape — a second bind leaks a source the ledger
+    // rejects, and the wrapper inherits no closed face of its own.
     let source = r#"
         func shaky() -> string {
             let a = "x"
+            let b = "y"
             a
         }
         func wrap() -> string {
@@ -427,6 +438,48 @@ fn string_argument_wrapper_chain_routes_complete_across_consumers() {
 }
 
 #[test]
+fn constant_bind_member_routes_complete_across_consumers() {
+    // R6-1080: the one-statement constant-bind body (`let a = "x"; a`)
+    // joins the set — its `Const → Move → Return` glue is exactly the
+    // candidate the ledger's shape validation proves, and the R6-1077
+    // journey probes already showed the verifier treating the shape as the
+    // constant face.  The scanner side now agrees, so the former
+    // multi_statement_body floor classifies complete and every consumer
+    // executes it on the canonical engine — including composition with a
+    // one-edge wrapper and the StringHandle print face.
+    let source = r#"
+        func greet() -> string {
+            let a = "x"
+            a
+        }
+        func wrap() -> string {
+            greet()
+        }
+        func main() -> i32 {
+            let s = wrap()
+            println(s)
+            println(7)
+            0
+        }
+    "#;
+    let label = "constant-bind member";
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
 fn identity_member_argument_face_routes_complete_across_consumers() {
     // R6-1079: the identity member itself (`echo(s) { s }`) joins the
     // owned-String set, and a direct literal-argument call from main
@@ -463,9 +516,8 @@ fn identity_member_argument_face_routes_complete_across_consumers() {
 // String but its provenance escapes the closed constant face, so the whole
 // program stays on the compatibility route.  R6-1077 moved the one-edge
 // wrapper into the positive matrix; R6-1079 moved the identity member and
-// the literal-argument face into it, so `string_parameter` now pins the
-// precise residue — a String parameter in any position other than an
-// identity member's whole-body return keeps the profile floor.
+// the literal-argument face into it; R6-1080 moved the one-statement
+// constant-bind body into it — the floors below pin the residues.
 #[test]
 fn off_shape_string_callables_keep_the_compatibility_floor() {
     struct OffShapeCase {
@@ -473,13 +525,31 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
         source: &'static str,
     }
     const CASES: &[OffShapeCase] = &[
-        // A multi-statement body materializes Move/Clone/Drop glue the
-        // checker-side shape predicate does not cover.
+        // R6-1080: the one-statement constant-bind body
+        // (`let a = "x"; a`) joined the positive matrix — its
+        // `Const → Move → Return` glue is ledger-proven.  The floors below
+        // keep the compatibility route: a parameter in a multi-statement
+        // body has no identity face, and a second bind leaks a source.
         OffShapeCase {
-            name: "multi_statement_body",
+            name: "parameterized_multi_statement_body",
+            source: r#"
+                func greet(n: string) -> string {
+                    let a = "x"
+                    a
+                }
+                func main() -> i32 {
+                    let s = greet("y")
+                    println(7)
+                    0
+                }
+            "#,
+        },
+        OffShapeCase {
+            name: "double_constant_leak",
             source: r#"
                 func greet() -> string {
                     let a = "x"
+                    let b = "y"
                     a
                 }
                 func main() -> i32 {

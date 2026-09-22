@@ -1,0 +1,13 @@
+func greet() -> string {
+    let a = "x"
+    a
+}
+func wrap() -> string {
+    greet()
+}
+func main() -> i32 {
+    let s = wrap()
+    println(s)
+    println(7)
+    0
+}

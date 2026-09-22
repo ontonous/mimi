@@ -932,6 +932,70 @@ fn is_owned_string_identity_callable(
         })
 }
 
+/// R6-1080: the owned-String constant-bind face — a concrete, effect-free,
+/// non-prelude callable whose whole body is one String-literal bind followed
+/// by returning that binding (`func greet() -> string { let a = "x"; a }`).
+/// The construction ledger already proves the shape: the body lowers to
+/// `Const → Move → Return` glue (a glue candidate whose shape validation
+/// ends with an empty live set), and the R6-1077 journey probes proved the
+/// verifier explores it as the constant face.  The checker-side set admits
+/// the same exactly-one-statement shape; a parameter, a second bind, or a
+/// call-result initializer keeps the floor.
+fn is_owned_string_constant_bind_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !has_owned_string_callable_envelope(program, callable) {
+        return false;
+    }
+    if !matches!(
+        program.resolved_types().get(&callable.signature.result),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    if !callable.signature.parameters.is_empty() || !callable.body.parameters.is_empty() {
+        return false;
+    }
+    let [statement] = &callable.body.root.statements[..] else {
+        return false;
+    };
+    let ResolvedStmtKind::Bind {
+        pattern,
+        initializer,
+    } = &statement.kind
+    else {
+        return false;
+    };
+    let ResolvedPatternKind::Binding {
+        local,
+        by_reference: None,
+    } = &pattern.kind
+    else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&pattern.ty),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    let literal_initializer = matches!(
+        initializer.as_ref().map(|value| &value.kind),
+        Some(ResolvedExprKind::Literal(
+            crate::core::ResolvedLiteral::String(_)
+        ))
+    );
+    literal_initializer
+        && callable.body.root.result.as_ref().is_some_and(|result| {
+            matches!(
+                &result.kind,
+                ResolvedExprKind::Load(place)
+                    if place.base == *local && place.projections.is_empty()
+            )
+        })
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -959,11 +1023,13 @@ fn scan_scalar_collection_admission(
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
     );
     let closure = scan_scalar_collection_once(
         program,
         discovery.float_print_functions.clone(),
         discovery.string_print_functions,
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -984,10 +1050,19 @@ fn scan_scalar_collection_admission(
     // body returns their single String parameter — so a wrapper feeding a
     // String argument into one (`wrap() { echo("hi") }`) closes over the
     // same set.
+    // R6-1080: the seed admits constant-bind members — one String-literal
+    // bind returned whole — whose `Const → Move → Return` glue the ledger
+    // already proves.
     let owned_string_identity_callables = program
         .callables()
         .iter()
         .filter(|(_, callable)| is_owned_string_identity_callable(program, callable))
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
+    let owned_string_constant_bind_callables = program
+        .callables()
+        .iter()
+        .filter(|(_, callable)| is_owned_string_constant_bind_callable(program, callable))
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
     let mut owned_string_callables = program
@@ -996,6 +1071,7 @@ fn scan_scalar_collection_admission(
         .filter(|(_, callable)| {
             is_owned_string_constant_callable(program, callable)
                 || is_owned_string_identity_callable(program, callable)
+                || is_owned_string_constant_bind_callable(program, callable)
         })
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
@@ -1036,6 +1112,7 @@ fn scan_scalar_collection_admission(
         float_face_callables,
         owned_string_callables,
         owned_string_identity_callables,
+        owned_string_constant_bind_callables,
     )
 }
 
@@ -1046,6 +1123,7 @@ fn scan_scalar_collection_once(
     float_face_callables: BTreeSet<NodeId>,
     owned_string_callables: BTreeSet<NodeId>,
     owned_string_identity_callables: BTreeSet<NodeId>,
+    owned_string_constant_bind_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -1060,6 +1138,7 @@ fn scan_scalar_collection_once(
         float_face_callables,
         owned_string_callables,
         owned_string_identity_callables,
+        owned_string_constant_bind_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
@@ -1222,6 +1301,12 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// String-parameter exemption; an unused String parameter elsewhere
     /// keeps the profile floor.
     owned_string_identity_callables: BTreeSet<NodeId>,
+    /// R6-1080: the constant-bind subset of `owned_string_callables` —
+    /// members whose whole body is one String-literal bind returned whole
+    /// (`Const → Move → Return` glue).  Only these carry the literal-bind
+    /// pattern and tail-read exemptions; any other multi-statement body
+    /// keeps the compatibility floor.
+    owned_string_constant_bind_callables: BTreeSet<NodeId>,
     /// R6-1070: non-prelude callees recorded inside float print functions
     /// during the closure pass.  Only the pass seeded with the completed
     /// discovery sets fills this meaningfully; the classification pass
@@ -1300,6 +1385,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.owned_string_identity_callables.contains(owner))
+    }
+
+    /// R6-1080: is the current callable a constant-bind member — one
+    /// String-literal bind returned whole, the `Const → Move → Return` glue
+    /// the ledger proves?
+    fn in_owned_string_constant_bind_callable(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.owned_string_constant_bind_callables.contains(owner))
     }
 
     /// R6-1061: is this expression something the MIR verifier models in the
@@ -1649,7 +1743,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                             )) => self.in_float_face_function(),
                             Some(ResolvedExprKind::Literal(
                                 crate::core::ResolvedLiteral::String(_),
-                            )) => self.in_string_print_function(),
+                            )) => {
+                                self.in_string_print_function()
+                                    // R6-1080: a constant-bind member's one
+                                    // String-literal bind is the face itself —
+                                    // the ledger proves the binding moves to
+                                    // the return exactly once.
+                                    || self.in_owned_string_constant_bind_callable()
+                            }
                             _ => false,
                         };
                     // R6-1060: a second-hand print-face bind root (a plain
@@ -2089,7 +2190,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // the parameter read itself — the shape predicate constrains the
             // whole body to `Load(param)`, and the ledger proves the
             // parameter live exactly to the `Move → Return` glue.
-            let is_identity_param_value = self.in_owned_string_identity_callable()
+            // R6-1080: inside a constant-bind member the only String value is
+            // the bound local's read — the shape predicate constrains the
+            // whole body to `let a = "…"; a`, and the ledger proves the
+            // `Const → Move → Return` glue.
+            let is_identity_param_value = (self.in_owned_string_identity_callable()
+                || self.in_owned_string_constant_bind_callable())
                 && matches!(
                     self.program.resolved_types().get(&expression.ty),
                     Some(ResolvedType::Primitive(PrimitiveType::String))

@@ -18948,6 +18948,62 @@ fn canonical_mir_owned_string_identity_routes_canonical_and_matches_native() {
 }
 
 #[test]
+fn canonical_mir_owned_string_constant_bind_routes_canonical_and_matches_native() {
+    // R6-1080: the one-statement constant-bind face — `greet() { let a =
+    // "x"; a }` lowers to the ledger-proven `Const → Move → Return` glue,
+    // so the body, its one-edge wrapper, the bind and both print faces
+    // route canonical and the native MIR binary agrees byte-for-byte.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_constant_bind.mimi");
+    let expected = "x\n7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-constant-bind-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string constant-bind native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String constant-bind face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string constant-bind fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String constant-bind face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String constant-bind face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_owned_string_wrapper_contract_verifies_single_engine() {
     // R6-1077: a contract-bearing caller of a one-edge wrapper verifies on
     // the canonical route — the capability gate's ledger mirror admits the
