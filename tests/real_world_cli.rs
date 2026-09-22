@@ -1658,6 +1658,157 @@ fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_proven_verify_ffi_builds_and_executes_full_binary() {
+    // Closes the proven-side verification matrix: the disproven side
+    // (build --verify-ffi rejects) and the proven --emit-ir side are pinned
+    // by canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable;
+    // this pins the proven FULL BINARY path — verification passes, the
+    // artifact is produced, and it executes. `labs` resolves from libc, so
+    // no fixture library is needed.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_proven_build_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("proven.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func labs(x: i64) -> i64 requires: x > 0; }\nfunc main() -> i64 { println(labs(42 as i64))\n    0 }\n",
+    )
+    .unwrap();
+
+    for explicit_mir in [false, true] {
+        let binary = dir.join(if explicit_mir {
+            "proven-mir"
+        } else {
+            "proven-default"
+        });
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let build = command
+            .arg("--verify-ffi")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("proven build {explicit_mir}: {error}"));
+        assert!(
+            build.status.success(),
+            "proven build {explicit_mir} must succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(String::from_utf8_lossy(&build.stderr).is_empty());
+        assert!(
+            binary.exists(),
+            "proven build {explicit_mir} must produce the output binary"
+        );
+        let native = Command::new(&binary)
+            .output()
+            .expect("run proven native binary");
+        assert!(native.status.success());
+        assert_eq!(native.stdout, b"42\n");
+        fs::remove_file(&binary).ok();
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn canonical_scalar_ffi_cli_legacy_path_warns_verify_ffi_unsupported() {
+    // Honest-boundary pin for the legacy bytecode consumer: a
+    // legacy-dispositioned program that still DECLARES an extern (never
+    // called, so the scalar-FFI declaration boundary does not reject it)
+    // warns that --verify-ffi cannot be honored on this path. The flag is
+    // default-on (opt-out via --skip-verify-ffi), so the plain default run
+    // carries the warning too, while execution itself is unaffected.
+    // The Option+if match shape relies on the current island policy
+    // (if-in-arm projection callables stay unadmitted, R6-1097 verdict
+    // block); if that face ever opens through its island-closure ruling,
+    // this program turns canonical and this pin must be re-examined.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_legacy_warn_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("legacy_warn.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func uncalled_probe(x: i64) -> i64; }\nfunc pick(v: Option<i64>) -> i64 {\n    match v {\n        Some(value) => { if value > 0 { value } else { 0 as i64 } }\n        None => 0 as i64\n    }\n}\nfunc main() -> i64 {\n    println(pick(Some(3 as i64)))\n    0\n}\n",
+    )
+    .unwrap();
+
+    let run = |flags: &[&str], verbose: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        command.args(flags);
+        if verbose {
+            command.env("MIMI_VERBOSE", "1");
+        } else {
+            command.env_remove("MIMI_VERBOSE");
+        }
+        command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("legacy warning run {flags:?}: {error}"))
+    };
+
+    let default_run = run(&[], false);
+    let explicit_run = run(&["--verify-ffi"], false);
+    let skipped_run = run(&["--skip-verify-ffi"], false);
+    for (label, output) in [("default", &default_run), ("--verify-ffi", &explicit_run)] {
+        assert!(
+            output.status.success(),
+            "{label} run must still execute: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"3\n", "{label} run stdout");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "warning: --verify-ffi is not yet supported by the bytecode VM; \
+                 FFI contract verification is disabled"
+            ),
+            "{label} run must warn: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{label} run must not leak a verbose disposition without MIMI_VERBOSE: {stderr}"
+        );
+    }
+    assert_eq!(default_run.stderr, explicit_run.stderr);
+
+    assert!(skipped_run.status.success());
+    assert_eq!(skipped_run.stdout, b"3\n");
+    assert!(
+        skipped_run.stderr.is_empty(),
+        "--skip-verify-ffi must silence the warning: {}",
+        String::from_utf8_lossy(&skipped_run.stderr)
+    );
+
+    let verbose_run = run(&[], true);
+    assert!(verbose_run.status.success());
+    let verbose_stderr = String::from_utf8_lossy(&verbose_run.stderr);
+    assert!(
+        verbose_stderr.contains("canonical route disposition: legacy"),
+        "verbose run must record the legacy disposition: {verbose_stderr}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {
     if !can_link() {
         return;
