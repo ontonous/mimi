@@ -1,9 +1,9 @@
-func inner() -> string {
-    "inner"
+func inner(s: string) -> string {
+    s
 }
 
 func nested() -> string {
-    inner()
+    inner("hi")
 }
 
 func outer() -> string {

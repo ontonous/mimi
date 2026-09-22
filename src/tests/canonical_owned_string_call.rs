@@ -19,9 +19,20 @@
 //! materialized `Const "…" → Return` graph, and the island gate's String
 //! value/constant arms are now the canonical StringHandle contract itself
 //! (per-instruction Move/Clone/Drop/PrintlnString/Call arms keep policing
-//! every use).  Off-shape callees — one-edge wrappers, multi-statement
-//! bodies, String parameters, concatenation, branches, second-hand rebinds
-//! outside a string print face — keep the compatibility floor.
+//! every use).  Off-shape callees — multi-statement bodies, String
+//! parameters, concatenation, branches, second-hand rebinds outside a string
+//! print face — keep the compatibility floor.
+//!
+//! R6-1077: the constant set closes over one-edge wrappers.  A callable
+//! whose whole body is a call to a set member (`func wrap() -> string {
+//! greet() }`) joins the set on the checker side, the construction ledger
+//! gains the mirrored exactly-one-call-instruction candidate (callee
+//! candidacy recurses with a cache and an active-set cycle guard, so cyclic
+//! wrapper bodies keep the floor), and the shape ledger's Call arm admits
+//! the wrapper's `Call(proven callee) → Return` graph exactly like a Clone
+//! introduces a live String.  The verifier's per-hop routing explores the
+//! wrapper body and re-proves the callee at its own hop, so contracts
+//! through wrappers verify on the single canonical engine.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -155,16 +166,200 @@ fn owned_string_constant_callable_is_construction_validated() {
         .get(&NodeId("function:greet".into()))
         .unwrap_or_else(|| panic!("{label} greet absent"));
     assert!(
-        crate::core::mir::is_owned_string_return_candidate(greet, catalog),
+        crate::core::mir::is_owned_string_return_candidate(greet, mir.functions(), catalog),
         "{label} greet must be an owned-String return candidate"
     );
-    crate::core::mir::validate_owned_string_return_shape(greet, catalog)
+    crate::core::mir::validate_owned_string_return_shape(greet, mir.functions(), catalog)
         .unwrap_or_else(|message| panic!("{label} greet ledger: {message}"));
+}
+
+#[test]
+fn owned_string_one_edge_wrapper_bind_and_print_agrees_across_consumers() {
+    // R6-1077: the wrapper's whole body is a call to a set member, so it
+    // joins the closed face on the checker side, its materialized
+    // `Call(proven callee) → Return` graph passes the ledger's Call arm, and
+    // the bind/print consumers see exactly the same StringHandle chain.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func wrap() -> string {
+            greet()
+        }
+        func main() -> i32 {
+            let s = wrap()
+            println(s)
+            0
+        }
+    "#;
+    let label = "owned-string one-edge wrapper bind and print";
+    let mir = assert_admitted(source, label);
+    let catalog = mir.type_catalog();
+    let wrap = mir
+        .functions()
+        .get(&NodeId("function:wrap".into()))
+        .unwrap_or_else(|| panic!("{label} wrap absent"));
+    assert!(
+        crate::core::mir::is_owned_string_return_candidate(wrap, mir.functions(), catalog),
+        "{label} wrap must be an owned-String return candidate"
+    );
+    crate::core::mir::validate_owned_string_return_shape(wrap, mir.functions(), catalog)
+        .unwrap_or_else(|message| panic!("{label} wrap ledger: {message}"));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn owned_string_wrapper_chain_contract_verifies_on_mir() {
+    // Two wrapper edges plus a contract-bearing main: the capability gate's
+    // ledger mirror admits the wrapper composition, and the evaluator
+    // explores wrap_of_wrap → wrap → greet one proven hop at a time, so the
+    // ensures contract verifies on the single canonical engine.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func wrap() -> string {
+            greet()
+        }
+        func wrap_of_wrap() -> string {
+            wrap()
+        }
+        func main() -> i32 {
+            ensures: result == 1
+            let s = wrap_of_wrap()
+            println(7)
+            1
+        }
+    "#;
+    let label = "owned-string wrapper chain contract";
+    let mir = assert_admitted(source, label);
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "owned-string-wrapper-chain".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    assert_eq!(results.len(), 1, "{label} obligation count");
+    assert!(
+        matches!(results[0].status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        results[0].status
+    );
+}
+
+#[test]
+fn cyclic_owned_string_wrapper_keeps_the_compatibility_floor() {
+    // A self-recursive wrapper body has no provenance chain: the scanner
+    // closure never admits it (the callee is not yet a member when the
+    // wrapper is judged), and the ledger's active-set guard makes the
+    // recursive candidacy short-circuit false instead of diverging.
+    let source = r#"
+        func wrap() -> string {
+            wrap()
+        }
+        func main() -> i32 {
+            let s = wrap()
+            println(7)
+            0
+        }
+    "#;
+    let label = "cyclic owned-string wrapper";
+    let checked = checked_program_of(source);
+    assert!(
+        matches!(
+            crate::core::mir::classify_scalar_collection_admission(&checked),
+            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
+        ),
+        "{label} must classify mixed"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .unwrap_or_else(|error| panic!("{label} materialize: {error:?}"));
+    let wrap = mir
+        .functions()
+        .get(&NodeId("function:wrap".into()))
+        .unwrap_or_else(|| panic!("{label} wrap absent"));
+    assert!(
+        !crate::core::mir::is_owned_string_return_candidate(
+            wrap,
+            mir.functions(),
+            mir.type_catalog()
+        ),
+        "{label} wrap must stay outside the owned-String return contract"
+    );
+}
+
+#[test]
+fn wrapper_composing_an_off_shape_callee_keeps_the_floor() {
+    // The closure composes proven callees only: a wrapper over a
+    // multi-statement callee inherits no closed face of its own.
+    let source = r#"
+        func shaky() -> string {
+            let a = "x"
+            a
+        }
+        func wrap() -> string {
+            shaky()
+        }
+        func main() -> i32 {
+            let s = wrap()
+            println(7)
+            0
+        }
+    "#;
+    let label = "wrapper over off-shape callee";
+    let checked = checked_program_of(source);
+    assert!(
+        matches!(
+            crate::core::mir::classify_scalar_collection_admission(&checked),
+            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
+        ),
+        "{label} must classify mixed"
+    );
+}
+
+#[test]
+fn multi_statement_wrapper_keeps_the_compatibility_floor() {
+    // A wrapper body with its own statement (`let t = greet(); t`)
+    // materializes glue the one-edge face does not cover.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func wrap() -> string {
+            let t = greet()
+            t
+        }
+        func main() -> i32 {
+            let s = wrap()
+            println(7)
+            0
+        }
+    "#;
+    let label = "multi-statement wrapper";
+    let checked = checked_program_of(source);
+    assert!(
+        matches!(
+            crate::core::mir::classify_scalar_collection_admission(&checked),
+            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
+        ),
+        "{label} must classify mixed"
+    );
 }
 
 // The narrowest floors this slice keeps: every callee below returns a
 // String but its provenance escapes the closed constant face, so the whole
-// program stays on the compatibility route.
+// program stays on the compatibility route.  R6-1077 moved the one-edge
+// wrapper into the positive matrix; the floors below are unchanged.
 #[test]
 fn off_shape_string_callables_keep_the_compatibility_floor() {
     struct OffShapeCase {
@@ -172,24 +367,6 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
         source: &'static str,
     }
     const CASES: &[OffShapeCase] = &[
-        // A one-edge wrapper's String result has no constant face of its
-        // own — the call chain would need its own transitive closure proof.
-        OffShapeCase {
-            name: "one_edge_wrapper",
-            source: r#"
-                func greet() -> string {
-                    "hi"
-                }
-                func wrap() -> string {
-                    greet()
-                }
-                func main() -> i32 {
-                    let s = wrap()
-                    println(7)
-                    0
-                }
-            "#,
-        },
         // A multi-statement body materializes Move/Clone/Drop glue the
         // checker-side shape predicate does not cover.
         OffShapeCase {

@@ -659,9 +659,13 @@ fn verify_function(
     // native admission. String payloads stay opaque in Z3, but their TypeDesc
     // ABI and exactly-once ownership transfer are still checked before any
     // arithmetic contract is proved.
-    if crate::core::mir::is_owned_string_return_candidate(function, catalog) {
-        crate::core::mir::validate_owned_string_return_shape(function, catalog)
-            .map_err(|message| format!("canonical MIR owned String return rejected: {message}"))?;
+    if crate::core::mir::is_owned_string_return_candidate(function, program.functions(), catalog) {
+        crate::core::mir::validate_owned_string_return_shape(
+            function,
+            program.functions(),
+            catalog,
+        )
+        .map_err(|message| format!("canonical MIR owned String return rejected: {message}"))?;
     }
 
     let mut initial = initial_state(function, catalog, session)?;
@@ -4832,12 +4836,13 @@ fn eval_direct_owned_string_call(
         )
     })?;
     catalog.validate_owned_string(&target.result)?;
-    crate::core::mir::validate_owned_string_return_shape(target, catalog).map_err(|message| {
-        format!(
-            "MIR verifier direct owned String call target '{}' rejected: {message}",
-            target_owner.0
-        )
-    })?;
+    crate::core::mir::validate_owned_string_return_shape(target, program.functions(), catalog)
+        .map_err(|message| {
+            format!(
+                "MIR verifier direct owned String call target '{}' rejected: {message}",
+                target_owner.0
+            )
+        })?;
     if arguments.len() != target.parameters.len() {
         return Err("MIR verifier direct owned String call arity disagrees with target".into());
     }
@@ -8229,10 +8234,22 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_nested_owned_string_call_target_without_call_contract() {
+    fn verifier_floors_nested_owned_string_wrapper_chain_on_argument_liveness() {
+        // R6-1077 restatement: the former pin rode the wrapper floor — a
+        // nested one-edge `nested() { inner() }` over a constant callee now
+        // composes the proven contract through the ledger's Call arm and
+        // verifies (see `owned_string_wrapper_chain_contract_verifies_on_mir`).
+        // The narrowest verifier-level rejection left is the same wrapper
+        // chain whose callee takes a String argument: the identity callee is
+        // itself glue-admissible (the parameter return lowers to Move), but
+        // the ledger's Call arm admits only the zero-argument face — the
+        // literal argument stays live past the call, so the wrapper chain
+        // floors on argument liveness instead of proving.  Transferring
+        // String call arguments in the ledger (mirroring the evaluator's
+        // argument transfer) is the follow-up face, not this slice.
         let source = r#"
-            func inner() -> string { "inner" }
-            func nested() -> string { inner() }
+            func inner(s: string) -> string { s }
+            func nested() -> string { inner("hi") }
             func outer() -> string {
                 ensures: true
                 nested()
@@ -8253,9 +8270,13 @@ mod tests {
             result.status,
             crate::verifier::VerifStatus::NotInTrustedSubset
         );
-        assert!(result.message.contains(
-            "direct owned String call target 'function:nested' rejected: owned String return contract only admits String constants and ownership glue"
-        ));
+        assert!(
+            result.message.contains(
+                "direct owned String call target 'function:nested' rejected: owned String return leaves source"
+            ),
+            "unexpected rejection message: {}",
+            result.message
+        );
         assert!(!result.message.contains("flow_ast"));
     }
 

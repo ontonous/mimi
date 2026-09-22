@@ -2898,13 +2898,53 @@ pub(crate) fn validate_owned_string_identity_shape(
 /// Return whether a function enters the narrow direct owned-`String` return
 /// island. The candidate predicate is intentionally structural and
 /// TypeDesc-driven: a function with a direct String result is only claimed by
-/// this contract once its MIR contains an explicit String Move/Clone/Drop.
-/// Wider String producers (calls, concatenation, projections, and variant
-/// control flow) remain outside this slice until their own return contracts
-/// are materialized.
+/// this contract once its MIR contains an explicit String Move/Clone/Drop, a
+/// closed constant face, or (R6-1077) a one-edge call to an already-proven
+/// owned-String callee.  Wider String producers (concatenation, projections,
+/// and variant control flow) remain outside this slice until their own return
+/// contracts are materialized.
 pub(crate) fn is_owned_string_return_candidate(
     function: &MirFunction,
+    functions: &BTreeMap<NodeId, MirFunction>,
     type_catalog: &types::MirTypeCatalog,
+) -> bool {
+    let mut cache = BTreeMap::new();
+    let mut active = BTreeSet::new();
+    owned_string_return_candidate_visit(function, functions, type_catalog, &mut cache, &mut active)
+}
+
+/// R6-1077: recursive candidacy over the one-edge wrapper face.  `cache`
+/// memoizes finished verdicts so a wrapper DAG stays linear; `active` is the
+/// in-progress set, so a cyclic wrapper body (`wrap() { wrap() }`, mutual
+/// `a → b → a`) short-circuits to false instead of diverging — cyclic String
+/// provenance keeps the compatibility floor exactly like the capability
+/// gate's recursion guard.
+fn owned_string_return_candidate_visit(
+    function: &MirFunction,
+    functions: &BTreeMap<NodeId, MirFunction>,
+    type_catalog: &types::MirTypeCatalog,
+    cache: &mut BTreeMap<NodeId, bool>,
+    active: &mut BTreeSet<NodeId>,
+) -> bool {
+    if let Some(cached) = cache.get(&function.owner) {
+        return *cached;
+    }
+    if !active.insert(function.owner.clone()) {
+        return false;
+    }
+    let candidate =
+        owned_string_return_candidate_inner(function, functions, type_catalog, cache, active);
+    active.remove(&function.owner);
+    cache.insert(function.owner.clone(), candidate);
+    candidate
+}
+
+fn owned_string_return_candidate_inner(
+    function: &MirFunction,
+    functions: &BTreeMap<NodeId, MirFunction>,
+    type_catalog: &types::MirTypeCatalog,
+    cache: &mut BTreeMap<NodeId, bool>,
+    active: &mut BTreeSet<NodeId>,
 ) -> bool {
     if type_catalog
         .validate_owned_string(&function.result)
@@ -2918,6 +2958,12 @@ pub(crate) fn is_owned_string_return_candidate(
     // the Const to the Return), so it joins the candidate set beside the
     // Move/Clone returns without weakening the glue-only pre-filter.
     if has_direct_owned_string_constant_return(function, type_catalog) {
+        return true;
+    }
+    // R6-1077: a one-block `Call(proven callee) → Return` graph composes the
+    // callee's already-proven owned-String contract; the ledger below proves
+    // the wrapper's own liveness exactly once per candidate.
+    if has_direct_owned_string_call_return(function, functions, type_catalog, cache, active) {
         return true;
     }
     (has_direct_owned_string_return_glue(function, type_catalog)
@@ -2985,6 +3031,66 @@ fn has_direct_owned_string_constant_return(
                     result,
                     literal: crate::core::ResolvedLiteral::String(_),
                 }) if result == return_value
+            )
+    })
+}
+
+/// R6-1077: whether the function's single block consists of exactly one
+/// instruction — the call to an already-proven owned-String callee defining
+/// the returned value — and holds no String parameters.  This is the
+/// materialized shape of a one-edge owned-String wrapper (`wrap() { greet()
+/// }`); the callee candidacy recurses through
+/// `owned_string_return_candidate_visit`, whose active set rejects cyclic
+/// bodies and whose cache keeps the proof linear over wrapper chains.  Any
+/// additional instruction leaves the wrapper face.
+fn has_direct_owned_string_call_return(
+    function: &MirFunction,
+    functions: &BTreeMap<NodeId, MirFunction>,
+    type_catalog: &types::MirTypeCatalog,
+    cache: &mut BTreeMap<NodeId, bool>,
+    active: &mut BTreeSet<NodeId>,
+) -> bool {
+    if function.blocks.len() != 1 {
+        return false;
+    }
+    if function.parameters.iter().any(|parameter| {
+        function
+            .values
+            .get(parameter)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+    }) {
+        return false;
+    }
+    function.blocks.values().any(|block| {
+        let MirTerminator::Return {
+            value: Some(return_value),
+        } = &block.terminator
+        else {
+            return false;
+        };
+        function
+            .values
+            .get(return_value)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+            && block.instructions.len() == 1
+            && matches!(
+                block.instructions.first().map(|instruction| &instruction.kind),
+                Some(MirInstructionKind::Call {
+                    result: Some(call_result),
+                    callee: ResolvedCallee::Function(owner),
+                    type_arguments,
+                    ..
+                }) if call_result == return_value
+                    && type_arguments.is_empty()
+                    && functions.get(owner).is_some_and(|callee| {
+                        owned_string_return_candidate_visit(
+                            callee,
+                            functions,
+                            type_catalog,
+                            cache,
+                            active,
+                        )
+                    })
             )
     })
 }
@@ -3072,10 +3178,15 @@ fn has_string_branch_merge(function: &MirFunction, type_catalog: &types::MirType
 /// deliberately a one-block ownership ledger: String parameters and literal
 /// results are live values, Move consumes its source, Clone preserves its
 /// source while introducing a new owned value, Drop consumes a value, and the
-/// Return transfers the final live value. No backend may infer these facts
-/// from a pointer, register, or runtime handle.
+/// Return transfers the final live value.  R6-1077: a Call whose result is
+/// the owned String admits the one-edge wrapper face — it introduces a live
+/// String exactly like a Clone, but only when the callee is itself a proven
+/// owned-String return candidate (constancy, glue, or a nested one-edge
+/// call).  No backend may infer these facts from a pointer, register, or
+/// runtime handle.
 pub(crate) fn validate_owned_string_return_shape(
     function: &MirFunction,
+    functions: &BTreeMap<NodeId, MirFunction>,
     type_catalog: &types::MirTypeCatalog,
 ) -> Result<(), String> {
     type_catalog.validate_owned_string(&function.result)?;
@@ -3156,6 +3267,36 @@ pub(crate) fn validate_owned_string_return_shape(
                         value
                     ));
                 }
+            }
+            MirInstructionKind::Call {
+                result: Some(call_result),
+                callee: ResolvedCallee::Function(owner),
+                type_arguments,
+                ..
+            } if is_string(call_result) => {
+                // R6-1077: the one-edge wrapper face.  The callee must be a
+                // proven owned-String return candidate — the same candidacy
+                // the verifier re-proves per hop when it explores the callee
+                // body — and generic arguments stay outside this contract.
+                // Everything else keeps the constants-and-glue-only floor.
+                if !type_arguments.is_empty() {
+                    return Err(
+                        "owned String return call cannot carry generic type arguments".into(),
+                    );
+                }
+                let Some(callee_function) = functions.get(owner) else {
+                    return Err(format!(
+                        "owned String return call callee '{}' is absent",
+                        owner.0
+                    ));
+                };
+                if !is_owned_string_return_candidate(callee_function, functions, type_catalog) {
+                    return Err(format!(
+                        "owned String return call callee '{}' is outside the owned-String return contract",
+                        owner.0
+                    ));
+                }
+                live.insert(call_result.clone());
             }
             kind if instruction_produces_owned_string(function, type_catalog, kind)
                 || instruction_consumes_owned_string(function, type_catalog, kind) =>

@@ -846,26 +846,33 @@ pub fn has_unsupported_generic_set_facade_candidate(program: &CheckedProgram) ->
 /// ledger and of `eval_direct_owned_string_call`'s routing class: the
 /// materialized graph is one block of `Const "…" → Return`, every consumer
 /// computes the same owned StringHandle, and no provenance escapes the
-/// literal.  Anything else a body could do with a String (arithmetic, second
-/// hands, String parameters, branches, calls) keeps its existing floor.
-fn is_owned_string_constant_callable(
+/// literal.  R6-1077: the face closes over one-edge wrappers — a callable
+/// whose whole body is a call to a set member joins the set (see the
+/// fixpoint in `scan_scalar_collection_admission`) — while everything else a
+/// body could do with a String (arithmetic, second hands, String parameters,
+/// branches, calls to non-members) keeps its existing floor.
+fn has_owned_string_callable_envelope(
     program: &CheckedProgram,
     callable: &crate::core::ir::ResolvedCallable,
 ) -> bool {
-    if is_prelude_origin(program, &callable.body.root.origin) {
-        return false;
-    }
-    if !callable.signature.generic_parameters.is_empty()
-        || !callable.signature.effects.is_empty()
-        || callable.signature.parameters.iter().any(|parameter| {
+    !is_prelude_origin(program, &callable.body.root.origin)
+        && callable.signature.generic_parameters.is_empty()
+        && callable.signature.effects.is_empty()
+        && !callable.signature.parameters.iter().any(|parameter| {
             matches!(
                 parameter.permission,
                 Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
             )
         })
-        || !callable.body.captures.is_empty()
-        || !callable.body.default_values.is_empty()
-    {
+        && callable.body.captures.is_empty()
+        && callable.body.default_values.is_empty()
+}
+
+fn is_owned_string_constant_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !has_owned_string_callable_envelope(program, callable) {
         return false;
     }
     if !matches!(
@@ -923,12 +930,48 @@ fn scan_scalar_collection_admission(
     // checker-owned bodies, so — unlike the print-evidence faces — it needs
     // no discovery pass and can never drift with walk order.  Every pass
     // sees the identical set.
-    let owned_string_callables = program
+    // R6-1077: the constant set closes over one-edge wrappers — a callable
+    // whose whole body is a call to a set member joins the set, so
+    // `wrap() { greet() }` composes the same provenance chain its callee
+    // already carries.  The fixpoint is bounded by the callable count (each
+    // round inserts at least one owner or stops), so walk order cannot drift
+    // the closure either.
+    let mut owned_string_callables = program
         .callables()
         .iter()
         .filter(|(_, callable)| is_owned_string_constant_callable(program, callable))
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
+    loop {
+        let mut grew = false;
+        for (owner, callable) in program.callables().iter() {
+            if owned_string_callables.contains(owner) {
+                continue;
+            }
+            let is_wrapper = has_owned_string_callable_envelope(program, callable)
+                && matches!(
+                    program.resolved_types().get(&callable.signature.result),
+                    Some(ResolvedType::Primitive(PrimitiveType::String))
+                )
+                && callable.body.root.statements.is_empty()
+                && matches!(
+                    callable.body.root.result.as_ref().map(|result| &result.kind),
+                    Some(ResolvedExprKind::Call(call))
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Function(target)
+                                if owned_string_callables.contains(target)
+                        )
+                );
+            if is_wrapper {
+                owned_string_callables.insert(owner.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     scan_scalar_collection_once(
         program,
         closure.float_print_functions,
@@ -1020,8 +1063,10 @@ fn scan_scalar_collection_once(
             // R6-1076: an owned-String constant callable's String result is
             // the closed one-block literal face itself — the value returns
             // from a `Const "…" → Return` graph the island gate re-proves
-            // through `validate_owned_string_return_shape`.  Every other
-            // out-of-profile result keeps the floor.
+            // through `validate_owned_string_return_shape`.  R6-1077: the
+            // set is the wrapper-closed set, so a one-edge wrapper's String
+            // result skips the floor through the same exemption.  Every
+            // other out-of-profile result keeps the floor.
             let is_owned_string_constant_result =
                 |scanner: &ScalarCollectionAdmissionScanner<'_>,
                  ty: &crate::core::ResolvedTypeId| {
@@ -1158,6 +1203,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
     /// R6-1076: is the current callable an owned-String constant callable —
     /// the closed one-block literal face the island gate re-proves through
     /// `validate_owned_string_return_shape` on the materialized graph.
+    /// R6-1077: the set is the wrapper-closed set, so a one-edge wrapper
+    /// whose whole body is a call to a set member carries the same exemption.
     fn in_owned_string_constant_callable(&self) -> bool {
         self.current_callable
             .as_ref()
@@ -1467,7 +1514,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // block of an owned-String constant callable joins the same
             // result-face shape — its literal result is the closed face
             // itself; branchy String returns still floor through nested
-            // blocks.
+            // blocks.  R6-1077: the set is the wrapper-closed set, so a
+            // one-edge wrapper's root block carries the same exemption.
             let is_face_result_block = self.block_depth == 1
                 && (self.in_float_face_function()
                     && matches!(
@@ -1601,9 +1649,12 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // `Const "…" → Return` StringHandle, the island gate
                     // re-proves the ledger per materialized function, and
                     // the binding is a plain Move of an exactly-modeled
-                    // owned String.  Off-shape callees (non-literal bodies,
-                    // one-edge wrappers, branches) keep the pattern floor:
-                    // their String provenance has no closed face.
+                    // owned String.  R6-1077: the callee set is the
+                    // wrapper-closed set, so a one-edge `wrap() { greet() }`
+                    // binds through the same exemption.  Off-shape callees
+                    // (non-literal, non-wrapper bodies, branches) keep the
+                    // pattern floor: their String provenance has no closed
+                    // face.
                     let string_call_result_bind_root = concrete
                         && matches!(
                             self.program.resolved_types().get(&pattern.ty),
@@ -1928,7 +1979,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // the print-face literal, while the Call arm below still polices
             // the prelude floor, arity and arguments.  The callee's
             // materialized `Const "…" → Return` graph is the closed face the
-            // island gate re-proves per function.
+            // island gate re-proves per function.  R6-1077: the callee set is
+            // the wrapper-closed set, so a one-edge wrapper call skips the
+            // floor through the same exemption.
             let is_string_call_result = matches!(
                 &expression.kind,
                 ResolvedExprKind::Call(call)

@@ -1871,11 +1871,14 @@ impl<'a> CapabilityGate<'a> {
     /// shape, consumes non-Copy arguments with MoveOut glue, executes the
     /// callee body, and requires exactly one trap-free return path — so an
     /// owned-String callee is exactly modeled in a contract-bearing
-    /// function too.  The recursion guard is load-bearing here (unlike the
-    /// scalar route, whose evaluator re-checks it): the checker admits
-    /// recursive bodies, and without the guard a contract-bearing caller of
-    /// a recursive String callee would send the evaluator into unbounded
-    /// exploration — the gate keeps that shape fail-closed.
+    /// function too.  R6-1077: the return-shape ledger now composes one-edge
+    /// wrappers (`wrap() { greet() }`) whose callee candidacy it re-proves
+    /// recursively, so this mirror follows automatically.  The recursion
+    /// guard is load-bearing here (unlike the scalar route, whose evaluator
+    /// re-checks it): the checker admits recursive bodies, and without the
+    /// guard a contract-bearing caller of a recursive String callee would
+    /// send the evaluator into unbounded exploration — the gate keeps that
+    /// shape fail-closed.
     fn call_routes_to_direct_owned_string_evaluation(
         &self,
         function: &MirFunction,
@@ -1884,7 +1887,12 @@ impl<'a> CapabilityGate<'a> {
     ) -> bool {
         let catalog = self.program.type_catalog();
         catalog.validate_owned_string(&target.result).is_ok()
-            && crate::core::mir::validate_owned_string_return_shape(target, catalog).is_ok()
+            && crate::core::mir::validate_owned_string_return_shape(
+                target,
+                self.program.functions(),
+                catalog,
+            )
+            .is_ok()
             && !crate::verifier::mir::direct_call_graph_reaches(
                 self.program,
                 &target.owner,

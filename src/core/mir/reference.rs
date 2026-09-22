@@ -477,9 +477,9 @@ impl MirProgram {
                     message: "function result type is absent from MIR type catalog".into(),
                 });
             }
-            if super::is_owned_string_return_candidate(function, &type_catalog) {
+            if super::is_owned_string_return_candidate(function, &functions, &type_catalog) {
                 if let Err(message) =
-                    super::validate_owned_string_return_shape(function, &type_catalog)
+                    super::validate_owned_string_return_shape(function, &functions, &type_catalog)
                 {
                     errors.push(super::MirValidationError {
                         subject: function.owner.0.clone(),

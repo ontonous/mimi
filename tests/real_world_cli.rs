@@ -14578,6 +14578,15 @@ fn canonical_mir_verifier_proves_direct_owned_string_calls_without_fallback() {
 
 #[test]
 fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
+    // R6-1077 restatement: the former fixture's one-edge `nested() { inner() }`
+    // over a constant callee now composes the proven contract through the
+    // ledger's Call arm and verifies.  The CLI-level boundary keeps the same
+    // wrapper-chain structure but demotes the callee to a String-taking
+    // identity — the ledger's Call arm admits only the zero-argument face, so
+    // the literal argument stays live past the call and the chain floors on
+    // argument liveness (the lib twin
+    // verifier_floors_nested_owned_string_wrapper_chain_on_argument_liveness
+    // pins the same shape in-process).
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -14601,7 +14610,7 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
     );
     assert!(
         output.contains(
-            "direct owned String call target 'function:nested' rejected: owned String return contract only admits String constants and ownership glue"
+            "direct owned String call target 'function:nested' rejected: owned String return leaves source"
         ),
         "{output}"
     );
@@ -18754,6 +18763,122 @@ fn canonical_mir_owned_string_call_contract_verifies_single_engine() {
     assert!(
         !stderr.contains("canonical route disposition: legacy"),
         "the owned-String call contract must not verify through the legacy route:\n{stderr}"
+    );
+    assert!(!stdout.contains("E0439"), "{stdout}");
+}
+
+#[test]
+fn canonical_mir_owned_string_wrapper_routes_canonical_and_matches_native() {
+    // R6-1077: the one-edge wrapper face — `wrap() { greet() }` composes the
+    // constant callable's proven provenance, so its binds and print-argument
+    // calls route canonical and the native MIR binary agrees byte-for-byte.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_wrapper.mimi");
+    let expected = "hi\nhi\n7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-wrapper-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string wrapper native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String wrapper face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string wrapper fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String wrapper face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String wrapper face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
+fn canonical_mir_owned_string_wrapper_contract_verifies_single_engine() {
+    // R6-1077: a contract-bearing caller of a one-edge wrapper verifies on
+    // the canonical route — the capability gate's ledger mirror admits the
+    // wrapper composition and the evaluator explores it one proven hop at a
+    // time, so no dual-engine E0439 merge participates.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_owned_string_wrapper_verify_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create owned-string wrapper verify directory");
+    let source = dir.join("owned_string_wrapper.mimi");
+    fs::write(
+        &source,
+        concat!(
+            "func greet() -> string {\n",
+            "    \"hi\"\n",
+            "}\n",
+            "func wrap() -> string {\n",
+            "    greet()\n",
+            "}\n",
+            "func main() -> i32 {\n",
+            "    ensures: result == 1\n",
+            "    let s = wrap()\n",
+            "    println(7)\n",
+            "    1\n",
+            "}\n",
+        ),
+    )
+    .expect("write owned-string wrapper verify source");
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .expect("owned-string wrapper verify");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        verify.status.success(),
+        "the owned-String wrapper contract must verify:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "the owned-String wrapper contract must not verify through the legacy route:\n{stderr}"
     );
     assert!(!stdout.contains("E0439"), "{stdout}");
 }
