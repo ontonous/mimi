@@ -14578,15 +14578,15 @@ fn canonical_mir_verifier_proves_direct_owned_string_calls_without_fallback() {
 
 #[test]
 fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
-    // R6-1077 restatement: the former fixture's one-edge `nested() { inner() }`
-    // over a constant callee now composes the proven contract through the
-    // ledger's Call arm and verifies.  The CLI-level boundary keeps the same
-    // wrapper-chain structure but demotes the callee to a String-taking
-    // identity — the ledger's Call arm admits only the zero-argument face, so
-    // the literal argument stays live past the call and the chain floors on
-    // argument liveness (the lib twin
-    // verifier_floors_nested_owned_string_wrapper_chain_on_argument_liveness
-    // pins the same shape in-process).
+    // R6-1078 restatement: with the ledger's Call arm consuming String
+    // arguments, the former fixture's `nested() { inner("hi") }` chain now
+    // composes the proven contract and verifies (see
+    // canonical_mir_verifier_proves_string_argument_wrapper_chain).  The
+    // boundary keeps the same chain but holds an extra String live beside
+    // the call — the ledger transfers the argument, yet the side value has
+    // no consumer, so the chain floors on liveness (the lib twin
+    // verifier_floors_owned_string_wrapper_chain_on_leaked_side_value pins
+    // the same shape in-process).
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -14618,6 +14618,74 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
         !output.contains("flow_ast"),
         "legacy verifier fallback leaked: {output}"
     );
+}
+
+#[test]
+fn canonical_mir_verifier_proves_string_argument_wrapper_chain() {
+    // R6-1078: the ledger's Call arm consumes String arguments, so the
+    // wrapper chain `nested() { inner("hi") }` over a String-parameter
+    // identity callee composes the proven contract on the canonical engine.
+    // The checker-side scanner keeps its provenance floor (argument-position
+    // String literals stay outside the wrapper closure), so the direct
+    // `--mir` entry pins the verifier-level face — the default-route
+    // classify split is pinned in-process by
+    // string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir.
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_owned_string_arg_chain_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create owned-string arg chain directory");
+    let source = dir.join("owned_string_arg_chain.mimi");
+    fs::write(
+        &source,
+        concat!(
+            "func inner(s: string) -> string {\n",
+            "    s\n",
+            "}\n",
+            "func nested() -> string {\n",
+            "    inner(\"hi\")\n",
+            "}\n",
+            "func outer() -> string {\n",
+            "    ensures: true\n",
+            "    nested()\n",
+            "}\n",
+            "func main() -> i32 {\n",
+            "    0\n",
+            "}\n",
+        ),
+    )
+    .expect("write owned-string arg chain source");
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&source)
+        .arg("--mir")
+        .output()
+        .expect("owned-string arg chain verify");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        verify.status.success(),
+        "the string-argument wrapper chain must verify:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "the string-argument wrapper chain must not verify through the legacy route:\n{stderr}"
+    );
+    assert!(!stdout.contains("flow_ast"), "{stdout}");
 }
 
 #[test]

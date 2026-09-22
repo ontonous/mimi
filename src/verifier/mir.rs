@@ -8234,19 +8234,13 @@ mod tests {
     }
 
     #[test]
-    fn verifier_floors_nested_owned_string_wrapper_chain_on_argument_liveness() {
-        // R6-1077 restatement: the former pin rode the wrapper floor — a
-        // nested one-edge `nested() { inner() }` over a constant callee now
-        // composes the proven contract through the ledger's Call arm and
-        // verifies (see `owned_string_wrapper_chain_contract_verifies_on_mir`).
-        // The narrowest verifier-level rejection left is the same wrapper
-        // chain whose callee takes a String argument: the identity callee is
-        // itself glue-admissible (the parameter return lowers to Move), but
-        // the ledger's Call arm admits only the zero-argument face — the
-        // literal argument stays live past the call, so the wrapper chain
-        // floors on argument liveness instead of proving.  Transferring
-        // String call arguments in the ledger (mirroring the evaluator's
-        // argument transfer) is the follow-up face, not this slice.
+    fn verifier_proves_string_argument_wrapper_chain_on_mir() {
+        // R6-1078: the ledger's Call arm now consumes its String arguments —
+        // the same non-Copy transfer the evaluator performs on the caller's
+        // symbolic state — so the wrapper chain whose callee takes a String
+        // argument (R6-1077's floor) composes the proven contract and
+        // verifies.  The argument literal stays live only from its Const to
+        // the admitted call; the identity callee returns it unchanged.
         let source = r#"
             func inner(s: string) -> string { s }
             func nested() -> string { inner("hi") }
@@ -8260,7 +8254,43 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
-        let results = verify_program(&program, "owned-string-call-rejected-source-hash".into())
+        let results = verify_program(&program, "owned-string-arg-chain-source-hash".into())
+            .expect("verifier returns a stable trusted-subset result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:outer")
+            .expect("outer verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Verified);
+        assert!(
+            !result.message.contains("flow_ast"),
+            "legacy verifier fallback leaked: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verifier_floors_owned_string_wrapper_chain_on_leaked_side_value() {
+        // R6-1078: with argument transfer admitted, the narrowest
+        // verifier-level floor for a wrapper chain is a body that holds an
+        // extra String live beside the call — the ledger transfers the
+        // argument but the side value has no consumer, so the chain floors
+        // on liveness instead of proving.
+        let source = r#"
+            func inner(s: string) -> string { s }
+            func nested() -> string {
+                let a = "x"
+                inner("hi")
+            }
+            func outer() -> string {
+                ensures: true
+                nested()
+            }
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results = verify_program(&program, "owned-string-leak-source-hash".into())
             .expect("verifier returns a stable trusted-subset result");
         let result = results
             .iter()

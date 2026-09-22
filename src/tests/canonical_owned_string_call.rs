@@ -33,6 +33,15 @@
 //! introduces a live String.  The verifier's per-hop routing explores the
 //! wrapper body and re-proves the callee at its own hop, so contracts
 //! through wrappers verify on the single canonical engine.
+//!
+//! R6-1078: the shape ledger's Call arm consumes its String arguments — the
+//! same non-Copy transfer the verifier performs on the caller's symbolic
+//! state — so wrapper chains whose callee takes a String argument
+//! (`nested() { inner("hi") }` over a String-parameter identity) verify on
+//! the canonical engine.  The checker-side scanner keeps its provenance
+//! floor for the default run/build route: argument-position String literals
+//! stay outside the wrapper closure, so these programs still classify mixed
+//! — the same classify/gate layering R6-1076 recorded.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -353,6 +362,52 @@ fn multi_statement_wrapper_keeps_the_compatibility_floor() {
             crate::core::mir::ScalarCollectionAdmission::MixedCoverage
         ),
         "{label} must classify mixed"
+    );
+}
+
+#[test]
+fn string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir() {
+    // R6-1078: the ledger's Call arm consumes String arguments, so the
+    // wrapper chain `nested() { inner("hi") }` over a String-parameter
+    // identity callee composes the proven contract and verifies on the
+    // single canonical engine.  The checker-side scanner keeps its
+    // provenance floor — argument-position String literals stay outside the
+    // wrapper closure — so the program still classifies mixed for the
+    // default run/build route; the ledger face is verifier-level layering,
+    // exactly like the R6-1076 classify/gate split.
+    let source = r#"
+        func inner(s: string) -> string { s }
+        func nested() -> string { inner("hi") }
+        func main() -> i32 {
+            ensures: result == 1
+            let s = nested()
+            println(7)
+            1
+        }
+    "#;
+    let label = "string-argument wrapper chain";
+    let checked = checked_program_of(source);
+    assert!(
+        matches!(
+            crate::core::mir::classify_scalar_collection_admission(&checked),
+            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
+        ),
+        "{label} must classify mixed (scanner provenance floor)"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .unwrap_or_else(|error| panic!("{label} materialize: {error:?}"));
+    crate::verifier::validate_mir_capabilities(&mir)
+        .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+    let results = crate::verifier::verify_mir(&mir, "owned-string-arg-wrapper".into())
+        .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .unwrap_or_else(|| panic!("{label} main obligation absent: {results:?}"));
+    assert!(
+        matches!(main.status, crate::verifier::VerifStatus::Verified),
+        "{label} must verify, got {:?}",
+        main.status
     );
 }
 

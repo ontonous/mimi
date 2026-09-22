@@ -3,6 +3,7 @@ func inner(s: string) -> string {
 }
 
 func nested() -> string {
+    let a = "x"
     inner("hi")
 }
 

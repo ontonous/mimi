@@ -3272,6 +3272,7 @@ pub(crate) fn validate_owned_string_return_shape(
                 result: Some(call_result),
                 callee: ResolvedCallee::Function(owner),
                 type_arguments,
+                arguments,
                 ..
             } if is_string(call_result) => {
                 // R6-1077: the one-edge wrapper face.  The callee must be a
@@ -3295,6 +3296,18 @@ pub(crate) fn validate_owned_string_return_shape(
                         "owned String return call callee '{}' is outside the owned-String return contract",
                         owner.0
                     ));
+                }
+                // R6-1078: an admitted call consumes its String arguments —
+                // the same transfer the verifier performs when it removes
+                // non-Copy arguments from the caller's symbolic state.
+                // Consuming a moved argument again keeps the floor.
+                for argument in arguments {
+                    if is_string(argument) && !live.remove(argument) {
+                        return Err(format!(
+                            "owned String return call argument '{}' is unavailable",
+                            argument
+                        ));
+                    }
                 }
                 live.insert(call_result.clone());
             }
