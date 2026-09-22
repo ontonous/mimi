@@ -1,0 +1,12 @@
+func pick(v: Option<i32>) -> i32 {
+    ensures: result >= 0
+    match v {
+        Some(x) => 41,
+        None => 0
+    }
+}
+func main() -> i32 {
+    let a: Option<i32> = Some(7)
+    let b: Option<i32> = None
+    pick(a) + pick(b) - 41
+}
