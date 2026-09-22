@@ -1,0 +1,18 @@
+func greet() -> string {
+    "hi"
+}
+
+func consume(value: Option<string>) -> i32 {
+    ensures: result >= 0
+    let s = greet()
+    match value {
+        Some(_) => 41,
+        None => { drop(s) 0 }
+    }
+}
+
+func main() -> i32 {
+    let first: Option<string> = Some("owned")
+    let code = consume(first)
+    code - 41
+}

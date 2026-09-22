@@ -120,10 +120,22 @@
 //! as a block argument, yields via `Return`, or carries into `Fault`
 //! (id-based accounting cannot see through those renames/transfers).
 //! Placements of one value always live in mutually exclusive arms, so
-//! every path drops at most once.  Match/`Switch` arms stay held: match
-//! shapes classify outside the complete-coverage profile today, so the
-//! face is unreachable end-to-end until the eligibility scanner admits
-//! them.
+//! every path drops at most once.
+//!
+//! R6-1088: the placement criterion reaches the match family.  The
+//! R6-1087 note's "unreachable end-to-end" verdict was scoped to the
+//! Copy unwrap islands (Option<i32>/Result classify OutsideProfile on a
+//! match — no unwrap call, no candidate); the non-Copy Option<string>
+//! wildcard-match island already classified CompleteCoverage and
+//! lowered `match` to a two-arm `switch_move`, so the flip probe ran
+//! end-to-end and measured 3 bytes definitely lost on the native
+//! binary before this slice.  The pass now judges `Switch`/`SwitchMove`
+//! terminators with the identical containment-and-sibling-clear
+//! criterion (plus a distinct-head guard: a duplicated arm target
+//! would run one placement for two arms) and places the Drop at each
+//! sibling arm head (`drop.pb.*` anchored at the owning match-arm
+//! block).  Both-arm and pre-switch consumption keep holding
+//! conservatively.
 //!
 //! R6-1083: the parameter-rebind body joins the set and the ledger gains
 //! end-of-body drop glue.  The lowerer now discharges the original handles
@@ -751,6 +763,135 @@ fn nested_diamond_sibling_arms_settle_per_path() {
         "outer and inner sibling heads each carry one placed Drop: {text}"
     );
     assert!(!text.contains("inst:drop.mb."), "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn option_string_switch_sibling_arm_settles_per_path() {
+    // R6-1088: the Option<string> wildcard-match island lowers `match`
+    // to a two-arm `switch_move` whose arm blocks join at the match
+    // join, so the R6-1087 Branch-only placement face held for the
+    // whole match family while the flip probe measured 3 bytes
+    // definitely lost on the native binary (Some taken, `s` surviving
+    // un-consumed; None taken settles explicitly, valgrind clean).  The
+    // criterion carries over unchanged — every consumption inside the
+    // None arm's reachable set and none inside the Some arm's — so the
+    // Drop lands at the sibling (Some) arm head anchored at the
+    // owning match-arm block, the return-site pass stays held, and
+    // both consumers execute the placed Drop cleanly.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func consume(value: Option<string>) -> i32 {
+            ensures: result >= 0
+            let s = greet()
+            match value {
+                Some(_) => 41,
+                None => { drop(s) 0 }
+            }
+        }
+        func main() -> i32 {
+            let first: Option<string> = Some("owned")
+            let code = consume(first)
+            code - 41
+        }
+    "#;
+    let label = "Option<string> switch sibling settle";
+    let checked = checked_program_of(source);
+    assert_eq!(
+        crate::core::mir::classify_option_string_variant_admission(&checked),
+        crate::core::mir::OptionStringVariantAdmission::CompleteCoverage,
+        "{label} must classify complete"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .unwrap_or_else(|error| panic!("{label} materialize: {error:?}"));
+    crate::core::mir::validate_option_string_variant_island(&mir)
+        .unwrap_or_else(|errors| panic!("{label} island gate: {errors:?}"));
+    let consume = mir
+        .functions()
+        .get(&NodeId("function:consume".into()))
+        .expect("consume function present");
+    let text = consume.canonical_text();
+    assert_eq!(
+        text.matches("inst:drop.pb.0:bb:match.arm:").count(),
+        1,
+        "the sibling (Some) arm head carries one placed Drop: {text}"
+    );
+    assert!(!text.contains("inst:drop.mb."), "{text}");
+    // The consuming (None) arm keeps its own explicit Drop.
+    assert_eq!(text.matches("inst:drop.0:").count(), 1, "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn option_string_switch_both_arms_hold_settlement_conservatively() {
+    // R6-1088 negative: consumption in BOTH arms leaves no complement —
+    // every path already settles the value — so the sibling-clear half
+    // of the criterion fails for each arm and neither the per-path pass
+    // nor the return-site pass may add a Drop.  The graph still routes
+    // canonical and both consumers run it.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func consume(value: Option<string>) -> i32 {
+            ensures: result >= 0
+            let s = greet()
+            match value {
+                Some(_) => { drop(s) 41 },
+                None => { drop(s) 0 }
+            }
+        }
+        func main() -> i32 {
+            let first: Option<string> = Some("owned")
+            let code = consume(first)
+            code - 41
+        }
+    "#;
+    let label = "Option<string> switch both-arm hold";
+    let checked = checked_program_of(source);
+    assert_eq!(
+        crate::core::mir::classify_option_string_variant_admission(&checked),
+        crate::core::mir::OptionStringVariantAdmission::CompleteCoverage,
+        "{label} must classify complete"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .unwrap_or_else(|error| panic!("{label} materialize: {error:?}"));
+    crate::core::mir::validate_option_string_variant_island(&mir)
+        .unwrap_or_else(|errors| panic!("{label} island gate: {errors:?}"));
+    let consume = mir
+        .functions()
+        .get(&NodeId("function:consume".into()))
+        .expect("consume function present");
+    let text = consume.canonical_text();
+    assert!(!text.contains("inst:drop.pb."), "{text}");
+    assert!(!text.contains("inst:drop.mb."), "{text}");
+    assert_eq!(text.matches("inst:drop.0:").count(), 2, "{text}");
     let reference = MirReferenceInterpreter::new(&mir)
         .execute(&NodeId("function:main".into()), &[])
         .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));

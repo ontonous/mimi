@@ -9669,7 +9669,13 @@ impl<'a> Lowerer<'a> {
     /// construction, so placements of one value always live in mutually
     /// exclusive arms and no path executes two of them.  Consumption
     /// spanning both arms or predating the branch holds the value
-    /// conservatively.  Placed Drops join the R6-1085 consumed
+    /// conservatively.  R6-1088 extends the same criterion to
+    /// `Switch`/`SwitchMove` terminators — the Option<string>
+    /// wildcard-match island lowers `match` to `switch_move`, and a value
+    /// consumed inside exactly one arm leaves every sibling arm's path
+    /// holding it — placing the Drop at each sibling arm head under the
+    /// same single-predecessor, acyclic, and distinct-head guards.
+    /// Placed Drops join the R6-1085 consumed
     /// computation, which then excludes the value from its seeds.
     fn settle_per_path_owned_string_drops(
         &mut self,
@@ -9838,6 +9844,15 @@ impl<'a> Lowerer<'a> {
             .filter(|(_, block)| matches!(block.terminator, Some(MirTerminator::Branch { .. })))
             .map(|(block_id, _)| block_id.clone())
             .collect();
+        // R6-1087: a single-predecessor arm head keeps the Drop off
+        // every other path into the block, and a branch unreachable
+        // from its own arms keeps each head to at most one execution
+        // per call.  Shapes violating either hold.
+        let single_predecessor = |block_id: &MirBlockId| {
+            predecessor_counts
+                .get(block_id)
+                .is_some_and(|count| *count == 1)
+        };
         let mut placed: Vec<(MirBlockId, Vec<MirValueId>)> = Vec::new();
         for branch_block in &branch_blocks {
             let Some((then_target, else_target)) =
@@ -9857,15 +9872,6 @@ impl<'a> Lowerer<'a> {
             if then_target == else_target {
                 continue;
             }
-            // R6-1087: a single-predecessor arm head keeps the Drop off
-            // every other path into the block, and a branch unreachable
-            // from its own arms keeps each head to at most one execution
-            // per call.  Shapes violating either hold.
-            let single_predecessor = |block_id: &MirBlockId| {
-                predecessor_counts
-                    .get(block_id)
-                    .is_some_and(|count| *count == 1)
-            };
             if !single_predecessor(&then_target) || !single_predecessor(&else_target) {
                 continue;
             }
@@ -9897,6 +9903,72 @@ impl<'a> Lowerer<'a> {
                     placed.push((else_target.clone(), vec![value.clone()]));
                 } else if inside_else && !touches_then {
                     placed.push((then_target.clone(), vec![value.clone()]));
+                }
+            }
+        }
+        // R6-1088: the same criterion over Switch/SwitchMove terminators.
+        // A value consumed strictly inside one arm's reachable set and
+        // untouched by every sibling arm's set leaves each sibling path
+        // holding it, so the Drop lands at each sibling arm head.  A
+        // duplicated head would run one placement for two arms, and every
+        // head must keep its single-predecessor and acyclic guarantees.
+        let switch_blocks: Vec<MirBlockId> = self
+            .blocks
+            .iter()
+            .filter(|(_, block)| {
+                matches!(
+                    block.terminator,
+                    Some(MirTerminator::Switch { .. }) | Some(MirTerminator::SwitchMove { .. })
+                )
+            })
+            .map(|(block_id, _)| block_id.clone())
+            .collect();
+        for switch_block in &switch_blocks {
+            let Some(arm_targets) = self.blocks.get(switch_block).and_then(|block| {
+                match block.terminator.as_ref()? {
+                    MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+                        Some(
+                            arms.iter()
+                                .map(|arm| arm.target.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    _ => None,
+                }
+            }) else {
+                continue;
+            };
+            let mut distinct = arm_targets.clone();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() != arm_targets.len()
+                || arm_targets.iter().any(|target| !single_predecessor(target))
+            {
+                continue;
+            }
+            let reaches: Vec<BTreeSet<MirBlockId>> = arm_targets
+                .iter()
+                .map(|target| reachable(self, target))
+                .collect();
+            if reaches.iter().any(|reach| reach.contains(switch_block)) {
+                continue;
+            }
+            for value in &candidates {
+                let Some(consumed) = consumed_blocks.get(value) else {
+                    continue;
+                };
+                for (index, reach) in reaches.iter().enumerate() {
+                    let inside = consumed.iter().all(|block| reach.contains(block));
+                    let siblings_clear = reaches.iter().enumerate().all(|(other, other_reach)| {
+                        other == index || consumed.iter().all(|block| !other_reach.contains(block))
+                    });
+                    if inside && siblings_clear {
+                        for (sibling, sibling_target) in arm_targets.iter().enumerate() {
+                            if sibling != index {
+                                placed.push((sibling_target.clone(), vec![value.clone()]));
+                            }
+                        }
+                    }
                 }
             }
         }
