@@ -1,0 +1,14 @@
+func echo_chain(s: string) -> string {
+    let v = s
+    v
+}
+func wrap() -> string {
+    echo_chain("hi")
+}
+func main() -> i32 {
+    ensures: result == 0
+    let direct = echo_chain("yo")
+    println(direct)
+    println(wrap())
+    0
+}

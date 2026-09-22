@@ -213,6 +213,18 @@ fn lower_body_impl(
         if let Some(result) = body.root.result.as_deref() {
             let value = lowerer.lower_transition_return_expr(result);
             if lowerer.errors.is_empty() {
+                // R6-1083: the return-shape contract's ledger treats String
+                // parameters and locals as callee-owned values — every one
+                // must be consumed or dropped by the time the Return
+                // transfers the result.  The owned-String drop glue closes
+                // that ledger mechanically: a single-block body returning an
+                // owned String drops the locals the emitted graph never
+                // consumed, so a rebind copy (`let v = s; v`) or an unused
+                // side value accounts for its original handle instead of
+                // leaking it.  Consumed-set computation is conservative — a
+                // value is only considered free of obligations when no
+                // instruction can still consume it.
+                lowerer.emit_end_of_body_owned_string_drops(&value, &result.node_id);
                 lowerer.terminate(MirTerminator::Return { value: Some(value) });
             }
         } else {
@@ -9521,6 +9533,93 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.lower_expr(expression)
+    }
+
+    /// R6-1083: close the owned-String return ledger with end-of-body drop
+    /// glue.  The return-shape contract polices single-block bodies whose
+    /// result is an owned String, and its ledger holds every String
+    /// parameter and local as a callee-owned value that must be consumed or
+    /// dropped before the Return transfers the result.  Graphs that copy a
+    /// value (the rebind `let v = s`, an unused side literal) previously
+    /// left the original handle live forever — an unaccounted allocation
+    /// under the `mimi_string_free` ABI — so this emits an explicit
+    /// `Drop` for each local the emitted graph never consumed, placed
+    /// before the terminator.
+    ///
+    /// The face is deliberately narrow: a type catalog must be present, the
+    /// body must still be a single block, and the return value must be an
+    /// owned String — exactly the population the contract walks.  The
+    /// consumed set is conservative: only instructions that discharge an
+    /// obligation (Move/Drop/MoveProject/MoveProjectDrop bases, call
+    /// arguments, moved variant payloads, record update bases and overlaid
+    /// fields, session endpoints and payloads, conversions) release a
+    /// value; Clone deliberately preserves its source.
+    fn emit_end_of_body_owned_string_drops(&mut self, return_value: &MirValueId, node_id: &NodeId) {
+        let Some(catalog) = self.type_catalog else {
+            return;
+        };
+        if self.blocks.len() != 1 {
+            return;
+        }
+        let return_is_owned_string = self
+            .values
+            .get(return_value)
+            .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok());
+        if !return_is_owned_string {
+            return;
+        }
+        let mut consumed: BTreeSet<MirValueId> = BTreeSet::new();
+        if let Some(block) = self.blocks.get(&self.current) {
+            for instruction in &block.instructions {
+                match &instruction.kind {
+                    MirInstructionKind::Move { source, .. }
+                    | MirInstructionKind::Drop { value: source }
+                    | MirInstructionKind::MoveProject { base: source, .. }
+                    | MirInstructionKind::MoveProjectDrop { base: source, .. }
+                    | MirInstructionKind::Convert { source, .. } => {
+                        consumed.insert(source.clone());
+                    }
+                    MirInstructionKind::UpdateRecord { base, fields, .. } => {
+                        consumed.insert(base.clone());
+                        consumed.extend(fields.iter().cloned());
+                    }
+                    MirInstructionKind::ConstructVariantMove { fields, .. } => {
+                        consumed.extend(fields.iter().map(|(_, value)| value.clone()));
+                    }
+                    MirInstructionKind::Call { arguments, .. }
+                    | MirInstructionKind::BuiltinCall { arguments, .. }
+                    | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        consumed.extend(arguments.iter().cloned());
+                    }
+                    MirInstructionKind::SessionCall {
+                        endpoint, payload, ..
+                    } => {
+                        consumed.insert(endpoint.clone());
+                        if let Some(payload) = payload {
+                            consumed.insert(payload.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            return;
+        }
+        consumed.insert(return_value.clone());
+        let mut drop_targets: Vec<MirValueId> = self
+            .values
+            .iter()
+            .filter(|(value_id, value)| {
+                value_id.0.starts_with("local:")
+                    && catalog.validate_owned_string(&value.ty).is_ok()
+                    && !consumed.contains(value_id)
+            })
+            .map(|(value_id, _)| value_id.clone())
+            .collect();
+        drop_targets.sort();
+        for target in drop_targets {
+            self.emit(node_id, "drop", MirInstructionKind::Drop { value: target });
+        }
     }
 
     /// Materialize ordinary-call ownership effects from checker-finalized

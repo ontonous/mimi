@@ -14581,12 +14581,12 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
     // R6-1078 restatement: with the ledger's Call arm consuming String
     // arguments, the former fixture's `nested() { inner("hi") }` chain now
     // composes the proven contract and verifies (see
-    // canonical_mir_verifier_proves_string_argument_wrapper_chain).  The
-    // boundary keeps the same chain but holds an extra String live beside
-    // the call — the ledger transfers the argument, yet the side value has
-    // no consumer, so the chain floors on liveness (the lib twin
-    // verifier_floors_owned_string_wrapper_chain_on_leaked_side_value pins
-    // the same shape in-process).
+    // canonical_mir_verifier_proves_string_argument_wrapper_chain).
+    // R6-1083 restatement: the lowerer's end-of-body drop glue discharges
+    // an unconsumed side value, so the former leak fixture proves too; the
+    // surviving boundary is the structural use-after-move rule — a body
+    // that consumes the same String value twice rejects the canonical
+    // graph before any verifier runs.
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -14599,9 +14599,9 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
         .output()
         .expect("failed to spawn rejected nested owned String call verifier");
     assert!(
-        output.status.success(),
-        "trusted-subset rejection is a verifier result, not a process failure:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "the double-consumed parameter must fail closed at construction:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
     let output = format!(
         "{}{}",
@@ -14609,9 +14609,11 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        output.contains(
-            "direct owned String call target 'function:nested' rejected: owned String return leaves source"
-        ),
+        output.contains("canonical MIR verifier input rejected"),
+        "{output}"
+    );
+    assert!(
+        output.contains("use after consuming non-Copy value"),
         "{output}"
     );
     assert!(
@@ -19127,6 +19129,84 @@ fn canonical_mir_owned_string_rebind_routes_canonical_and_verifies() {
     assert!(
         verify.status.success(),
         "the owned-String rebind contract must verify:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        verify_stdout.contains("canonical MIR ensures contract proven"),
+        "{verify_stdout}"
+    );
+    assert!(!verify_stdout.contains("flow_ast"), "{verify_stdout}");
+}
+
+#[test]
+fn canonical_mir_owned_string_param_rebind_routes_canonical_and_verifies() {
+    // R6-1083: the parameter-rebind face — `let v = s; v` copies the
+    // parameter once and the lowerer's end-of-body drop glue discharges the
+    // original handle, so the member plus a wrapper closure over it routes
+    // canonical with the native MIR binary agreeing byte-for-byte, and the
+    // ensures contract verifies on the single canonical engine.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_param_rebind.mimi");
+    let expected = "yo\nhi\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-param-rebind-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string param-rebind native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String param-rebind face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string param-rebind fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String param-rebind face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String param-rebind face must not fall back to legacy:\n{default_stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("owned-string param-rebind verify");
+    assert!(
+        verify.status.success(),
+        "the owned-String param-rebind contract must verify:\n{}\n{}",
         String::from_utf8_lossy(&verify.stdout),
         String::from_utf8_lossy(&verify.stderr)
     );

@@ -73,6 +73,18 @@
 //! unadmitted provenance; candidate evidence deliberately stays with the
 //! boundary operations (a glue-only graph materializes no production
 //! boundary and a literal-origin rebind keeps its floor at the origin).
+//!
+//! R6-1083: the parameter-rebind body joins the set and the ledger gains
+//! end-of-body drop glue.  The lowerer now discharges the original handles
+//! a single-block owned-String body copied or left unused (`Drop` before the
+//! Return terminator), so the rebind copy `let v = s; v` ends the ledger's
+//! live set empty exactly like the identity face and the whole shape
+//! (`func echo_chain(s: string) -> string { let v = s; v }`) flips the
+//! route.  A side value beside a call no longer floors the verifier — the
+//! glue consumes it — so the R6-1078 leak boundary moved to the structural
+//! use-after-move floor (consuming a value twice).  A second statement, a
+//! non-parameter initializer, or a reference binding keeps the scanner
+//! floor.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -414,6 +426,48 @@ fn second_hand_rebind_routes_complete_across_consumers() {
 }
 
 #[test]
+fn param_rebind_member_routes_complete_across_consumers() {
+    // R6-1083: the parameter-rebind face — `let v = s; v` copies the
+    // parameter once and returns the copy, and the lowerer's end-of-body
+    // drop glue discharges the parameter's original handle, so the ledger's
+    // live set ends empty exactly like the identity face.  The member plus
+    // a wrapper closure over it (literal argument) and both direct and
+    // composed consumption route canonical on every consumer.  A
+    // two-statement rebind chain keeps the scanner floor: the shape
+    // predicate constrains the whole body to one rebind of the parameter.
+    let source = r#"
+        func echo_chain(s: string) -> string {
+            let v = s
+            v
+        }
+        func wrap() -> string {
+            echo_chain("hi")
+        }
+        func main() -> i32 {
+            let direct = echo_chain("yo")
+            println(direct)
+            println(wrap())
+            0
+        }
+    "#;
+    let label = "parameter rebind";
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
 fn call_bind_member_routes_complete_across_consumers() {
     // R6-1081: the one-statement call-bind body (`let t = greet(); t`)
     // joins the set through the fixpoint closure — its `Call → Move →
@@ -731,6 +785,43 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
                     let a = "x"
                     let b = echo(a)
                     println(b)
+                    0
+                }
+            "#,
+        },
+        // R6-1083: the parameter-rebind face is exactly one rebind of the
+        // parameter — a second rebind hop is a second statement the shape
+        // predicate does not constrain, so the body keeps the floor.
+        OffShapeCase {
+            name: "param_rebind_two_statement",
+            source: r#"
+                func chain2(s: string) -> string {
+                    let v = s
+                    let w = v
+                    w
+                }
+                func main() -> i32 {
+                    println(chain2("x"))
+                    0
+                }
+            "#,
+        },
+        // R6-1083: a parameter-rebind shape over a non-parameter initializer
+        // is not the face — the copy provenance must be the member's own
+        // parameter for the end-of-body drop glue to discharge it.
+        OffShapeCase {
+            name: "param_rebind_non_param_origin",
+            source: r#"
+                func other() -> string {
+                    let o = "o"
+                    o
+                }
+                func chain3(s: string) -> string {
+                    let v = other()
+                    v
+                }
+                func main() -> i32 {
+                    println(chain3("x"))
                     0
                 }
             "#,

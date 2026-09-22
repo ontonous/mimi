@@ -932,6 +932,78 @@ fn is_owned_string_identity_callable(
         })
 }
 
+/// R6-1083: the owned-String parameter-rebind face — a concrete, effect-free,
+/// non-prelude callable whose whole body rebinds its single String parameter
+/// and returns the binding (`func echo_chain(s: string) -> string {
+/// let v = s; v }`).  The bind lowers to a copy (`Clone → Move`), so the
+/// end-of-body drop glue (R6-1083, the lowerer) discharges the parameter's
+/// original handle and the ledger's live set ends empty — the same
+/// exactly-once accounting the identity face proves, one copy hop later.  A
+/// second statement, a non-parameter initializer, or a reference binding
+/// keeps the floor.
+fn is_owned_string_param_rebind_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !has_owned_string_callable_envelope(program, callable) {
+        return false;
+    }
+    if !matches!(
+        program.resolved_types().get(&callable.signature.result),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    if callable.signature.parameters.len() != 1 || callable.body.parameters.len() != 1 {
+        return false;
+    }
+    if !matches!(
+        program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    let parameter_local = &callable.body.parameters[0];
+    let [statement] = &callable.body.root.statements[..] else {
+        return false;
+    };
+    let ResolvedStmtKind::Bind {
+        pattern,
+        initializer: Some(initializer),
+    } = &statement.kind
+    else {
+        return false;
+    };
+    let ResolvedPatternKind::Binding {
+        local,
+        by_reference: None,
+    } = &pattern.kind
+    else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&pattern.ty),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    let parameter_copy = matches!(
+        &initializer.kind,
+        ResolvedExprKind::Load(place)
+            if place.base == *parameter_local && place.projections.is_empty()
+    );
+    parameter_copy
+        && callable.body.root.result.as_ref().is_some_and(|result| {
+            matches!(
+                &result.kind,
+                ResolvedExprKind::Load(place)
+                    if place.base == *local && place.projections.is_empty()
+            )
+        })
+}
+
 /// R6-1080: the owned-String constant-bind face — a concrete, effect-free,
 /// non-prelude callable whose whole body is one String-literal bind followed
 /// by returning that binding (`func greet() -> string { let a = "x"; a }`).
@@ -1090,11 +1162,13 @@ fn scan_scalar_collection_admission(
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
     );
     let closure = scan_scalar_collection_once(
         program,
         discovery.float_print_functions.clone(),
         discovery.string_print_functions,
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -1126,6 +1200,15 @@ fn scan_scalar_collection_admission(
         .filter(|(_, callable)| is_owned_string_identity_callable(program, callable))
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
+    // R6-1083: the parameter-rebind subset joins the seed like the identity
+    // subset — a pure shape with no set dependency — and the wrapper closure
+    // composes over it identically.
+    let owned_string_param_rebind_callables = program
+        .callables()
+        .iter()
+        .filter(|(_, callable)| is_owned_string_param_rebind_callable(program, callable))
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
     let owned_string_constant_bind_callables = program
         .callables()
         .iter()
@@ -1138,6 +1221,7 @@ fn scan_scalar_collection_admission(
         .filter(|(_, callable)| {
             is_owned_string_constant_callable(program, callable)
                 || is_owned_string_identity_callable(program, callable)
+                || is_owned_string_param_rebind_callable(program, callable)
                 || is_owned_string_constant_bind_callable(program, callable)
         })
         .map(|(owner, _)| owner.clone())
@@ -1196,6 +1280,7 @@ fn scan_scalar_collection_admission(
         owned_string_identity_callables,
         owned_string_constant_bind_callables,
         owned_string_call_bind_callables,
+        owned_string_param_rebind_callables,
     )
 }
 
@@ -1208,6 +1293,7 @@ fn scan_scalar_collection_once(
     owned_string_identity_callables: BTreeSet<NodeId>,
     owned_string_constant_bind_callables: BTreeSet<NodeId>,
     owned_string_call_bind_callables: BTreeSet<NodeId>,
+    owned_string_param_rebind_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -1224,6 +1310,7 @@ fn scan_scalar_collection_once(
         owned_string_identity_callables,
         owned_string_constant_bind_callables,
         owned_string_call_bind_callables,
+        owned_string_param_rebind_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
@@ -1284,10 +1371,15 @@ fn scan_scalar_collection_once(
             // the construction ledger re-proves — so it skips the profile
             // floor exactly like the member's String result.  Any other
             // String parameter (an unused one above all) keeps the floor.
-            let is_identity_string_parameter =
+            // R6-1083: a parameter-rebind member's parameter joins the same
+            // exemption — the body copies it once and the end-of-body drop
+            // glue discharges the original, so the ledger's live set ends
+            // empty exactly like the identity face.
+            let is_member_string_parameter =
                 |scanner: &ScalarCollectionAdmissionScanner<'_>,
                  ty: &crate::core::ResolvedTypeId| {
-                    scanner.in_owned_string_identity_callable()
+                    (scanner.in_owned_string_identity_callable()
+                        || scanner.in_owned_string_param_rebind_callable())
                         && matches!(
                             scanner.program.resolved_types().get(ty),
                             Some(ResolvedType::Primitive(PrimitiveType::String))
@@ -1295,7 +1387,7 @@ fn scan_scalar_collection_once(
                 };
             for parameter in &callable.signature.parameters {
                 if !is_face_f64_type(&scanner, &parameter.ty)
-                    && !is_identity_string_parameter(&scanner, &parameter.ty)
+                    && !is_member_string_parameter(&scanner, &parameter.ty)
                 {
                     scanner.require_profile_type(&parameter.ty);
                 }
@@ -1397,6 +1489,12 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// (`Call → Move → Return` glue).  Derived against the completed
     /// closure; any other multi-statement body keeps the floor.
     owned_string_call_bind_callables: BTreeSet<NodeId>,
+    /// R6-1083: the parameter-rebind subset of `owned_string_callables` —
+    /// members whose whole body rebinds their single String parameter and
+    /// returns the binding (the copy hop the end-of-body drop glue
+    /// discharges).  Like the identity subset, only these carry the
+    /// String-parameter exemption.
+    owned_string_param_rebind_callables: BTreeSet<NodeId>,
     /// R6-1070: non-prelude callees recorded inside float print functions
     /// during the closure pass.  Only the pass seeded with the completed
     /// discovery sets fills this meaningfully; the classification pass
@@ -1493,6 +1591,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.owned_string_call_bind_callables.contains(owner))
+    }
+
+    /// R6-1083: is the current callable a parameter-rebind member — one
+    /// rebind of its single String parameter returned whole, the copy hop
+    /// the end-of-body drop glue discharges?
+    fn in_owned_string_param_rebind_callable(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.owned_string_param_rebind_callables.contains(owner))
     }
 
     /// R6-1061: is this expression something the MIR verifier models in the
@@ -2309,10 +2416,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // R6-1080: inside a constant-bind member the only String value is
             // the bound local's read — the shape predicate constrains the
             // whole body to `let a = "…"; a`, and the ledger proves the
-            // `Const → Move → Return` glue.
+            // `Const → Move → Return` glue.  R6-1083: inside a
+            // parameter-rebind member the values are the parameter copy and
+            // the bound local's read — the shape constrains the whole body
+            // to `let v = s; v`, and the end-of-body drop glue discharges
+            // the parameter's original handle.
             let is_identity_param_value = (self.in_owned_string_identity_callable()
                 || self.in_owned_string_constant_bind_callable()
-                || self.in_owned_string_call_bind_callable())
+                || self.in_owned_string_call_bind_callable()
+                || self.in_owned_string_param_rebind_callable())
                 && matches!(
                     self.program.resolved_types().get(&expression.ty),
                     Some(ResolvedType::Primitive(PrimitiveType::String))

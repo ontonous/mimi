@@ -1,15 +1,13 @@
-func inner(s: string) -> string {
-    s
-}
+func inner(s: string) -> string { s }
 
-func nested() -> string {
-    let a = "x"
-    inner("hi")
+func nested(s: string) -> string {
+    let first = inner(s)
+    inner(s)
 }
 
 func outer() -> string {
     ensures: true
-    nested()
+    nested("hi")
 }
 
 func main() -> i32 {

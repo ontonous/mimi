@@ -8268,46 +8268,40 @@ mod tests {
     }
 
     #[test]
-    fn verifier_floors_owned_string_wrapper_chain_on_leaked_side_value() {
+    fn mir_construction_floors_owned_string_chain_on_double_consumption() {
         // R6-1078: with argument transfer admitted, the narrowest
-        // verifier-level floor for a wrapper chain is a body that holds an
-        // extra String live beside the call — the ledger transfers the
-        // argument but the side value has no consumer, so the chain floors
-        // on liveness instead of proving.
+        // verifier-level floor for a wrapper chain was a body that held an
+        // extra String live beside the call.  R6-1083 restatement: the
+        // lowerer's end-of-body drop glue now discharges an unconsumed side
+        // value, so that shape proves; the surviving floor moved down to
+        // the structural use-after-move rule — consuming the same String
+        // value twice rejects the canonical graph before any verifier runs.
         let source = r#"
             func inner(s: string) -> string { s }
-            func nested() -> string {
-                let a = "x"
-                inner("hi")
+            func nested(s: string) -> string {
+                let first = inner(s)
+                inner(s)
             }
             func outer() -> string {
                 ensures: true
-                nested()
+                nested("hi")
             }
             func main() -> i32 { 0 }
         "#;
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
-        let results = verify_program(&program, "owned-string-leak-source-hash".into())
-            .expect("verifier returns a stable trusted-subset result");
-        let result = results
-            .iter()
-            .find(|result| result.func_name == "function:outer")
-            .expect("outer verification result");
-        assert_eq!(
-            result.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("the double-consumed parameter must reject at MIR construction");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("use after consuming non-Copy value"),
+            "unexpected rejection message: {rendered}"
         );
         assert!(
-            result.message.contains(
-                "direct owned String call target 'function:nested' rejected: owned String return leaves source"
-            ),
-            "unexpected rejection message: {}",
-            result.message
+            rendered.contains("function:nested"),
+            "the floor must name the consuming function: {rendered}"
         );
-        assert!(!result.message.contains("flow_ast"));
     }
 
     #[test]
