@@ -996,6 +996,71 @@ fn is_owned_string_constant_bind_callable(
         })
 }
 
+/// R6-1081: the owned-String call-bind face — a concrete, effect-free,
+/// non-prelude callable whose whole body is one bind of a set member's call
+/// result followed by returning that binding (`func wrap() -> string { let
+/// t = greet(); t }`).  The body lowers to `Call → Move → Return` glue: the
+/// ledger's Call arm introduces the binding exactly like a Clone and the
+/// Move settles it into the return, so the shape validation ends with an
+/// empty live set.  The callee side is set membership, so the face joins
+/// the fixpoint closure rather than the pure-shape seed; the predicate runs
+/// against the completed set.
+fn is_owned_string_call_bind_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+    owned_string_callables: &BTreeSet<NodeId>,
+) -> bool {
+    if !has_owned_string_callable_envelope(program, callable) {
+        return false;
+    }
+    if !matches!(
+        program.resolved_types().get(&callable.signature.result),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    if !callable.signature.parameters.is_empty() || !callable.body.parameters.is_empty() {
+        return false;
+    }
+    let [statement] = &callable.body.root.statements[..] else {
+        return false;
+    };
+    let ResolvedStmtKind::Bind {
+        pattern,
+        initializer,
+    } = &statement.kind
+    else {
+        return false;
+    };
+    let ResolvedPatternKind::Binding {
+        local,
+        by_reference: None,
+    } = &pattern.kind
+    else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&pattern.ty),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    let member_call_initializer = matches!(
+        initializer.as_ref().map(|value| &value.kind),
+        Some(ResolvedExprKind::Call(call))
+            if matches!(&call.callee, ResolvedCallee::Function(owner)
+                if owned_string_callables.contains(owner))
+    );
+    member_call_initializer
+        && callable.body.root.result.as_ref().is_some_and(|result| {
+            matches!(
+                &result.kind,
+                ResolvedExprKind::Load(place)
+                    if place.base == *local && place.projections.is_empty()
+            )
+        })
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -1024,11 +1089,13 @@ fn scan_scalar_collection_admission(
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
     );
     let closure = scan_scalar_collection_once(
         program,
         discovery.float_print_functions.clone(),
         discovery.string_print_functions,
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -1081,22 +1148,26 @@ fn scan_scalar_collection_admission(
             if owned_string_callables.contains(owner) {
                 continue;
             }
-            let is_wrapper = has_owned_string_callable_envelope(program, callable)
-                && matches!(
-                    program.resolved_types().get(&callable.signature.result),
-                    Some(ResolvedType::Primitive(PrimitiveType::String))
-                )
-                && callable.body.root.statements.is_empty()
+            let envelope_ok = has_owned_string_callable_envelope(program, callable);
+            let result_ok = matches!(
+                program.resolved_types().get(&callable.signature.result),
+                Some(ResolvedType::Primitive(PrimitiveType::String))
+            );
+            // R6-1077: the zero-statement one-edge wrapper — the whole body
+            // is a call to a set member.
+            let direct_wrapper = callable.body.root.statements.is_empty()
                 && matches!(
                     callable.body.root.result.as_ref().map(|result| &result.kind),
                     Some(ResolvedExprKind::Call(call))
-                        if matches!(
-                            &call.callee,
-                            ResolvedCallee::Function(target)
-                                if owned_string_callables.contains(target)
-                        )
+                        if matches!(&call.callee, ResolvedCallee::Function(target)
+                            if owned_string_callables.contains(target))
                 );
-            if is_wrapper {
+            // R6-1081: the one-statement call-bind wrapper — the whole body
+            // binds a member's call result and returns the binding
+            // (`Call → Move → Return` glue the ledger proves).
+            let call_bind_wrapper =
+                is_owned_string_call_bind_callable(program, callable, &owned_string_callables);
+            if envelope_ok && result_ok && (direct_wrapper || call_bind_wrapper) {
                 owned_string_callables.insert(owner.clone());
                 grew = true;
             }
@@ -1105,6 +1176,17 @@ fn scan_scalar_collection_admission(
             break;
         }
     }
+    // R6-1081: the call-bind subset is taken against the completed closure —
+    // membership needs the fixpoint, so unlike the pure-shape subsets it
+    // cannot be derived before the loop.
+    let owned_string_call_bind_callables = program
+        .callables()
+        .iter()
+        .filter(|(_, callable)| {
+            is_owned_string_call_bind_callable(program, callable, &owned_string_callables)
+        })
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
     scan_scalar_collection_once(
         program,
         closure.float_print_functions,
@@ -1113,6 +1195,7 @@ fn scan_scalar_collection_admission(
         owned_string_callables,
         owned_string_identity_callables,
         owned_string_constant_bind_callables,
+        owned_string_call_bind_callables,
     )
 }
 
@@ -1124,6 +1207,7 @@ fn scan_scalar_collection_once(
     owned_string_callables: BTreeSet<NodeId>,
     owned_string_identity_callables: BTreeSet<NodeId>,
     owned_string_constant_bind_callables: BTreeSet<NodeId>,
+    owned_string_call_bind_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -1139,6 +1223,7 @@ fn scan_scalar_collection_once(
         owned_string_callables,
         owned_string_identity_callables,
         owned_string_constant_bind_callables,
+        owned_string_call_bind_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
@@ -1307,6 +1392,11 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// pattern and tail-read exemptions; any other multi-statement body
     /// keeps the compatibility floor.
     owned_string_constant_bind_callables: BTreeSet<NodeId>,
+    /// R6-1081: the call-bind subset of `owned_string_callables` — members
+    /// whose whole body is one bind of a member's call result returned whole
+    /// (`Call → Move → Return` glue).  Derived against the completed
+    /// closure; any other multi-statement body keeps the floor.
+    owned_string_call_bind_callables: BTreeSet<NodeId>,
     /// R6-1070: non-prelude callees recorded inside float print functions
     /// during the closure pass.  Only the pass seeded with the completed
     /// discovery sets fills this meaningfully; the classification pass
@@ -1394,6 +1484,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.owned_string_constant_bind_callables.contains(owner))
+    }
+
+    /// R6-1081: is the current callable a call-bind member — one bind of a
+    /// member's call result returned whole, the `Call → Move → Return` glue
+    /// the ledger proves?
+    fn in_owned_string_call_bind_callable(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.owned_string_call_bind_callables.contains(owner))
     }
 
     /// R6-1061: is this expression something the MIR verifier models in the
@@ -2195,7 +2294,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             // whole body to `let a = "…"; a`, and the ledger proves the
             // `Const → Move → Return` glue.
             let is_identity_param_value = (self.in_owned_string_identity_callable()
-                || self.in_owned_string_constant_bind_callable())
+                || self.in_owned_string_constant_bind_callable()
+                || self.in_owned_string_call_bind_callable())
                 && matches!(
                     self.program.resolved_types().get(&expression.ty),
                     Some(ResolvedType::Primitive(PrimitiveType::String))

@@ -1,0 +1,18 @@
+func greet() -> string {
+    "hi"
+}
+func wrap() -> string {
+    let t = greet()
+    t
+}
+func wrap2() -> string {
+    let u = wrap()
+    u
+}
+func main() -> i32 {
+    let s = wrap2()
+    println(s)
+    println(wrap())
+    println(7)
+    0
+}

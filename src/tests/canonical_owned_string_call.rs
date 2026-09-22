@@ -59,6 +59,13 @@
 //! `Const → Move → Return` glue the ledger's shape validation proves, so
 //! the scanner admits the same exactly-one-statement shape; a parameter,
 //! a second bind, or a call-result initializer keeps the floor.
+//!
+//! R6-1081: the one-statement call-bind body joins the set through the
+//! fixpoint — the whole body binds a set member's call result and returns
+//! the binding (`let t = greet(); t`), the `Call → Move → Return` glue the
+//! ledger proves.  Callee side is set membership, so the face lives in the
+//! closure loop; a leaky callee, a parameter, or a second statement keeps
+//! the floor.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -358,9 +365,15 @@ fn wrapper_composing_an_off_shape_callee_keeps_the_floor() {
 }
 
 #[test]
-fn multi_statement_wrapper_keeps_the_compatibility_floor() {
-    // A wrapper body with its own statement (`let t = greet(); t`)
-    // materializes glue the one-edge face does not cover.
+fn call_bind_member_routes_complete_across_consumers() {
+    // R6-1081: the one-statement call-bind body (`let t = greet(); t`)
+    // joins the set through the fixpoint closure — its `Call → Move →
+    // Return` glue is ledger-proven (the Call arm introduces the binding
+    // exactly like a Clone and the Move settles it into the return), and
+    // the R6-1078 chain probes already verified the shape at the verifier
+    // layer.  The former multi-statement-wrapper floor classifies complete
+    // and composes: deep call-bind chains, direct member calls, and both
+    // print faces route canonical together.
     let source = r#"
         func greet() -> string {
             "hi"
@@ -369,21 +382,33 @@ fn multi_statement_wrapper_keeps_the_compatibility_floor() {
             let t = greet()
             t
         }
+        func wrap2() -> string {
+            let u = wrap()
+            u
+        }
         func main() -> i32 {
-            let s = wrap()
+            let s = wrap2()
+            println(s)
+            println(wrap())
             println(7)
             0
         }
     "#;
-    let label = "multi-statement wrapper";
-    let checked = checked_program_of(source);
-    assert!(
-        matches!(
-            crate::core::mir::classify_scalar_collection_admission(&checked),
-            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
-        ),
-        "{label} must classify mixed"
+    let label = "call-bind member";
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
     );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
 }
 
 #[test]
@@ -616,6 +641,28 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
                 func main() -> i32 {
                     let s = greet()
                     let t = s
+                    println(7)
+                    0
+                }
+            "#,
+        },
+        // R6-1081: the call-bind face composes set members only — a
+        // call-result bind of a leaky callee inherits no closed face, and
+        // the bind pattern keeps its floor.
+        OffShapeCase {
+            name: "call_bind_over_leak",
+            source: r#"
+                func shaky() -> string {
+                    let a = "x"
+                    let b = "y"
+                    a
+                }
+                func wrap() -> string {
+                    let t = shaky()
+                    t
+                }
+                func main() -> i32 {
+                    let s = wrap()
                     println(7)
                     0
                 }

@@ -19004,6 +19004,63 @@ fn canonical_mir_owned_string_constant_bind_routes_canonical_and_matches_native(
 }
 
 #[test]
+fn canonical_mir_owned_string_call_bind_routes_canonical_and_matches_native() {
+    // R6-1081: the one-statement call-bind face — `wrap() { let t =
+    // greet(); t }` lowers to the ledger-proven `Call → Move → Return`
+    // glue and joins the set through the fixpoint closure, so the deep
+    // call-bind chain, direct member calls, and both print faces route
+    // canonical with the native MIR binary agreeing byte-for-byte.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_call_bind.mimi");
+    let expected = "hi\nhi\n7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-call-bind-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string call-bind native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String call-bind face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string call-bind fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String call-bind face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String call-bind face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_owned_string_wrapper_contract_verifies_single_engine() {
     // R6-1077: a contract-bearing caller of a one-edge wrapper verifies on
     // the canonical route — the capability gate's ledger mirror admits the
