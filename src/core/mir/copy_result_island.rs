@@ -3,15 +3,23 @@
 //! This is deliberately a separate route profile from the Copy `Option` islands:
 //! the MIR node is shared, but checker admission, TypeDesc proof and stable
 //! diagnostics must not let an Option receipt accidentally qualify a Result.
+//!
+//! R6-1090 admits the guarded-free `match` face: an unguarded constructor arm
+//! over a Copy `Result<i32, i32>` scrutinee lowers to a plain `Switch` with
+//! `Variant` arms, so the classifier, the route receipt, and the island
+//! validator all accept exactly that shape (mirroring the R6-1089 Copy Option
+//! match admission).
 
 use std::collections::BTreeSet;
 
-use crate::core::ir::{ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedStmtKind};
+use crate::core::ir::{
+    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedPatternKind, ResolvedStmtKind,
+};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{MirGlueKind, MirOwnership, MirTypeKind};
 use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedTypeId};
 
-use super::{MirFunction, MirInstructionKind, MirTerminator};
+use super::{MirFunction, MirInstructionKind, MirSwitchCase, MirTerminator};
 
 /// Versioned default-route island for direct Copy `Result<i32, i32>.unwrap()`
 /// and total `unwrap_or` projection.
@@ -26,7 +34,11 @@ pub enum CopyResultI32VariantAdmission {
 
 /// Classify the concrete checker shape before MIR construction. The profile
 /// is closed: every Result unwrap/unwrap_or must use the canonical builtin,
-/// and only the exact `Result<i32, i32>` shape is complete.
+/// and only the exact `Result<i32, i32>` shape is complete.  The R6-1090
+/// match face is family-strict like the parameterized Copy Option islands:
+/// only an i32/i32 `match` counts as a candidate, and a foreign-payload
+/// `match` is invisible to this island (it stays on the legacy route, which
+/// lowers it correctly as an ordinary plain `Switch`).
 pub fn classify_copy_result_i32_variant_admission(
     program: &CheckedProgram,
 ) -> CopyResultI32VariantAdmission {
@@ -49,11 +61,13 @@ pub fn classify_copy_result_i32_variant_admission(
             super::option_island::option_body_is_closed(program, &callable.body.root);
         let has_any_unwrap = body_has_result_unwrap(program, &callable.body.root, false);
         let has_expected_unwrap = body_has_result_unwrap(program, &callable.body.root, true);
+        let has_expected_switch = body_has_result_i32_switch(program, &callable.body.root);
         if body_is_closed {
-            // Any Result::unwrap is a profile candidate. Only the concrete
-            // i32/i32 payload is complete; unsupported payloads must become a
-            // MixedCoverage hard rejection rather than silently entering legacy.
-            candidate |= has_any_unwrap;
+            // Any Result::unwrap is a profile candidate, and an i32/i32 match
+            // joins it.  Only the concrete i32/i32 payload is complete;
+            // unsupported unwrap payloads must become a MixedCoverage hard
+            // rejection rather than silently entering legacy.
+            candidate |= has_any_unwrap || has_expected_switch;
             mixed |= has_any_unwrap && !has_expected_unwrap;
         } else {
             mixed = true;
@@ -315,6 +329,198 @@ fn expr_has_result_unwrap(
     }
 }
 
+/// Is the `match` scrutinee the concrete island family `Result<i32, i32>`?
+/// Foreign-payload Result matches are invisible to this single-family island
+/// (the parameterized Copy Option islands give each family its own admission;
+/// here the non-i32/i32 payload simply stays outside the profile).
+fn match_scrutinee_is_result_i32(program: &CheckedProgram, scrutinee: &ResolvedExpr) -> bool {
+    match program.resolved_types().get(&scrutinee.ty) {
+        Some(crate::core::ir::ResolvedType::Result { ok, error }) => matches!(
+            (
+                program.resolved_types().get(ok),
+                program.resolved_types().get(error)
+            ),
+            (
+                Some(crate::core::ir::ResolvedType::Primitive(PrimitiveType::I32)),
+                Some(crate::core::ir::ResolvedType::Primitive(PrimitiveType::I32))
+            )
+        ),
+        _ => false,
+    }
+}
+
+/// Scan a body for `match` expressions over concrete `Result<i32, i32>`
+/// scrutinees.  A match only counts when at least one constructor arm is
+/// unguarded — MIR Phase 0 lowers exactly that shape to a `Switch` with
+/// `Variant` arms, so the checker-side candidate stays aligned with the
+/// materialized receipt (mirroring the R6-1089 Copy Option match scan).
+fn body_has_result_i32_switch(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| match &statement.kind {
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|expr| expr_has_result_i32_switch(program, expr)),
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => expr_has_result_i32_switch(program, value),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_some_and(|expr| expr_has_result_i32_switch(program, expr)),
+            ResolvedStmtKind::While { condition, body } => {
+                expr_has_result_i32_switch(program, condition)
+                    || body_has_result_i32_switch(program, body)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => {
+                expr_has_result_i32_switch(program, initializer)
+                    || body_has_result_i32_switch(program, body)
+            }
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_has_result_i32_switch(program, initializer)
+                    || body_has_result_i32_switch(program, then_block)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|block| body_has_result_i32_switch(program, block))
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                body_has_result_i32_switch(program, body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                expr_has_result_i32_switch(program, iterable)
+                    || body_has_result_i32_switch(program, body)
+            }
+            ResolvedStmtKind::Math(expressions) => expressions
+                .iter()
+                .any(|expr| expr_has_result_i32_switch(program, expr)),
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                expr_has_result_i32_switch(program, value)
+                    || body_has_result_i32_switch(program, body)
+            }
+            ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::Continue
+            | ResolvedStmtKind::NestedCallable(_) => false,
+        })
+        || block
+            .result
+            .as_ref()
+            .is_some_and(|expr| expr_has_result_i32_switch(program, expr))
+}
+
+fn expr_has_result_i32_switch(program: &CheckedProgram, expression: &ResolvedExpr) -> bool {
+    match &expression.kind {
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            let switch_receipt = arms.iter().any(|arm| {
+                arm.guard.is_none()
+                    && matches!(arm.pattern.kind, ResolvedPatternKind::Constructor { .. })
+            }) && match_scrutinee_is_result_i32(program, scrutinee);
+            switch_receipt
+                || expr_has_result_i32_switch(program, scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|guard| expr_has_result_i32_switch(program, guard))
+                        || expr_has_result_i32_switch(program, &arm.body)
+                })
+        }
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Scope { body: block, .. }
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => body_has_result_i32_switch(program, block),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_result_i32_switch(program, condition)
+                || body_has_result_i32_switch(program, then_block)
+                || body_has_result_i32_switch(program, else_block)
+        }
+        ResolvedExprKind::Project { value, .. }
+        | ResolvedExprKind::Unary { operand: value, .. }
+        | ResolvedExprKind::Cast { value, .. }
+        | ResolvedExprKind::Old(value)
+        | ResolvedExprKind::OptionalChain {
+            receiver: value, ..
+        }
+        | ResolvedExprKind::TypeOf(value)
+        | ResolvedExprKind::Spawn(value)
+        | ResolvedExprKind::Await(value)
+        | ResolvedExprKind::Try { value, .. } => expr_has_result_i32_switch(program, value),
+        ResolvedExprKind::Binary { left, right, .. } => {
+            expr_has_result_i32_switch(program, left) || expr_has_result_i32_switch(program, right)
+        }
+        ResolvedExprKind::Tuple(values)
+        | ResolvedExprKind::List(values)
+        | ResolvedExprKind::Set(values) => values
+            .iter()
+            .any(|value| expr_has_result_i32_switch(program, value)),
+        ResolvedExprKind::Map(entries) => entries.iter().any(|(key, value)| {
+            expr_has_result_i32_switch(program, key) || expr_has_result_i32_switch(program, value)
+        }),
+        ResolvedExprKind::Record { fields, rest, .. } => {
+            rest.as_ref()
+                .is_some_and(|value| expr_has_result_i32_switch(program, value))
+                || fields
+                    .iter()
+                    .any(|field| expr_has_result_i32_switch(program, &field.value))
+        }
+        ResolvedExprKind::Call(call) => call
+            .arguments
+            .iter()
+            .any(|argument| expr_has_result_i32_switch(program, &argument.value)),
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => {
+            expr_has_result_i32_switch(program, value)
+                || expr_has_result_i32_switch(program, iterable)
+                || guard
+                    .as_ref()
+                    .is_some_and(|guard| expr_has_result_i32_switch(program, guard))
+        }
+        ResolvedExprKind::FString(parts) => parts.iter().any(|part| match part {
+            crate::core::ir::ResolvedFStringPart::Text(_) => false,
+            crate::core::ir::ResolvedFStringPart::Interpolation(value) => {
+                expr_has_result_i32_switch(program, value)
+            }
+        }),
+        ResolvedExprKind::Range { start, end } => {
+            expr_has_result_i32_switch(program, start) || expr_has_result_i32_switch(program, end)
+        }
+        ResolvedExprKind::Slice { target, start, end } => {
+            expr_has_result_i32_switch(program, target)
+                || start
+                    .as_ref()
+                    .is_some_and(|value| expr_has_result_i32_switch(program, value))
+                || end
+                    .as_ref()
+                    .is_some_and(|value| expr_has_result_i32_switch(program, value))
+        }
+        ResolvedExprKind::Lambda(lambda) => body_has_result_i32_switch(program, &lambda.body),
+        ResolvedExprKind::Literal(_)
+        | ResolvedExprKind::Load(_)
+        | ResolvedExprKind::Constant(_)
+        | ResolvedExprKind::Callable(_)
+        | ResolvedExprKind::DefaultArgument { .. }
+        | ResolvedExprKind::ComptimeValue(_)
+        | ResolvedExprKind::TypeValue(_) => false,
+    }
+}
 /// Detect one concrete Copy Result projection receipt in MIR.
 pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool {
     // Generic Result projection instances carry a specialized receipt and
@@ -368,6 +574,22 @@ pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool 
                     });
                     is_copy_result_i32(program, base_ty) && result_is_i32 && fallback_is_i32
                 })
+                    // R6-1090: the match face is a plain `Switch` with
+                    // `Variant` arms over a cloned Copy `Result<i32, i32>`
+                    // scrutinee — no `VariantProject` is emitted, so the
+                    // switch itself is the executable projection receipt.
+                    || match &block.terminator {
+                        MirTerminator::Switch { scrutinee, arms } => {
+                            function
+                                .values
+                                .get(scrutinee)
+                                .is_some_and(|value| is_copy_result_i32(program, &value.ty))
+                                && arms
+                                    .iter()
+                                    .any(|arm| matches!(arm.case, MirSwitchCase::Variant(_)))
+                        }
+                        _ => false,
+                    }
             })
         })
 }
@@ -551,11 +773,61 @@ impl<'a> CopyResultI32VariantValidator<'a> {
                     _ => {}
                 }
             }
-            if matches!(block.terminator, MirTerminator::SwitchMove { .. }) {
-                self.error(format!(
+            match &block.terminator {
+                MirTerminator::SwitchMove { .. } => self.error(format!(
                     "{} consuming variant terminator is outside {}",
                     block.id, COPY_RESULT_I32_VARIANT_ISLAND
-                ));
+                )),
+                // R6-1090: the match face is a plain `Switch` with `Variant`
+                // arms over a cloned Copy scrutinee.  Only this island's own
+                // family is envelope-checked here; foreign switches (scalar
+                // literal arms, user enums, other islands' families) remain
+                // ordinary code for the shared structural validator.
+                MirTerminator::Switch { scrutinee, arms } => {
+                    let has_variant_arm = arms
+                        .iter()
+                        .any(|arm| matches!(arm.case, MirSwitchCase::Variant(_)));
+                    let scrutinee_is_island = function
+                        .values
+                        .get(scrutinee)
+                        .is_some_and(|value| is_copy_result_i32(self.program, &value.ty));
+                    if has_variant_arm && scrutinee_is_island {
+                        self.saw_projection = true;
+                        for arm in arms {
+                            for binding in &arm.bindings {
+                                if binding.nested_tuple.is_some() {
+                                    self.error(format!(
+                                        "{} consuming tuple destructure is outside {}",
+                                        block.id, COPY_RESULT_I32_VARIANT_ISLAND
+                                    ));
+                                }
+                                if !self
+                                    .program
+                                    .type_catalog()
+                                    .get(&binding.projection.field_ty)
+                                    .is_some_and(|descriptor| {
+                                        descriptor.kind
+                                            == MirTypeKind::Primitive(PrimitiveType::I32)
+                                    })
+                                {
+                                    self.error(format!(
+                                        "{} switch binding is outside the Copy Result<i32, i32> projection shape",
+                                        block.id
+                                    ));
+                                }
+                                if binding.projection.ownership != MirOwnership::Copy
+                                    || binding.projection.move_out_glue != MirGlueKind::Noop
+                                {
+                                    self.error(format!(
+                                        "{} switch binding does not prove Copy + Noop glue",
+                                        block.id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -648,5 +920,132 @@ mod tests {
         assert_eq!(receipt.fallback_variant_name, "Err");
         assert_eq!(receipt.fallback_discriminant, 1);
         assert_eq!(receipt.result_ty, receipt.fallback_ty);
+    }
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+    use crate::core::mir::reference::{MirReferenceInterpreter, MirRuntimeValue};
+    use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
+
+    fn check(source: &str) -> CheckedProgram {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        crate::core::check_program(&file).expect("check")
+    }
+
+    #[test]
+    fn result_i32_match_binds_and_materializes_switch_receipt() {
+        let source = include_str!("../../../tests/fixtures/mir_native_result_i32_match.mimi");
+        let checked = check(source);
+        assert_eq!(
+            classify_copy_result_i32_variant_admission(&checked),
+            CopyResultI32VariantAdmission::CompleteCoverage,
+            "the bound-payload match face must classify complete"
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("lower");
+        assert!(
+            contains_copy_result_i32_variant_candidate(&program),
+            "the match face must materialize a receipt for the route"
+        );
+        validate_copy_result_i32_variant_island(&program)
+            .unwrap_or_else(|errors| panic!("match island: {errors:?}"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("reference: {error:?}"));
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+        let bytecode =
+            compile_mir_program(&program).unwrap_or_else(|error| panic!("bytecode: {error:?}"));
+        BytecodeVM::new(bytecode)
+            .run()
+            .unwrap_or_else(|error| panic!("vm: {error:?}"));
+    }
+
+    #[test]
+    fn result_i32_match_wildcard_arms_discriminate_without_binding() {
+        let source = r#"
+func pick(r: Result<i32, i32>) -> i32 {
+    ensures: result >= 0
+    match r {
+        Ok(_) => 8,
+        Err(_) => 3
+    }
+}
+func main() -> i32 {
+    let ok: Result<i32, i32> = Ok(1)
+    let bad: Result<i32, i32> = Err(2)
+    pick(ok) + pick(bad) - 11
+}
+"#;
+        let checked = check(source);
+        assert_eq!(
+            classify_copy_result_i32_variant_admission(&checked),
+            CopyResultI32VariantAdmission::CompleteCoverage,
+            "a binding-free constructor arm must still count as a candidate"
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("lower");
+        assert!(
+            contains_copy_result_i32_variant_candidate(&program),
+            "a binding-free Variant arm is the executable Result receipt"
+        );
+        validate_copy_result_i32_variant_island(&program)
+            .unwrap_or_else(|errors| panic!("wildcard island: {errors:?}"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("reference: {error:?}"));
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+    }
+
+    #[test]
+    fn result_match_foreign_payload_stays_outside_profile() {
+        let source = r#"
+func pick(r: Result<string, i32>) -> i32 {
+    ensures: result >= 0
+    match r {
+        Ok(_) => 8,
+        Err(_) => 3
+    }
+}
+func main() -> i32 {
+    let ok: Result<string, i32> = Ok("a")
+    pick(ok)
+}
+"#;
+        let checked = check(source);
+        assert_eq!(
+            classify_copy_result_i32_variant_admission(&checked),
+            CopyResultI32VariantAdmission::OutsideProfile,
+            "a foreign-payload Result match is invisible to the single-family \
+             island and stays on the legacy route"
+        );
+    }
+
+    #[test]
+    fn result_i32_match_guard_stays_outside_profile() {
+        let source = r#"
+func pick(r: Result<i32, i32>) -> i32 {
+    match r {
+        Ok(x) if x > 0 => x,
+        Err(e) => e,
+        _ => 0
+    }
+}
+func main() -> i32 {
+    let ok: Result<i32, i32> = Ok(41)
+    pick(ok)
+}
+"#;
+        let checked = check(source);
+        assert_eq!(
+            classify_copy_result_i32_variant_admission(&checked),
+            CopyResultI32VariantAdmission::OutsideProfile,
+            "a guarded match body is not closed, so it is not an island candidate"
+        );
+        // The guard body cannot lower to MIR at all ("match guards require
+        // CFG lowering"), so there is nothing further to materialize — the
+        // classification gate alone keeps it on the legacy route.
     }
 }
