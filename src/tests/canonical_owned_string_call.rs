@@ -74,6 +74,16 @@
 //! boundary operations (a glue-only graph materializes no production
 //! boundary and a literal-origin rebind keeps its floor at the origin).
 //!
+//! R6-1084: the end-of-body drop glue widened beyond owned-String returns.
+//! The `mimi_string_free` ABI makes any unaccounted live String a real
+//! leak, and an `i32`-returning `main` that binds a String it never prints
+//! holds exactly that — the R6-1082-admitted rebind main leaked 6 bytes in
+//! 2 blocks under valgrind.  The glue now closes every value-returning
+//! single-block body's String ledger (multi-block bodies keep the
+//! boundary; a body already consuming each handle emits nothing and stays
+//! byte-identical), and glue Drops anchor at the root node with indexed
+//! roles (`drop.0`, `drop.1`, …) so instruction identities stay unique.
+//!
 //! R6-1083: the parameter-rebind body joins the set and the ledger gains
 //! end-of-body drop glue.  The lowerer now discharges the original handles
 //! a single-block owned-String body copied or left unused (`Drop` before the
@@ -452,6 +462,52 @@ fn param_rebind_member_routes_complete_across_consumers() {
     "#;
     let label = "parameter rebind";
     let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn main_side_leftover_strings_close_their_ledger() {
+    // R6-1084: the end-of-body drop glue widened beyond owned-String
+    // returns — an `i32`-returning `main` that binds a String and never
+    // prints it (`let s = greet(); let t = s; println(7)`) used to hold
+    // two unaccounted handles (valgrind: 6 bytes in 2 blocks definitely
+    // lost on the native binary).  The graph now closes its ledger with
+    // `drop.0`/`drop.1` before the Return — instruction identity anchors
+    // at the root node, so each glue Drop gets an indexed role — and the
+    // rebind face stays admitted with all consumers agreeing on the
+    // dropped graph.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            let t = s
+            println(7)
+            0
+        }
+    "#;
+    let label = "main-side leftover";
+    let mir = assert_admitted(source, label);
+    let main = mir
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main function present");
+    let text = main.canonical_text();
+    assert!(text.contains("inst:drop.0:"), "{text}");
+    assert!(text.contains("inst:drop.1:"), "{text}");
     let reference = MirReferenceInterpreter::new(&mir)
         .execute(&NodeId("function:main".into()), &[])
         .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
