@@ -1150,7 +1150,7 @@ else
     else
         cli_evidence_body="$(sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" "$ROOT_DIR/tests/real_world_cli.rs")"
         missing_abi=0
-        for abi_symbol in mir_ffi_i32 mir_ffi_i64 mir_ffi_bool mir_ffi_f64 mir_ffi_store; do
+        for abi_symbol in mir_ffi_i32 mir_ffi_i64 mir_ffi_bool mir_ffi_f32 mir_ffi_f32_code mir_ffi_f64 mir_ffi_store; do
             if ! printf '%s\n' "$cli_evidence_body" | rg "\"${abi_symbol}\"" >/dev/null; then
                 printf 'owner_audit_error=closed_scalar_cli_evidence_missing_abi_symbol symbol=%s\n' "$abi_symbol" >&2
                 missing_abi=1
@@ -1160,7 +1160,7 @@ else
             audit_failed=1
         else
             emit_closed_scalar_marker 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
-            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
+            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
         fi
     fi
 fi
@@ -1170,7 +1170,7 @@ expected_closed_scalar_marker_sequence=(
     'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()'
     'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts'
     'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
-    'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
+    'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
 )
 if [ "${closed_scalar_marker_sequence[*]}" != "${expected_closed_scalar_marker_sequence[*]}" ]; then
     printf 'owner_audit_error=closed_scalar_evidence_marker_sequence_drift\n' >&2

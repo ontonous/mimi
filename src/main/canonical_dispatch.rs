@@ -3815,7 +3815,14 @@ mod tests {
     }
 
     #[test]
-    fn scalar_collection_candidate_rejects_a_mixed_managed_graph() {
+    fn scalar_collection_mixed_owned_string_graph_enters_canonical_default_route() {
+        // R6-1094: the 5d08128c-era pin expected any managed value beside a
+        // List.len candidate to reject.  The owned-String faces (R6-1049 /
+        // R6-1050) deliberately admitted bound string literals with explicit
+        // drop accounting, so this graph now materializes canonical MIR that
+        // carries both the List glue and the OwnedString drop glue.  The pin
+        // guards the deliberate widening: the route must be canonical with
+        // the list operation and managed drops intact, never legacy.
         let source = r#"
             func main() -> i32 {
                 let values = [1, 2, 3]
@@ -3827,11 +3834,87 @@ mod tests {
             }
         "#;
         let (checked, file) = checked(source);
-        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("a List.len candidate with a managed value must fail closed");
+        // The owned string keeps the checker scan Mixed, yet the graph is
+        // fully constructible, so the route materializes canonical MIR
+        // instead of the compatibility floor.
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::MixedCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("a constructible mixed collection graph must materialize canonical MIR");
         };
-        assert!(reason.contains("S11 scalar collection candidate"));
-        assert!(reason.contains("copy-scalar-collection-v1"));
+        assert!(
+            program.functions().values().any(|function| {
+                function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            mimi::core::mir::MirInstructionKind::ListOp {
+                                operation: mimi::core::mir::MirListOperation::Len,
+                                ..
+                            }
+                        )
+                    })
+                })
+            }),
+            "the canonical MIR must retain the materialized List.len"
+        );
+        let drop_count = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    mimi::core::mir::MirInstructionKind::Drop { .. }
+                )
+            })
+            .count();
+        assert!(
+            drop_count >= 2,
+            "the list and the owned string must keep explicit drop accounting, got {drop_count}"
+        );
+    }
+
+    #[test]
+    fn scalar_collection_candidate_with_unsupported_managed_value_fails_closed() {
+        // A managed value with no canonical glue (a mutex handle) inside an
+        // otherwise-recognized collection candidate must fail closed at MIR
+        // construction instead of re-entering the legacy route.
+        let source = r#"
+            func main() -> i32 {
+                let values = [1, 2, 3]
+                let count = len(values)
+                drop(values)
+                let lock = mutex_new(7 as i64)
+                drop(lock)
+                count
+            }
+        "#;
+        let (checked, file) = checked(source);
+        // R6-1094 boundary record: a glue-less managed value beside a
+        // materialized List.len makes canonical construction fail, the route
+        // envelope drops its materialized-candidate flags, and the dispatcher
+        // takes the explicit MixedCoverageWithoutMaterializedCandidate
+        // compatibility route.  This is the documented R6-1052 floor for
+        // previously working programs, but it also means `len` has no
+        // compatibility-arm tripwire (unlike reverse/concat/generic facades),
+        // so a glue-less managed value beside a len call rides legacy
+        // silently.  Closing that tripwire gap is a registered follow-up:
+        // turning this program into a hard rejection needs its own
+        // island-closure verdict, not a silent pin change.
+        let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
+            panic!("a glue-less managed value beside len must take the compatibility route");
+        };
+        assert!(
+            matches!(
+                reason,
+                LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+            ),
+            "unexpected route reason: {reason:?}"
+        );
     }
 
     #[test]

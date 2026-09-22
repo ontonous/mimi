@@ -285,7 +285,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()",
         "closed_scalar_cli_evidence=",
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]",
-        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
+        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "production_legacy_body_file_call_sites=4",
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=7",
@@ -1410,7 +1410,7 @@ fn legacy_owner_scalar_evidence_markers_have_stable_order() {
         "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()".to_owned(),
         "closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts".to_owned(),
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]".to_owned(),
-        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent".to_owned(),
+        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent".to_owned(),
     ];
     assert_eq!(
         markers(&first),
@@ -1477,7 +1477,7 @@ fn legacy_owner_scalar_marker_sequence_missing_duplicate_or_reordered_fails_clos
         .expect("read legacy owner audit script");
     let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
     let matrix_call = "            emit_closed_scalar_marker 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'\n";
-    let abi_call = "            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'\n";
+    let abi_call = "            emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'\n";
     let run_drift = |tampered_script: String, label: &str| {
         std::fs::write(&script_path, tampered_script).expect("write marker drift script");
         let output = std::process::Command::new("bash")
