@@ -28504,3 +28504,157 @@ fn scalar_ffi_generated_ensures_failure_position_sweep_matches_consumers() {
     }
     drop(guard);
 }
+
+// R6-1093: the declared-ABI dimension of the load-failure faces.  The
+// hand-written fixtures above pin the i64 spelling of each failure; this
+// seeded matrix rotates every declared scalar ABI (i32/i64/bool/f64/f32)
+// through both load-failure shapes — a present library whose symbol is
+// absent, and a wholly absent library — so no ABI can silently lose its
+// fail-closed load behavior while another keeps it.
+#[test]
+fn scalar_ffi_declared_abi_load_failure_matrix_matches_consumers() {
+    const DUMMY_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
+"#;
+    const ABIS: &[(&str, &str)] = &[
+        ("i32", "3"),
+        ("i64", "9 as i64"),
+        ("bool", "true"),
+        ("f64", "2.5"),
+        ("f32", "2.5 as f32"),
+    ];
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, DUMMY_C_SOURCE);
+    let present_library = fixture.dir.join("ffi.so");
+    let absent_library = fixture.dir.join("absent.so");
+    // The dummy definition deliberately does not provide any declared
+    // symbol, so the native link leg must fail for every rotated case.
+    let config = super::E2EConfig {
+        extra_c_src: Some(DUMMY_C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    // The seed and recurrence are part of the regression contract: a
+    // failure names the round, ABI, and face exactly.
+    let mut seed = 0x10ad_fa11_u64;
+    for round in 0..12_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let (label, argument) = ABIS[(seed as usize) % ABIS.len()];
+        let missing_symbol_face = (seed >> 8) & 1 == 0;
+        let prefix = ((seed >> 16) % 90) + 1;
+        let symbol = format!("mir_ffi_absent_{label}_{round}");
+        let source = format!(
+            r#"extern "C" {{ func {symbol}(value: {label}) -> {label}; }}
+            func main() -> i64 {{ println({prefix}); {symbol}({argument}); 0 }}"#
+        );
+
+        let file = crate::parser::Parser::new(
+            crate::lexer::Lexer::new(&source)
+                .tokenize()
+                .unwrap_or_else(|error| panic!("round {round} ({label}) lex: {error:?}")),
+        )
+        .parse_file()
+        .unwrap_or_else(|error| panic!("round {round} ({label}) parse: {error:?}"));
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|error| panic!("round {round} ({label}) check: {error:?}"));
+        let mir = MirProgram::from_checked_program(&checked)
+            .unwrap_or_else(|error| panic!("round {round} ({label}) materialize: {error:?}"));
+        assert_eq!(mir.ffi_calls().len(), 1, "round {round} ({label})");
+        assert!(
+            mir.ffi_calls()
+                .values()
+                .any(|receipt| receipt.symbol == symbol),
+            "round {round} ({label}): receipt symbol drift"
+        );
+
+        // Reference leg: the host binding is explicit, so an unbound
+        // consumer fails at the call after emitting the stdout prefix.
+        let reference_interpreter = MirReferenceInterpreter::new(&mir);
+        let reference_error = reference_interpreter
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("round: reference must fail unbound");
+        assert!(
+            reference_error
+                .to_string()
+                .contains("no reference FFI host binding"),
+            "round {round} ({label}): {reference_error}"
+        );
+        assert_eq!(
+            reference_interpreter.captured_output(),
+            format!("{prefix}\n"),
+            "round {round} ({label}): reference prefix order"
+        );
+
+        // Verifier leg: a contract-free foreign call carries no proof
+        // obligations, but the MIR must still verify structurally.
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let verification = crate::verifier::verify_mir(
+            &mir,
+            format!("scalar-ffi-abi-load-failure-{round}").into(),
+        )
+        .unwrap_or_else(|error| panic!("round {round} ({label}) verify: {error}"));
+        assert!(
+            verification.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "round {round} ({label}): {verification:?}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        // Bytecode leg: both faces fail closed at E0800 with the stdout
+        // prefix preserved, distinguished only by the failure text.
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("round {round} ({label}) bytecode: {error:?}"));
+        assert!(bytecode.ast.is_none());
+        guard.set_path(if missing_symbol_face {
+            &present_library
+        } else {
+            &absent_library
+        });
+        let mut vm = BytecodeVM::new(bytecode);
+        let bytecode_error = vm.run_value().expect_err("round: VM must fail closed");
+        assert_eq!(bytecode_error.code(), "E0800", "round {round} ({label})");
+        let expected_fragment = if missing_symbol_face {
+            "failed to find canonical MIR FFI symbol"
+        } else {
+            "failed to load"
+        };
+        assert!(
+            bytecode_error.to_string().contains(expected_fragment),
+            "round {round} ({label}): {bytecode_error}"
+        );
+        assert_eq!(
+            vm.stdout(),
+            format!("{prefix}\n"),
+            "round {round} ({label}): bytecode prefix order"
+        );
+
+        // Native leg: lowering and module verification succeed, then the
+        // host link rejects the absent symbol.
+        let context = inkwell::context::Context::create();
+        let mut generator =
+            crate::codegen::CodeGenerator::new(&context, format!("mir_ffi_abi_{round}").as_str());
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("round {round} ({label}) native: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("round {round} ({label}) module: {error}"));
+        let native_error = super::link_and_observe_module(&generator, &config, counter)
+            .expect_err("round: native link must reject the absent symbol");
+        assert!(
+            native_error.contains("linker failed"),
+            "round {round} ({label}): {native_error}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    drop(guard);
+}
