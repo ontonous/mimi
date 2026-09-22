@@ -1,0 +1,13 @@
+func echo(s: string) -> string {
+    s
+}
+func wrap() -> string {
+    echo("hi")
+}
+func main() -> i32 {
+    let s = wrap()
+    println(s)
+    println(echo("yo"))
+    println(7)
+    0
+}

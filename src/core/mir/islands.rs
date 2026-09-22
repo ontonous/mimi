@@ -890,6 +890,48 @@ fn is_owned_string_constant_callable(
         })
 }
 
+/// R6-1079: the owned-String identity face — a concrete, effect-free,
+/// non-prelude callable whose whole body returns its single String parameter
+/// (`func echo(s: string) -> string { s }`).  The construction ledger proves
+/// the parameter live exactly from the entry to the `Move → Return` glue
+/// (the glue candidacy the R6-1078 argument-transfer probes established), so
+/// the checker-side set can admit the same shape its gate re-proves.  A
+/// String parameter in any other position keeps the profile floor.
+fn is_owned_string_identity_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !has_owned_string_callable_envelope(program, callable) {
+        return false;
+    }
+    if !matches!(
+        program.resolved_types().get(&callable.signature.result),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    if callable.signature.parameters.len() != 1 || callable.body.parameters.len() != 1 {
+        return false;
+    }
+    if !matches!(
+        program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty),
+        Some(ResolvedType::Primitive(PrimitiveType::String))
+    ) {
+        return false;
+    }
+    let parameter_local = &callable.body.parameters[0];
+    callable.body.root.statements.is_empty()
+        && callable.body.root.result.as_ref().is_some_and(|result| {
+            matches!(
+                &result.kind,
+                ResolvedExprKind::Load(place)
+                    if place.base == *parameter_local && place.projections.is_empty()
+            )
+        })
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -916,11 +958,13 @@ fn scan_scalar_collection_admission(
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
     );
     let closure = scan_scalar_collection_once(
         program,
         discovery.float_print_functions.clone(),
         discovery.string_print_functions,
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
     );
@@ -936,10 +980,23 @@ fn scan_scalar_collection_admission(
     // already carries.  The fixpoint is bounded by the callable count (each
     // round inserts at least one owner or stops), so walk order cannot drift
     // the closure either.
+    // R6-1079: the seed also admits identity members — callables whose whole
+    // body returns their single String parameter — so a wrapper feeding a
+    // String argument into one (`wrap() { echo("hi") }`) closes over the
+    // same set.
+    let owned_string_identity_callables = program
+        .callables()
+        .iter()
+        .filter(|(_, callable)| is_owned_string_identity_callable(program, callable))
+        .map(|(owner, _)| owner.clone())
+        .collect::<BTreeSet<_>>();
     let mut owned_string_callables = program
         .callables()
         .iter()
-        .filter(|(_, callable)| is_owned_string_constant_callable(program, callable))
+        .filter(|(_, callable)| {
+            is_owned_string_constant_callable(program, callable)
+                || is_owned_string_identity_callable(program, callable)
+        })
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
     loop {
@@ -978,6 +1035,7 @@ fn scan_scalar_collection_admission(
         closure.string_print_functions,
         float_face_callables,
         owned_string_callables,
+        owned_string_identity_callables,
     )
 }
 
@@ -987,6 +1045,7 @@ fn scan_scalar_collection_once(
     string_print_functions: BTreeSet<NodeId>,
     float_face_callables: BTreeSet<NodeId>,
     owned_string_callables: BTreeSet<NodeId>,
+    owned_string_identity_callables: BTreeSet<NodeId>,
 ) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -1000,6 +1059,7 @@ fn scan_scalar_collection_once(
         string_print_functions,
         float_face_callables,
         owned_string_callables,
+        owned_string_identity_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
         float_symbolic_locals: BTreeMap::new(),
@@ -1055,8 +1115,24 @@ fn scan_scalar_collection_once(
                             Some(ResolvedType::Primitive(PrimitiveType::F64))
                         )
                 };
+            // R6-1079: an identity member's single String parameter is the
+            // face itself — live from the entry to the `Move → Return` glue
+            // the construction ledger re-proves — so it skips the profile
+            // floor exactly like the member's String result.  Any other
+            // String parameter (an unused one above all) keeps the floor.
+            let is_identity_string_parameter =
+                |scanner: &ScalarCollectionAdmissionScanner<'_>,
+                 ty: &crate::core::ResolvedTypeId| {
+                    scanner.in_owned_string_identity_callable()
+                        && matches!(
+                            scanner.program.resolved_types().get(ty),
+                            Some(ResolvedType::Primitive(PrimitiveType::String))
+                        )
+                };
             for parameter in &callable.signature.parameters {
-                if !is_face_f64_type(&scanner, &parameter.ty) {
+                if !is_face_f64_type(&scanner, &parameter.ty)
+                    && !is_identity_string_parameter(&scanner, &parameter.ty)
+                {
                     scanner.require_profile_type(&parameter.ty);
                 }
             }
@@ -1138,7 +1214,14 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// R6-1076: callables whose whole body is a string-literal result (the
     /// owned-String constant face).  Shape-derived before any walk; see
     /// `is_owned_string_constant_callable`.
+    /// R6-1077: the set is the wrapper-closed set.
     owned_string_callables: BTreeSet<NodeId>,
+    /// R6-1079: the identity subset of `owned_string_callables` — members
+    /// whose single String parameter IS the face (live from the entry to the
+    /// `Move → Return` glue the ledger re-proves).  Only these carry the
+    /// String-parameter exemption; an unused String parameter elsewhere
+    /// keeps the profile floor.
+    owned_string_identity_callables: BTreeSet<NodeId>,
     /// R6-1070: non-prelude callees recorded inside float print functions
     /// during the closure pass.  Only the pass seeded with the completed
     /// discovery sets fills this meaningfully; the classification pass
@@ -1209,6 +1292,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         self.current_callable
             .as_ref()
             .is_some_and(|owner| self.owned_string_callables.contains(owner))
+    }
+
+    /// R6-1079: is the current callable an identity member — its single
+    /// String parameter flows to the return through the ledger's glue face?
+    fn in_owned_string_identity_callable(&self) -> bool {
+        self.current_callable
+            .as_ref()
+            .is_some_and(|owner| self.owned_string_identity_callables.contains(owner))
     }
 
     /// R6-1061: is this expression something the MIR verifier models in the
@@ -1994,7 +2085,20 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 self.program.resolved_types().get(&expression.ty),
                 Some(ResolvedType::Primitive(PrimitiveType::String))
             );
-            if !is_print_face_literal && !is_float_face_call_result && !is_string_call_result {
+            // R6-1079: inside an identity member the only String value is
+            // the parameter read itself — the shape predicate constrains the
+            // whole body to `Load(param)`, and the ledger proves the
+            // parameter live exactly to the `Move → Return` glue.
+            let is_identity_param_value = self.in_owned_string_identity_callable()
+                && matches!(
+                    self.program.resolved_types().get(&expression.ty),
+                    Some(ResolvedType::Primitive(PrimitiveType::String))
+                );
+            if !is_print_face_literal
+                && !is_float_face_call_result
+                && !is_string_call_result
+                && !is_identity_param_value
+            {
                 self.require_profile_type(&expression.ty);
             }
         }
@@ -2217,6 +2321,28 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         }
                     }
                 }
+                // R6-1079: a String argument fed into an owned-String member
+                // (constant, wrapper, or identity) is that member's input
+                // contract — the callee's ledger-proven body consumes the
+                // parameter exactly once (the shape ledger's Call arm and the
+                // verifier's transfer agree), and a String-literal argument
+                // materializes the same canonical StringHandle constant the
+                // print face already admits.  Only literal String arguments
+                // join the face; a second-hand String argument has no
+                // checker-side provenance here and keeps the floor.
+                let owned_string_member_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Function(owner)
+                        if self.owned_string_callables.contains(owner)
+                ) && call.arguments.iter().all(|argument| {
+                    !matches!(
+                        self.program.resolved_types().get(&argument.value.ty),
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    ) || matches!(
+                        &argument.value.kind,
+                        ResolvedExprKind::Literal(crate::core::ResolvedLiteral::String(_))
+                    )
+                });
                 if concrete
                     && call.arguments.iter().any(|argument| {
                         matches!(
@@ -2225,6 +2351,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                         )
                     })
                     && !is_scalar_println_call(self.program, call)
+                    && !owned_string_member_call
                 {
                     // A string literal argument to any callee other than the
                     // scalar print face (len, starts_with, user calls, ...)

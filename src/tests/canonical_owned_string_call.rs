@@ -38,10 +38,20 @@
 //! same non-Copy transfer the verifier performs on the caller's symbolic
 //! state — so wrapper chains whose callee takes a String argument
 //! (`nested() { inner("hi") }` over a String-parameter identity) verify on
-//! the canonical engine.  The checker-side scanner keeps its provenance
-//! floor for the default run/build route: argument-position String literals
-//! stay outside the wrapper closure, so these programs still classify mixed
-//! — the same classify/gate layering R6-1076 recorded.
+//! the canonical engine.  The checker-side scanner kept its provenance
+//! floor: argument-position String literals stayed outside the wrapper
+//! closure, so those programs still classified mixed — the same
+//! classify/gate layering R6-1076 recorded.
+//!
+//! R6-1079: the identity member and the literal-argument face join the
+//! checker-side set, closing that layering.  A concrete, effect-free,
+//! non-prelude callable whose whole body returns its single String
+//! parameter (`func echo(s: string) -> string { s }`) joins the set, and a
+//! String-literal argument to any set member is admitted as the member's
+//! input contract (its ledger-proven body consumes the parameter exactly
+//! once).  `wrap() { echo("hi") }` and direct `echo("x")` binds now flip
+//! the default run/build route; a String parameter in any other position
+//! and a second-hand (non-literal) String argument keep the floor.
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -366,15 +376,16 @@ fn multi_statement_wrapper_keeps_the_compatibility_floor() {
 }
 
 #[test]
-fn string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir() {
-    // R6-1078: the ledger's Call arm consumes String arguments, so the
-    // wrapper chain `nested() { inner("hi") }` over a String-parameter
-    // identity callee composes the proven contract and verifies on the
-    // single canonical engine.  The checker-side scanner keeps its
-    // provenance floor — argument-position String literals stay outside the
-    // wrapper closure — so the program still classifies mixed for the
-    // default run/build route; the ledger face is verifier-level layering,
-    // exactly like the R6-1076 classify/gate split.
+fn string_argument_wrapper_chain_routes_complete_across_consumers() {
+    // R6-1078 opened the ledger's Call arm (String arguments transfer like
+    // the verifier's own symbolic transfer) and pinned the wrapper chain
+    // `nested() { inner("hi") }` at the verifier layer while the scanner
+    // kept its provenance floor.  R6-1079 closes that layering: the
+    // checker-side argument face admits a String-literal argument to an
+    // owned-String member — the member's ledger-proven body consumes the
+    // parameter exactly once — so the same chain now classifies complete
+    // and every consumer executes it on the canonical engine: reference,
+    // bytecode VM, and the single-engine MIR verifier.
     let source = r#"
         func inner(s: string) -> string { s }
         func nested() -> string { inner("hi") }
@@ -386,16 +397,20 @@ fn string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir() {
         }
     "#;
     let label = "string-argument wrapper chain";
-    let checked = checked_program_of(source);
-    assert!(
-        matches!(
-            crate::core::mir::classify_scalar_collection_admission(&checked),
-            crate::core::mir::ScalarCollectionAdmission::MixedCoverage
-        ),
-        "{label} must classify mixed (scanner provenance floor)"
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(1),
+        "{label} reference result"
     );
-    let mir = MirProgram::from_checked_program(&checked)
-        .unwrap_or_else(|error| panic!("{label} materialize: {error:?}"));
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
     crate::verifier::validate_mir_capabilities(&mir)
         .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
     let results = crate::verifier::verify_mir(&mir, "owned-string-arg-wrapper".into())
@@ -411,10 +426,46 @@ fn string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir() {
     );
 }
 
+#[test]
+fn identity_member_argument_face_routes_complete_across_consumers() {
+    // R6-1079: the identity member itself (`echo(s) { s }`) joins the
+    // owned-String set, and a direct literal-argument call from main
+    // composes with the bind face and the StringHandle print face — the
+    // end-to-end default-route shape the slice exists to unlock.
+    let source = r#"
+        func echo(s: string) -> string {
+            s
+        }
+        func main() -> i32 {
+            let s = echo("x")
+            println(s)
+            0
+        }
+    "#;
+    let label = "identity member argument face";
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
 // The narrowest floors this slice keeps: every callee below returns a
 // String but its provenance escapes the closed constant face, so the whole
 // program stays on the compatibility route.  R6-1077 moved the one-edge
-// wrapper into the positive matrix; the floors below are unchanged.
+// wrapper into the positive matrix; R6-1079 moved the identity member and
+// the literal-argument face into it, so `string_parameter` now pins the
+// precise residue — a String parameter in any position other than an
+// identity member's whole-body return keeps the profile floor.
 #[test]
 fn off_shape_string_callables_keep_the_compatibility_floor() {
     struct OffShapeCase {
@@ -496,6 +547,23 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
                     let s = greet()
                     let t = s
                     println(7)
+                    0
+                }
+            "#,
+        },
+        // R6-1079: the argument face admits only literal String arguments —
+        // a second-hand String fed into an identity member has no
+        // checker-side provenance and keeps the compatibility floor.
+        OffShapeCase {
+            name: "second_hand_argument",
+            source: r#"
+                func echo(s: string) -> string {
+                    s
+                }
+                func main() -> i32 {
+                    let a = "x"
+                    let b = echo(a)
+                    println(b)
                     0
                 }
             "#,

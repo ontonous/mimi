@@ -14625,11 +14625,11 @@ fn canonical_mir_verifier_proves_string_argument_wrapper_chain() {
     // R6-1078: the ledger's Call arm consumes String arguments, so the
     // wrapper chain `nested() { inner("hi") }` over a String-parameter
     // identity callee composes the proven contract on the canonical engine.
-    // The checker-side scanner keeps its provenance floor (argument-position
-    // String literals stay outside the wrapper closure), so the direct
-    // `--mir` entry pins the verifier-level face — the default-route
-    // classify split is pinned in-process by
-    // string_argument_wrapper_chain_classifies_mixed_but_verifies_on_mir.
+    // R6-1079 closed the scanner layering (the identity member and the
+    // literal-argument face join the checker-side set), so the direct
+    // `--mir` entry and the default route now agree on the same face — the
+    // three-consumer pin lives in-process in
+    // string_argument_wrapper_chain_routes_complete_across_consumers.
     let dir = std::env::temp_dir().join(format!(
         "mimi_owned_string_arg_chain_{}_{}",
         std::process::id(),
@@ -18887,6 +18887,63 @@ fn canonical_mir_owned_string_wrapper_routes_canonical_and_matches_native() {
     assert!(
         !default_stderr.contains("canonical route disposition: legacy"),
         "the admitted owned-String wrapper face must not fall back to legacy:\n{default_stderr}"
+    );
+}
+
+#[test]
+fn canonical_mir_owned_string_identity_routes_canonical_and_matches_native() {
+    // R6-1079: the identity member face — `echo(s) { s }` joins the
+    // owned-String set and the literal-argument face admits
+    // `wrap() { echo("hi") }`, so the whole chain (bind, direct
+    // literal-argument call, StringHandle and integer print faces) routes
+    // canonical and the native MIR binary agrees byte-for-byte.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_identity.mimi");
+    let expected = "hi\nyo\n7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-identity-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string identity native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String identity face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string identity fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String identity face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String identity face must not fall back to legacy:\n{default_stderr}"
     );
 }
 
