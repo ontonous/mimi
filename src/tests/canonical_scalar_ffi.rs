@@ -23551,6 +23551,302 @@ func main() -> i64 { matrix_guard(1 as i64) }
 }
 
 #[test]
+fn scalar_ffi_i32_bool_f64_receipt_forgery_matrix_rejects_before_host() {
+    // R6-1095: the deterministic i64 matrix and the f32 seeded matrix left
+    // the remaining declared scalar ABIs (i32, bool, f64) without
+    // receipt-forgery coverage.  This matrix rotates every forgery
+    // dimension exhaustively across those three ABIs on a single-receipt
+    // program each.  Fixtures are contract-free — f64 extern contracts fail
+    // scalar materialization by design — so the Requires/Ensures arms also
+    // prove the receipt digest covers contract-free receipts gaining
+    // obligations they were never checked against.  The reference
+    // interpreter validates receipt tables in preflight, so every forged
+    // round must fail before any stdout and before the host oracle is
+    // reached.  Shape forgeries (receipt key vs instruction consistency)
+    // are rejected in preflight with no stdout at all; content forgeries
+    // are rejected at the call site after earlier statements have run — so
+    // captured output is exactly "" or the pre-call prefix, never the
+    // post-call sink line, and the host oracle is never reached.
+    struct UncoveredAbiOracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for UncoveredAbiOracle {
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            match args {
+                [MirRuntimeValue::Int(value)] => Ok(MirRuntimeValue::Int(*value)),
+                [MirRuntimeValue::Bool(value)] => Ok(MirRuntimeValue::Bool(*value)),
+                [MirRuntimeValue::FloatBits(bits)] => Ok(MirRuntimeValue::FloatBits(*bits)),
+                other => Err(format!("unexpected uncovered-abi oracle args: {other:?}")),
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdbool.h>
+int32_t uncovered_abi_i32(int32_t x) { return x; }
+bool uncovered_abi_bool(bool x) { return x; }
+double uncovered_abi_f64(double x) { return x; }
+"#;
+    const ABIS: &[(&str, &str, &str, &str, &str)] = &[
+        // (label, symbol, mimi type, call argument, expected stdout tail)
+        ("i32", "uncovered_abi_i32", "i32", "3", "3\n"),
+        ("bool", "uncovered_abi_bool", "bool", "true", "11\n"),
+        ("f64", "uncovered_abi_f64", "f64", "2.5", "2.5\n"),
+    ];
+
+    #[derive(Clone, Copy)]
+    enum Forgery {
+        Caller,
+        Instruction,
+        Callee,
+        Symbol,
+        Abi,
+        Arguments,
+        ParameterTypes,
+        ParameterConversions,
+        Result,
+        ResultConversion,
+        Requires,
+        Ensures,
+    }
+
+    const CASES: &[(Forgery, &str)] = &[
+        (Forgery::Caller, "caller"),
+        (Forgery::Instruction, "instruction"),
+        (Forgery::Callee, "callee"),
+        (Forgery::Symbol, "symbol"),
+        (Forgery::Abi, "abi"),
+        (Forgery::Arguments, "arguments"),
+        (Forgery::ParameterTypes, "parameter-types"),
+        (Forgery::ParameterConversions, "parameter-conversions"),
+        (Forgery::Result, "result"),
+        (Forgery::ResultConversion, "result-conversion"),
+        (Forgery::Requires, "requires"),
+        (Forgery::Ensures, "ensures"),
+    ];
+
+    fn apply_forgery(
+        forgery: Forgery,
+        instruction_id: &crate::core::mir::MirInstructionId,
+        receipts: &mut std::collections::BTreeMap<
+            crate::core::mir::MirInstructionId,
+            crate::core::mir::MirFfiCallContract,
+        >,
+    ) {
+        let receipt = receipts.get_mut(instruction_id).expect("matrix receipt");
+        match forgery {
+            Forgery::Caller => receipt.caller = crate::core::NodeId("function:forged".into()),
+            Forgery::Instruction => {
+                receipt.instruction = crate::core::mir::MirInstructionId::new("inst:call:forged")
+                    .expect("forged instruction id");
+            }
+            Forgery::Callee => receipt.callee = crate::core::NodeId("extern:forged".into()),
+            Forgery::Symbol => receipt.symbol = "uncovered_abi_forged".into(),
+            Forgery::Abi => receipt.abi = "Rust".into(),
+            Forgery::Arguments => receipt.arguments.clear(),
+            Forgery::ParameterTypes => receipt.parameter_types.clear(),
+            Forgery::ParameterConversions => receipt.parameter_conversions.clear(),
+            Forgery::Result => receipt.result = None,
+            Forgery::ResultConversion => receipt.result_conversion = None,
+            Forgery::Requires => {
+                receipt.requires = Some(crate::core::mir::MirContractExpr::Value(
+                    crate::core::mir::MirValueId::new("value:forged-requires")
+                        .expect("forged predicate value id"),
+                ));
+            }
+            Forgery::Ensures => {
+                receipt.ensures = Some(crate::core::mir::MirContractExpr::Value(
+                    crate::core::mir::MirValueId::new("value:forged-ensures")
+                        .expect("forged postcondition value id"),
+                ));
+            }
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    for &(label, symbol, mimi_type, call_argument, expected_tail) in ABIS.iter() {
+        let sink = if mimi_type == "bool" {
+            "if value { println(11) } else { println(13) }"
+        } else {
+            "println(value)"
+        };
+        let source = format!(
+            r#"
+extern "C" {{ func {symbol}(value: {mimi_type}) -> {mimi_type}; }}
+func main() -> i64 {{
+    println(7)
+    let value = {symbol}({call_argument})
+    {sink}
+    0
+}}
+"#
+        );
+        let checked = crate::core::check_program(&super::parse_prod(&source))
+            .expect("uncovered-abi forgery fixture check");
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("uncovered-abi forgery fixture materialization");
+        let canonical = route.program;
+        let entries = canonical.ffi_call_entries_in_source_order();
+        assert_eq!(entries.len(), 1, "{label}: fixture must carry one receipt");
+        let instruction_id = entries[0].0.clone();
+        assert_eq!(entries[0].1.symbol, symbol, "{label}: receipt symbol");
+        assert_eq!(entries[0].1.abi, "C", "{label}: receipt abi");
+        assert_eq!(
+            entries[0].1.parameter_types.len(),
+            1,
+            "{label}: parameter types"
+        );
+        assert_eq!(
+            entries[0].1.parameter_conversions.len(),
+            1,
+            "{label}: parameter conversions"
+        );
+        assert!(entries[0].1.result.is_some(), "{label}: result type");
+
+        let oracle = UncoveredAbiOracle {
+            calls: Cell::new(0),
+        };
+        let expected_stdout = format!("7\n{expected_tail}");
+
+        let baseline = MirReferenceInterpreter::new(&canonical)
+            .with_ffi_resolver(&oracle)
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+            .expect("valid uncovered-abi reference execution");
+        assert_eq!(
+            baseline.value,
+            MirRuntimeValue::Int(0),
+            "{label}: reference value"
+        );
+        assert_eq!(
+            baseline.output, expected_stdout,
+            "{label}: reference stdout"
+        );
+        let baseline_calls = oracle.calls.get();
+        assert_eq!(
+            baseline_calls, 1,
+            "{label}: baseline must reach the host once"
+        );
+
+        let bytecode = compile_mir_program(&canonical).expect("valid uncovered-abi bytecode");
+        assert!(bytecode.ast.is_none());
+        let mut vm = BytecodeVM::new(bytecode);
+        assert_eq!(
+            vm.run_value()
+                .expect("valid uncovered-abi bytecode execution"),
+            Value::Int(0)
+        );
+        assert_eq!(vm.stdout(), expected_stdout, "{label}: bytecode stdout");
+        assert_eq!(vm.debug_stack_state(), (0, 0));
+
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(
+            &context,
+            &format!("mir_scalar_ffi_uncovered_abi_forgery_{label}"),
+        );
+        generator
+            .compile_mir_native(&canonical)
+            .expect("valid uncovered-abi native lowering");
+        generator
+            .module
+            .verify()
+            .expect("valid uncovered-abi native module");
+        let native = super::link_and_observe_module(
+            &generator,
+            &config,
+            super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+        .expect("valid uncovered-abi native execution");
+        assert_eq!(native.exit_code, Some(0));
+        assert_eq!(native.stdout, expected_stdout, "{label}: native stdout");
+        assert_eq!(native.stderr, "");
+
+        let receipt_label = format!("scalar-ffi-uncovered-abi-forgery-{label}");
+        let baseline_route = canonical.route_receipt(receipt_label.as_str());
+
+        for (forgery, forge_label) in CASES {
+            let mut receipts = canonical.ffi_calls().clone();
+            apply_forgery(*forgery, &instruction_id, &mut receipts);
+            let mut forged = canonical.clone();
+            forged.replace_ffi_calls_for_test_only(receipts);
+            let forged_route = forged.route_receipt(receipt_label.as_str());
+            assert_ne!(
+                forged_route.ffi_digest, baseline_route.ffi_digest,
+                "{label}/{forge_label}: forgery must change the FFI digest"
+            );
+
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
+            let reference_error = forged_reference
+                .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+                .expect_err("reference must reject uncovered-abi receipt forgery");
+            assert!(
+                reference_error.to_string().contains("FFI")
+                    || reference_error.to_string().contains("extern"),
+                "{label}/{forge_label}: {reference_error}"
+            );
+            let captured = forged_reference.captured_output();
+            assert!(
+                captured.is_empty() || captured == "7\n",
+                "{label}/{forge_label}: forged execution must be rejected at or before \
+                 the forged call site, never emit the post-call sink: {captured:?}"
+            );
+            assert_eq!(
+                oracle.calls.get(),
+                baseline_calls,
+                "{label}/{forge_label}: forged receipt reached the host"
+            );
+            assert!(
+                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+                "{label}/{forge_label} reached a compatibility owner"
+            );
+
+            let bytecode_error = compile_mir_program(&forged)
+                .expect_err("bytecode must reject uncovered-abi receipt forgery");
+            assert!(
+                !bytecode_error.is_empty(),
+                "{label}/{forge_label}: {bytecode_error:?}"
+            );
+            let native_error = crate::codegen::mir::validate_mir_native(&forged)
+                .expect_err("native must reject uncovered-abi receipt forgery");
+            assert!(
+                !native_error.is_empty(),
+                "{label}/{forge_label}: {native_error:?}"
+            );
+            let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+                .expect_err("capability gate must reject uncovered-abi receipt forgery");
+            assert!(
+                !capability_error.is_empty(),
+                "{label}/{forge_label}: {capability_error:?}"
+            );
+            let verifier_error = crate::verifier::verify_mir(&forged, receipt_label.clone())
+                .expect_err("verifier must reject uncovered-abi receipt forgery");
+            assert!(
+                !verifier_error.is_empty(),
+                "{label}/{forge_label}: {verifier_error}"
+            );
+            assert!(
+                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+                "{label}/{forge_label} reached a compatibility owner"
+            );
+        }
+    }
+}
+
+#[test]
 fn scalar_ffi_public_entry_matrix_replays_failure_and_recovery_identically() {
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
