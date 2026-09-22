@@ -23847,6 +23847,218 @@ func main() -> i64 {{
 }
 
 #[test]
+fn scalar_ffi_mixed_abi_multi_receipt_graph_diffs_and_isolates_forgery() {
+    // R6-1096: single-ABI matrices forge receipts on one-receipt graphs and
+    // the CLI face pins a mixed-ABI graph only through the bytecode run and
+    // --emit-ir transports.  This closes the in-process gap: one graph
+    // carrying i32, bool, and f64 receipts must produce a four-consumer
+    // baseline differential, and forging the middle receipt must reject in
+    // both documented stages: symbol forgery fails preflight before any
+    // statement runs, while parameter-types forgery isolates at the middle
+    // call site — earlier statements and the first receipt still execute,
+    // the forged call never reaches the host, and the later call site and
+    // its sinks never run.
+    struct MixedAbiOracle {
+        calls: Cell<u32>,
+    }
+    impl MirReferenceFfiResolver for MixedAbiOracle {
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.set(self.calls.get() + 1);
+            match args {
+                [MirRuntimeValue::Int(value)] => Ok(MirRuntimeValue::Int(*value)),
+                [MirRuntimeValue::Bool(value)] => Ok(MirRuntimeValue::Bool(*value)),
+                [MirRuntimeValue::FloatBits(bits)] => Ok(MirRuntimeValue::FloatBits(*bits)),
+                other => Err(format!("unexpected mixed-abi oracle args: {other:?}")),
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdbool.h>
+int32_t probe_i32(int32_t x) { return x; }
+bool probe_bool(bool x) { return x; }
+double probe_f64(double x) { return x; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func probe_i32(value: i32) -> i32;
+    func probe_bool(value: bool) -> bool;
+    func probe_f64(value: f64) -> f64;
+}
+func main() -> i64 {
+    println(7)
+    let a = probe_i32(3)
+    println(a)
+    let b = probe_bool(true)
+    if b { println(11) } else { println(13) }
+    let c = probe_f64(2.5)
+    println(c)
+    0
+}
+"#;
+    const EXPECTED_STDOUT: &str = "7\n3\n11\n2.5\n";
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    let checked = crate::core::check_program(&super::parse_prod(SOURCE))
+        .expect("mixed-abi multi-receipt fixture check");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("mixed-abi multi-receipt fixture materialization");
+    let canonical = route.program;
+    let entries = canonical.ffi_call_entries_in_source_order();
+    assert_eq!(entries.len(), 3, "fixture must carry three receipts");
+    for (entry, symbol) in entries.iter().zip(["probe_i32", "probe_bool", "probe_f64"]) {
+        assert_eq!(entry.1.symbol, symbol, "receipt order");
+        assert_eq!(entry.1.abi, "C", "{symbol}: receipt abi");
+        assert_eq!(
+            entry.1.parameter_types.len(),
+            1,
+            "{symbol}: parameter types"
+        );
+        assert_eq!(
+            entry.1.parameter_conversions.len(),
+            1,
+            "{symbol}: parameter conversions"
+        );
+        assert!(entry.1.result.is_some(), "{symbol}: result type");
+    }
+
+    let oracle = MixedAbiOracle {
+        calls: Cell::new(0),
+    };
+    let baseline = MirReferenceInterpreter::new(&canonical)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("valid mixed-abi reference execution");
+    assert_eq!(baseline.value, MirRuntimeValue::Int(0));
+    assert_eq!(baseline.output, EXPECTED_STDOUT);
+    assert_eq!(
+        oracle.calls.get(),
+        3,
+        "baseline must reach the host once per receipt"
+    );
+
+    let bytecode = compile_mir_program(&canonical).expect("valid mixed-abi bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("valid mixed-abi bytecode execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), EXPECTED_STDOUT);
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator =
+        crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_mixed_abi_multi_receipt");
+    generator
+        .compile_mir_native(&canonical)
+        .expect("valid mixed-abi native lowering");
+    generator
+        .module
+        .verify()
+        .expect("valid mixed-abi native module");
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("valid mixed-abi native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, EXPECTED_STDOUT);
+    assert_eq!(native.stderr, "");
+
+    let receipt_label = "scalar-ffi-mixed-abi-multi-receipt";
+    let baseline_route = canonical.route_receipt(receipt_label);
+
+    // Two rejection stages, both pinned per receipt within one graph:
+    // a symbol forgery fails the preflight declaration-shape validator
+    // before any statement runs, while a parameter-types forgery survives
+    // preflight and isolates at the middle call site — earlier statements
+    // and the first receipt still execute, the forged call never reaches
+    // the host, and the later call site plus its sinks never run.
+    const FORGED_MIDDLE_LEGS: &[(&str, &str, u32)] = &[
+        // (forged field, expected captured stdout, host calls after the forged run)
+        ("symbol", "", 3),
+        ("parameter-types", "7\n3\n", 4),
+    ];
+    let bool_id = entries[1].0.clone();
+    for &(field, expected_captured, expected_calls) in FORGED_MIDDLE_LEGS {
+        let mut receipts = canonical.ffi_calls().clone();
+        let receipt = receipts.get_mut(&bool_id).expect("middle receipt");
+        if field == "symbol" {
+            receipt.symbol = "probe_bool_forged".into();
+        } else {
+            receipt.parameter_types.clear();
+        }
+        let mut forged = canonical.clone();
+        forged.replace_ffi_calls_for_test_only(receipts);
+        let forged_route = forged.route_receipt(receipt_label);
+        assert_ne!(
+            forged_route.ffi_digest, baseline_route.ffi_digest,
+            "{field}: forgery must change the FFI digest"
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
+        let reference_error = forged_reference
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject the forged middle receipt");
+        assert!(
+            reference_error.to_string().contains("FFI")
+                || reference_error.to_string().contains("extern"),
+            "{field}: {reference_error}"
+        );
+        assert_eq!(
+            forged_reference.captured_output(),
+            expected_captured,
+            "{field}: forged call-site isolation"
+        );
+        assert_eq!(
+            oracle.calls.get(),
+            expected_calls,
+            "{field}: the forged call must never reach the host"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{field}: forgery leg reached a compatibility owner"
+        );
+
+        let bytecode_error = compile_mir_program(&forged)
+            .expect_err("bytecode must reject the forged middle receipt");
+        assert!(!bytecode_error.is_empty(), "{field}: {bytecode_error:?}");
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native must reject the forged middle receipt");
+        assert!(!native_error.is_empty(), "{field}: {native_error:?}");
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject the forged middle receipt");
+        assert!(
+            !capability_error.is_empty(),
+            "{field}: {capability_error:?}"
+        );
+        let verifier_error = crate::verifier::verify_mir(&forged, receipt_label.to_string())
+            .expect_err("verifier must reject the forged middle receipt");
+        assert!(!verifier_error.is_empty(), "{field}: {verifier_error}");
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{field}: forgery leg reached a compatibility owner"
+        );
+    }
+}
+
+#[test]
 fn scalar_ffi_public_entry_matrix_replays_failure_and_recovery_identically() {
     let mut guard = super::FfiEnvGuard::lock();
     let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

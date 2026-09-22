@@ -3894,17 +3894,23 @@ mod tests {
             }
         "#;
         let (checked, file) = checked(source);
-        // R6-1094 boundary record: a glue-less managed value beside a
-        // materialized List.len makes canonical construction fail, the route
-        // envelope drops its materialized-candidate flags, and the dispatcher
-        // takes the explicit MixedCoverageWithoutMaterializedCandidate
-        // compatibility route.  This is the documented R6-1052 floor for
-        // previously working programs, but it also means `len` has no
-        // compatibility-arm tripwire (unlike reverse/concat/generic facades),
-        // so a glue-less managed value beside a len call rides legacy
-        // silently.  Closing that tripwire gap is a registered follow-up:
-        // turning this program into a hard rejection needs its own
-        // island-closure verdict, not a silent pin change.
+        // R6-1094 boundary record, verdict closed in R6-1096: a glue-less
+        // managed value beside a materialized List.len makes canonical
+        // construction fail, the route envelope drops its materialized
+        // candidate flags, and the dispatcher takes the explicit
+        // MixedCoverageWithoutMaterializedCandidate compatibility route.
+        // This is the documented R6-1052 floor for previously working
+        // programs.  The absent `len` compatibility-arm tripwire (unlike
+        // reverse/concat/generic facades) is a deliberate exemption, not a
+        // hole: `has_unsupported_list_reverse_candidate` records "List len
+        // retains the pre-existing compatibility policy here" (b58cfb79,
+        // written after the len island had already closed), and the policy
+        // line is coherent — len is a read-only borrow with no ownership
+        // obligations crossing the island boundary, while reverse/concat
+        // are transform operations whose unsupported boundary shapes carry
+        // contract implications and therefore fail closed.  Reversing the
+        // exemption would turn working programs into hard rejections and
+        // needs its own island-closure verdict, not a silent pin change.
         let DefaultMirRoute::Legacy(reason) = select_default_route(&checked, &file) else {
             panic!("a glue-less managed value beside len must take the compatibility route");
         };
