@@ -66,6 +66,13 @@
 //! ledger proves.  Callee side is set membership, so the face lives in the
 //! closure loop; a leaky callee, a parameter, or a second statement keeps
 //! the floor.
+//!
+//! R6-1082: the second-hand rebind drops its print-function envelope.  A
+//! String local's origin site floors independently of any later read and
+//! mixed is sticky, so `let t = s` is admitted island-wide without hiding
+//! unadmitted provenance; candidate evidence deliberately stays with the
+//! boundary operations (a glue-only graph materializes no production
+//! boundary and a literal-origin rebind keeps its floor at the origin).
 
 use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
 use crate::core::NodeId;
@@ -365,6 +372,48 @@ fn wrapper_composing_an_off_shape_callee_keeps_the_floor() {
 }
 
 #[test]
+fn second_hand_rebind_routes_complete_across_consumers() {
+    // R6-1082: the second-hand rebind face drops its print-function
+    // envelope.  A String local in a concrete island can only originate in
+    // an admitted call-result bind, an admitted literal, a seeded identity
+    // parameter, or an earlier rebind — every other origin floors at its
+    // own site and mixed is sticky, so admitting `let t = s` island-wide
+    // never hides unadmitted provenance.  The rebind plus an integer
+    // print face (the former second_hand_rebind negative) now classifies
+    // complete and every consumer executes it on the canonical engine.
+    // A rebind with no boundary operation at all stays OutsideProfile —
+    // deliberately not candidate evidence, since a glue-only graph
+    // materializes no production boundary operation and construction
+    // would reject the admission.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            let t = s
+            println(7)
+            0
+        }
+    "#;
+    let label = "second-hand rebind";
+    let mir = assert_admitted(source, label);
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
 fn call_bind_member_routes_complete_across_consumers() {
     // R6-1081: the one-statement call-bind body (`let t = greet(); t`)
     // joins the set through the fixpoint closure — its `Call → Move →
@@ -630,17 +679,18 @@ fn off_shape_string_callables_keep_the_compatibility_floor() {
                 }
             "#,
         },
-        // A second-hand String rebind outside a string print face has no
-        // admitted provenance.
+        // R6-1082: the second-hand rebind floor dropped island-wide — the
+        // origin site (literal bind, parameter, member body) floors
+        // independently and mixed is sticky, so a rebind never hides an
+        // unadmitted origin.  The residue: a literal-origin rebind keeps
+        // its floor at the origin bind, which is not a member body and
+        // carries no print face.
         OffShapeCase {
-            name: "second_hand_rebind",
+            name: "literal_origin_rebind",
             source: r#"
-                func greet() -> string {
-                    "hi"
-                }
                 func main() -> i32 {
-                    let s = greet()
-                    let t = s
+                    let a = "x"
+                    let t = a
                     println(7)
                     0
                 }

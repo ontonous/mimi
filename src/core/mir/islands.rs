@@ -1865,6 +1865,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     // materialized graph.  R6-1071: the f64 half widens to
                     // the one-edge print closure; the owned-String half
                     // stays print-function-scoped.
+                    // R6-1082: the owned-String half drops the print
+                    // envelope.  The provenance argument was already
+                    // island-wide — a String local's origin site (literal
+                    // bind, parameter, member body) floors independently of
+                    // any later read, and `mixed` is sticky, so admitting
+                    // the rebind never hides an unadmitted origin.  What
+                    // the rebind itself lowers to — a plain Move of an
+                    // exactly-modeled StringHandle — is a canonical MIR
+                    // node the gate's Move arm polices.
                     let second_hand_print_face_root = concrete
                         && initializer.as_ref().is_some_and(|value| {
                             let face_active = match &value.kind {
@@ -1876,12 +1885,20 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                                         || matches!(
                                             self.program.resolved_types().get(&value.ty),
                                             Some(ResolvedType::Primitive(PrimitiveType::String))
-                                        ) && self.in_string_print_function()
+                                        )
                                 }
                                 _ => false,
                             };
                             face_active
                         });
+                    // R6-1082: deliberately NOT candidate evidence.  The
+                    // rebind lowers to plain Move glue; a graph whose only
+                    // String shape is glue materializes no production
+                    // boundary operation, so construction would reject a
+                    // Complete admission and turn a runnable compatibility
+                    // program into a hard route error.  Candidate evidence
+                    // stays with the boundary operations (println faces,
+                    // facades); the rebind exemption only clears the floor.
                     // R6-1061: an f64 bind whose initializer is an admitted
                     // finite-only float arithmetic (Add/Subtract since
                     // R6-1061, Multiply/Divide since R6-1067) over

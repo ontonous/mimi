@@ -1,0 +1,10 @@
+func greet() -> string {
+    "hi"
+}
+func main() -> i32 {
+    ensures: result == 0
+    let s = greet()
+    let t = s
+    println(7)
+    0
+}

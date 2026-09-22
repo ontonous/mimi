@@ -19061,6 +19061,84 @@ fn canonical_mir_owned_string_call_bind_routes_canonical_and_matches_native() {
 }
 
 #[test]
+fn canonical_mir_owned_string_rebind_routes_canonical_and_verifies() {
+    // R6-1082: the island-wide second-hand rebind face — `let s = greet();
+    // let t = s` moves an exactly-modeled StringHandle whose origin site
+    // floors independently, so the rebind plus an integer print face routes
+    // canonical with the native MIR binary agreeing byte-for-byte, and the
+    // ensures contract verifies on the single canonical engine.
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_owned_string_rebind.mimi");
+    let expected = "7\n";
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-owned-string-rebind-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn owned-string rebind native build");
+    assert!(
+        build.status.success(),
+        "the admitted owned-String rebind face must build natively:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary).output().expect("run native binary");
+    let _ = fs::remove_file(&binary);
+    assert!(native.status.success());
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    assert_eq!(native_stdout, expected);
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to run owned-string rebind fixture on the default backend");
+    assert!(default.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        native_stdout,
+        "default and native MIR must agree on the owned-String rebind face"
+    );
+    let default_stderr = String::from_utf8_lossy(&default.stderr).to_string();
+    assert!(
+        !default_stderr.contains("canonical route disposition: legacy"),
+        "the admitted owned-String rebind face must not fall back to legacy:\n{default_stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("owned-string rebind verify");
+    assert!(
+        verify.status.success(),
+        "the owned-String rebind contract must verify:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        verify_stdout.contains("canonical MIR ensures contract proven"),
+        "{verify_stdout}"
+    );
+    assert!(!verify_stdout.contains("flow_ast"), "{verify_stdout}");
+}
+
+#[test]
 fn canonical_mir_owned_string_wrapper_contract_verifies_single_engine() {
     // R6-1077: a contract-bearing caller of a one-edge wrapper verifies on
     // the canonical route — the capability gate's ledger mirror admits the
