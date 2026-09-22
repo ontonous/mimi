@@ -28179,3 +28179,328 @@ fn ffi_checked_compatibility_keeps_only_called_contract_externs() {
         vec![crate::core::LegacyBodyConsumer::FfiVerifierCompatibility]
     );
 }
+
+const SWEEP_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t sweep_pos0(int64_t x) { return x * 2 + 1; }
+int64_t sweep_pos1(int64_t x) { return x * 2 + 2; }
+int64_t sweep_pos2(int64_t x) { return x * 2 + 3; }
+int64_t sweep_pos3(int64_t x) { return x * 2 + 4; }
+"#;
+
+/// Build one generated sweep case: a four-site i64 scalar FFI chain whose
+/// `failure_position` site carries the failing argument. The last site is the
+/// `main` tail; every other site prints its result so the preserved prefix
+/// stdout is observable. Returns (source, expected prefix lines).
+fn sweep_case_source(
+    clause: &str,
+    failure_position: usize,
+    values: [i64; 4],
+    poison: i64,
+) -> (String, Vec<String>) {
+    let declarations = (0..4)
+        .map(|site| {
+            let contract = if clause == "requires" {
+                "requires: x < 100".to_string()
+            } else {
+                format!("ensures: result != {poison}")
+            };
+            format!("    func sweep_pos{site}(x: i64) -> i64 {contract};")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls = (0..4)
+        .map(|site| {
+            let call = format!("sweep_pos{site}({} as i64)", values[site]);
+            if site == 3 {
+                format!("    {call}")
+            } else {
+                format!("    println({call})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source =
+        format!("extern \"C\" {{\n{declarations}\n}}\nfunc main() -> i64 {{\n{calls}\n}}\n");
+    let prefix = (0..failure_position)
+        .map(|site| (values[site] * 2 + site as i64 + 1).to_string())
+        .collect::<Vec<_>>();
+    (source, prefix)
+}
+
+struct SweepOracle {
+    executions: Cell<usize>,
+}
+
+impl MirReferenceFfiResolver for SweepOracle {
+    fn call(
+        &self,
+        receipt: &MirFfiCallContract,
+        arguments: &[MirRuntimeValue],
+    ) -> Result<MirRuntimeValue, String> {
+        let site = receipt
+            .symbol
+            .strip_prefix("sweep_pos")
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+            .ok_or_else(|| format!("unexpected sweep symbol {}", receipt.symbol))?;
+        let [MirRuntimeValue::Int(value)] = arguments else {
+            return Err(format!("sweep arguments {arguments:?} are not one i64"));
+        };
+        self.executions.set(self.executions.get() + 1);
+        Ok(MirRuntimeValue::Int(value * 2 + site as i64 + 1))
+    }
+}
+
+/// One generated failure case over the four call sites. `clause` selects the
+/// contract family: requires failures must happen BEFORE the foreign call
+/// (exactly `failure_position` executions) while ensures failures happen
+/// AFTER it (exactly `failure_position + 1` executions) — the side-effect
+/// order the three consumers must agree on.
+fn run_sweep_case(
+    test_label: &str,
+    clause: &str,
+    failure_position: usize,
+    values: [i64; 4],
+    poison: i64,
+    counter: u64,
+    config: &super::E2EConfig,
+) {
+    let (source, expected_prefix) = sweep_case_source(clause, failure_position, values, poison);
+    let expected_stdout = if expected_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", expected_prefix.join("\n"))
+    };
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .unwrap_or_else(|error| panic!("{test_label}: lex: {error:?}"));
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .unwrap_or_else(|error| panic!("{test_label}: parse: {error:?}"));
+    let checked = crate::core::check_program(&file)
+        .unwrap_or_else(|diags| panic!("{test_label}: check: {diags:?}"));
+    let mir = MirProgram::from_checked_program(&checked)
+        .unwrap_or_else(|error| panic!("{test_label}: lower: {error:?}"));
+    assert_eq!(
+        mir.ffi_calls().len(),
+        4,
+        "{test_label}: every generated chain keeps four receipts"
+    );
+    let ordered = mir.ffi_call_entries_in_source_order();
+    assert_eq!(ordered.len(), 4, "{test_label}: source-order receipts");
+    let expected_clause_word = if clause == "requires" {
+        "precondition"
+    } else {
+        "postcondition"
+    };
+
+    let verification = crate::verifier::verify_mir(&mir, format!("{test_label}-mir").into())
+        .expect("generated sweep MIR verifier");
+    let disproven_sites: Vec<usize> = verification
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.status == crate::verifier::VerifStatus::Disproven)
+        .map(|(site, _)| site)
+        .collect();
+    if clause == "requires" {
+        assert_eq!(
+            disproven_sites,
+            vec![failure_position],
+            "{test_label}: exactly the failing site is disproven: {verification:?}"
+        );
+    } else {
+        // An extern result is unconstrained at the MIR verifier, so every
+        // `ensures` obligation over that result is statically disproven for
+        // ALL sites; only the real returned value can localize the runtime
+        // failure. Pin the per-site span alignment instead.
+        assert_eq!(
+            disproven_sites,
+            vec![0, 1, 2, 3],
+            "{test_label}: every unconstrained extern ensures is disproven: {verification:?}"
+        );
+    }
+    for site in &disproven_sites {
+        let result = &verification[*site];
+        assert_eq!(
+            result.diagnostic.as_ref().expect("failing span").span,
+            ordered[*site].1.span,
+            "{test_label}: disproven receipt {site} must keep its own span"
+        );
+    }
+    assert!(verification.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == mir.canonical_digest()
+        })
+    }));
+
+    let oracle = SweepOracle {
+        executions: Cell::new(0),
+    };
+    let reference_interpreter = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let reference_error = reference_interpreter
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("{test_label}: reference must stop at the injected failure");
+    let reference_error = reference_error.to_string();
+    assert!(
+        reference_error.contains(expected_clause_word) || reference_error.contains(clause),
+        "{test_label}: reference names the {clause} failure: {reference_error}"
+    );
+    let expected_executions = if clause == "requires" {
+        failure_position
+    } else {
+        failure_position + 1
+    };
+    assert_eq!(
+        oracle.executions.get(),
+        expected_executions,
+        "{test_label}: reference must execute exactly the prefix calls"
+    );
+    assert_eq!(
+        reference_interpreter.captured_output(),
+        expected_stdout,
+        "{test_label}: reference prefix stdout"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let bytecode = compile_mir_program(&mir)
+        .unwrap_or_else(|error| panic!("{test_label}: bytecode: {error:?}"));
+    assert!(bytecode.ast.is_none(), "{test_label}: AST-free bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("{test_label}: bytecode must stop at the injected failure");
+    let bytecode_error = bytecode_error.to_string();
+    assert!(
+        bytecode_error.contains(expected_clause_word) || bytecode_error.contains(clause),
+        "{test_label}: bytecode names the {clause} failure: {bytecode_error}"
+    );
+    assert_eq!(
+        vm.stdout(),
+        expected_stdout,
+        "{test_label}: bytecode prefix stdout"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "{test_label}: bytecode must not touch legacy bodies"
+    );
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(
+        &context,
+        &format!("mir_scalar_ffi_{}", test_label.replace(['-', ' '], "_")),
+    );
+    generator
+        .compile_mir_native(&mir)
+        .unwrap_or_else(|error| panic!("{test_label}: native lowering: {error:?}"));
+    generator
+        .module
+        .verify()
+        .expect("generated sweep LLVM module verifies");
+    let native = super::link_and_observe_module(&generator, config, counter)
+        .unwrap_or_else(|error| panic!("{test_label}: native run: {error}"));
+    assert_ne!(
+        native.exit_code,
+        Some(0),
+        "{test_label}: native must fail at the injected site"
+    );
+    assert_eq!(
+        native.stdout, expected_stdout,
+        "{test_label}: native prefix stdout"
+    );
+    assert!(
+        native.stderr.contains("E0808"),
+        "{test_label}: native names E0808: {}",
+        native.stderr
+    );
+    let native_guard = if clause == "requires" {
+        "FFI precondition failed"
+    } else {
+        "FFI postcondition failed"
+    };
+    assert!(
+        native.stderr.contains(native_guard),
+        "{test_label}: native names the {clause} guard: {}",
+        native.stderr
+    );
+}
+
+/// Shared fixture for both generated sweeps: one C library whose four
+/// endpoints return position-tagged values, plus the native link config.
+/// The caller must keep the returned `LibraryFixture` alive: dropping it
+/// removes the shared-object directory the guard points at.
+fn sweep_fixture() -> (super::FfiEnvGuard, super::E2EConfig, u64, LibraryFixture) {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, SWEEP_C_SOURCE);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(SWEEP_C_SOURCE.into()),
+        ..Default::default()
+    };
+    (guard, config, counter, fixture)
+}
+
+#[test]
+fn scalar_ffi_generated_requires_failure_position_sweep_matches_consumers() {
+    let (guard, config, counter, _fixture) = sweep_fixture();
+    let mut seed = 0x5eed_1234_u64;
+    for case_index in 0..8_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let failure_position = (seed % 4) as usize;
+        let mut values = [0i64; 4];
+        for (site, value) in values.iter_mut().enumerate() {
+            *value = ((seed >> (8 + site as u32 * 7)) % 97) as i64;
+        }
+        values[failure_position] = 100 + ((seed >> 37) % 89) as i64;
+        run_sweep_case(
+            &format!("requires-sweep-case-{case_index}"),
+            "requires",
+            failure_position,
+            values,
+            0,
+            counter,
+            &config,
+        );
+    }
+    drop(guard);
+}
+
+#[test]
+fn scalar_ffi_generated_ensures_failure_position_sweep_matches_consumers() {
+    let (guard, config, counter, _fixture) = sweep_fixture();
+    let mut seed = 0xfeed_4321_u64;
+    for case_index in 0..8_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let failure_position = (seed % 4) as usize;
+        let mut values = [0i64; 4];
+        for site in 0..4 {
+            values[site] = ((seed >> (8 + site as u32 * 7)) % 97) as i64;
+        }
+        let poison = values[failure_position] * 2 + failure_position as i64 + 1;
+        for site in 0..4 {
+            if site == failure_position {
+                continue;
+            }
+            // Keep every non-failing site's result away from the poison so
+            // exactly one site trips the generated ensures clause.
+            while values[site] * 2 + site as i64 + 1 == poison {
+                values[site] += 1;
+            }
+        }
+        run_sweep_case(
+            &format!("ensures-sweep-case-{case_index}"),
+            "ensures",
+            failure_position,
+            values,
+            poison,
+            counter,
+            &config,
+        );
+    }
+    drop(guard);
+}
