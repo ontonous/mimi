@@ -95,6 +95,19 @@
 //! unreleased path keeps its leak as a documented boundary until a real
 //! must-liveness dataflow replaces the shape predicate.
 //!
+//! R6-1086: per-path Drop placement for diamond consumption — a String
+//! transferred inside exactly one arm leaves the sibling path holding an
+//! unaccounted value, and the R6-1085 return-site pass holds for exactly
+//! that shape (the join cannot drop for one path's sake).  When both arms
+//! are distinct single-successor blocks joining at the same target, a
+//! value whose consuming blocks lie entirely within one arm's sub-graph
+//! gets a `Drop` at the sibling arm's tail (`drop.pb.*`, anchored at the
+//! owning block) — the surviving path is exactly the sibling's, and the
+//! verifier's path-sensitive exploration models the value as defined
+//! there.  Consumption in both arms holds the placement (no complement
+//! exists); placed Drops join the R6-1085 consumed computation, which
+//! then excludes the value from its return-site seeds.
+//!
 //! R6-1083: the parameter-rebind body joins the set and the ledger gains
 //! end-of-body drop glue.  The lowerer now discharges the original handles
 //! a single-block owned-String body copied or left unused (`Drop` before the
@@ -584,12 +597,15 @@ fn multiblock_leftover_strings_settle_per_return_site() {
 }
 
 #[test]
-fn multiblock_explicit_drop_holds_settlement_conservatively() {
-    // R6-1085 boundary: an explicit `drop(s)` inside one branch puts the
-    // value in the global consumed set, so the pass holds entirely — the
-    // join/exit return site must not drop a value the other path already
-    // released.  The unreleased path keeps the leak (documented
-    // boundary); the pin holds the pass to its conservative face.
+fn multiblock_sibling_arm_settles_single_arm_consumption() {
+    // R6-1086: an explicit `drop(s)` inside one branch consumes the value
+    // only on that path, so the R6-1085 return-site pass holds (the other
+    // path must not drop at the join) — and the per-path placement now
+    // closes the surviving path exactly where it lives: a `Drop` at the
+    // sibling arm's tail, which executes only on the path where the value
+    // was never consumed.  The former 3-byte leak on the surviving path
+    // is gone (valgrind 99 -> 0 on the native binary); the return-site
+    // settlement stays held for the consumed value.
     let source = r#"
         func greet() -> string {
             "hi"
@@ -604,13 +620,63 @@ fn multiblock_explicit_drop_holds_settlement_conservatively() {
             0
         }
     "#;
-    let label = "multiblock explicit drop hold";
+    let label = "multiblock sibling settle";
     let mir = assert_admitted(source, label);
     let main = mir
         .functions()
         .get(&NodeId("function:main".into()))
         .expect("main function present");
     let text = main.canonical_text();
+    assert!(text.contains("inst:drop.pb.0:"), "{text}");
+    assert!(!text.contains("inst:drop.mb."), "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
+}
+
+#[test]
+fn multiblock_both_arm_consumption_holds_per_path_placement() {
+    // R6-1086 boundary: a value consumed in BOTH arms is dead on every
+    // path past the diamond — each path consumed it exactly once, so no
+    // complement exists and per-path placement holds (no `drop.pb.*`);
+    // the return-site pass holds too (`drop.mb.*` absent — the value is
+    // in the global consumed set).  Each arm keeps a print face so the
+    // shape stays canonical-reachable (a glue-only graph materializes no
+    // boundary).  Consumers agree on the held graph.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            if 1 > 0 {
+                drop(s)
+                println(7)
+            } else {
+                drop(s)
+                println(8)
+            }
+            0
+        }
+    "#;
+    let label = "multiblock both-arm hold";
+    let mir = assert_admitted(source, label);
+    let main = mir
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main function present");
+    let text = main.canonical_text();
+    assert!(!text.contains("inst:drop.pb."), "{text}");
     assert!(!text.contains("inst:drop.mb."), "{text}");
     let reference = MirReferenceInterpreter::new(&mir)
         .execute(&NodeId("function:main".into()), &[])

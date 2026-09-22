@@ -239,10 +239,15 @@ fn lower_body_impl(
         return Err(lowerer.errors);
     }
 
-    // R6-1085: multi-block bodies (branch or loop tails) settle their
-    // owned-String ledger per Return site through the conservative
+    // R6-1086: per-path placement runs first — a String consumed inside
+    // exactly one arm of a diamond gets a Drop at the sibling arm's tail,
+    // and the inserted Drops join the consumed computation of the
+    // R6-1085 return-site pass, which then naturally holds for those
+    // values.  R6-1085: multi-block bodies (branch or loop tails) settle
+    // their owned-String ledger per Return site through the conservative
     // entry-prefix/never-consumed pass; the single-block body already
     // settled inline at the root return.
+    lowerer.settle_per_path_owned_string_drops(&entry, &parameters);
     lowerer.settle_multiblock_owned_string_drops(&entry, &parameters);
     if !lowerer.errors.is_empty() {
         return Err(lowerer.errors);
@@ -9636,6 +9641,204 @@ impl<'a> Lowerer<'a> {
                 &format!("drop.{index}"),
                 MirInstructionKind::Drop { value: target },
             );
+        }
+    }
+
+    /// R6-1086: per-path Drop placement for diamond consumption.  The
+    /// R6-1085 return-site pass holds whenever a value is consumed
+    /// anywhere, so a String transferred inside exactly one arm of an
+    /// if/else diamond left the surviving path leaking.  For each
+    /// Branch-terminated block whose arms are distinct single-successor
+    /// blocks joining at the same target, a candidate value (owned String
+    /// local introduced by the entry prefix — defined on both edges —
+    /// the same universe as the R6-1085 seeds) whose consuming blocks lie
+    /// entirely within one arm's sub-graph gets a `Drop` at the tail of
+    /// the sibling arm: the surviving path is exactly the sibling's, and
+    /// the arm tail executes only on that path.  Consuming blocks
+    /// spanning both arms or reaching outside the diamond hold the value
+    /// conservatively.  Placed Drops join the R6-1085 consumed
+    /// computation, which then excludes the value from its seeds.
+    fn settle_per_path_owned_string_drops(
+        &mut self,
+        entry: &MirBlockId,
+        parameters: &[MirValueId],
+    ) {
+        let Some(catalog) = self.type_catalog else {
+            return;
+        };
+        if self.blocks.len() <= 1 {
+            return;
+        }
+        let is_owned_string_local = |value: &MirValueId| -> bool {
+            value.0.starts_with("local:")
+                && self
+                    .values
+                    .get(value)
+                    .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
+        };
+        let mut candidates: BTreeSet<MirValueId> = parameters
+            .iter()
+            .filter(|value| is_owned_string_local(value))
+            .cloned()
+            .collect();
+        if let Some(entry_block) = self.blocks.get(entry) {
+            for instruction in &entry_block.instructions {
+                if let MirInstructionKind::Move { result, .. } = &instruction.kind {
+                    if is_owned_string_local(result) {
+                        candidates.insert(result.clone());
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let mut consumed_blocks: BTreeMap<MirValueId, BTreeSet<MirBlockId>> = BTreeMap::new();
+        for (block_id, block) in &self.blocks {
+            for instruction in &block.instructions {
+                let mut sources: Vec<MirValueId> = Vec::new();
+                match &instruction.kind {
+                    MirInstructionKind::Move { source, .. }
+                    | MirInstructionKind::Drop { value: source }
+                    | MirInstructionKind::MoveProject { base: source, .. }
+                    | MirInstructionKind::MoveProjectDrop { base: source, .. }
+                    | MirInstructionKind::Convert { source, .. } => {
+                        sources.push(source.clone());
+                    }
+                    MirInstructionKind::UpdateRecord { base, fields, .. } => {
+                        sources.push(base.clone());
+                        sources.extend(fields.iter().cloned());
+                    }
+                    MirInstructionKind::ConstructVariantMove { fields, .. } => {
+                        sources.extend(fields.iter().map(|(_, value)| value.clone()));
+                    }
+                    MirInstructionKind::Call { arguments, .. }
+                    | MirInstructionKind::BuiltinCall { arguments, .. }
+                    | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        sources.extend(arguments.iter().cloned());
+                    }
+                    MirInstructionKind::SessionCall {
+                        endpoint, payload, ..
+                    } => {
+                        sources.push(endpoint.clone());
+                        if let Some(payload) = payload {
+                            sources.push(payload.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                for source in sources {
+                    if candidates.contains(&source) {
+                        consumed_blocks
+                            .entry(source)
+                            .or_default()
+                            .insert(block_id.clone());
+                    }
+                }
+            }
+        }
+        let branch_blocks: Vec<MirBlockId> = self
+            .blocks
+            .iter()
+            .filter(|(_, block)| matches!(block.terminator, Some(MirTerminator::Branch { .. })))
+            .map(|(block_id, _)| block_id.clone())
+            .collect();
+        let goto_target = |self_: &Self, block_id: &MirBlockId| -> Option<MirBlockId> {
+            match self_.blocks.get(block_id)?.terminator.as_ref()? {
+                MirTerminator::Goto { target, .. } => Some(target.clone()),
+                _ => None,
+            }
+        };
+        let sub_graph =
+            |self_: &Self, arm: &MirBlockId, join: &MirBlockId| -> BTreeSet<MirBlockId> {
+                let mut visited: BTreeSet<MirBlockId> = BTreeSet::new();
+                let mut queue: Vec<MirBlockId> = vec![arm.clone()];
+                while let Some(block_id) = queue.pop() {
+                    if block_id == *join || !visited.insert(block_id.clone()) {
+                        continue;
+                    }
+                    let Some(block) = self_.blocks.get(&block_id) else {
+                        continue;
+                    };
+                    match block.terminator.as_ref() {
+                        Some(MirTerminator::Goto { target, .. }) => queue.push(target.clone()),
+                        Some(MirTerminator::Branch {
+                            then_target,
+                            else_target,
+                            ..
+                        }) => {
+                            queue.push(then_target.clone());
+                            queue.push(else_target.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                visited
+            };
+        let mut placed: Vec<(MirBlockId, Vec<MirValueId>)> = Vec::new();
+        for branch_block in &branch_blocks {
+            let Some((then_target, else_target)) =
+                self.blocks.get(branch_block).and_then(|block| {
+                    match block.terminator.as_ref()? {
+                        MirTerminator::Branch {
+                            then_target,
+                            else_target,
+                            ..
+                        } => Some((then_target.clone(), else_target.clone())),
+                        _ => None,
+                    }
+                })
+            else {
+                continue;
+            };
+            if then_target == else_target {
+                continue;
+            }
+            let (Some(then_join), Some(else_join)) = (
+                goto_target(self, &then_target),
+                goto_target(self, &else_target),
+            ) else {
+                continue;
+            };
+            if then_join != else_join {
+                continue;
+            }
+            let sub_then = sub_graph(self, &then_target, &then_join);
+            let sub_else = sub_graph(self, &else_target, &else_join);
+            for value in &candidates {
+                let Some(consumed) = consumed_blocks.get(value) else {
+                    continue;
+                };
+                let in_then = consumed.iter().all(|block| sub_then.contains(block));
+                let in_else = consumed.iter().all(|block| sub_else.contains(block));
+                if in_then && !in_else {
+                    placed.push((else_target.clone(), vec![value.clone()]));
+                } else if in_else && !in_then {
+                    placed.push((then_target.clone(), vec![value.clone()]));
+                }
+            }
+        }
+        let mut per_block: BTreeMap<MirBlockId, Vec<MirValueId>> = BTreeMap::new();
+        for (block_id, values) in placed {
+            per_block.entry(block_id).or_default().extend(values);
+        }
+        for (block_id, mut values) in per_block {
+            values.sort();
+            values.dedup();
+            let Some(block) = self.blocks.get_mut(&block_id) else {
+                continue;
+            };
+            for (index, target) in values.into_iter().enumerate() {
+                let Ok(id) =
+                    super::MirInstructionId::new(format!("inst:drop.pb.{index}:{}", block_id.0))
+                else {
+                    continue;
+                };
+                block.instructions.push(MirInstruction {
+                    id,
+                    kind: MirInstructionKind::Drop { value: target },
+                });
+            }
         }
     }
 
