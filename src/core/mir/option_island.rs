@@ -275,6 +275,19 @@ fn is_option_string_unwrap_call(
             .is_some_and(|argument| is_option_string_type_in_checked(program, &argument.value.ty))
 }
 
+/// R6-1097 verdict record: admitting value-producing `if` expressions
+/// (`ResolvedExprKind::If` over closed condition + both branches) here is a
+/// registered but BLOCKED candidate face. The closure extension works
+/// mechanically, but it flips if-hidden programs: an if-bearing projection
+/// callable currently stays unclosed, so `candidate = false` keeps the whole
+/// profile `OutsideProfile` (compatibility legacy); with `if` admitted the
+/// candidate fires while an output-bearing `main` keeps the profile mixed,
+/// landing the program in `MixedCoverage` hard rejection (S114/S115).
+/// tests/real_world/a1_verification.mimi (match arms contain ifs, `main`
+/// prints) is the living proof — it runs via the compatibility arm today and
+/// hard-rejects under admission. Opening this face therefore requires an
+/// island-closure ruling on the if-hidden→hard-reject migration, not a
+/// drive-by closure widening.
 pub(crate) fn option_body_is_closed(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
