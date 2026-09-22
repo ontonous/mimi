@@ -108,6 +108,23 @@
 //! exists); placed Drops join the R6-1085 consumed computation, which
 //! then excludes the value from its return-site seeds.
 //!
+//! R6-1087: reachability-based placement generalizes the R6-1086
+//! join-stopped sub-graph to full forward reachability, so nested
+//! diamonds and multi-block arms place too — the consuming blocks must
+//! all lie inside one arm's reachable set (which contains the join and
+//! its downstream, so consumption there holds) and none inside the
+//! sibling's.  The placement lands at the sibling arm's head, guarded by
+//! exactly one predecessor (no other path enters the block), an acyclic
+//! branch (no arm reaches back into the branch, so each head runs at
+//! most once per call), and a hold for candidates any terminator passes
+//! as a block argument, yields via `Return`, or carries into `Fault`
+//! (id-based accounting cannot see through those renames/transfers).
+//! Placements of one value always live in mutually exclusive arms, so
+//! every path drops at most once.  Match/`Switch` arms stay held: match
+//! shapes classify outside the complete-coverage profile today, so the
+//! face is unreachable end-to-end until the eligibility scanner admits
+//! them.
+//!
 //! R6-1083: the parameter-rebind body joins the set and the ledger gains
 //! end-of-body drop glue.  The lowerer now discharges the original handles
 //! a single-block owned-String body copied or left unused (`Drop` before the
@@ -686,6 +703,67 @@ fn multiblock_both_arm_consumption_holds_per_path_placement() {
         MirRuntimeValue::Int(0),
         "{label} reference result"
     );
+}
+
+#[test]
+fn nested_diamond_sibling_arms_settle_per_path() {
+    // R6-1087: reachability-based placement generalizes the R6-1086
+    // single-Goto-arm diamond to nested diamonds.  The inner diamond is
+    // a plain R6-1086 shape (inner-else head gets a Drop), and the outer
+    // diamond — whose then arm is itself Branch-terminated, which the
+    // join-stopped sub-graph test used to hold — now places at the
+    // outer-else head because the inner consuming block lies inside the
+    // outer then arm's full reachable set and outside the outer else's.
+    // The two placed Drops live in mutually exclusive arms (outer-else
+    // vs inner-else), so every path drops at most once; the previously
+    // leaking outer-else path (valgrind 99 -> 0 on the native binary) is
+    // settled, the return-site pass stays held, and both consumers
+    // execute the placed Drops cleanly.
+    let source = r#"
+        func greet() -> string {
+            "hi"
+        }
+        func main() -> i32 {
+            let s = greet()
+            if 1 > 0 {
+                if 2 > 0 {
+                    drop(s)
+                } else {
+                    println(7)
+                }
+            } else {
+                println(8)
+            }
+            0
+        }
+    "#;
+    let label = "nested diamond sibling settle";
+    let mir = assert_admitted(source, label);
+    let main = mir
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main function present");
+    let text = main.canonical_text();
+    let placed_head = "inst:drop.pb.0:bb:if.stmt.else:function:main/node:stmt.if@";
+    assert_eq!(
+        text.matches(placed_head).count(),
+        2,
+        "outer and inner sibling heads each carry one placed Drop: {text}"
+    );
+    assert!(!text.contains("inst:drop.mb."), "{text}");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap_or_else(|error| panic!("{label} reference: {error:?}"));
+    assert_eq!(
+        reference,
+        MirRuntimeValue::Int(0),
+        "{label} reference result"
+    );
+    let bytecode =
+        compile_mir_program(&mir).unwrap_or_else(|error| panic!("{label} bytecode: {error:?}"));
+    BytecodeVM::new(bytecode)
+        .run()
+        .unwrap_or_else(|error| panic!("{label} vm: {error:?}"));
 }
 
 #[test]

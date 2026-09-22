@@ -9644,18 +9644,31 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// R6-1086: per-path Drop placement for diamond consumption.  The
-    /// R6-1085 return-site pass holds whenever a value is consumed
+    /// R6-1086/R6-1087: per-path Drop placement for arm-local consumption.
+    /// The R6-1085 return-site pass holds whenever a value is consumed
     /// anywhere, so a String transferred inside exactly one arm of an
     /// if/else diamond left the surviving path leaking.  For each
-    /// Branch-terminated block whose arms are distinct single-successor
-    /// blocks joining at the same target, a candidate value (owned String
-    /// local introduced by the entry prefix — defined on both edges —
-    /// the same universe as the R6-1085 seeds) whose consuming blocks lie
-    /// entirely within one arm's sub-graph gets a `Drop` at the tail of
-    /// the sibling arm: the surviving path is exactly the sibling's, and
-    /// the arm tail executes only on that path.  Consuming blocks
-    /// spanning both arms or reaching outside the diamond hold the value
+    /// Branch-terminated block a candidate value (owned String local
+    /// introduced by the entry prefix — defined on both edges — the same
+    /// universe as the R6-1085 seeds) whose consuming blocks lie entirely
+    /// inside one arm's reachable set and never inside the sibling's gets
+    /// a `Drop` at the head of the sibling arm: the surviving path is
+    /// exactly the sibling's, the head executes only on that path, and the
+    /// full reachable sets already contain the join and its downstream, so
+    /// any consumption there holds the value.  R6-1087 generalizes the
+    /// R6-1086 single-Goto-arm diamond to nested diamonds and multi-block
+    /// arms by judging full forward reachability instead of a
+    /// join-stopped sub-graph, and guards it: arm heads must have exactly
+    /// one predecessor (the branch), the branch must not be reachable
+    /// from its own arms (acyclic placement), and a candidate any
+    /// terminator passes as a block argument (it would escape the
+    /// id-based consumed accounting into the target's parameter
+    /// namespace), yields via `Return`, or carries into `Fault` holds.
+    /// Placements read the original consumption set only: a sibling arm
+    /// admitted for placement holds zero consumption of the value by
+    /// construction, so placements of one value always live in mutually
+    /// exclusive arms and no path executes two of them.  Consumption
+    /// spanning both arms or predating the branch holds the value
     /// conservatively.  Placed Drops join the R6-1085 consumed
     /// computation, which then excludes the value from its seeds.
     fn settle_per_path_owned_string_drops(
@@ -9737,44 +9750,94 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+        // R6-1087: a candidate any terminator transfers as a block
+        // argument escapes the id-based consumed accounting into the
+        // target's parameter namespace; a candidate any `Return` yields
+        // or `Fault` carries would see the placed Drop as a use-after-
+        // move on that path.  All three hold.
+        let mut held: BTreeSet<MirValueId> = BTreeSet::new();
+        for block in self.blocks.values() {
+            match block.terminator.as_ref() {
+                Some(MirTerminator::Return {
+                    value: Some(value), ..
+                }) => {
+                    held.insert(value.clone());
+                }
+                Some(MirTerminator::Goto { arguments, .. }) => {
+                    held.extend(arguments.iter().cloned());
+                }
+                Some(MirTerminator::Branch {
+                    then_arguments,
+                    else_arguments,
+                    ..
+                }) => {
+                    held.extend(then_arguments.iter().cloned());
+                    held.extend(else_arguments.iter().cloned());
+                }
+                Some(MirTerminator::Switch { arms, .. })
+                | Some(MirTerminator::SwitchMove { arms, .. }) => {
+                    for arm in arms {
+                        held.extend(arm.arguments.iter().cloned());
+                    }
+                }
+                Some(MirTerminator::Fault { value: Some(value) }) => {
+                    held.insert(value.clone());
+                }
+                _ => {}
+            }
+        }
+        candidates.retain(|value| !held.contains(value));
+        if candidates.is_empty() {
+            return;
+        }
+        let successors = |self_: &Self, block_id: &MirBlockId, out: &mut Vec<MirBlockId>| {
+            let Some(block) = self_.blocks.get(block_id) else {
+                return;
+            };
+            match block.terminator.as_ref() {
+                Some(MirTerminator::Goto { target, .. }) => out.push(target.clone()),
+                Some(MirTerminator::Branch {
+                    then_target,
+                    else_target,
+                    ..
+                }) => {
+                    out.push(then_target.clone());
+                    out.push(else_target.clone());
+                }
+                Some(MirTerminator::Switch { arms, .. })
+                | Some(MirTerminator::SwitchMove { arms, .. }) => {
+                    out.extend(arms.iter().map(|arm| arm.target.clone()));
+                }
+                _ => {}
+            }
+        };
+        let reachable = |self_: &Self, head: &MirBlockId| -> BTreeSet<MirBlockId> {
+            let mut visited: BTreeSet<MirBlockId> = BTreeSet::new();
+            let mut queue: Vec<MirBlockId> = vec![head.clone()];
+            while let Some(block_id) = queue.pop() {
+                if !visited.insert(block_id.clone()) {
+                    continue;
+                }
+                let mut next: Vec<MirBlockId> = Vec::new();
+                successors(self_, &block_id, &mut next);
+                queue.extend(next);
+            }
+            visited
+        };
+        let mut predecessor_counts: BTreeMap<MirBlockId, usize> = BTreeMap::new();
+        for block_id in self.blocks.keys() {
+            let mut next: Vec<MirBlockId> = Vec::new();
+            successors(self, block_id, &mut next);
+            for target in next {
+                *predecessor_counts.entry(target).or_default() += 1;
+            }
+        }
         let branch_blocks: Vec<MirBlockId> = self
             .blocks
             .iter()
             .filter(|(_, block)| matches!(block.terminator, Some(MirTerminator::Branch { .. })))
             .map(|(block_id, _)| block_id.clone())
             .collect();
-        let goto_target = |self_: &Self, block_id: &MirBlockId| -> Option<MirBlockId> {
-            match self_.blocks.get(block_id)?.terminator.as_ref()? {
-                MirTerminator::Goto { target, .. } => Some(target.clone()),
-                _ => None,
-            }
-        };
-        let sub_graph =
-            |self_: &Self, arm: &MirBlockId, join: &MirBlockId| -> BTreeSet<MirBlockId> {
-                let mut visited: BTreeSet<MirBlockId> = BTreeSet::new();
-                let mut queue: Vec<MirBlockId> = vec![arm.clone()];
-                while let Some(block_id) = queue.pop() {
-                    if block_id == *join || !visited.insert(block_id.clone()) {
-                        continue;
-                    }
-                    let Some(block) = self_.blocks.get(&block_id) else {
-                        continue;
-                    };
-                    match block.terminator.as_ref() {
-                        Some(MirTerminator::Goto { target, .. }) => queue.push(target.clone()),
-                        Some(MirTerminator::Branch {
-                            then_target,
-                            else_target,
-                            ..
-                        }) => {
-                            queue.push(then_target.clone());
-                            queue.push(else_target.clone());
-                        }
-                        _ => {}
-                    }
-                }
-                visited
-            };
         let mut placed: Vec<(MirBlockId, Vec<MirValueId>)> = Vec::new();
         for branch_block in &branch_blocks {
             let Some((then_target, else_target)) =
@@ -9794,26 +9857,45 @@ impl<'a> Lowerer<'a> {
             if then_target == else_target {
                 continue;
             }
-            let (Some(then_join), Some(else_join)) = (
-                goto_target(self, &then_target),
-                goto_target(self, &else_target),
-            ) else {
-                continue;
+            // R6-1087: a single-predecessor arm head keeps the Drop off
+            // every other path into the block, and a branch unreachable
+            // from its own arms keeps each head to at most one execution
+            // per call.  Shapes violating either hold.
+            let single_predecessor = |block_id: &MirBlockId| {
+                predecessor_counts
+                    .get(block_id)
+                    .is_some_and(|count| *count == 1)
             };
-            if then_join != else_join {
+            if !single_predecessor(&then_target) || !single_predecessor(&else_target) {
                 continue;
             }
-            let sub_then = sub_graph(self, &then_target, &then_join);
-            let sub_else = sub_graph(self, &else_target, &else_join);
+            let reach_then = reachable(self, &then_target);
+            let reach_else = reachable(self, &else_target);
+            if reach_then.contains(branch_block) || reach_else.contains(branch_block) {
+                continue;
+            }
             for value in &candidates {
                 let Some(consumed) = consumed_blocks.get(value) else {
                     continue;
                 };
-                let in_then = consumed.iter().all(|block| sub_then.contains(block));
-                let in_else = consumed.iter().all(|block| sub_else.contains(block));
-                if in_then && !in_else {
+                // Every consuming block must lie inside the taken arm's
+                // reachable set (consumption predating the branch sits in
+                // neither set and holds), and none inside the sibling's —
+                // the full sets contain the join and its downstream, so
+                // any consumption there holds too.  Placements read the
+                // original consumption set without feeding the placed
+                // Drops back: a sibling arm admitted for placement holds
+                // zero consumption of the value by construction, so a
+                // branch nested inside it can never place a second Drop
+                // on the same path, and placements of one value always
+                // live in mutually exclusive arms.
+                let inside_then = consumed.iter().all(|block| reach_then.contains(block));
+                let touches_else = consumed.iter().any(|block| reach_else.contains(block));
+                let inside_else = consumed.iter().all(|block| reach_else.contains(block));
+                let touches_then = consumed.iter().any(|block| reach_then.contains(block));
+                if inside_then && !touches_else {
                     placed.push((else_target.clone(), vec![value.clone()]));
-                } else if in_else && !in_then {
+                } else if inside_else && !touches_then {
                     placed.push((then_target.clone(), vec![value.clone()]));
                 }
             }

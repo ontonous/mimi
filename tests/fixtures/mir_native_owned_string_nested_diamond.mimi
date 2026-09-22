@@ -1,0 +1,16 @@
+func greet() -> string { "hi" }
+func main() -> i32 {
+    ensures: result == 0
+    let s = greet()
+    if 1 > 0 {
+        if 2 > 0 {
+            drop(s)
+            println(3)
+        } else {
+            println(7)
+        }
+    } else {
+        println(8)
+    }
+    0
+}
