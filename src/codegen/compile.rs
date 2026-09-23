@@ -1343,7 +1343,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
     ) -> MimiResult<()> {
         // C1 (permanent): the fifth pass compiles ineligible body classes
-        // (capturing lambdas, generics, async, extern ABI wrappers) from the
+        // (capturing lambdas, generics, extern ABI wrappers) from the
         // surface AST. The resolved native emitter handles the eligible subset;
         // The tagged compatibility owner provides the permanent remainder to
         // the legacy emitter.
@@ -1541,14 +1541,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(())
         })?;
-        // v0.28.26 — Forward-declare all non-extern, non-async, non-comptime
+        // v0.28.26 — Forward-declare all non-extern, non-comptime
         // user functions before any bodies are compiled. This lets functions
         // (including those in imported modules) call later-defined functions.
         // Iterate over file.items to keep declaration order deterministic and
         // match the order used for the rest of codegen.
         for item in &file.items {
             if let Item::Func(f) = item {
-                if f.is_comptime || f.is_async || f.extern_abi.is_some() {
+                if f.is_comptime || f.extern_abi.is_some() {
                     continue;
                 }
                 if matches!(
@@ -1619,7 +1619,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // resolved native emitter (fourth pass) are skipped via the
         // count_basic_blocks != 0 guard in compile_func_legacy.
         // Permanent ineligible body classes: capturing lambdas, generics,
-        // async, extern ABI wrappers, view/mutate borrow params (non-self).
+        // extern ABI wrappers, view/mutate borrow params (non-self).
         // v0.28.21 — `comptime func` items are folded at codegen-start by
         // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
         // (the caller resolves them via the cached `comptime_values` map,
