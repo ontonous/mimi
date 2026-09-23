@@ -811,6 +811,15 @@ pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarC
 /// graph may still be a compatibility input, but an unsupported List operation
 /// shape must not silently reach the legacy emitter after MIR construction
 /// fails. List `len` retains the pre-existing compatibility policy here.
+///
+/// Island-closure policy anchor (R6-1104, unified with the Option-island
+/// if-in-arm BLOCKED face): dispositions are chosen by ownership/contract
+/// delta, then migration blast radius, then analysis cost. `len` is a
+/// read-only borrow with no ownership obligation across the boundary
+/// (SD-2 spirit) → Compatibility Exemption; `reverse`/`concat` carry
+/// transform obligations → Hard-Reject, same policy line as aggregate FFI
+/// declaration rejection. Exemptions require a contemporaneous in-code
+/// record like this one.
 pub fn has_unsupported_list_reverse_candidate(program: &CheckedProgram) -> bool {
     scan_scalar_collection_admission(program).has_unsupported_list_reverse_candidate
 }

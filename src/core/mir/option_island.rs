@@ -288,6 +288,15 @@ fn is_option_string_unwrap_call(
 /// hard-rejects under admission. Opening this face therefore requires an
 /// island-closure ruling on the if-hidden→hard-reject migration, not a
 /// drive-by closure widening.
+///
+/// Island-closure policy anchor (R6-1104, unified with the List `len`
+/// exemption): an identified operation face gets exactly one of three
+/// dispositions — Hard-Reject, Compatibility Exemption, or Conditional
+/// Admission — chosen by three tests in order: ownership/contract delta
+/// across the boundary, then migration blast radius on living programs,
+/// then analysis cost. This face: obligation present (a1 flips), blast
+/// radius non-zero (living proof below), conditional admission needs
+/// output-reachability analysis → stays BLOCKED pending an explicit ruling.
 pub(crate) fn option_body_is_closed(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
