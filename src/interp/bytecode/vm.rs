@@ -323,6 +323,15 @@ impl BytecodeVM {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_canonical_ffi_route_receipt_anchor_for_test_only(
+        &mut self,
+        anchor: Option<crate::core::mir::CanonicalMirRouteReceipt>,
+    ) {
+        let program = std::sync::Arc::make_mut(&mut self.program);
+        program.canonical_ffi_route_receipt = anchor;
+    }
+
+    #[cfg(test)]
     pub(crate) fn debug_stack_state(&self) -> (usize, usize) {
         (self.stack.len(), self.depth)
     }

@@ -12646,6 +12646,88 @@ mod tests {
         );
     }
 
+    /// R6-1107 L2 negatives: the two receipt-anchoring branches the pinned
+    /// test does not reach, plus the empty-binding-manifest table shape.
+    /// A program anchor without matching binding receipts, a binding receipt
+    /// without a program anchor, and a descriptor table without any binding
+    /// manifest must all fail closed at the VM boundary with
+    /// MIR_ROUTE_RECEIPT_ERROR_CODE before any dynamic library load.
+    #[test]
+    fn canonical_scalar_ffi_route_receipt_anchor_gaps_fail_closed() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(
+            Lexer::new(source)
+                .tokenize()
+                .expect("lex scalar FFI anchor gaps"),
+        )
+        .parse_file()
+        .expect("parse scalar FFI anchor gaps");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI anchor gaps");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("canonical scalar FFI anchor gaps MIR");
+        let receipt = mir.route_receipt("r6-1107-bytecode-route-v1");
+        let bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+            .expect("canonical scalar FFI anchor gaps bytecode");
+        let descriptors = bytecode.canonical_ffi.clone();
+
+        // Act 1: descriptor table without any binding manifest.
+        let mut vm = BytecodeVM::new(bytecode.clone());
+        vm.replace_canonical_ffi_tables_for_test_only(descriptors.clone(), Vec::new());
+        let error = vm
+            .run_value()
+            .expect_err("descriptor table without binding manifest must fail closed");
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("canonical FFI binding manifest is missing"),
+            "{error}"
+        );
+
+        // Act 2: program anchor present, every binding receipt stripped —
+        // the anchor would silently dangle if the per-site walk ran.
+        let mut unanchored_bindings = bytecode.canonical_ffi_bindings.clone();
+        for binding in &mut unanchored_bindings {
+            binding.route_receipt = None;
+        }
+        let mut vm = BytecodeVM::new(bytecode.clone());
+        vm.replace_canonical_ffi_tables_for_test_only(descriptors.clone(), unanchored_bindings);
+        let error = vm
+            .run_value()
+            .expect_err("dangling program anchor must fail closed");
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("canonical FFI program route receipt is missing from binding manifest"),
+            "{error}"
+        );
+
+        // Act 3: binding receipts present, program anchor removed — a
+        // binding snapshot must never self-certify without the anchor.
+        let mut vm = BytecodeVM::new(bytecode);
+        vm.replace_canonical_ffi_route_receipt_anchor_for_test_only(None);
+        let error = vm
+            .run_value()
+            .expect_err("binding receipt without program anchor must fail closed");
+        assert_eq!(
+            error.diagnostic_code(),
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("canonical FFI binding route receipt has no program anchor"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn canonical_scalar_ffi_route_manifest_replay_keeps_manifest_diagnostic_code() {
         let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
