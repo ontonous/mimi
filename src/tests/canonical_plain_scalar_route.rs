@@ -442,3 +442,214 @@ fn prelude_callee_keeps_mixed_boundary() {
         other => panic!("prelude callee must stay a compatibility input, got: {other:?}"),
     }
 }
+
+// ── R6-1109: deterministic generative scalar matrix (goal ⑤) ──────────
+//
+// splitmix64-seeded straight-line i32 programs driven through the full
+// three-consumer differential.  The generator simulates each program in
+// Rust (Mimi i32 `/` truncates toward zero and `%` follows the dividend's
+// sign exactly like Rust), so expected stdout is computed, not hardcoded;
+// the consumers must agree with it and with each other.  Overflow is
+// excluded by construction here; the dedicated overflow family below
+// covers the generative trap side.
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+}
+
+struct GenerativeProgram {
+    source: String,
+    expected_stdout: String,
+}
+
+fn generate_overflow_free_program(seed: u64) -> GenerativeProgram {
+    const STATEMENTS: u64 = 10;
+    let mut rng = SplitMix64(seed);
+    let mut acc: i32 = rng.below(51) as i32;
+    let mut source = format!("func main() -> i32 {{\n    let mut acc = {acc}\n");
+    // The initial value is not printed; only the post-statement printlns are.
+    let mut expected = String::new();
+    let mut multiplications = 0u64;
+    for _ in 0..STATEMENTS {
+        let op = rng.below(5);
+        // Guarded so the simulation can never overflow: `*` appears at most
+        // three times and is rerouted to `+` whenever the magnitude could
+        // leave comfortable i32 headroom.
+        let op = if op == 2 && (multiplications == 3 || acc.abs() > 100_000) {
+            0
+        } else {
+            op
+        };
+        let (text, next) = match op {
+            0 => {
+                let c = rng.below(20) + 1;
+                (format!("acc = acc + {c}"), acc.wrapping_add(c as i32))
+            }
+            1 => {
+                let c = rng.below(20) + 1;
+                (format!("acc = acc - {c}"), acc.wrapping_sub(c as i32))
+            }
+            2 => {
+                let c = rng.below(2) + 2;
+                multiplications += 1;
+                (format!("acc = acc * {c}"), acc.wrapping_mul(c as i32))
+            }
+            3 => {
+                let c = rng.below(8) + 2;
+                (format!("acc = acc / {c}"), acc.wrapping_div(c as i32))
+            }
+            _ => {
+                let c = rng.below(8) + 2;
+                (format!("acc = acc % {c}"), acc.wrapping_rem(c as i32))
+            }
+        };
+        acc = next;
+        source.push_str(&format!("    {text}\n    println(acc)\n"));
+        expected.push_str(&format!("{acc}\n"));
+    }
+    source.push_str("    0\n}\n");
+    GenerativeProgram {
+        source,
+        expected_stdout: expected,
+    }
+}
+
+#[test]
+fn generative_scalar_programs_agree_across_consumers() {
+    const PROGRAM_COUNT: u64 = 48;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for seed in 1..=PROGRAM_COUNT {
+        let label = format!("generative scalar seed {seed}");
+        let program = generate_overflow_free_program(seed);
+        let (checked, excluded_sources) = checked_program_of(&program.source);
+        let route =
+            crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+                .unwrap_or_else(|error| panic!("{label} route materialization failed: {error:?}"));
+        assert!(
+            matches!(
+                route.admission.collection,
+                crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+            ),
+            "{label} must stay inside the plain-scalar island: {:?}",
+            route.admission.collection
+        );
+        let mir = route.program;
+        let digest = mir.canonical_digest();
+        crate::verifier::validate_mir_capabilities(&mir)
+            .unwrap_or_else(|errors| panic!("{label} capability gate: {errors:?}"));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("{label} reference failed: {error}"));
+        assert_eq!(
+            reference.output, program.expected_stdout,
+            "{label} reference"
+        );
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+        assert!(bytecode.ast.is_none(), "{label} bytecode must be AST-free");
+        let mut vm = BytecodeVM::new(bytecode);
+        vm.run_value()
+            .unwrap_or_else(|error| panic!("{label} bytecode failed: {error}"));
+        assert_eq!(vm.stdout(), program.expected_stdout, "{label} bytecode");
+
+        // Native compiles are sampled deterministically (every 4th seed) to
+        // keep the suite budget bounded; reference/bytecode cover all seeds.
+        if seed % 4 == 0 && can_link() {
+            let context = inkwell::context::Context::create();
+            let mut generator =
+                crate::codegen::CodeGenerator::new(&context, &format!("mir_generative_{seed}"));
+            generator
+                .compile_mir_native(&mir)
+                .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+            generator
+                .module
+                .verify()
+                .unwrap_or_else(|error| panic!("{label} native module verifies: {error}"));
+            let native = link_and_observe_canonical_mir(&generator)
+                .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+            assert_eq!(native.exit_code, Some(0), "{label} native exit");
+            assert_eq!(
+                native.stdout, program.expected_stdout,
+                "{label} native stdout"
+            );
+            assert_eq!(native.stderr, "", "{label} native stderr");
+        }
+        assert_eq!(mir.canonical_digest(), digest, "{label} digest stability");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+// Generative negative family: seeded i32 self-multiplication chains that
+// deterministically overflow must trap identically in every consumer
+// (SD-7 checked arithmetic, E0802-class) instead of wrapping silently.
+#[test]
+fn generative_scalar_overflow_traps_agree_across_consumers() {
+    const TRAP_PROGRAMS: u64 = 8;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for seed in 0..TRAP_PROGRAMS {
+        let label = format!("generative overflow seed {seed}");
+        let mut rng = SplitMix64(0x0F1_2E3 ^ seed);
+        let base = 46_342 + rng.below(500_000) as i32;
+        let source = format!(
+            "func main() -> i32 {{\n    let mut acc = {base}\n    acc = acc * acc\n    acc = acc * acc\n    0\n}}\n"
+        );
+        let (checked, excluded_sources) = checked_program_of(&source);
+        let route =
+            crate::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
+                .unwrap_or_else(|error| panic!("{label} route materialization failed: {error:?}"));
+        let mir = route.program;
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&NodeId("function:main".into()), &[])
+            .expect_err("{label} reference must trap on overflow");
+        let reference_text = reference.to_string();
+        assert!(
+            reference_text.contains("E0802") || reference_text.contains("overflow"),
+            "{label} reference trap must name the overflow: {reference_text}"
+        );
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("{label} bytecode compilation failed: {error:?}"));
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("{label} bytecode must trap on overflow");
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("E0802") || error_text.contains("overflow"),
+            "{label} bytecode trap must name the overflow: {error_text}"
+        );
+
+        if can_link() {
+            let context = inkwell::context::Context::create();
+            let mut generator = crate::codegen::CodeGenerator::new(
+                &context,
+                &format!("mir_generative_overflow_{seed}"),
+            );
+            generator
+                .compile_mir_native(&mir)
+                .unwrap_or_else(|error| panic!("{label} native emission failed: {error:?}"));
+            let native = link_and_observe_canonical_mir(&generator)
+                .unwrap_or_else(|error| panic!("{label} native execution failed: {error}"));
+            assert_ne!(
+                native.exit_code,
+                Some(0),
+                "{label} native must not exit cleanly on overflow: {native:?}"
+            );
+        }
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
