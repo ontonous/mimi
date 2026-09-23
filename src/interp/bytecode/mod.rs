@@ -77,6 +77,55 @@ mod tests {
         assert_eq!(run_program(std::sync::Arc::new(prog.clone())), Ok(42));
     }
 
+    /// R6-1106 L2 negative: a malformed program whose binary op references
+    /// a register the function never allocated must fail closed with a
+    /// graceful, role-attributed diagnostic — never silently executed,
+    /// never a process-killing panic (mirrors the
+    /// `bench::vm_rejects_forged_*` contract for hand-built programs).
+    #[test]
+    fn vm_rejects_out_of_range_register_in_binary_op() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let r0 = main.alloc_reg();
+        let r1 = main.alloc_reg();
+        let c1 = main.add_const(ConstValue::Int(10));
+        main.emit(Op::LoadConst { rd: r0, idx: c1 });
+        main.emit(Op::LoadConst { rd: r1, idx: c1 });
+        // r7 is never allocated: malformed compiler output.
+        main.emit(Op::AddInt {
+            rd: r0,
+            ra: r1,
+            rb: 7,
+        });
+        main.emit(Op::Ret { ra: r0 });
+
+        let prog = BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            canonical_ffi_route_receipt: None,
+            functions: vec![main],
+            entry: 0,
+            builtin_names: vec![],
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        };
+        let error = run_program(std::sync::Arc::new(prog))
+            .expect_err("a malformed program must be rejected, never silently executed");
+        assert!(
+            error.contains("add-int rhs source register 7 out of bounds (frame has 2 register(s))"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn vm_integer_arithmetic() {
         // func main() -> i32 {

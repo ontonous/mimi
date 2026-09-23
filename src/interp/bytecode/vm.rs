@@ -6367,26 +6367,32 @@ impl BytecodeVM {
         Ok(())
     }
 
-    /// R6-1105: hot-path variant of `ensure_reg` — the operation/role
-    /// composition happens only in the error branch, never on the happy
-    /// path. `ensure_binary_regs`-style helpers used to `format!` three
-    /// role strings per arithmetic op (~33% of VM cycles on the dsp
-    /// perf-gate loop, all of it discarded unless the check failed).
-    /// The composed message is byte-identical to
-    /// `ensure_reg(r, &format!("{operation} {role}"))`.
-    fn ensure_reg_composed(&self, r: Reg, operation: &str, role: &str) -> Result<(), InterpError> {
+    // R6-1106: the fused helpers below replace the R6-1105 lazy-format shape
+    // (per-register `ensure_reg_composed` calls whose operation/role strings
+    // were only composed in the error branch — itself a fix for ~33% of VM
+    // cycles once spent `format!`ing three role strings per arithmetic op).
+    // Each fused helper does one frame-length load and one compare on the
+    // largest register; the failure branch reconstructs the per-role
+    // diagnostic (byte-identical to the sequential checks) scanning positions
+    // in the same order, so the first offender's message is unchanged.
+    // Checks stay runtime `Err`s on all build profiles: malformed bytecode
+    // must fail closed with a graceful diagnostic (the
+    // `bench::vm_rejects_forged_*` family pins exactly that), never a
+    // release `panic = "abort"` process kill.
+
+    fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
         let len = self.cur_frame().regs.len();
-        if (r as usize) >= len {
+        if (rd as usize).max(ra as usize) >= len {
+            let (r, role) = if (rd as usize) >= len {
+                (rd, "destination")
+            } else {
+                (ra, "source")
+            };
             return Err(InterpError::new(format!(
                 "{operation} {role} register {r} out of bounds (frame has {len} register(s))"
             )));
         }
         Ok(())
-    }
-
-    fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
-        self.ensure_reg_composed(rd, operation, "destination")?;
-        self.ensure_reg_composed(ra, operation, "source")
     }
 
     fn ensure_binary_regs(
@@ -6396,14 +6402,35 @@ impl BytecodeVM {
         rb: Reg,
         operation: &str,
     ) -> Result<(), InterpError> {
-        self.ensure_reg_composed(rd, operation, "destination")?;
-        self.ensure_reg_composed(ra, operation, "lhs source")?;
-        self.ensure_reg_composed(rb, operation, "rhs source")
+        let len = self.cur_frame().regs.len();
+        if (rd as usize).max(ra as usize).max(rb as usize) >= len {
+            let (r, role) = if (rd as usize) >= len {
+                (rd, "destination")
+            } else if (ra as usize) >= len {
+                (ra, "lhs source")
+            } else {
+                (rb, "rhs source")
+            };
+            return Err(InterpError::new(format!(
+                "{operation} {role} register {r} out of bounds (frame has {len} register(s))"
+            )));
+        }
+        Ok(())
     }
 
     fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
-        self.ensure_reg_composed(ra, operation, "lhs source")?;
-        self.ensure_reg_composed(rb, operation, "rhs source")
+        let len = self.cur_frame().regs.len();
+        if (ra as usize).max(rb as usize) >= len {
+            let (r, role) = if (ra as usize) >= len {
+                (ra, "lhs source")
+            } else {
+                (rb, "rhs source")
+            };
+            return Err(InterpError::new(format!(
+                "{operation} {role} register {r} out of bounds (frame has {len} register(s))"
+            )));
+        }
+        Ok(())
     }
 
     fn ensure_arg_window(&self, base: Reg, count: u16, role: &str) -> Result<(), InterpError> {
@@ -6425,9 +6452,20 @@ impl BytecodeVM {
         rc: Reg,
         operation: &str,
     ) -> Result<(), InterpError> {
-        self.ensure_reg_composed(ra, operation, "target source")?;
-        self.ensure_reg_composed(rb, operation, "index source")?;
-        self.ensure_reg_composed(rc, operation, "value source")
+        let len = self.cur_frame().regs.len();
+        if (ra as usize).max(rb as usize).max(rc as usize) >= len {
+            let (r, role) = if (ra as usize) >= len {
+                (ra, "target source")
+            } else if (rb as usize) >= len {
+                (rb, "index source")
+            } else {
+                (rc, "value source")
+            };
+            return Err(InterpError::new(format!(
+                "{operation} {role} register {r} out of bounds (frame has {len} register(s))"
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn get_reg(&self, r: Reg) -> &Value {
