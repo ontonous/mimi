@@ -214,6 +214,36 @@ owner_closed_route_guard \
     verify_closed_mir_program \
     'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
 
+# Direct CodeGenerator callers must enforce the same called-extern boundary
+# as CLI dispatch before the migrated-island probe can return a compatibility
+# disposition to the resolved/legacy emitters.
+direct_native_ffi_boundary_guard() {
+    local context boundary_line route_line
+    context="$(sed -n '/pub fn compile_checked(/,/^    fn try_compile_exact_migrated_mir_island(/p' \
+        "$ROOT_DIR/src/codegen/compile.rs")"
+    for pattern in \
+        'scalar_ffi_boundary_reason(program)' \
+        'MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE' \
+        'canonical scalar FFI declaration boundary:'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=direct_native_ffi_boundary_guard_missing=src/codegen/compile.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    boundary_line="$(printf '%s\n' "$context" | rg -n 'scalar_ffi_boundary_reason\(program\)' | head -n1 | cut -d: -f1)"
+    route_line="$(printf '%s\n' "$context" | rg -n 'try_compile_exact_migrated_mir_island\(program\)' | head -n1 | cut -d: -f1)"
+    if [ -z "$boundary_line" ] || [ -z "$route_line" ] || [ "$boundary_line" -ge "$route_line" ]; then
+        printf 'owner_audit_error=direct_native_ffi_boundary_guard_not_before_route_probe\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'direct_native_ffi_boundary_guard=before-route-probe-and-legacy-disposition consumer=src/codegen/compile.rs::pub fn compile_checked(\n'
+}
+
+direct_native_ffi_boundary_guard
+
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \

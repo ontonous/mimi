@@ -28,6 +28,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        // Keep the public CheckedProgram API on the same FFI boundary as CLI
+        // dispatch. `Compatibility` from canonical MIR means this declaration
+        // is outside the migrated scalar C ABI; treating that as permission to
+        // enter the resolved/legacy emitters would silently broaden the FFI
+        // profile and bypass its checker-owned receipt.
+        if let Some(reason) = crate::core::mir::scalar_ffi_boundary_reason(program) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
+                format!("canonical scalar FFI declaration boundary: {reason}"),
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
         // S12/S15/S25/S30/R6-15: the scalar FFI, S8 Flow, scalar collection, flat Copy-record,
         // exact non-Copy Option<string>, and exact nested Option-tuple production
         // islands have crossed the default route boundary.  This direct

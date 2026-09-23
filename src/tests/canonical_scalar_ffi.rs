@@ -18827,6 +18827,29 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
             other => panic!("unsupported declaration must remain compatibility: {other:?}"),
         }
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        // The public native CodeGenerator API must enforce the same FFI
+        // boundary as CLI dispatch. Otherwise a declaration outside the
+        // migrated scalar C ABI can fall through its "Compatibility" MIR
+        // result into the old resolved/AST emitter.
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_ffi_boundary");
+        let diagnostics = generator
+            .compile_checked(&checked)
+            .expect_err("direct native API must reject unsupported called FFI declarations");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code.as_deref()
+                    == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                    && diagnostic.message.contains(expected)
+            }),
+            "direct native API must preserve the precise FFI boundary '{expected}': {diagnostics:?}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "rejected FFI declarations must not open the legacy body"
+        );
     }
 }
 

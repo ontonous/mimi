@@ -140,6 +140,51 @@ fn run_both(src: &str, expected_stdout: &str) {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// Assert that run/build reject an Option<i64> program which is outside the
+/// closed S116 projection profile, before any compatibility backend can run.
+fn assert_option_i64_outside_s116_rejected(src: &str) {
+    let dir = temp_dir();
+    let src_path = dir.join("program.mimi");
+    fs::write(&src_path, src).expect("write source");
+
+    for command in ["run", "build"] {
+        let mut process = Command::new(mimi_bin());
+        process
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&src_path);
+        if command == "build" {
+            process.arg("-o").arg(dir.join("program"));
+        }
+        let output = process.output().expect("spawn mimi command");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "mimi {command} unexpectedly accepted an out-of-profile program\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(stdout.trim().is_empty(), "mimi {command}: {stdout}");
+        assert!(
+            stderr.contains("default Canonical MIR route rejected"),
+            "mimi {command}: {stderr}"
+        );
+        assert!(
+            stderr.contains("S116 Copy Option<i64>"),
+            "mimi {command}: {stderr}"
+        );
+        assert!(
+            stderr.contains("outside complete coverage"),
+            "mimi {command}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("legacy") && !stderr.contains("bytecode runtime error"),
+            "mimi {command} reached a compatibility/runtime fallback:\n{stderr}"
+        );
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 // ===================== Literal sub-pattern fall-through =====================
 // 0.35.7: `B(false)` under a `B(true)` arm must fall through to the next arm,
 // not abort. Before the fix the arm was entered on tag match alone and the
@@ -804,13 +849,11 @@ fn real_world_resolved_mixed_dispatch() {
     );
 }
 
-/// Option<i64> construction (Some/None) through the resolved native emitter.
-/// 0.32.1: Option/Result types are now eligible. This test verifies
-/// construction + return without match (match Constructor patterns are
-/// still legacy-only).
+/// Keep the full safe_div/unwrap_or composition outside the narrow S116
+/// Option<i64> island. The route must reject it instead of falling back.
 #[test]
-fn real_world_resolved_option_construct() {
-    run_both(
+fn real_world_option_construct_outside_s116_profile_is_rejected() {
+    assert_option_i64_outside_s116_rejected(
         r#"
         func safe_div(a: i64, b: i64) -> Option<i64> {
             if b == 0 { None } else { Some(a / b) }
@@ -829,7 +872,6 @@ fn real_world_resolved_option_construct() {
             0
         }
     "#,
-        "3\n-1",
     );
 }
 
@@ -890,11 +932,11 @@ fn real_world_resolved_record_field() {
     );
 }
 
-/// Option match with Constructor patterns (Some/None) through the resolved
-/// native emitter. 0.32.6: Constructor patterns are now eligible.
+/// Keep helper-mediated constructor matching outside the narrow S116
+/// Option<i64> island. The route must reject it instead of falling back.
 #[test]
-fn real_world_resolved_option_match_ctor() {
-    run_both(
+fn real_world_option_match_ctor_outside_s116_profile_is_rejected() {
+    assert_option_i64_outside_s116_rejected(
         r#"
         func safe_div(a: i64, b: i64) -> Option<i64> {
             if b == 0 { None } else { Some(a / b) }
@@ -913,7 +955,6 @@ fn real_world_resolved_option_match_ctor() {
             0
         }
     "#,
-        "3\n-1",
     );
 }
 

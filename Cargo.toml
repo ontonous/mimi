@@ -39,7 +39,10 @@ regex = "1"
 blake3 = "1"
 
 [features]
-default = []
+# All ordinary build, test, and lint entrypoints use the host LLVM 18 shared
+# library configuration. Callers must opt out explicitly with
+# --no-default-features before selecting an alternate LLVM linking mode.
+default = ["llvm18-host-dynamic"]
 no_std = []
 # Enable deliberate UB test symbols (test_segfault / test_abort) outside cargo test.
 test_ub_symbols = []

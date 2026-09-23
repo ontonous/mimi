@@ -10576,33 +10576,42 @@ fn dual_exec_pipe() {
 
 #[test]
 fn dual_ffi_libc_symbols_default_resolution_parity() {
-    // 0.39.136 (L1): the VM previously demanded MIMI_FFI_LIB for EVERY extern
-    // call while production native binaries link libc directly — identical
-    // programs diverged (VM E0800 vs native success). The VM now falls back to
-    // the system libc when the variable is unset; custom libraries still set
-    // it explicitly. Locks abs/strlen parity with no environment setup.
+    // R6-15: direct scalar C FFI uses the shared canonical route and resolves
+    // libc when MIMI_FFI_LIB is unset. String FFI remains outside this profile
+    // and must be rejected before the direct native API can open a legacy body.
     if !can_link() {
         return;
     }
     let _guard = super::FfiEnvGuard::lock();
     std::env::remove_var("MIMI_FFI_LIB");
-    let src = r#"
-        extern "C" {
-            func abs(x: i32) -> i32;
-            func strlen(s: string) -> i64;
-        }
+    let scalar_src = r#"
+        extern "C" { func abs(x: i32) -> i32; }
         func main() -> i32 {
             println(abs(-42))
-            println(strlen("hello"))
             0
         }
     "#;
-    // Native side: libc is linked implicitly.
-    let native = checked_codegen_compile_and_run(src).expect("native libc extern");
-    assert_eq!(native.trim(), "42\n5", "native(codegen) libc externs");
-    // VM side: must resolve via the default-libc fallback, no env var.
-    let (_, vm) = run_source_bytecode_with_stdout(src);
-    assert_eq!(vm.trim(), "42\n5", "vm default libc resolution");
+    let native = checked_codegen_compile_and_run(scalar_src).expect("native libc scalar extern");
+    assert_eq!(native.trim(), "42", "native(codegen) libc scalar extern");
+    let (_, vm) = run_source_bytecode_with_stdout(scalar_src);
+    assert_eq!(vm.trim(), "42", "vm default libc resolution");
+
+    let string_src = r#"
+        extern "C" { func strlen(s: string) -> i64; }
+        func main() -> i32 { println(strlen("hello")); 0 }
+    "#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let rejection = checked_codegen_compile_and_run(string_src)
+        .expect_err("direct native API must reject string FFI outside scalar MIR");
+    assert!(
+        rejection.contains("MIR-FFI-DECLARATION-001")
+            && rejection.contains("parameter type is outside canonical scalar FFI"),
+        "unexpected string FFI boundary: {rejection}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "out-of-profile string FFI must not open a legacy body"
+    );
 }
 
 #[test]
