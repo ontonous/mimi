@@ -152,6 +152,10 @@ const MAX_DEPTH: usize = 768;
 /// Read a register value as f64 (Float directly, Int widened). Used by the
 /// float arithmetic ops to release the frame borrow before calling the
 /// `&self` method `check_float` (H1 fix).
+///
+/// R6-1108: `#[inline]` — perf showed 5.6% of VM cycles in this symbol
+/// alone because LLVM declined to fold it into the already-huge exec_loop.
+#[inline(always)]
 fn reg_as_f64(v: &Value) -> Result<f64, InterpError> {
     match v {
         Value::Float(f) => Ok(*f),
@@ -1590,12 +1594,11 @@ impl BytecodeVM {
                         )
                     };
                     let r = a + b;
-                    self.check_float(a, "+")?;
-                    self.check_float(b, "+")?;
                     // H1 fix (SD-9): route through check_float so `ieee_float { }`
                     // suspends the finiteness trap for basic arithmetic too
                     // (was: hardcoded is_nan/is_infinite, ignoring ieee_depth).
-                    self.check_float(r, "+")?;
+                    // R6-1108: three per-operand calls fused into one branch.
+                    self.check_float_binary(a, b, r, "+")?;
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::SubFloat { rd, ra, rb } => {
@@ -1608,9 +1611,7 @@ impl BytecodeVM {
                         )
                     };
                     let r = a - b;
-                    self.check_float(a, "-")?;
-                    self.check_float(b, "-")?;
-                    self.check_float(r, "-")?;
+                    self.check_float_binary(a, b, r, "-")?;
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
                 Op::MulFloat { rd, ra, rb } => {
@@ -6365,6 +6366,7 @@ impl BytecodeVM {
 
     // ── Register access helpers (D8: centralized Value conversion) ──
 
+    #[inline(always)]
     fn ensure_reg(&self, r: Reg, role: &str) -> Result<(), InterpError> {
         let len = self.cur_frame().regs.len();
         if (r as usize) >= len {
@@ -6389,6 +6391,7 @@ impl BytecodeVM {
     // `bench::vm_rejects_forged_*` family pins exactly that), never a
     // release `panic = "abort"` process kill.
 
+    #[inline(always)]
     fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
         let len = self.cur_frame().regs.len();
         if (rd as usize).max(ra as usize) >= len {
@@ -6404,6 +6407,7 @@ impl BytecodeVM {
         Ok(())
     }
 
+    #[inline(always)]
     fn ensure_binary_regs(
         &self,
         rd: Reg,
@@ -6427,6 +6431,7 @@ impl BytecodeVM {
         Ok(())
     }
 
+    #[inline(always)]
     fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
         let len = self.cur_frame().regs.len();
         if (ra as usize).max(rb as usize) >= len {
@@ -6454,6 +6459,7 @@ impl BytecodeVM {
         Ok(())
     }
 
+    #[inline(always)]
     fn ensure_ternary_sources(
         &self,
         ra: Reg,
@@ -7132,6 +7138,7 @@ impl BytecodeVM {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn check_float(&self, v: f64, op: &str) -> Result<(), InterpError> {
         // v0.34.10a (SD-9): inside `ieee_float { }` the finiteness invariant
         // is suspended — NaN/Inf are legitimate IEEE 754 values there.
@@ -7145,6 +7152,26 @@ impl BytecodeVM {
             return Err(InterpError::float_error(format!(
                 "invalid floating-point result from {}",
                 op
+            )));
+        }
+        Ok(())
+    }
+
+    /// R6-1108: fused SD-9 check for the hot binary float arms. AddFloat and
+    /// SubFloat used to pay three out-of-line `check_float` calls per op
+    /// (operands + result); this folds them into one frame load and one
+    /// likely-false branch. Semantics are preserved exactly — all three
+    /// positions still trap (a finite result must not hide a non-finite
+    /// operand) and the diagnostic is the byte-identical
+    /// "invalid floating-point result from {op}" every per-operand call
+    /// produced. Callers that only check the result (mul/div) stay on
+    /// `check_float`: strengthening them to operand checks would newly trap
+    /// finite results like `5.0 / Inf == 0.0` leaked from `ieee_float`.
+    #[inline(always)]
+    fn check_float_binary(&self, a: f64, b: f64, r: f64, op: &str) -> Result<(), InterpError> {
+        if self.cur_frame().ieee_depth == 0 && !(a.is_finite() && b.is_finite() && r.is_finite()) {
+            return Err(InterpError::float_error(format!(
+                "invalid floating-point result from {op}"
             )));
         }
         Ok(())

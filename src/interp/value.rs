@@ -1972,6 +1972,7 @@ pub(crate) fn is_copy(v: &Value) -> bool {
     }
 }
 
+#[inline(always)]
 pub(crate) fn is_truthy(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
