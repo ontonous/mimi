@@ -843,10 +843,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 }
                                                 _ => {}
                                             }
-                                        } else if let Some((ret_ty, is_async)) = self
+                                        } else if let Some(ret_ty) = self
                                             .func_defs
                                             .get(func_name)
-                                            .map(|fdef| (fdef.ret.clone(), fdef.is_async))
+                                            .map(|fdef| fdef.ret.clone())
                                         {
                                             if let Some(ret_ty) = ret_ty {
                                                 match ret_ty.unlocated() {
@@ -907,15 +907,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     | Type::TyErr
                                                     | Type::TypeVar(..)
                                                     | Type::ForAll(..) => {}
-                                                }
-                                                // For async functions, track the inner result type for await.
-                                                if is_async {
-                                                    if let Some(llvm_ret) =
-                                                        self.llvm_type_for(&ret_ty)
-                                                    {
-                                                        self.async_var_inner_types
-                                                            .insert(name.clone(), llvm_ret);
-                                                    }
                                                 }
                                             }
                                         } else if let Some(crate::ast::Type::Name(tn, _)) = self

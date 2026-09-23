@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 
 /// 0.34.36 (cross-agent contract, audit wave-1): future data region starts at
 /// offset 16 — header { completed: AtomicI32 @0, refs: AtomicI32 @4,
-/// data_capacity: u64 @8..16 }. Must stay in sync with
-/// src/runtime/future.rs and the async-fn layout in codegen/func.rs.
+/// data_capacity: u64 @8..16 }. Must stay in sync with src/runtime/future.rs
+/// (FUTURE_HEADER_SIZE), the sole owner of the future memory layout.
 const FUTURE_DATA_OFFSET: u64 = 16;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -304,21 +304,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         _vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<BasicTypeEnum<'ctx>> {
         match expr.unlocated() {
-            Expr::Ident(name) => {
-                // Check async_var_inner_types first (variable holding a future from async fn)
-                if let Some(&ty) = self.async_var_inner_types.get(name) {
-                    return Some(ty);
-                }
-                // Fallback: var_type_names lookup
-                if let Some(tn) = self.var_type_names.get(name) {
-                    if tn == "Future" {
-                        // We don't know the generic param from name alone, so return None
-                        // and let the caller use pending_spawn_type
-                        return None;
-                    }
-                    // Could be a plain type (not a future) — in that case it's a spawn handle
-                    return None;
-                }
+            Expr::Ident(_) => {
+                // Spawn handles are plain-typed locals, and a name registered as
+                // "Future" lacks its generic parameter here — either way the
+                // caller falls back to pending_spawn_type (set by the spawn site).
                 None
             }
             Expr::Call(callee, _) => {

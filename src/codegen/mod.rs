@@ -372,9 +372,6 @@ pub struct CodeGenerator<'ctx> {
     /// Cache of export callback trampolines, keyed by signature fingerprint.
     export_callback_trampolines: HashMap<String, inkwell::values::PointerValue<'ctx>>,
     pending_spawn_type: Option<BasicTypeEnum<'ctx>>,
-    /// Maps variable names to the inner result type of `Future<T>` for async fn calls.
-    /// Set when compiling `let f = async_fn()` and used when compiling `await f`.
-    async_var_inner_types: HashMap<String, BasicTypeEnum<'ctx>>,
     /// Set of type names that are record types (for JSON FFI serialization).
     record_type_names: std::collections::HashSet<String>,
     /// Set of #[repr(C)] record type names (for struct-by-value FFI in codegen).
@@ -788,7 +785,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             export_callback_thunk_counter: 0,
             export_callback_trampolines: HashMap::new(),
             pending_spawn_type: None,
-            async_var_inner_types: HashMap::new(),
             record_type_names: std::collections::HashSet::new(),
             repr_c_record_names: std::collections::HashSet::new(),
             tuple_type_stack: Vec::new(),

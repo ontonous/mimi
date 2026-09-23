@@ -7545,7 +7545,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Emit a direct call to a known function, clear callback TLS, and record async info.
+    /// Emit a direct call to a known function and clear callback TLS.
     fn emit_function_call(
         &mut self,
         function: inkwell::values::FunctionValue<'ctx>,
@@ -7558,15 +7558,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let tls_ptrs: Vec<_> = self.pending_callback_tls.drain(..).collect();
         for tls_ptr in tls_ptrs {
             self.build_store(tls_ptr, null_i8)?;
-        }
-        if let Some(fdef) = self.func_defs.get(name) {
-            if fdef.is_async {
-                if let Some(ret_ty) = &fdef.ret {
-                    if let Some(llvm_ret) = self.llvm_type_for(ret_ty) {
-                        self.pending_spawn_type = Some(llvm_ret);
-                    }
-                }
-            }
         }
         let result = call_try_basic_value(&call)
             .unwrap_or(self.context.i64_type().const_int(0, false).into());
