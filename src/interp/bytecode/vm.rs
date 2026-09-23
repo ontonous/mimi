@@ -6367,10 +6367,26 @@ impl BytecodeVM {
         Ok(())
     }
 
-    fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
-        self.ensure_reg(rd, &format!("{} destination", operation))?;
-        self.ensure_reg(ra, &format!("{} source", operation))?;
+    /// R6-1105: hot-path variant of `ensure_reg` — the operation/role
+    /// composition happens only in the error branch, never on the happy
+    /// path. `ensure_binary_regs`-style helpers used to `format!` three
+    /// role strings per arithmetic op (~33% of VM cycles on the dsp
+    /// perf-gate loop, all of it discarded unless the check failed).
+    /// The composed message is byte-identical to
+    /// `ensure_reg(r, &format!("{operation} {role}"))`.
+    fn ensure_reg_composed(&self, r: Reg, operation: &str, role: &str) -> Result<(), InterpError> {
+        let len = self.cur_frame().regs.len();
+        if (r as usize) >= len {
+            return Err(InterpError::new(format!(
+                "{operation} {role} register {r} out of bounds (frame has {len} register(s))"
+            )));
+        }
         Ok(())
+    }
+
+    fn ensure_unary_regs(&self, rd: Reg, ra: Reg, operation: &str) -> Result<(), InterpError> {
+        self.ensure_reg_composed(rd, operation, "destination")?;
+        self.ensure_reg_composed(ra, operation, "source")
     }
 
     fn ensure_binary_regs(
@@ -6380,16 +6396,14 @@ impl BytecodeVM {
         rb: Reg,
         operation: &str,
     ) -> Result<(), InterpError> {
-        self.ensure_reg(rd, &format!("{} destination", operation))?;
-        self.ensure_reg(ra, &format!("{} lhs source", operation))?;
-        self.ensure_reg(rb, &format!("{} rhs source", operation))?;
-        Ok(())
+        self.ensure_reg_composed(rd, operation, "destination")?;
+        self.ensure_reg_composed(ra, operation, "lhs source")?;
+        self.ensure_reg_composed(rb, operation, "rhs source")
     }
 
     fn ensure_source_pair(&self, ra: Reg, rb: Reg, operation: &str) -> Result<(), InterpError> {
-        self.ensure_reg(ra, &format!("{} lhs source", operation))?;
-        self.ensure_reg(rb, &format!("{} rhs source", operation))?;
-        Ok(())
+        self.ensure_reg_composed(ra, operation, "lhs source")?;
+        self.ensure_reg_composed(rb, operation, "rhs source")
     }
 
     fn ensure_arg_window(&self, base: Reg, count: u16, role: &str) -> Result<(), InterpError> {
@@ -6411,10 +6425,9 @@ impl BytecodeVM {
         rc: Reg,
         operation: &str,
     ) -> Result<(), InterpError> {
-        self.ensure_reg(ra, &format!("{} target source", operation))?;
-        self.ensure_reg(rb, &format!("{} index source", operation))?;
-        self.ensure_reg(rc, &format!("{} value source", operation))?;
-        Ok(())
+        self.ensure_reg_composed(ra, operation, "target source")?;
+        self.ensure_reg_composed(rb, operation, "index source")?;
+        self.ensure_reg_composed(rc, operation, "value source")
     }
 
     pub(crate) fn get_reg(&self, r: Reg) -> &Value {
