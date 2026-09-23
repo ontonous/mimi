@@ -2955,17 +2955,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             // transfer) can legitimately point at one allocation, e.g. an impl
             // method that returns its receiver verbatim. Duplicate entries now
             // degrade to a leak instead of a double free.
-            match self.get_runtime_fn("mimi_heap_guard_reset") {
-                Ok(reset_fn) => {
-                    self.builder
-                        .build_call(reset_fn, &[], "heap_guard_reset")
-                        .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
-                }
-                Err(_) => {
-                    eprintln!(
-                        "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
-                         free-uniqueness guard inactive"
-                    );
+            //
+            // R6-1103: an empty scope performs no frees, so it must not start
+            // a flush session — every claim site lives inside a non-empty
+            // flush's entry loop, and that flush begins with its own reset.
+            // Skipping the reset here keeps suppression semantics identical
+            // while removing the per-iteration TLS cost from allocation-free
+            // loop bodies (LOOP-REBIND-HEAP-001 perf follow-up).
+            if !scope.is_empty() {
+                match self.get_runtime_fn("mimi_heap_guard_reset") {
+                    Ok(reset_fn) => {
+                        self.builder
+                            .build_call(reset_fn, &[], "heap_guard_reset")
+                            .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
+                             free-uniqueness guard inactive"
+                        );
+                    }
                 }
             }
             for entry in scope {
@@ -3172,17 +3181,26 @@ impl<'ctx> CodeGenerator<'ctx> {
             // transfer) can legitimately point at one allocation, e.g. an impl
             // method that returns its receiver verbatim. Duplicate entries now
             // degrade to a leak instead of a double free.
-            match self.get_runtime_fn("mimi_heap_guard_reset") {
-                Ok(reset_fn) => {
-                    self.builder
-                        .build_call(reset_fn, &[], "heap_guard_reset")
-                        .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
-                }
-                Err(_) => {
-                    eprintln!(
-                        "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
-                         free-uniqueness guard inactive"
-                    );
+            //
+            // R6-1103: an empty scope performs no frees, so it must not start
+            // a flush session — every claim site lives inside a non-empty
+            // flush's entry loop, and that flush begins with its own reset.
+            // Skipping the reset here keeps suppression semantics identical
+            // while removing the per-iteration TLS cost from allocation-free
+            // loop bodies (LOOP-REBIND-HEAP-001 perf follow-up).
+            if !scope.is_empty() {
+                match self.get_runtime_fn("mimi_heap_guard_reset") {
+                    Ok(reset_fn) => {
+                        self.builder
+                            .build_call(reset_fn, &[], "heap_guard_reset")
+                            .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
+                             free-uniqueness guard inactive"
+                        );
+                    }
                 }
             }
             for entry in scope {

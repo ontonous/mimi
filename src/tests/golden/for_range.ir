@@ -1031,7 +1031,6 @@ trap_overflow8:                                   ; preds = %op_ok
 
 op_ok9:                                           ; preds = %op_ok
   store i64 %op_result6, ptr %i, align 4
-  call void @mimi_heap_guard_reset()
   br label %loop
 }
 

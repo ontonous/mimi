@@ -1015,7 +1015,6 @@ trap_overflow:                                    ; preds = %loopbody
 
 op_ok:                                            ; preds = %loopbody
   store i64 %op_result, ptr %i, align 4
-  call void @mimi_heap_guard_reset()
   br label %loop
 }
 
