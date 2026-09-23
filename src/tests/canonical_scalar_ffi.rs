@@ -23263,6 +23263,207 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     }
 }
 
+/// R6-1101: checker-legal aggregate ABI shapes (`#[repr(C)]` records,
+/// `string`, tuples) must stay outside the canonical scalar island even
+/// though the checker admits their declarations.  The route boundary must
+/// name the exact declaration and side, and the rejection must touch no
+/// compatibility owner.  Deterministic LCG rotation over the shape matrix
+/// mirrors `scalar_ffi_seeded_unsupported_compositions_reject_without_legacy`.
+#[test]
+fn scalar_ffi_aggregate_declaration_shapes_reject_at_route_boundary() {
+    const CASES: &[(&str, &str, &str)] = &[
+        (
+            "repr-c-record-param",
+            r#"#[repr(C)]
+type Pair { a: i64, b: i64 }
+extern "C" { func foreign(p: Pair) -> i64; }
+func main() -> i64 { let p = Pair { a: 1, b: 2 }
+foreign(p) }"#,
+            "'foreign' parameter type is outside canonical scalar FFI",
+        ),
+        (
+            "repr-c-record-result",
+            r#"#[repr(C)]
+type Pair { a: i64, b: i64 }
+extern "C" { func foreign(x: i64) -> Pair; }
+func main() -> i64 { let p = foreign(1 as i64)
+p.a }"#,
+            "'foreign' result type is outside canonical scalar FFI",
+        ),
+        (
+            "string-param",
+            r#"extern "C" { func foreign(s: string) -> i64; }
+func main() -> i64 { foreign("hi") }"#,
+            "'foreign' parameter type is outside canonical scalar FFI",
+        ),
+        (
+            "string-result",
+            r#"extern "C" { func foreign(x: i64) -> string; }
+func main() -> i64 { let s = foreign(1 as i64)
+if s == "" { 1 } else { 0 } }"#,
+            "'foreign' result type is outside canonical scalar FFI",
+        ),
+        (
+            "tuple-param",
+            r#"extern "C" { func foreign(t: (i64, i64)) -> i64; }
+func main() -> i64 { foreign((1 as i64, 2 as i64)) }"#,
+            "'foreign' parameter type is outside canonical scalar FFI",
+        ),
+        (
+            "tuple-result",
+            r#"extern "C" { func foreign(x: i64) -> (i64, i64); }
+func main() -> i64 { let t = foreign(1 as i64)
+t.0 }"#,
+            "'foreign' result type is outside canonical scalar FFI",
+        ),
+        (
+            "mixed-scalar-and-aggregate-block",
+            r#"extern "C" {
+    func scalar_ok(x: i64) -> i64;
+    func foreign_agg(s: string) -> i64;
+}
+func main() -> i64 { let a = scalar_ok(1 as i64)
+foreign_agg("x") }"#,
+            "'foreign_agg' parameter type is outside canonical scalar FFI",
+        ),
+    ];
+    let mut seed = 0x5eed_ff01_u64;
+    for round in 0..21_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let (label, source, expected) = CASES[(seed as usize) % CASES.len()];
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .unwrap_or_else(|error| panic!("{label} round {round} check: {error:?}"));
+        assert!(
+            !crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "{label} must stay outside the scalar island"
+        );
+        let reason = crate::core::mir::scalar_ffi_boundary_reason(&checked)
+            .unwrap_or_else(|| panic!("{label} round {round} must name a boundary reason"));
+        assert!(reason.contains(expected), "{label} round {round}: {reason}");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect_err("aggregate shape must fail closed at the declaration boundary");
+        let text = error.to_string();
+        assert!(
+            text.contains("scalar FFI declaration boundary"),
+            "{label} round {round}: {text}"
+        );
+        assert!(text.contains(expected), "{label} round {round}: {text}");
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{label} round {round} touched a compatibility owner while rejecting"
+        );
+    }
+}
+
+/// R6-1101: the Record/List/Flow family shapes that cannot cross the C ABI
+/// at all are checker-level E0231 rejections with type-specific guidance —
+/// plain records, Mimi lists, and Flow state types are each named.
+#[test]
+fn scalar_ffi_checker_rejects_record_list_and_flow_shapes_at_c_abi() {
+    const CASES: &[(&str, &str, &str)] = &[
+        (
+            "plain-record-param",
+            r#"type Point { x: i64, y: i64 }
+extern "C" { func foreign(p: Point) -> i64; }
+func main() -> i64 { 0 }"#,
+            "type 'Point' is not allowed across the C ABI boundary",
+        ),
+        (
+            "list-param",
+            r#"extern "C" { func foreign(xs: List<i64>) -> i64; }
+func main() -> i64 { 0 }"#,
+            "type 'List<i64>' is a Mimi list/array and cannot cross the C ABI boundary directly",
+        ),
+        (
+            "flow-state-param",
+            r#"flow Counter {
+    state Idle { v: i64 }
+}
+extern "C" { func foreign(s: Counter) -> i64; }
+func main() -> i64 { 0 }"#,
+            "type 'Counter' is not allowed across the C ABI boundary",
+        ),
+    ];
+    for (label, source, expected) in CASES {
+        let errors = crate::core::check_program(&super::parse_prod(source)).expect_err(&format!(
+            "{label} declaration must be rejected by the checker"
+        ));
+        let text = errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("E0231"), "{label}: {text}");
+        assert!(text.contains(expected), "{label}: {text}");
+    }
+}
+
+/// R6-1101: the boundary is call-site scoped.  An aggregate declaration that
+/// is never called is inert — the scalar island stays admitted and
+/// materializes — while calling the same shape flips the program to a named
+/// hard rejection with no compatibility owner touched by the route
+/// machinery.
+#[test]
+fn scalar_ffi_uncalled_aggregate_declaration_is_inert_to_route_admission() {
+    let inert = r#"
+        extern "C" {
+            func scalar_ok(x: i64) -> i64;
+            func agg_inert(s: string) -> i64;
+        }
+        func main() -> i64 { scalar_ok(41 as i64) + 1 }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(inert))
+        .expect("scalar island with inert aggregate declaration");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "uncalled aggregate declaration must not leave the scalar island"
+    );
+    assert!(
+        crate::core::mir::scalar_ffi_boundary_reason(&checked).is_none(),
+        "uncalled aggregate declaration must not produce a boundary reason"
+    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("uncalled aggregate declaration must not block scalar materialization");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "scalar materialization touched a compatibility owner"
+    );
+
+    let called = r#"
+        extern "C" {
+            func scalar_ok(x: i64) -> i64;
+            func agg_called(s: string) -> i64;
+        }
+        func main() -> i64 { let a = scalar_ok(41 as i64)
+agg_called("x") }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(called))
+        .expect("scalar island plus called aggregate declaration");
+    assert!(
+        !crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "called aggregate declaration must leave the scalar island"
+    );
+    let reason = crate::core::mir::scalar_ffi_boundary_reason(&checked)
+        .expect("called aggregate must name the boundary");
+    assert!(
+        reason.contains("'agg_called'")
+            && reason.contains("parameter type is outside canonical scalar FFI"),
+        "{reason}"
+    );
+    let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("called aggregate must fail closed at the declaration boundary");
+    assert!(
+        error
+            .to_string()
+            .contains("scalar FFI declaration boundary"),
+        "{error}"
+    );
+}
+
 #[test]
 fn scalar_ffi_f32_result_integer_cast_stays_outside_migrated_contract() {
     const SOURCE: &str = r#"
