@@ -60,7 +60,14 @@ m_ns=$(printf '%s\n' "${m_times[@]}" | sort -n | awk '{a[NR]=$1} END {print a[in
 ratio=$(awk -v m="$m_ns" -v c="$c_ns" 'BEGIN {if (c>0) printf "%.2f", m/c; else print "inf"}')
 echo "PERF-GATE: ${BENCH} native O1 = ${ratio}x C -O2 (threshold ${THRESHOLD}x)"
 awk -v r="$ratio" -v t="$THRESHOLD" 'BEGIN {exit !(r+0 <= t+0)}' \
-    || fail "${BENCH} native ratio ${ratio}x exceeds threshold ${THRESHOLD}x"
+    || { echo "PERF-GATE: attribution (R6-1102): the dominant cost is the 0.1.9" \
+         "heap free-uniqueness guard (90523d80) emitting mimi_heap_guard_reset" \
+         "(TLS RefCell clear) at every scope flush incl. each while-body" \
+         "iteration (~61% of cycles on dsp); the remainder is the SD-9 float" \
+         "finiteness check chain (4/iter) fragmenting the loop. Fix candidates:" \
+         "skip reset on empty-scope flush, or epoch-based guard. Debt ledger:" \
+         "devdocs/v0.41/evidence-2026-09-23-r6-1102a/." >&2; \
+         fail "${BENCH} native ratio ${ratio}x exceeds threshold ${THRESHOLD}x"; }
 
 # ── VM dsp ──────────────────────────────────────────────────────
 s=$(date +%s%N)
