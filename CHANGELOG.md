@@ -2,7 +2,7 @@
 
 ## [Unreleased] — 0.1.10-dev
 
-### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-24，游标 R6-22 → R6-1113）
+### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-24，游标 R6-22 → R6-1114）
 
 按 `devdocs/MIR_EXECUTION_PLAN_2026-09-06.md`（M0 稳定化 → M1 家族组合 → M2 默认迁移/
 物理删除 → M3 Flow 失败闭环）完成首轮全部里程碑验收，随后按 §8 队列推进 R6 系列切片。
@@ -37,6 +37,13 @@
   执行路径及 AST-backed interpreter FFI runtime/callback 栈删除；无生产消费者的
   `Interpreter` CheckedProgram 目录查看器仅保留在测试构建。此项不代表四类通用 legacy
   owner 清零。
+- **R6-1114 CodegenLegacyRemainder 深审**：将六条 `compile_func_legacy` 生产调用按
+  top-level 函数、Flow 双目标/单目标转移、extern 导出 wrapper、nested callable、trait
+  impl specialization 分别固定到 owner audit；同时钉住 resolved 成功跳过与失败清理重编译
+  合同。六条目前都有真实依赖，不安全删除条件逐项记录。捕获型 nested callable 的 MIR
+  lowering 增加显式 closure-environment ABI fail-closed 检查；三种 direct MIR CLI
+  （`mir`/`run --mir`/`build --mir`）负例和 lowered-body 单测锁定拒绝边界。actor shadow
+  与 capture fallback 仍需 parent/declaration receipt 或 closure ABI，不扩大支持面。
 - **CLI 可用性收口**：删除无效 `promote`、`--strict`、`--verify-rules` 和测试分配器选项；
   `mimi build` 增加可重复的 `--link-search` / `--link-lib` 原生宿主链接选项；默认与显式
   `--mir` 对不支持的已调用 FFI 声明在相同源码边界拒绝，文档同步当前模块、测试、FFI 和
@@ -52,8 +59,8 @@
   `blake3/pure`，不宣称链接或运行）；wasm32 保持上游依赖层阻断记录。
 - **删除门禁现状（2026-09-24）**：`raw_ast()` 生产调用点 **0**；四类兼容 owner 仍各有
   真实依赖，生产 body accessor 4 处、`compile_func_legacy` 6 处；scalar FFI direct
-  expression legacy references **0**。不宣称全局 legacy 清零；R6-1114 的 Codegen
-  legacy 调用点依赖矩阵是后续工作，不是本 scalar FFI profile 的剩余验收项。
+  expression legacy references **0**。不宣称全局 legacy 清零；R6-1114 已建立六条
+  Codegen legacy 调用点身份矩阵并复核删除前置条件，scalar FFI profile 不受影响。
 
 不变量类别：L1（同一 `MirProgram` 的 reference/bytecode/native/verifier 可观察等价 +
 三方差分 harness）/ L2（validator 与 route selector 在任何后端消费前拒绝非法/未建模

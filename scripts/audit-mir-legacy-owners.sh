@@ -1468,6 +1468,82 @@ if [ "$legacy_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SIT
         "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES" "$legacy_call_count" >&2
     audit_failed=1
 fi
+
+# R6-1114: pin the identity of the six retained legacy body call sites, not
+# just their aggregate count. Each expression is a distinct body class; a
+# migration may remove it only while updating this inventory and its evidence.
+legacy_callsite_expression() {
+    local owner="$1"
+    local source_file="$2"
+    local expression="$3"
+    local expected="$4"
+    local source="$ROOT_DIR/$source_file"
+    local matches actual
+    matches="$(rg -n -F "$expression" "$source" || true)"
+    actual=0
+    if [ -n "$matches" ]; then
+        actual="$(printf '%s\n' "$matches" | wc -l)"
+    fi
+    if [ "$actual" -ne "$expected" ]; then
+        printf 'owner_audit_error=legacy_callsite_identity owner=%s file=%s expression=%s expected=%s actual=%s\n' \
+            "$owner" "$source_file" "$expression" "$expected" "$actual" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'legacy_callsite_identity owner=%s file=%s expression=%s count=%s\n' \
+        "$owner" "$source_file" "$expression" "$actual"
+    printf '%s\n' "$matches" | sed 's/^/  /'
+}
+
+legacy_callsite_expression \
+    top_level_function_pass \
+    src/codegen/compile.rs \
+    'self.compile_func_legacy(f)' \
+    1
+legacy_callsite_expression \
+    flow_transition_multi_and_single_target \
+    src/codegen/compile.rs \
+    '.compile_func_legacy(&func)' \
+    2
+legacy_callsite_expression \
+    extern_export_body_wrapper \
+    src/codegen/func.rs \
+    'self.compile_func_legacy(&body_func)' \
+    1
+legacy_callsite_expression \
+    nested_function_body \
+    src/codegen/expr/lambda.rs \
+    'self.compile_func_legacy(&compile_target)' \
+    1
+legacy_callsite_expression \
+    trait_impl_specialization \
+    src/codegen/registry/funcs.rs \
+    'self.compile_func_legacy(&impl_method)' \
+    1
+
+# The resolved emitter deliberately leaves a failed/partial body for the
+# fifth pass to rebuild. Removing the top-level call without replacing this
+# status handoff would strand an invalid LLVM body or drop supported code.
+resolved_failure_recompile_guard() {
+    local context
+    context="$(sed -n '/fn compile_func_legacy_clean(/,/^    fn /p' \
+        "$ROOT_DIR/src/codegen/func.rs")"
+    for pattern in \
+        'function.count_basic_blocks() != 0' \
+        'resolved_failed_functions.contains(&func.name)' \
+        'resolved_failed_functions.contains(&llvm_symbol)' \
+        'self.clear_partial_body(function)'; do
+        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=resolved_failure_recompile_guard_missing=src/codegen/func.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'resolved_failure_recompile_guard=resolved-success-skip+failed-body-clear-and-recompile consumer=src/codegen/func.rs::compile_func_legacy_clean\n'
+}
+
+resolved_failure_recompile_guard
 printf 'owner_count=%s\n' "$owner_count"
 
 # R6-15 removed the former direct-expression-only scalar FFI admission helper.

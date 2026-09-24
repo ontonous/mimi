@@ -167,6 +167,22 @@ fn lower_body_impl(
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
+    // A captured callable needs an explicit environment parameter, a
+    // checker-owned environment layout, and ownership/lifetime rules for the
+    // captured values. `ResolvedBody::captures` records lexical visibility,
+    // but it does not itself materialize any of those ABI facts in MIR. Do not
+    // let a later Load synthesize an undefined local value and rely on the
+    // structural validator to discover the missing environment by accident.
+    if !body.captures.is_empty() {
+        return Err(vec![MirLoweringError {
+            node_id: body.owner.clone(),
+            message: format!(
+                "MIR callable has {} lexical capture(s), but no canonical closure-environment ABI is available",
+                body.captures.len()
+            ),
+        }]);
+    }
+
     let entry = MirBlockId::new("bb.entry").map_err(|error| {
         vec![MirLoweringError {
             node_id: body.owner.clone(),
@@ -12261,6 +12277,32 @@ mod tests {
         let mir = lower_body(&callable.body).expect("MIR lowering");
         assert!(mir.canonical_text().contains("clone"));
         assert!(mir.canonical_text().contains("local:"));
+    }
+
+    #[test]
+    fn captured_nested_callable_fails_before_mir_materialization() {
+        let source = r#"
+            func main(base: i32) -> i32 {
+                func add(value: i32) -> i32 { base + value }
+                add(1)
+            }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let nested = program
+            .callables()
+            .values()
+            .find(|callable| callable.body.owner.0.contains("function:add"))
+            .expect("nested callable");
+        assert_eq!(nested.body.captures.len(), 1);
+
+        let errors = lower_body(&nested.body).expect_err("captured body has no MIR env ABI");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].node_id, nested.owner);
+        assert!(errors[0]
+            .message
+            .contains("no canonical closure-environment ABI is available"));
     }
 
     #[test]

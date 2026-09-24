@@ -24665,6 +24665,68 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
     );
 }
 
+// R6-1114 L2 negative pin: a nested callable that captures an outer local has
+// no canonical MIR environment ABI. Inspection and explicit execution/build
+// entries must all stop during MIR construction rather than materializing an
+// undefined capture slot or silently routing the request to legacy codegen.
+#[test]
+fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
+    let source = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("actor_nested_func_capture.mimi");
+    let native = std::env::temp_dir().join(format!(
+        "mimi_nested_capture_mir_{}.out",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&native);
+
+    let mut mir = Command::new(mimi_bin());
+    mir.current_dir(project_root()).arg("mir").arg(&source);
+    let mut run = Command::new(mimi_bin());
+    run.current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .arg("--mir");
+    let mut build = Command::new(mimi_bin());
+    build
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&native);
+
+    for (surface, output) in [
+        ("mimi mir", mir.output().expect("spawn MIR inspection")),
+        ("mimi run --mir", run.output().expect("spawn MIR run")),
+        ("mimi build --mir", build.output().expect("spawn MIR build")),
+    ] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{surface} must reject the unmodeled captured callable: {stderr}"
+        );
+        assert!(
+            stderr.contains("no canonical closure-environment ABI is available"),
+            "{surface} must identify the missing capture ABI: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{surface} must not silently fall back after explicit MIR was requested: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{surface} must reject before executing the actor program: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    assert!(
+        !native.exists(),
+        "failed MIR construction must not leave a native output artifact"
+    );
+}
+
 // R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a
 // helper) plus an admitted stdout effect runs through the direct canonical
 // entries — the explicit `--mir` run and the native `build --mir` —
