@@ -329,6 +329,30 @@ retired_ast_ffi_compatibility_runtime() {
 
 retired_ast_ffi_compatibility_runtime
 
+# R6-1113: this CheckedProgram directory viewer has no production callers;
+# unit tests retain it as a test adapter, while runtime execution stays in the
+# AST-free bytecode/MIR consumers. Keep the legacy facade out of library builds.
+retired_checked_directory_viewer_from_production() {
+    local interpreter="$SRC_DIR/interp/mod.rs"
+    if ! rg -U -q '#\[cfg\(test\)\]\npub struct Interpreter' "$interpreter" ||
+        ! rg -U -q '#\[cfg\(test\)\]\nimpl Interpreter' "$interpreter"; then
+        printf 'owner_audit_error=checked_directory_viewer_not_test_only\n' >&2
+        audit_failed=1
+        return
+    fi
+    if rg -n 'Interpreter::from_checked|interp::Interpreter' "$SRC_DIR" \
+        --glob '!**/tests.rs' \
+        --glob '!**/test.rs' \
+        --glob '!src/tests/**' >/dev/null; then
+        printf 'owner_audit_error=checked_directory_viewer_has_production_callsite\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'checked_directory_viewer=test-only+no-production-consumers\n'
+}
+
+retired_checked_directory_viewer_from_production
+
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \

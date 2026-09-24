@@ -11,14 +11,19 @@ pub use value::*;
 /// Alias for interpreter results.
 pub type InterpResult<T> = std::result::Result<T, InterpError>;
 
+#[cfg(test)]
 use crate::ast::*;
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// CheckedProgram directory viewer.
 ///
 /// Holds the resolved_* data installed by `from_checked()` and provides
-/// read-only accessor methods.  Execution is handled exclusively by the
-/// bytecode VM (`bytecode::BytecodeVM`).
+/// read-only accessor methods. It has no production consumers: execution is
+/// handled exclusively by the bytecode VM (`bytecode::BytecodeVM`), while
+/// production backends consume `CheckedProgram` directly. Keep this adapter
+/// available to unit tests only.
+#[cfg(test)]
 pub struct Interpreter {
     /// Whether to verify contracts at runtime (used by tests).
     pub verify_contracts: bool,
@@ -97,6 +102,7 @@ pub struct Interpreter {
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
 }
 
+#[cfg(test)]
 impl Interpreter {
     pub fn from_checked(program: &crate::core::CheckedProgram) -> Self {
         // C2 deletion gate: this constructor is a checked-directory viewer,
