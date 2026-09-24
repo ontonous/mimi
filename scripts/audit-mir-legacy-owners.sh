@@ -294,6 +294,41 @@ retired_receiptless_bytecode_ffi_path() {
 
 retired_receiptless_bytecode_ffi_path
 
+# R6-1112: the former AST-backed Interpreter FFI runtime and callback stack
+# have no production or test consumer after the raw-AST bytecode loader was
+# retired. Keep the shared host-library policy because Canonical MIR still
+# uses it, and fail if any compatibility runtime/module is reintroduced.
+retired_ast_ffi_compatibility_runtime() {
+    local interpreter="$SRC_DIR/interp/mod.rs"
+    local mir_runtime="$SRC_DIR/interp/bytecode/mir_ffi.rs"
+    local legacy_ffi_files
+    legacy_ffi_files="$(find "$SRC_DIR/interp/ffi" -type f -print -quit 2>/dev/null || true)"
+    if [ -e "$SRC_DIR/interp/ffi_runtime.rs" ] || [ -n "$legacy_ffi_files" ]; then
+        printf 'owner_audit_error=retired_ast_ffi_runtime_or_callback_tree_reintroduced\n' >&2
+        audit_failed=1
+        return
+    fi
+    if rg -n 'pub\(crate\) mod ffi;|pub\(crate\) mod ffi_runtime;|ffi_runtime:|FfiClosureRunner|call_extern_with_runner_ptr' \
+        "$interpreter" >/dev/null; then
+        printf 'owner_audit_error=checked_interpreter_ffi_owner_reintroduced\n' >&2
+        audit_failed=1
+        return
+    fi
+    if rg -n '\bFfiRuntime\b|FfiClosureRunner|ffi_runtime::|super::ffi::' "$SRC_DIR/interp" >/dev/null; then
+        printf 'owner_audit_error=ast_ffi_compatibility_symbol_reintroduced\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -F 'crate::interp::ffi_system_libraries' "$mir_runtime" >/dev/null; then
+        printf 'owner_audit_error=canonical_mir_ffi_lost_shared_host_binding_policy\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'ast_ffi_compatibility=retired+canonical_mir_runtime_only\n'
+}
+
+retired_ast_ffi_compatibility_runtime
+
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \

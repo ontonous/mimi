@@ -1,16 +1,12 @@
 //! Single source of the scalar FFI system-library discovery and selection
 //! contract.
 //!
-//! Both FFI runtimes (the compatibility `FfiRuntime` and the canonical MIR
-//! `CanonicalMirFfiRuntime`) must agree on which system libraries are
-//! discovered when `MIMI_FFI_LIB` is absent, on how an explicit binding is
-//! read from the environment, and on the candidate-selection policy (strict
-//! versus best-effort, symbol-miss diagnostic precedence over later load
-//! failures). Native binaries link libc and libm directly, so any runtime
-//! that cannot resolve the same symbols diverges from the native backend for
-//! identical programs (the 0.39.136 libc parity fix, extended to libm and to
-//! explicit-binding strictness here; the selection policy unified after the
-//! two runtimes drifted on candidate tables).
+//! The canonical MIR FFI runtime shares one contract with native binaries:
+//! system-library discovery when `MIMI_FFI_LIB` is absent, explicit host
+//! binding resolution, and candidate selection (strict versus best-effort,
+//! with symbol-miss diagnostics preferred over later load failures). Native
+//! binaries link libc and libm directly, so the MIR runtime must resolve the
+//! same symbols for identical programs.
 
 /// Candidate system libc paths for the `MIMI_FFI_LIB`-less default.
 /// Absolute multiarch paths first; loader sonames are appended by
@@ -35,7 +31,7 @@ pub(crate) fn default_libc_candidates() -> Vec<&'static str> {
 }
 
 /// Candidate system libraries for the no-configuration scalar FFI profile.
-/// Native builds already link both libc and libm; the VM runtimes must search
+/// Native builds already link both libc and libm; the MIR runtime must search
 /// the same system surface when `MIMI_FFI_LIB` is absent.
 ///
 /// Loader sonames stay at the very end: cross-target Linux installs (for
@@ -104,8 +100,8 @@ pub(crate) fn is_discoverable_system_library_candidate(candidate: &str) -> bool 
     }
 }
 
-/// No-environment discovery used by both runtimes: the shared candidate table
-/// filtered through the shared admission gate.
+/// No-environment discovery used by the canonical MIR FFI runtime: the shared
+/// candidate table filtered through the shared admission gate.
 pub(crate) fn discover_no_env_candidates() -> Vec<String> {
     default_system_library_candidates()
         .into_iter()
@@ -181,7 +177,7 @@ pub(crate) enum SelectorRejection {
     },
 }
 
-/// Shared candidate-selection policy for both FFI runtimes.
+/// Shared candidate-selection policy for the canonical MIR FFI runtime.
 ///
 /// No-environment candidates are best-effort: an existing file may still be a
 /// linker script, the wrong architecture, or simply lack the symbol, so load

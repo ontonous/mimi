@@ -1,10 +1,8 @@
 //! AST-free scalar FFI runtime for Canonical MIR bytecode.
 //!
-//! This module is deliberately separate from `ffi_runtime`: that runtime
-//! consumes surface `ExternFunc`/`FfiContract` declarations and is retained
-//! for compatibility bytecode.  Canonical MIR bytecode receives a fully
-//! materialized descriptor from the MIR adapter and only performs the physical
-//! symbol lookup/call described by that receipt.
+//! Canonical MIR bytecode receives a checker-owned, fully materialized
+//! descriptor and only performs the physical symbol lookup/call described by
+//! that receipt. The former surface-AST FFI runtime has been retired.
 
 use std::any::Any;
 use std::ffi::c_void;
@@ -62,10 +60,9 @@ fn ffi_runtime_error(message: String) -> crate::interp::InterpError {
 // Candidate tables, the discovery allowlist, the explicit `MIMI_FFI_LIB`
 // binding resolution, and the selection policy (strict/best-effort, cache
 // handling, load-vs-symbol diagnostic precedence) live in
-// `crate::interp::ffi_system_libraries` so the canonical and compatibility
-// runtimes cannot drift apart on host-binding decisions. Only the canonical
-// dialect wording and the final fallback assembly below stay local: both are
-// pinned byte-for-byte by this runtime's tests.
+// `crate::interp::ffi_system_libraries` so the MIR runtime and native linker
+// contract cannot drift on host-binding decisions. The canonical dialect
+// wording and final fallback assembly stay local and are pinned by tests.
 
 fn ffi_lookup_failure(
     symbol: &str,
@@ -284,9 +281,8 @@ impl CanonicalMirFfiRuntime {
     /// Select a loaded library whose symbol can actually be called.
     ///
     /// The strict/best-effort policy, cache handling, and load-vs-symbol
-    /// diagnostic precedence are shared with the compatibility runtime via
-    /// [`select_library_index`]; this adapter supplies the canonical dialect
-    /// and assembles the final pinned diagnostic.
+    /// diagnostic precedence come from [`select_library_index`]; this adapter
+    /// supplies the canonical dialect and assembles the final pinned diagnostic.
     fn select_library_for_symbol(
         &mut self,
         candidate_paths: Vec<String>,

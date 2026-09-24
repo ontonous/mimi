@@ -291,6 +291,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "production_compile_func_legacy_call_sites=6",
         "scalar_ffi_direct_expression_legacy_refs=0",
         "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed",
+        "ast_ffi_compatibility=retired+canonical_mir_runtime_only",
         "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
         "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",

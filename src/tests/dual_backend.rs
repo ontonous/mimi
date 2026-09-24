@@ -10612,11 +10612,8 @@ fn dual_ffi_libc_symbols_default_resolution_parity() {
 #[test]
 fn dual_ffi_libm_symbols_default_resolution_parity() {
     // R6-1029 (L1): native binaries link both libc and libm, and the
-    // canonical MIR runtime falls back to libm, but the compatibility runtime
-    // only discovered libc candidates — identical `cos` programs succeeded
-    // natively and on the canonical route while the compatibility route
-    // failed with a libc symbol miss. Both VM runtimes now share the same
-    // system-library discovery contract.
+    // canonical MIR runtime must fall back to libm for the same symbol. This
+    // keeps the default VM host binding aligned with the native linker.
     if !can_link() {
         return;
     }
@@ -10647,12 +10644,9 @@ fn dual_ffi_libm_symbols_default_resolution_parity() {
 
 #[cfg(unix)]
 #[test]
-fn compatibility_ffi_non_utf8_binding_fails_closed() {
-    // R6-1029: the compatibility runtime read MIMI_FFI_LIB with
-    // `std::env::var`, silently treating a non-UTF-8 binding as unset and
-    // falling back to system-library discovery. It now shares the canonical
-    // fail-closed contract: the program asked for one specific library, and
-    // silently running against a different one would violate the binding.
+fn vm_ffi_non_utf8_binding_fails_closed() {
+    // R6-1029: an explicit non-UTF-8 MIMI_FFI_LIB binding must fail closed.
+    // The VM must not treat it as unset and silently fall back to discovery.
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 

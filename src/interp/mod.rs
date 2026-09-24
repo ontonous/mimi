@@ -2,8 +2,6 @@
 
 pub mod bytecode;
 pub mod error;
-pub(crate) mod ffi;
-pub(crate) mod ffi_runtime;
 pub(crate) mod ffi_system_libraries;
 mod value;
 
@@ -24,8 +22,6 @@ use std::collections::HashMap;
 pub struct Interpreter {
     /// Whether to verify contracts at runtime (used by tests).
     pub verify_contracts: bool,
-    /// FFI execution context (shared with the bytecode VM).
-    pub(crate) ffi_runtime: ffi_runtime::FfiRuntime,
     /// v0.29.24: process-wide max children (None = unlimited).
     max_children: Option<usize>,
 
@@ -108,10 +104,7 @@ impl Interpreter {
         // it from the retained surface body; all runtime execution now goes
         // through bytecode/MIR consumers, so install the directory from typed
         // CheckedProgram facts only.
-        let mut interp = Self::with_runtime(
-            ffi_runtime::FfiRuntime::from_parts(HashMap::new(), HashMap::new(), HashMap::new()),
-            None,
-        );
+        let mut interp = Self::empty(None);
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
         let tables = std::sync::Arc::new(program.build_transition_tables());
         interp.resolved_transitions = Some(tables.resolved.clone());
@@ -512,29 +505,9 @@ impl Interpreter {
         interp
     }
 
-    /// Minimal legacy helper: initializes FFI runtime from a surface AST and
-    /// sets all resolved_* directory fields to None. The checked-directory
-    /// constructor does not use this helper.
-    pub(crate) fn new(file: &File) -> Self {
-        let ffi_runtime = ffi_runtime::FfiRuntime::from_file(file);
-        // v0.29.24: first `@max_children(N)` among flows sets process spawn quota.
-        let max_children = file.items.iter().find_map(|item| {
-            if let Item::Flow(flow) = item {
-                flow.annotations.iter().find_map(|a| match &a.kind {
-                    crate::ast::FlowAnnotationKind::MaxChildren(n) => Some(*n),
-                    _ => None,
-                })
-            } else {
-                None
-            }
-        });
-        Self::with_runtime(ffi_runtime, max_children)
-    }
-
-    fn with_runtime(ffi_runtime: ffi_runtime::FfiRuntime, max_children: Option<usize>) -> Self {
+    fn empty(max_children: Option<usize>) -> Self {
         Self {
             verify_contracts: true,
-            ffi_runtime,
             max_children,
             resolved_transitions: None,
             resolved_fallback_transitions: None,
@@ -588,11 +561,6 @@ impl Interpreter {
             resolved_item_kinds: None,
             resolved_persistent_fields: None,
         }
-    }
-
-    /// Enable/disable FFI contract verification (tests, fuzz harness).
-    pub(crate) fn set_verify_ffi(&mut self, verify: bool) {
-        self.ffi_runtime.verify_ffi = verify;
     }
 
     pub(crate) fn resolved_function_arity(&self, qualified_name: &str) -> Option<usize> {

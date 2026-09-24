@@ -89,7 +89,7 @@ run_ffi_test() {
             local output=""
             output=$("$MIMI_BIN" run --verify-ffi "$mimi_file" 2>&1) || exit_code=$?
             # 违约被检出的判据：运行必须失败（退出码非零，违约错误经
-            # src/interp/ffi_runtime.rs 的 "FFI contract violation" → Err → exit 1）
+            # Canonical MIR bytecode FFI contract violation → Err → exit 1）
             # 且输出必须带合约违约标记。仅凭标记或仅凭退出码都不充分。
             if [ "$exit_code" -ne 0 ] \
                 && echo "$output" | grep -qi "ensures\|requires\|violation\|failed\|assert"; then
