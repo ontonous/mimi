@@ -1,6 +1,7 @@
 # Rust build output
 target/
 Cargo.lock
+!/Cargo.lock
 
 # CMake build artifacts
 build/
