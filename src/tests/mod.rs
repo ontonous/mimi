@@ -1948,14 +1948,78 @@ pub(crate) fn checked_compile_and_run(src: &str) -> Result<String, String> {
 
 // ===================== Bytecode VM test helpers (0.33 retirement) =====================
 
+/// Compile test source through the checker-owned scalar FFI route whenever it
+/// contains a resolved extern call. Raw-AST bytecode remains useful for the
+/// wider compatibility test corpus, but it may not manufacture FFI calls.
+fn compile_test_bytecode_program(
+    file: &crate::ast::File,
+    checked_program: Option<&core::CheckedProgram>,
+) -> Result<Arc<interp::bytecode::BytecodeProgram>, String> {
+    let owned_checked;
+    let checked = if file
+        .items
+        .iter()
+        .any(|item| matches!(item, crate::ast::Item::ExternBlock(_)))
+    {
+        match checked_program {
+            Some(program) => Some(program),
+            None => {
+                owned_checked = core::check_program(file).map_err(|diags| {
+                    diags
+                        .iter()
+                        .map(|diagnostic| diagnostic.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })?;
+                Some(&owned_checked)
+            }
+        }
+    } else {
+        checked_program
+    };
+
+    let has_extern_call = checked.is_some_and(|program| {
+        program
+            .call_sites_sorted()
+            .iter()
+            .any(|site| site.kind == core::ResolvedCallKind::Extern)
+    });
+    if has_extern_call {
+        let checked = checked.expect("extern calls always have a checked program");
+        if let Some(reason) = core::mir::scalar_ffi_boundary_reason(checked) {
+            return Err(format!(
+                "{}: {reason}",
+                core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+            ));
+        }
+        let mir = core::mir::reference::MirProgram::from_checked_program(checked)
+            .map_err(|error| error.to_string())?;
+        let receipt = mir.route_receipt("test-source-bytecode-scalar-ffi-v1");
+        return interp::bytecode::compile_mir_program_with_route_receipt(&mir, &receipt).map_err(
+            |errors| {
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+        );
+    }
+
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    if let Some(checked) = checked {
+        compiler.install_checked_program(checked);
+    }
+    compiler
+        .compile_file(file)
+        .map_err(|error| error.to_string())
+}
+
 /// Compile and run source via the Bytecode VM, returning the main Value.
 /// Panics on compile or runtime error (mirrors `run_source` semantics).
 pub(crate) fn run_source_bytecode(src: &str) -> interp::Value {
     let file = parse_prod(src);
-    let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    let prog = compiler
-        .compile_file(&file)
-        .expect("bytecode compile failed");
+    let prog = compile_test_bytecode_program(&file, None).expect("bytecode compile failed");
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().expect("bytecode run_value failed")
 }
@@ -1967,8 +2031,7 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
     let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
-    let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let prog = compile_test_bytecode_program(&file, None)?;
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }
@@ -1977,10 +2040,7 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
 /// Returns `(main return value, captured stdout)`.
 pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, String) {
     let file = parse_prod(src);
-    let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    let prog = compiler
-        .compile_file(&file)
-        .expect("bytecode compile failed");
+    let prog = compile_test_bytecode_program(&file, None).expect("bytecode compile failed");
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.enable_stdout_capture();
     let val = vm.run_value().expect("bytecode run_value failed");
@@ -2000,9 +2060,7 @@ pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Va
             .collect::<Vec<_>>()
             .join("\n")
     })?;
-    let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    compiler.install_checked_program(&program);
-    let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
+    let prog = compile_test_bytecode_program(&file, Some(&program))?;
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
 }

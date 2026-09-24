@@ -262,31 +262,36 @@ pub(crate) fn same_type(a: &Type, b: &Type) -> bool {
         (Type::CapAtom(a), Type::CapAtom(b)) => a == b,
         (Type::Shared(a), Type::Shared(b)) => same_type(a, b),
         (Type::Weak(a), Type::Weak(b)) => same_type(a, b),
-        // A4: Newtypes with same name and same inner type are equal.
-        // Different-name newtypes do NOT match (consistent with unify).
-        // Previous code fell through to inner-type comparison via the
-        // catch-all below, allowing Newtype("UserId", i32) == Newtype("OrderId", i32).
-        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => n1 == n2 && same_type(a, b),
-        // Constructor or transparent: Newtype(name,inner) matches Name(n) if name==n or inner.
-        // AUDIT FIX (0.35.20): the else branch must keep the Name's type arguments —
-        // stripping them made `Newtype("a", Name("Option", []))` structurally equal to
-        // `Name("Option", [i32])` (both funnel to Name("Option", [])), while fmt_type
-        // renders them differently ("Option" vs "Option<i32>"). Proptest regression
-        // 0b73fde9 seed: a = Name("Option",[i32]), b = Newtype("a", Name("Option",[])).
-        (Type::Newtype(n, inner), Type::Name(n2, args))
-        | (Type::Name(n2, args), Type::Newtype(n, inner)) => {
-            if n == n2 {
-                true
-            } else {
-                same_type(inner, &Type::Name(n2.clone(), args.clone()))
+        // `fmt_type` erases a single Newtype wrapper, but retains the outer
+        // name when the wrapper directly contains another Newtype. Equality
+        // must follow that same presentation: otherwise the property test can
+        // consider `Name("unknown")` equal to `Newtype("a", Newtype("a",
+        // Name("unknown")))` while their diagnostics have different types.
+        (Type::Newtype(n1, a), Type::Newtype(n2, b)) => {
+            let a_has_visible_wrapper = matches!(a.unlocated(), Type::Newtype(..));
+            let b_has_visible_wrapper = matches!(b.unlocated(), Type::Newtype(..));
+            match (a_has_visible_wrapper, b_has_visible_wrapper) {
+                (true, true) => n1 == n2 && same_type(a, b),
+                (false, false) => same_type(a, b),
+                _ => false,
             }
         }
-        // Newtype is transparent — same_type with non-Name, non-Newtype types
+        // A non-nested Newtype is transparent in `fmt_type`; compare only its
+        // inner type. A nested Newtype remains visible and cannot equal a
+        // non-Newtype presentation.
         (Type::Newtype(_, inner), other) if !matches!(other, Type::Newtype(..)) => {
-            same_type(inner, other)
+            if matches!(inner.unlocated(), Type::Newtype(..)) {
+                false
+            } else {
+                same_type(inner, other)
+            }
         }
         (other, Type::Newtype(_, inner)) if !matches!(other, Type::Newtype(..)) => {
-            same_type(inner, other)
+            if matches!(inner.unlocated(), Type::Newtype(..)) {
+                false
+            } else {
+                same_type(other, inner)
+            }
         }
         (Type::Infer, Type::Infer) => true,
         (Type::Array(a_inner, a_size), Type::Array(b_inner, b_size)) => {

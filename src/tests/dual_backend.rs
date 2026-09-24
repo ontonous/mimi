@@ -17,10 +17,6 @@ fn can_link() -> bool {
     crate::tests::can_link()
 }
 
-fn can_cc() -> bool {
-    crate::tests::can_link()
-}
-
 macro_rules! dual_assert {
     ($src:expr, $expected:expr) => {{
         // TC-C1: compare interpreter captured stdout with codegen stdout.
@@ -10571,8 +10567,7 @@ fn dual_exec_pipe() {
     );
 }
 
-// ==================== FFI Struct-by-Value Dual Tests ====================
-// Requires: rustc compiler, cc linker, and standalone.rs compiled as .so
+// ==================== Aggregate FFI Boundary Tests ====================
 
 #[test]
 fn dual_ffi_libc_symbols_default_resolution_parity() {
@@ -10687,22 +10682,27 @@ fn compatibility_ffi_non_utf8_binding_fails_closed() {
     );
 }
 
+fn assert_aggregate_ffi_outside_scalar_mir_profile(src: &str) {
+    check_source(src).unwrap_or_else(|diags| {
+        panic!(
+            "checker rejected the aggregate FFI declaration unexpectedly:\n{}",
+            diags
+                .iter()
+                .map(|d| format!("{}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let error = run_source_bytecode_result(src)
+        .expect_err("aggregate C ABI shapes are outside the migrated scalar FFI profile");
+    assert!(
+        error.contains("MIR-FFI-DECLARATION-001"),
+        "expected explicit aggregate FFI boundary, got: {error}"
+    );
+}
+
 #[test]
-fn dual_ffi_reprc_struct() {
-    if !can_cc() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    if !can_link() {
-        eprintln!("SKIP: linker not available");
-        return;
-    }
-    let mut guard = FfiEnvGuard::lock();
-    // Build the shared library containing test_struct_by_val
-    let so_path = build_interp_ffi_so().expect("dual_ffi_reprc_struct: build so failed");
-    guard.set_path(&so_path);
-    // Codegen links test_struct_by_val from the Rust runtime;
-    // interpreter loads it from .so via MIMI_FFI_LIB.
+fn dual_ffi_reprc_struct_is_outside_scalar_profile() {
     let src = r#"
         #[repr(C)]
         type TestPoint { x: i32, y: i32 }
@@ -10714,40 +10714,11 @@ fn dual_ffi_reprc_struct() {
             0
         }
     "#;
-    check_source(src).unwrap_or_else(|diags| {
-        panic!(
-            "checker rejected FFI struct-by-val source:\n{}",
-            diags
-                .iter()
-                .map(|d| format!("{}", d))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    });
-    // Interpreter should run without error
-    let _interp = run_source(src);
-    // Codegen: compile and run, capture stdout
-    let codegen_stdout = compile_and_run(src).expect("codegen failed");
-    assert_eq!(
-        codegen_stdout.trim(),
-        "30",
-        "codegen struct-by-value FFI mismatch"
-    );
+    assert_aggregate_ffi_outside_scalar_mir_profile(src);
 }
 
 #[test]
-fn dual_ffi_struct_multiple_fields() {
-    if !can_cc() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    if !can_link() {
-        eprintln!("SKIP: linker not available");
-        return;
-    }
-    let mut guard = FfiEnvGuard::lock();
-    let so_path = build_interp_ffi_so().expect("dual_ffi_struct_multiple: build so failed");
-    guard.set_path(&so_path);
+fn dual_ffi_struct_multiple_fields_is_outside_scalar_profile() {
     let src = r#"
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
@@ -10759,40 +10730,11 @@ fn dual_ffi_struct_multiple_fields() {
             0
         }
     "#;
-    check_source(src).unwrap_or_else(|diags| {
-        panic!(
-            "checker rejected FFI mixed struct source:\n{}",
-            diags
-                .iter()
-                .map(|d| format!("{}", d))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    });
-    let _interp = run_source(src);
-    let codegen_stdout = compile_and_run(src).expect("codegen failed");
-    // 10 + 3.5 + 1 = 14.5 (the C function sums all fields)
-    // P0-3: %g shortest round-trip, matches interp.
-    assert_eq!(
-        codegen_stdout.trim(),
-        "14.5",
-        "codegen mixed struct FFI mismatch"
-    );
+    assert_aggregate_ffi_outside_scalar_mir_profile(src);
 }
 
 #[test]
-fn dual_ffi_struct_return_complex() {
-    if !can_cc() {
-        eprintln!("SKIP: cc not available");
-        return;
-    }
-    if !can_link() {
-        eprintln!("SKIP: linker not available");
-        return;
-    }
-    let mut guard = FfiEnvGuard::lock();
-    let so_path = build_interp_ffi_so().expect("dual_ffi_struct_return_complex: build so failed");
-    guard.set_path(&so_path);
+fn dual_ffi_struct_return_is_outside_scalar_profile() {
     let src = r#"
         #[repr(C)]
         type MixedStruct { id: i32, value: f64, flag: i32 }
@@ -10807,32 +10749,7 @@ fn dual_ffi_struct_return_complex() {
             0
         }
     "#;
-    check_source(src).unwrap_or_else(|diags| {
-        panic!(
-            "checker rejected FFI struct return source:\n{}",
-            diags
-                .iter()
-                .map(|d| format!("{}", d))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    });
-    let _interp = run_source(src);
-    // Keep MIMI_FFI_LIB set; the codegen binary is statically linked and ignores it.
-    let codegen_stdout = compile_and_run(src);
-    match codegen_stdout {
-        Ok(out) => {
-            let lines: Vec<&str> = out.trim().lines().collect();
-            assert_eq!(lines.first().copied(), Some("10"));
-            // P0-3: %g shortest round-trip, matches interp.
-            assert_eq!(lines.get(1).copied(), Some("3.5"));
-            assert_eq!(lines.get(2).copied(), Some("1"));
-        }
-        Err(e) => {
-            eprintln!("COMPILE_AND_RUN ERROR: {}", e);
-            panic!("codegen failed: {}", e);
-        }
-    }
+    assert_aggregate_ffi_outside_scalar_mir_profile(src);
 }
 
 #[test]

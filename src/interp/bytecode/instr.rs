@@ -428,9 +428,10 @@ pub enum Op {
         args_base: Reg,
         argc: u16,
     },
-    /// Call extern (FFI) function: rd = extern(idx)(args[0..argc]).
-    /// The index refers to `BytecodeProgram::extern_names` and the
-    /// compatibility AST-backed runtime.
+    /// Retired receiptless extern-call encoding. It is retained as a
+    /// compatibility/inspection shape so forged or old bytecode can receive
+    /// a stable fail-closed diagnostic; production compilers never emit it
+    /// and the VM never resolves the index through host libraries.
     CallExtern {
         rd: Reg,
         extern_idx: u16,
@@ -1900,7 +1901,9 @@ pub struct BytecodeProgram {
     pub entry: FuncIdx,
     /// Builtin function name → BuiltinIdx mapping.
     pub builtin_names: Vec<String>,
-    /// Extern (FFI) function names, indexed by Op::CallExtern::extern_idx
+    /// Extern declaration names retained for old bytecode inspection.
+    /// `CallExtern` is rejected by the VM and this table is never used for
+    /// host symbol resolution.
     /// (0.33 Phase D FFI forwarding).
     pub extern_names: Vec<String>,
     /// Checker-owned scalar FFI descriptors materialized from Canonical MIR.

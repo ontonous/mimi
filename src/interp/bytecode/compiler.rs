@@ -41,7 +41,9 @@ pub struct BytecodeCompiler {
     actor_names: std::collections::HashSet<String>,
     /// Known extern function names (for clear error messages).
     extern_names: std::collections::HashSet<String>,
-    /// Ordered extern names for Op::CallExtern indexing (0.33 Phase D).
+    /// Extern declaration names retained for compatibility inspection. Raw
+    /// AST bytecode is not permitted to execute them; scalar FFI requires a
+    /// checker-owned Canonical MIR receipt.
     extern_name_order: Vec<String>,
     /// Known capability names (for cap value construction).
     cap_names: std::collections::HashSet<String>,
@@ -612,7 +614,9 @@ impl BytecodeCompiler {
                 self.actor_names.insert(a.name.clone());
                 self.actor_defs.insert(a.name.clone(), a.clone());
             }
-            // Collect extern function names (for call dispatch + indexing).
+            // Retain declaration names for compatibility inspection. Call
+            // dispatch below rejects raw-AST FFI instead of creating a
+            // receiptless CallExtern instruction.
             if let Item::ExternBlock(block) = item {
                 for f in &block.funcs {
                     if self.extern_names.insert(f.name.clone()) {
@@ -3665,16 +3669,15 @@ impl BytecodeCompiler {
                 });
                 return Ok(rd);
             }
-            // Extern (FFI) function — resolved at runtime through the shared
-            // FfiRuntime (0.33 Phase D FFI forwarding).
-            if let Some(pos) = self.extern_name_order.iter().position(|n| n == name) {
-                fc.emit(Op::CallExtern {
-                    rd,
-                    extern_idx: pos as u16,
-                    args_base,
-                    argc: effective_args.len() as u16,
-                });
-                return Ok(rd);
+            // A surface AST carries no checker-owned FFI receipt. Compiling
+            // an extern call here would recreate the legacy runtime path and
+            // bypass the scalar MIR descriptor, ABI checks, and route anchor.
+            if self.extern_names.contains(name.as_str()) {
+                return Err(InterpError::new(format!(
+                    "{}: raw-AST bytecode cannot execute extern call '{}'; use checker-owned Canonical MIR with a route receipt",
+                    crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
+                    name
+                )));
             }
             // Enum variant constructors: Circle(5), Point(1, 2), etc.
             if self.variant_names.contains(name.as_str()) {

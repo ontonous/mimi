@@ -3469,7 +3469,7 @@ func main() -> i32 {
     }
 
     #[test]
-    fn vm_rejects_forged_call_extern_argument_window() {
+    fn raw_ast_compiler_rejects_receiptless_extern_calls() {
         let source = r#"
         extern "C" {
             func labs(x: i64) -> i64;
@@ -3482,31 +3482,142 @@ func main() -> i32 {
         let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
         let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         let mut compiler = BytecodeCompiler::new();
+        let error = compiler
+            .compile_file(&file)
+            .expect_err("raw AST compilation cannot produce a receiptless extern call");
+        assert!(
+            error.to_string().contains("MIR-FFI-DECLARATION-001"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn raw_ast_compiler_rejects_deterministic_receiptless_extern_matrix() {
+        let shapes = [
+            ("", "", "foreign()"),
+            ("x: i64", "1", "foreign(1)"),
+            ("x: f64", "2.5", "foreign(2.5)"),
+            ("x: bool", "true", "foreign(true)"),
+            (
+                "x: i64, y: bool, z: f64",
+                "1, true, 2.5",
+                "foreign(1, true, 2.5)",
+            ),
+        ];
+
+        for seed in 0..20usize {
+            let (params, _args, call) = shapes[seed % shapes.len()];
+            let name = format!("foreign_receiptless_{seed}");
+            let call = call.replacen("foreign", &name, 1);
+            let source = format!(
+                r#"
+                extern "C" {{ func {name}({params}) -> i64; }}
+                func main() -> i32 {{
+                    println({seed})
+                    {call}
+                    0
+                }}
+                "#
+            );
+            let tokens = crate::lexer::Lexer::new(&source).tokenize().unwrap();
+            let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+            let mut compiler = BytecodeCompiler::new();
+            let error = compiler
+                .compile_file(&file)
+                .expect_err("raw AST compilation cannot mint FFI call receipts");
+            let message = error.to_string();
+            assert!(
+                message.contains("MIR-FFI-DECLARATION-001")
+                    && message.contains(&name)
+                    && message.contains("raw-AST bytecode cannot execute extern call"),
+                "seed {seed} lost its explicit boundary: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_rejects_receiptless_extern_index_matrix_before_stdout_or_host_lookup() {
+        let source = r#"
+        func main() -> i32 {
+            println(41)
+            0
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let base_program = compiler.compile_file(&file).unwrap();
+
+        for extern_idx in [0, 1, u16::MAX] {
+            let mut program = base_program.clone();
+            let forged = std::sync::Arc::make_mut(&mut program);
+            forged.extern_names = vec!["abs".to_string()];
+            let main = &mut forged.functions[forged.entry as usize];
+            let call_pc = main.code.len() - 1;
+            main.code.insert(
+                call_pc,
+                Op::CallExtern {
+                    rd: 0,
+                    extern_idx,
+                    args_base: 0,
+                    argc: 0,
+                },
+            );
+
+            let mut vm = BytecodeVM::new(program);
+            vm.enable_stdout_capture();
+            let error = vm
+                .run_value()
+                .expect_err("receiptless extern must be rejected during whole-program preflight");
+            assert!(
+                error.to_string().contains("MIR-FFI-DECLARATION-001"),
+                "index {extern_idx}: {error}"
+            );
+            assert!(
+                vm.take_stdout().is_empty(),
+                "stdout escaped before rejection for index {extern_idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_checks_receiptless_extern_register_window_before_rejecting() {
+        let source = r#"
+        func main() -> i32 {
+            println(41)
+            0
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
         let mut program = compiler.compile_file(&file).unwrap();
         let forged = std::sync::Arc::make_mut(&mut program);
         let main = &mut forged.functions[forged.entry as usize];
         let register_count = main.register_count;
-        let call = main
-            .code
-            .iter_mut()
-            .find_map(|op| match op {
-                Op::CallExtern {
-                    args_base, argc, ..
-                } => Some((args_base, argc)),
-                _ => None,
-            })
-            .expect("extern call must emit a CallExtern instruction");
-        *call.0 = register_count;
-        *call.1 = 1;
+        let call_pc = main.code.len() - 1;
+        main.code.insert(
+            call_pc,
+            Op::CallExtern {
+                rd: 0,
+                extern_idx: u16::MAX,
+                args_base: register_count,
+                argc: 1,
+            },
+        );
 
-        let error = BytecodeVM::new(program)
-            .run()
-            .expect_err("a forged extern-call argument window must fail before symbol loading");
+        let mut vm = BytecodeVM::new(program);
+        vm.enable_stdout_capture();
+        let error = vm
+            .run_value()
+            .expect_err("malformed extern register window must be rejected");
         assert!(
-            error
-                .to_string()
-                .contains("extern call argument register window"),
+            error.to_string().contains("argument register window"),
             "{error}"
+        );
+        assert!(
+            vm.take_stdout().is_empty(),
+            "stdout escaped before rejection"
         );
     }
 

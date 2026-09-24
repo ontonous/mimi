@@ -1,31 +1,17 @@
 use super::*;
 
-/// Path to a real shared library used only to reach the argument-conversion
-/// phase of call_extern. The called symbols do not exist, so no C function is
-/// actually invoked.
+/// The scalar FFI route reaches symbol lookup only after checker-owned MIR
+/// receipt validation. libc is used for deliberately missing test symbols.
 fn ffi_lib_path() -> &'static str {
     "/lib/x86_64-linux-gnu/libc.so.6"
 }
 
-fn expect_ffi_safety_error(src: &str, expected_substring: &str) {
-    let result = run_source_bytecode_result(src);
-
+fn expect_scalar_ffi_boundary(src: &str) {
+    let err = run_source_bytecode_result(src)
+        .expect_err("unsupported FFI shape must not reach the legacy runtime");
     assert!(
-        result.is_err(),
-        "expected FFI safety error, got value: {:?}",
-        result.ok()
-    );
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("FFI safety"),
-        "expected error to contain 'FFI safety', got: {}",
-        err
-    );
-    assert!(
-        err.contains(expected_substring),
-        "expected error to contain '{}', got: {}",
-        expected_substring,
-        err
+        err.contains("MIR-FFI-DECLARATION-001") || err.contains("[E0231]"),
+        "expected stable scalar FFI boundary diagnostic, got: {err}"
     );
 }
 
@@ -40,7 +26,9 @@ fn expect_symbol_not_found(src: &str) {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("failed to find symbol") || err.contains("cannot find"),
+        err.contains("failed to find symbol")
+            || err.contains("failed to find canonical MIR FFI symbol")
+            || err.contains("cannot find"),
         "expected symbol-not-found error, got: {}",
         err
     );
@@ -72,7 +60,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    expect_ffi_safety_error(src, "shared");
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
@@ -107,7 +95,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(&x)
 }
 "#;
-    expect_ffi_safety_error(src, "borrowed reference");
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
@@ -122,12 +110,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(&mut x)
 }
 "#;
-    expect_ffi_safety_error(src, "borrowed reference");
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
-fn record_allowed_in_ffi_via_json() {
-    // Record types are now supported via JSON serialization (like List/Tuple)
+fn record_ffi_rejected_outside_scalar_profile() {
+    // Aggregate FFI remains outside the scalar Canonical MIR profile.
     let src = r#"
 type Point {
     x: i32
@@ -143,13 +131,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(p)
 }
 "#;
-    // Should proceed past type check to symbol resolution
-    expect_symbol_not_found(src);
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
-fn list_allowed_in_ffi_via_json() {
-    // List types are now supported via JSON serialization
+fn list_ffi_rejected_outside_scalar_profile() {
+    // Managed aggregate FFI remains outside the scalar Canonical MIR profile.
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(xs: List<i32>) -> i32;
@@ -160,13 +147,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(xs)
 }
 "#;
-    // Should proceed past type check to symbol resolution
-    expect_symbol_not_found(src);
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
-fn cap_allowed_in_ffi_with_cap_table() {
-    // After STAGE2, caps are registered in the CapTable and passed as i64 handles
+fn cap_ffi_rejected_outside_scalar_profile() {
+    // Capability handles do not cross the scalar FFI boundary implicitly.
     let src = r#"
 cap FileReadCap;
 
@@ -179,8 +165,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(c)
 }
 "#;
-    // Cap is now allowed - the function just doesn't exist, so we get symbol-not-found
-    expect_symbol_not_found(src);
+    expect_scalar_ffi_boundary(src);
 }
 
 #[test]
@@ -226,7 +211,7 @@ func main() -> i32 {
 }
 
 #[test]
-fn string_borrow_allowed_in_ffi() {
+fn string_ffi_is_outside_scalar_profile() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(s: string) -> i32;
@@ -236,7 +221,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345("hello")
 }
 "#;
-    expect_symbol_not_found(src);
+    expect_scalar_ffi_boundary(src);
 }
 
 // ---------------------------------------------------------------------------

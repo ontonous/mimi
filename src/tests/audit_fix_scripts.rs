@@ -290,6 +290,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=6",
         "scalar_ffi_direct_expression_legacy_refs=0",
+        "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed",
         "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
         "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
@@ -1044,6 +1045,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
             "bytecode_route_receipt_vm_guard=program-anchor+identity-consistency+manifest-replay consumer=src/interp/bytecode/vm.rs"
         ),
         "legacy owner audit must pin the VM boundary receipt guard"
+    );
+    assert!(
+        stdout.contains(
+            "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed"
+        ),
+        "legacy owner audit must pin receiptless bytecode FFI retirement"
     );
     assert!(
         stdout.contains(

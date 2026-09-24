@@ -1,4 +1,3 @@
-use super::super::ffi_runtime::FfiClosureRunner;
 use super::super::*;
 use crate::ast::*;
 use crate::ffi::callback_table_remove;
@@ -200,7 +199,7 @@ fn evaluate_cross_thread_callback(
         // on any thread without a dangling pointer or a mismatched program.
         let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::clone(program));
         let result = vm
-            .apply_closure_ffi(closure, args)
+            .call_closure(closure, &args)
             .map_err(|e| format!("cross-thread callback evaluation error: {}", e))?;
         return encode_callback_result(result, ret_is_float);
     }

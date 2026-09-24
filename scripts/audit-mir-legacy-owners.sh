@@ -244,6 +244,56 @@ direct_native_ffi_boundary_guard() {
 
 direct_native_ffi_boundary_guard
 
+# R6-1111: the raw-AST bytecode compiler and VM must not retain the old host
+# loader ingress. The legacy instruction is kept only as a rejected bytecode
+# shape, with VM-wide validation before execution or host lookup.
+retired_receiptless_bytecode_ffi_path() {
+    local compiler="$ROOT_DIR/src/interp/bytecode/compiler.rs"
+    local vm="$ROOT_DIR/src/interp/bytecode/vm.rs"
+    local tests="$ROOT_DIR/src/interp/bytecode/mod.rs"
+    if rg -q 'fc\.emit\(Op::CallExtern' "$compiler"; then
+        printf 'owner_audit_error=raw_ast_bytecode_still_emits_receiptless_call_extern\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -F 'raw-AST bytecode cannot execute extern call' "$compiler" >/dev/null; then
+        printf 'owner_audit_error=raw_ast_bytecode_extern_boundary_missing\n' >&2
+        audit_failed=1
+        return
+    fi
+    if rg -n '\bFfiRuntime\b|call_extern_idx|vm_as_runner|call_extern_with_runner_ptr' "$vm" >/dev/null; then
+        printf 'owner_audit_error=bytecode_vm_retains_ast_backed_ffi_loader\n' >&2
+        audit_failed=1
+        return
+    fi
+    for marker in \
+        'receiptless legacy CallExtern' \
+        'receiptless legacy CallExtern execution is disabled' \
+        'self.validate_canonical_ffi_program()?'; do
+        if ! rg -F "$marker" "$vm" >/dev/null; then
+            printf 'owner_audit_error=bytecode_vm_ffi_preflight_marker_missing marker=%s\n' \
+                "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for test_name in \
+        raw_ast_compiler_rejects_receiptless_extern_calls \
+        raw_ast_compiler_rejects_deterministic_receiptless_extern_matrix \
+        vm_rejects_receiptless_extern_index_matrix_before_stdout_or_host_lookup \
+        vm_checks_receiptless_extern_register_window_before_rejecting; do
+        if ! rg -q "^[[:space:]]*fn ${test_name}\\(" "$tests"; then
+            printf 'owner_audit_error=bytecode_ffi_retirement_test_missing=%s\n' \
+                "$test_name" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed\n'
+}
+
+retired_receiptless_bytecode_ffi_path
+
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \

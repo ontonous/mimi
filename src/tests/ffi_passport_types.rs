@@ -1,8 +1,26 @@
 use super::*;
 
-/// Test that raw pointer can accept shared values
+fn assert_ffi_boundary(source: &str) {
+    let error = run_source_bytecode_result(source)
+        .expect_err("passport and capability ABI shapes are outside scalar FFI");
+    assert!(
+        error.contains("MIR-FFI-DECLARATION-001") || error.contains("[E0231]"),
+        "expected explicit scalar FFI boundary, got: {error}"
+    );
+}
+
+fn assert_pointer_argument_rejected_by_checker(source: &str) {
+    let error = run_source_bytecode_result(source)
+        .expect_err("shared integers do not implicitly become raw pointers");
+    assert!(
+        error.contains("[E0211]"),
+        "expected the pointer argument type error, got: {error}"
+    );
+}
+
+/// Raw pointer declarations parse, but shared integers do not coerce to them.
 #[test]
-fn raw_ptr_accepts_shared_value() {
+fn raw_ptr_rejects_shared_value_argument() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: *i32) -> i32;
@@ -13,21 +31,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FfiEnvGuard::set(std::path::Path::new("/lib/x86_64-linux-gnu/libc.so.6"));
-    let result = run_source_bytecode_result(src);
-
-    assert!(result.is_err(), "should fail with symbol not found");
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("failed to find symbol") || err.contains("cannot find"),
-        "error should be about symbol not found, got: {}",
-        err
-    );
+    assert_pointer_argument_rejected_by_checker(src);
 }
 
-/// Test that mutable raw pointer can accept shared values
+/// Mutable raw pointer calls have the same explicit argument type boundary.
 #[test]
-fn raw_ptr_mut_accepts_shared_value() {
+fn raw_ptr_mut_rejects_shared_value_argument() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: *mut i32) -> i32;
@@ -38,21 +47,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(s)
 }
 "#;
-    let _guard = FfiEnvGuard::set(std::path::Path::new("/lib/x86_64-linux-gnu/libc.so.6"));
-    let result = run_source_bytecode_result(src);
-
-    assert!(result.is_err(), "should fail with symbol not found");
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("failed to find symbol") || err.contains("cannot find"),
-        "error should be about symbol not found, got: {}",
-        err
-    );
+    assert_pointer_argument_rejected_by_checker(src);
 }
 
 /// Test that cap values are registered in CapTable
 #[test]
-fn cap_values_are_registered() {
+fn capability_call_is_outside_scalar_ffi_profile() {
     let src = r#"
 cap TestCap;
 
@@ -65,22 +65,12 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(c)
 }
 "#;
-    let _guard = FfiEnvGuard::set(std::path::Path::new("/lib/x86_64-linux-gnu/libc.so.6"));
-    let result = run_source_bytecode_result(src);
-
-    // Cap handling should work, but the function doesn't exist
-    assert!(result.is_err(), "should fail with symbol not found");
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("failed to find symbol") || err.contains("cannot find"),
-        "error should be about symbol not found, got: {}",
-        err
-    );
+    assert_ffi_boundary(src);
 }
 
-/// Test that FFI requires contract is checked when verify_ffi is enabled
+/// A scalar declaration without contracts still uses receipt-bearing MIR.
 #[test]
-fn ffi_requires_contract_checked() {
+fn scalar_ffi_without_contract_reaches_canonical_symbol_lookup() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: i32) -> i32;
@@ -90,17 +80,14 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(0)
 }
 "#;
-    // Without verify_ffi, the precondition is not checked
-    let _guard = FfiEnvGuard::set(std::path::Path::new("/lib/x86_64-linux-gnu/libc.so.6"));
-    let result = run_source_bytecode_result(src);
-
-    // Should fail with symbol not found (precondition not checked)
-    assert!(result.is_err(), "should fail with symbol not found");
-    let err = result.unwrap_err();
+    // The scalar declaration is checker-owned and executes only through its
+    // canonical route. Its deliberately absent symbol proves this is not the
+    // receiptless AST bytecode loader.
+    let error = run_source_bytecode_result(src)
+        .expect_err("the declared scalar symbol is intentionally absent");
     assert!(
-        err.contains("failed to find symbol") || err.contains("cannot find"),
-        "error should be about symbol not found, got: {}",
-        err
+        error.contains("failed to find canonical MIR FFI symbol"),
+        "expected canonical scalar FFI lookup, got: {error}"
     );
 }
 

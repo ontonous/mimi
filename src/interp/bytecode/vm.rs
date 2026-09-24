@@ -9,9 +9,7 @@
 use super::instr::*;
 use super::registry::{self, BuiltinFastPath, BuiltinRegistry};
 use crate::ast::Lit;
-use crate::ffi::FfiContract;
 use crate::interp::error::InterpError;
-use crate::interp::ffi_runtime::{FfiClosureRunner, FfiRuntime};
 use crate::interp::value::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -134,9 +132,6 @@ pub struct BytecodeVM {
     /// Reusable register buffers (frame regs Vec capacity is preserved across
     /// calls, so deep recursion does not re-malloc per frame).
     free_regs: Vec<Vec<Value>>,
-    /// Shared FFI execution context (0.33 Phase D FFI forwarding): extern
-    /// function tables, loaded shared libraries, contract verification.
-    ffi_runtime: FfiRuntime,
     /// AST-free runtime for canonical MIR scalar FFI descriptors.
     canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime,
     /// Quote assembly stack (0.33 Phase F): nodes pushed by Quote* ops.
@@ -167,20 +162,6 @@ fn reg_as_f64(v: &Value) -> Result<f64, InterpError> {
 impl BytecodeVM {
     pub fn new(program: std::sync::Arc<BytecodeProgram>) -> Self {
         let max_children = program.max_children;
-        // 0.35.27 (C3): read program metadata BEFORE moving the Arc into the
-        // struct field (program.ast is needed for the FFI runtime below).
-        let ffi_runtime = match program.ast.as_ref() {
-            Some(file) => {
-                let mut rt = FfiRuntime::from_file(file);
-                rt.verify_ffi = false;
-                rt
-            }
-            None => FfiRuntime::from_parts(
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            ),
-        };
         BytecodeVM {
             program,
             stack: Vec::with_capacity(64),
@@ -194,13 +175,6 @@ impl BytecodeVM {
             cli_args: Vec::new(),
             exit_requested: None,
             free_regs: Vec::new(),
-            // Shared FFI execution context (0.33 Phase D FFI forwarding).
-            // Built from the program AST when available (the compiler always
-            // stores it); hand-assembled test programs fall back to empty
-            // tables. Contract verification is disabled until the bytecode
-            // engine implements contract-expression eval (see
-            // FfiClosureRunner::eval_contract_expr).
-            ffi_runtime,
             canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime::new(),
             quote_stack: Vec::new(),
             quote_captures: std::collections::HashMap::new(),
@@ -395,7 +369,6 @@ impl BytecodeVM {
 
     /// Enable or disable FFI contract verification at runtime.
     pub fn set_verify_ffi(&mut self, verify: bool) {
-        self.ffi_runtime.verify_ffi = verify;
         self.canonical_ffi_runtime.verify_contracts = verify;
     }
 
@@ -431,6 +404,8 @@ impl BytecodeVM {
                 let message = error.message().to_owned();
                 let code = if message.contains("route receipt manifest replay failed") {
                     crate::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
+                } else if message.contains("receiptless legacy CallExtern") {
+                    crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
                 } else {
                     crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
                 };
@@ -439,6 +414,42 @@ impl BytecodeVM {
     }
 
     fn validate_canonical_ffi_program_inner(&self) -> Result<(), InterpError> {
+        // Retired AST-backed CallExtern programs have no checker-owned call
+        // receipt. Validate their operands and reject the whole program before
+        // executing any instruction, so a forged late call cannot expose
+        // earlier stdout or host side effects.
+        for proto in &self.program.functions {
+            for (pc, op) in proto.code.iter().enumerate() {
+                let Op::CallExtern {
+                    rd,
+                    extern_idx,
+                    args_base,
+                    argc,
+                } = op
+                else {
+                    continue;
+                };
+                let register_count = proto.register_count as usize;
+                if (*rd as usize) >= register_count {
+                    return Err(InterpError::new(format!(
+                        "receiptless legacy CallExtern in function '{}' pc {pc} has extern call destination register {rd} outside frame with {register_count} register(s)",
+                        proto.name
+                    )));
+                }
+                let args_end = (*args_base as usize).checked_add(*argc as usize);
+                if args_end.map_or(true, |end| end > register_count) {
+                    return Err(InterpError::new(format!(
+                        "receiptless legacy CallExtern in function '{}' pc {pc} has argument register window base {args_base} count {argc} outside frame with {register_count} register(s)",
+                        proto.name
+                    )));
+                }
+                return Err(InterpError::new(format!(
+                    "receiptless legacy CallExtern in function '{}' pc {pc} (extern index {extern_idx}) is disabled; use checker-owned Canonical MIR with a route receipt",
+                    proto.name
+                )));
+            }
+        }
+
         let descriptors = &self.program.canonical_ffi;
         let bindings = &self.program.canonical_ffi_bindings;
         if descriptors.is_empty() {
@@ -2410,26 +2421,11 @@ impl BytecodeVM {
                             args_base, argc, register_count
                         )));
                     }
-                    let args: Vec<Value> = (0..argc)
-                        .map(|i| self.get_reg(args_base + i).clone())
-                        .collect();
-                    let result = self.call_extern_idx(extern_idx, args);
-                    match result {
-                        Ok(v) => self.set_reg(rd, v),
-                        Err(e) => {
-                            // Audit fixes #1/#2: stash the error and pop the top
-                            // handler (see CallBuiltin Err branch).
-                            if let Some(handler_pc) =
-                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
-                            {
-                                let frame = self.cur_frame_mut();
-                                frame.pending_fault = Some(e);
-                                frame.pc = handler_pc;
-                            } else {
-                                return Err(e);
-                            }
-                        }
-                    }
+                    let _ = extern_idx;
+                    return Err(InterpError::new(format!(
+                        "{}: receiptless legacy CallExtern execution is disabled",
+                        crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+                    )));
                 }
                 Op::CallCanonicalExtern {
                     rd,
@@ -5689,51 +5685,6 @@ impl BytecodeVM {
         }
     }
 
-    // ── FFI forwarding (0.33 Phase D) ────────────────────────
-
-    /// Execute an extern (FFI) function call through the shared FfiRuntime.
-    /// The VM itself acts as the closure-execution engine (`self_as_runner`).
-    fn call_extern_idx(&mut self, extern_idx: u16, args: Vec<Value>) -> Result<Value, InterpError> {
-        let name = self
-            .program
-            .extern_names
-            .get(extern_idx as usize)
-            .cloned()
-            .ok_or_else(|| InterpError::new(format!("extern index {} out of range", extern_idx)))?;
-        let extern_func = self
-            .ffi_runtime
-            .extern_funcs
-            .get(&name)
-            .cloned()
-            .ok_or_else(|| InterpError::new(format!("extern function '{}' not found", name)))?;
-        let contract = self
-            .ffi_runtime
-            .ffi_contracts
-            .get(&name)
-            .cloned()
-            .unwrap_or_else(|| FfiContract::from_extern(&extern_func));
-        let runner_ptr = Self::vm_as_runner(self);
-        self.ffi_runtime
-            .call_extern_with_runner_ptr(&extern_func, &contract, args, runner_ptr)
-            .map_err(|e| InterpError::new(e.to_string()))
-    }
-
-    /// Convert `&mut self` into the raw engine pointer used by `FfiRuntime`.
-    ///
-    /// SAFETY: the returned pointer erases the `'a` lifetime to `'static`.
-    /// Sound ONLY because the pointer is used synchronously inside a single
-    /// C call that completes before `self`'s borrow ends (CRITICAL #4
-    /// analysis in ffi_runtime.rs). Never stored or dereferenced after
-    /// `call_extern_with_runner_ptr` returns. Isolated in this function so
-    /// no borrow of `self` escapes into `self.ffi_runtime`.
-    fn vm_as_runner(this: &mut Self) -> *mut (dyn FfiClosureRunner + 'static) {
-        let runner: &mut (dyn FfiClosureRunner + '_) = this;
-        let ptr: *mut (dyn FfiClosureRunner + '_) = runner as *mut (dyn FfiClosureRunner + '_);
-        // SAFETY: same-size transmute (fat pointer to fat pointer); lifetime
-        // erasure is sound per the function-level SAFETY contract.
-        unsafe { std::mem::transmute(ptr) }
-    }
-
     /// Call a function by index with the given arguments.
     /// Used by actor worker threads to execute actor methods.
     pub fn call_function(
@@ -7568,33 +7519,5 @@ fn default_value_for_type_str(
                 Value::Unit
             }
         }
-    }
-}
-
-/// FfiClosureRunner implementation: the bytecode VM can execute Mimi
-/// closures (BytecodeClosure) from C callback trampolines, and provides the
-/// program File for cross-thread callback evaluation.
-impl FfiClosureRunner for BytecodeVM {
-    fn ffi_file(&self) -> &crate::ast::File {
-        self.program
-            .ast
-            .as_ref()
-            .map(|f| f.as_ref() as &crate::ast::File)
-            .expect("BytecodeVM FFI: program AST is required (compiler always sets it)")
-    }
-
-    fn apply_closure_ffi(&mut self, closure: &Value, args: Vec<Value>) -> Result<Value, String> {
-        self.call_closure(closure, &args).map_err(|e| e.to_string())
-    }
-
-    fn eval_contract_expr(
-        &mut self,
-        _expr: &crate::ast::Expr,
-        _result_binding: Option<&Value>,
-    ) -> Result<Value, String> {
-        Err(
-            "FFI contract evaluation is not supported in the bytecode VM yet (0.33 Phase D+)"
-                .to_string(),
-        )
     }
 }
