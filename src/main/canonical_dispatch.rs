@@ -134,6 +134,23 @@ pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
     MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)
 }
 
+/// Return the source-level diagnostic shared by Canonical MIR execution and
+/// verifier entry points when a called extern declaration is outside the
+/// migrated scalar C ABI. Keep this check ahead of MIR construction so
+/// `run`, `build`, and `verify` explain the same source boundary instead of
+/// exposing backend-specific layout failures. Read-only `mimi mir` inspection
+/// intentionally remains able to represent declarations outside that ABI.
+pub(crate) fn scalar_ffi_declaration_boundary_diagnostic(
+    checked: &CheckedProgram,
+) -> Option<String> {
+    mimi::core::mir::scalar_ffi_boundary_reason(checked).map(|reason| {
+        format!(
+            "{}: canonical scalar FFI declaration boundary: {reason}. Supported declarations use extern \"C\", scalar i32/i64/f32/f64/bool parameters, and a scalar or unit result; string, pointer, callback, aggregate, variadic, parameter-mode, errno, no_panic, and non-C ABI declarations remain unsupported.",
+            mimi::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+        )
+    })
+}
+
 /// Select a default route for a complete checked program.
 ///
 /// The current default-switch islands are deliberately narrow: a program must
@@ -161,11 +178,8 @@ pub(crate) fn select_default_route(
     // is still a canonical FFI boundary.  Reject it before considering any
     // unrelated island or the compatibility route; otherwise default `run`,
     // `build`, or `verify` could silently hand the call to the old emitter.
-    if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(checked) {
-        return DefaultMirRoute::Rejected(format!(
-            "{}: canonical scalar FFI declaration boundary: {reason}",
-            mimi::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
-        ));
+    if let Some(reason) = scalar_ffi_declaration_boundary_diagnostic(checked) {
+        return DefaultMirRoute::Rejected(reason);
     }
     // Admission is checker-owned and must happen before MIR construction.
     // The shared envelope also owns the materialization receipts, preventing

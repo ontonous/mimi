@@ -6,11 +6,9 @@
 
 [![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-7700%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
-[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-Interpreter + LLVM 18 Codegen Dual Backend · Z3 Formal Verification · Sparse Flow State Machines · Linear Resources · Actor Model · Session Types · Component Boundary
+Bytecode VM + LLVM 18 Native Backend · Canonical MIR Islands · Z3 Formal Verification · Sparse Flow State Machines · Linear Resources · Actor Model · Session Types · Component Boundary
 
 ---
 
@@ -136,7 +134,7 @@ The Architecture Amendment (2026-07-25) established 10 design rulings after nine
 
 | Feature | Status |
 |---------|--------|
-| Bytecode VM interpreter (sole interpreter since 0.1.3) + LLVM 18 codegen (native binary) — L1 equivalence tested | ✅ |
+| Bytecode VM interpreter (sole interpreter since 0.1.3) + LLVM 18 codegen (native binary) — equivalence is tested per accepted slice; not a global VM/native claim | ✅ |
 | Hindley-Milner type inference (undo trail + TypeScheme + zonk) | ✅ |
 | Generics `<T: Bound>`, recursive types | ✅ |
 | Enums / records / tuples, `match` exhaustiveness, `while let` | ✅ |
@@ -146,7 +144,8 @@ The Architecture Amendment (2026-07-25) established 10 design rulings after nine
 
 | Feature | Status |
 |---------|--------|
-| `extern "C"`, `repr(C)`, multi-language bindgen (C/C++/Rust/Go/Node.js/Java/Python) | ✅ |
+| Scalar `extern "C"` imports | ✅ Narrow C ABI profile: `i32`/`i64`/`f32`/`f64`/`bool` parameters, scalar or unit result; see [FFI limits and linking](readme/10-ffi.md) |
+| `repr(C)` and binding generators | Separate export/binding tools; their availability does not widen the imported scalar FFI profile |
 | `comptime func` + `quote!` AST generation | ✅ |
 | LSP: completion, hover, goto-definition, contract lens | ✅ |
 | Package manager: `mimi.toml`, registry, git deps, dependency tree | ✅ |
@@ -166,6 +165,12 @@ bash scripts/setup-llvm-wrapper.sh
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo build --release --features llvm18-host-dynamic
 ```
+
+This source build requires LLVM 18, Z3, and libffi development packages to already be installed. The wrapper script only configures `llvm-sys`; it does not install those libraries.
+
+### Prebuilt release
+
+The release workflow produces a Linux x86_64 archive built on Ubuntu 22.04; find published archives on [GitHub Releases](https://github.com/ontonous/mimi/releases). The archive keeps LLVM, Z3, and libffi as shared system dependencies. On Ubuntu 22.04, install them with `sudo apt-get install libllvm18 libz3-4 libffi8` before running `mimi`.
 
 ### Hello, Flow
 
@@ -232,7 +237,7 @@ Source → Lexer → Parser → AST
   Executor       VM            Emitter        (MIR engine)
 ```
 
-**Iron rule**: backends cannot fall back to raw AST. As of the 0.1.11 campaign, production `raw_ast()` call sites are **zero**. Default `run`/`build`/`verify` route through Canonical MIR island-by-island: a program takes the default canonical route only after all consumers pre-admit it; unmodeled shapes are rejected fail-closed (never silently mis-executed) and keep the explicit legacy emitter, whose remaining call sites (currently 8) sit under a monotonic deletion gate.
+**Iron rule**: backends cannot fall back to raw AST. As of the 0.1.11 campaign, production `raw_ast()` call sites are **zero**. Default `run`/`build`/`verify` route through Canonical MIR island-by-island: a program takes the default canonical route only after all consumers pre-admit it; unmodeled shapes are rejected fail-closed (never silently mis-executed). Four compatibility owner classes still retain legacy production dependencies, so this does not claim global legacy removal.
 
 ### Dependency Chain
 
@@ -302,16 +307,16 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | Command | Description |
 |---------|-------------|
 | `mimi check <path>` | Type-check with full error reporting |
-| `mimi run <path>` | Run (interpret) with optional `--verify-contracts` / `--profile` / `--watch` |
-| `mimi test <path>` | Run `test_*` functions with `--filter` and `--verbose` |
-| `mimi build <path>` | Compile to native binary (LLVM). `--emit-ir`, `--shared`, `--target`, `--verify-contracts` |
+| `mimi run <path>` | Run in the Bytecode VM with optional `--verify-contracts`, `--profile`, `--watch`, and `--mir` |
+| `mimi test <path>` | Run zero-argument `test_*` functions in one source file with `--filter` and `--verbose` |
+| `mimi build <path>` | Compile to native binary (LLVM). `--emit-ir`, `--shared`, `--target`, `--verify-contracts`, `--verify-ffi`, repeatable `--link-search` / `--link-lib` |
 | `mimi fmt <files>` | Format code (`--check` for CI) |
 | `mimi lint <files>` | Static analysis (`--fail-on-warnings`) |
 | `mimi verify <path>` | Z3 formal verification |
 | `mimi mir <path>` | Lower to canonical MIR and print the deterministic form (`--receipt` for the route manifest, `--all` to include imported modules) |
 | `mimi disasm <file>` | Disassemble to bytecode (debugging) |
 | `mimi lsp` | Start LSP server (stdin/stdout) |
-| `mimi init [name]` | Initialize `mimi.toml` |
+| `mimi init [name]` | Create `mimi.toml` and a missing `main.mimi` in the current directory; NAME sets the package name |
 | `mimi add <name>` | Add dependency (`--version`, `--git`, `--path`) |
 | `mimi remove <name>` | Remove dependency |
 | `mimi install` | Install dependencies (`--frozen`, `--offline`) |
@@ -321,7 +326,6 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | `mimi publish` | Publish to local registry |
 | `mimi search <query>` | Search packages |
 | `mimi doc <path>` | Generate documentation |
-| `mimi promote <path>` | Upgrade legacy `.mms` sketch to `.mimi` (removed from user-facing surface after 0.1.8) |
 | `mimi stats <path>` | Usage statistics |
 | `mimi stat <path>` | Directory analysis |
 | `mimi bindgen <path>` | Generate multi-language FFI bindings |
@@ -371,7 +375,7 @@ mimi/
 │   ├── lint.rs                 # Static linter
 │   ├── main/                   # CLI subcommand implementations (24 commands)
 │   ├── diagnostic/             # Error codes & formatting
-│   └── tests/                  # Test suites (7700+ #[test] functions)
+│   └── tests/                  # Rust unit and integration test suites
 ├── std/                        # Standard library (24 modules)
 ├── examples/                   # Example programs (28)
 ├── demos/                      # Demo programs (23)
@@ -388,9 +392,11 @@ mimi/
 ### Prerequisites
 
 - **Rust** 1.75+
-- **LLVM 18** (auto-configure via `scripts/setup-llvm-wrapper.sh`)
-- **libffi** (FFI support)
-- **Z3** (contract verification; handled by `cargo build`)
+- **LLVM 18** development libraries and headers (`scripts/setup-llvm-wrapper.sh` configures the build wrapper; it does not install LLVM)
+- **Z3** development libraries and headers
+- **libffi** development libraries and headers
+
+The release workflow currently produces a dynamically linked Linux x86_64 binary on Ubuntu 22.04. The archive does not bundle its system libraries. Running that binary requires `libLLVM.so.18.1`, `libz3.so.4`, `libffi.so.8`, and their system dependencies; on Ubuntu 22.04 these are provided by `libllvm18`, `libz3-4`, and `libffi8`. Other operating systems and architectures do not currently receive release binaries.
 
 ### Testing Tiers (IDD)
 
@@ -419,7 +425,7 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo test --features llvm18-host-dynamic real_world
 
-# Clippy (zero-warnings gate)
+# Strict Clippy audit (existing warning debt may make this fail)
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo clippy --features llvm18-host-dynamic --all-targets -- -D warnings
 
@@ -427,13 +433,13 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **Test note**: the full suite runs in roughly 40 seconds at `--test-threads=4` on a 32-core machine; measured peak RSS is ~300 MB, and `--test-threads=16` is the throughput inflection point. Keep Z3 verification subsets single-threaded (Z3 arenas never return memory to the OS); the `ulimit -v 20000000` guard stays as insurance. See [AGENTS.md](AGENTS.md) for details.
+> **Test note**: timing varies by host and suite. In this environment the 343-test CLI integration target took about 56 seconds with four test workers. Keep Z3 verification-only subsets single-threaded because Z3 arenas do not return memory to the OS. See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test commands.
 
 ---
 
 ## Status
 
-**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): one semantic core (Canonical MIR) consumed mechanically by the reference executor, bytecode VM, native/LLVM emitter and verifier, migrated island-by-island behind explicit capability gates with fail-closed rejection of unmodeled shapes. The 2026-09-06 execution plan milestones **M0–M3 are all accepted** (stability re-sampling, family combination matrices, default-entry migration with physical legacy deletions, Flow failure closure), and scalar FFI is closed end-to-end across the four consumers. Deletion-gate status (2026-09-21): production `raw_ast()` call sites **0**, legacy emitter down to **8** call sites, **4** compatibility owners still pending. Language semantics (kernel card) are unchanged; default `run`/`build`/`verify` routes switch only for proven-complete islands. Does not yet claim VM≡native.
+**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): Canonical MIR is migrated island-by-island behind explicit capability gates, and unmodeled shapes fail closed. The 2026-09-06 execution plan milestones **M0–M3 are accepted**, including default-entry migration and scalar FFI execution/verification across the MIR consumers. The scalar FFI profile is deliberately narrow; unsupported string, pointer, aggregate, variadic, parameter-mode, errno, `no_panic`, and non-C declarations are rejected before execution. As of the 2026-09-24 deletion audit, production `raw_ast()` call sites are **0**, while four compatibility owner classes still have remaining dependencies. Default `run`/`build`/`verify` use Canonical MIR only for fully preflighted islands; this does not claim global VM≡native equivalence. See [FFI limits and linking](readme/10-ffi.md) and [release history](CHANGELOG.md).
 
 
 ### References & External Reviews

@@ -6,17 +6,14 @@ use mimi::diagnostic::format::{colors_enabled, format_diagnostic_with_registry, 
 
 use mimi::{lexer, loader};
 
-pub(crate) fn test(
-    path: Option<&Path>,
-    _allocator: &str,
-    filter: Option<&str>,
-    verbose: bool,
-    strict: bool,
-) -> Result<(), String> {
+pub(crate) fn test(path: Option<&Path>, filter: Option<&str>, verbose: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     if is_sketch(&path) {
-        return Err("cannot test a .mms sketch file directly; promote to .mimi first".into());
+        return Err(
+            "MimiSpec .mms sketches cannot be tested; port the program to a .mimi source file"
+                .into(),
+        );
     }
     let tokens = lexer::Lexer::new(&source).tokenize()?;
     let file = loader::parser_for_path(tokens, &path)?.parse_file()?;
@@ -37,11 +34,7 @@ pub(crate) fn test(
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
     loader::merge_prelude_into(&mut merged_file);
 
-    let checked_program = if strict {
-        mimi::core::check_program_strict(&merged_file)
-    } else {
-        mimi::core::check_program(&merged_file)
-    };
+    let checked_program = mimi::core::check_program(&merged_file);
     let checked_program = match checked_program {
         Ok(program) => program,
         Err(diagnostics) => {

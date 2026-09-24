@@ -96,6 +96,11 @@ pub(crate) fn verify(
         if dump_z3 {
             return Err("--dump-z3 is not available with --mir".into());
         }
+        if let Some(reason) =
+            crate::canonical_dispatch::scalar_ffi_declaration_boundary_diagnostic(&checked_program)
+        {
+            return Err(format!("canonical MIR verifier input rejected: {reason}"));
+        }
         Some(
             crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)
                 .map_err(|error| format!("canonical MIR verifier input rejected: {error}"))?,

@@ -324,22 +324,9 @@ func release(cap: FileWriteCap) {
 }
 ```
 
-### 6.6 cap 作为权限凭证
+### 6.6 与 FFI 的边界
 
-```mimi
-cap FileReadCap;
-
-extern "C" {
-    fn read_file(path: string, @cap FileReadCap) -> string;
-}
-
-// 调用时必须传入 cap
-func main() {
-    let data = read_file("config.txt", my_file_read_cap);
-}
-```
-
-没有对应的 cap，就无法调用外部函数。
+线性 `cap` 可以由 Mimi 函数签名表达，但当前 Canonical MIR 导入 profile 不支持把 cap、字符串、指针或聚合值当作 C ABI 参数传递。外部导入目前只接受 `extern "C"` 标量参数（`i32`、`i64`、`f32`、`f64`、`bool`）以及标量或 unit 返回值。不要用 Mimi FFI 声明模拟带能力参数的 SQLite、文件或 socket C API；网络功能请查看 `std::net`，准确的 FFI 边界与链接方式见[FFI 指南](./10-ffi.md)。
 
 ---
 

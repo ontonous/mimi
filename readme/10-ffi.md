@@ -1,338 +1,78 @@
-# 10 - FFI 与跨语言
+# 10 - FFI 范围与链接
 
----
+本页说明 **Mimi 调用宿主 C 函数** 的当前执行范围。Canonical MIR 标量 FFI 已接入 `mimi run`、`mimi build`、`mimi verify` 和直接 MIR 消费入口；未覆盖的 ABI 会在执行前 fail-closed，并返回 `MIR-FFI-DECLARATION-001`。
 
-## 1. 概述
+## 1. 当前支持的声明
 
-Mimi 支持安全的跨语言集成，核心机制是 **cap 线性能力** 作为权限凭证。
+调用的声明必须满足以下 ABI：
 
-| 方向 | 机制 |
-|------|------|
-| Mimi 调用外部 | `extern "C"` 块 + cap 授权 |
-| 外部调用 Mimi | 编译为 C 动态库 + 自动生成绑定 |
+| 声明位置 | 支持类型 |
+|-----------|----------|
+| 参数 | `i32`、`i64`、`f32`、`f64`、`bool`，或这些基础类型的透明别名 |
+| 返回值 | `i32`、`i64`、`f32`、`f64`、`bool`，或 unit/无返回值 |
+| ABI | `extern "C"` |
 
-### 1.1 运行时支持
-
-- **解释器路径**：通过 `libloading` 动态加载共享库，运行时调用
-- **代码生成路径**：通过 LLVM 生成 `declare` 指令，编译时链接
-
----
-
-## 2. extern "C" 声明
-
-### 2.1 基本语法
+示例：
 
 ```mimi
 extern "C" {
-    func function_name(param: Type, ...) -> ReturnType;
+    func ffi_add(left: i64, right: i64) -> i64;
+}
+
+func main() -> i32 {
+    println(ffi_add(20 as i64, 22 as i64));
+    0
 }
 ```
 
-### 2.2 代码生成支持
+对被调用的外部函数，字符串、指针、回调、记录/元组/枚举等聚合参数或结果、variadic、非 C ABI、参数模式、`errno` 转换和 `no_panic` 保护都不在此 profile 内。出现这些形状时，编译器会在执行任何程序副作用或查找宿主符号之前拒绝它；不会回退到旧 FFI runtime。仅声明但没有调用的外部函数不会因为此边界单独拒绝程序。
 
-当使用 `mimi build` 编译时，`extern "C"` 块中的函数声明会被转换为 LLVM `declare` 指令：
+## 2. 运行时绑定（`mimi run`）
 
-```mimi
-extern "C" {
-    func printf(format: &i8, ...) -> i32;
-    func malloc(size: i64) -> *mut i8;
-    func free(ptr: *mut i8);
-}
-
-func main() {
-    printf("Hello from Mimi!\n")
-}
-```
-
-编译后的 LLVM IR：
-```llvm
-declare i32 @printf(i8*, ...)
-declare i8* @malloc(i64)
-declare void @free(i8*)
-```
-
-### 2.3 带 cap 授权
-
-```mimi
-cap FileReadCap;
-
-extern "C" {
-    fn read_file(path: string, cap @fh: FileReadCap) -> string;
-    fn write_file(path: string, data: string, cap @fh: FileWriteCap) -> Result<(), string>;
-}
-```
-
-- `cap @fh: Type` — 移动语义的 cap（默认）
-- `&fh: Type` — 借用语义的 cap
-
-### 2.3 支持的参数类型
-
-| Mimi 类型 | C 类型 |
-|-----------|--------|
-| `i32` | `int32_t` |
-| `i64` | `int64_t` |
-| `f64` | `double` |
-| `bool` | `bool` |
-| `string` | `const char*` |
-| `cap` | 不透明句柄 |
-
----
-
-## 3. 使用示例
-
-### 3.1 调用 C 库
-
-```mimi
-cap SQLiteCap;
-
-extern "C" {
-    fn sqlite3_open(path: string, cap @db: SQLiteCap) -> Result<i64, string>;
-    fn sqlite3_exec(db: i64, query: string, cap @db: SQLiteCap) -> Result<(), string>;
-    fn sqlite3_close(db: i64, cap @db: SQLiteCap) -> Result<(), string>;
-}
-
-func init_database(path: string, cap: SQLiteCap) -> Result<i64, string> {
-    let db = sqlite3_open(path, cap)?;
-    Ok(db)
-}
-
-func query(db: i64, sql: string, cap: SQLiteCap) -> Result<(), string> {
-    sqlite3_exec(db, sql, cap)?;
-    Ok(())
-}
-
-func close_database(db: i64, cap: SQLiteCap) -> Result<(), string> {
-    sqlite3_close(db, cap)?;
-    Ok(())
-}
-```
-
-### 3.2 并发调用外部服务
-
-```mimi
-cap NetworkCap;
-
-extern "C" {
-    fn http_get(url: string, cap @nc: NetworkCap) -> Result<string, string>;
-    fn http_post(url: string, body: string, cap @nc: NetworkCap) -> Result<string, string>;
-}
-
-func sync_data(user_id: u64, net_cap: NetworkCap) -> Result<(), string> {
-    parasteps "同步用户数据" {
-        let profile = spawn http_get("api/users/" + to_string(user_id), net_cap);
-        let orders = spawn http_get("api/orders/" + to_string(user_id), net_cap);
-        let p = await profile;
-        let o = await orders;
-        process_profile(p)?;
-        process_orders(o)?;
-    }!
-    Ok(())
-}
-```
-
-### 3.3 带补偿的 FFI 调用
-
-```mimi
-cap FileWriteCap;
-
-extern "C" {
-    fn create_file(path: string, cap @fh: FileWriteCap) -> Result<i64, string>;
-    fn write_fd(fd: i64, data: string, cap @fh: FileWriteCap) -> Result<(), string>;
-    fn delete_file(path: string, cap @fh: FileWriteCap) -> Result<(), string>;
-}
-
-func safe_write(path: string, data: string, cap: FileWriteCap) -> Result<(), string> {
-    let fd = create_file(path, cap)?;
-    on failure {
-        delete_file(path, cap);   // 补偿：清理文件
-    }
-
-    write_fd(fd, data, cap)?;
-    Ok(())
-}
-```
-
----
-
-## 4. Cap 与 FFI 安全
-
-### 4.1 权限凭证模式
-
-```mimi
-cap FileReadCap;
-
-extern "C" {
-    fn read_file(path: string, cap @fh: FileReadCap) -> string;
-}
-
-// 没有 FileReadCap 就无法调用 read_file
-func main() {
-    // ❌ 编译错误：缺少 cap
-    // let data = read_file("secret.txt");
-
-    // ✅ 持有 cap 才能调用
-    let data = read_file("secret.txt", my_file_read_cap);
-}
-```
-
-### 4.2 Cap 组合
-
-```mimi
-cap FileReadCap;
-cap FileWriteCap;
-cap FullFileAccess = FileReadCap + FileWriteCap;
-
-func full_task(cap: FullFileAccess) {
-    let (read, write) = cap.split();
-    let data = read_file("input.txt", read);
-    write_file("output.txt", data, write);
-}
-```
-
----
-
-## 5. Mimi 作为库
-
-### 5.1 编译为 C 动态库
-
-```bash
-mimi build --emit-c-lib src/lib.mimi
-```
-
-生成产物：
-- `lib.so` / `lib.dylib` / `lib.dll` — 动态库
-- `lib.h` — C 头文件
-- `lib.meta.json` — 元数据（desc/rule/requires/ensures）
-
-### 5.2 C 头文件示例
+运行时使用 `MIMI_FFI_LIB` 指向**一个动态库文件**。例如，在 Linux 上准备 C 实现：
 
 ```c
-// 自动生成的 lib.h
-#ifndef LIB_H
-#define LIB_H
-
+// ffi.c
 #include <stdint.h>
 
-// 不透明 cap 句柄
-typedef void* FileReadCapHandle;
-
-// 函数声明
-int32_t process_order(uint64_t order_id, FileReadCapHandle cap);
-const char* get_status(uint64_t order_id);
-
-#endif
-```
-
-### 5.3 元数据文件示例
-
-```json
-{
-  "functions": {
-    "process_order": {
-      "desc": "处理订单：验证、扣款、发货",
-      "rule": "订单必须幂等",
-      "requires": "order.status == New",
-      "ensures": "order.status == Paid",
-      "params": [
-        {"name": "order_id", "type": "u64"},
-        {"name": "cap", "type": "FileReadCap"}
-      ],
-      "return": "i32"
-    }
-  }
+int64_t ffi_add(int64_t left, int64_t right) {
+    return left + right;
 }
 ```
 
----
-
-## 6. 跨语言调用
-
-### 6.1 Python 调用 Mimi
-
-```python
-# Python 端
-import mimilib
-
-# 获取能力令牌
-cap = mimilib.FileReadCap()
-
-# 调用 Mimi 函数
-result = mimilib.process_order(order_id, cap)
-print(result)
+```bash
+cc -shared -fPIC -o libmimi_math.so ffi.c
+MIMI_FFI_LIB="$PWD/libmimi_math.so" mimi run main.mimi
+# 输出 42
 ```
 
-### 6.2 Rust 调用 Mimi
+显式指定的路径是严格绑定：库无法加载或找不到所需符号时，运行失败，不会改用其他库。未设置 `MIMI_FFI_LIB` 时，运行时只探测平台的系统 libc/libm 候选；这不包含项目目录中的自定义库。
 
-```rust
-// Rust 端
-use mimilib;
+## 3. 原生链接（`mimi build`）
 
-fn main() {
-    let cap = unsafe { mimilib::FileReadCap::new() };
-    let result = unsafe { mimilib::process_order(order_id, cap) };
-    println!("{}", result);
-}
+原生二进制由宿主 C linker 链接。`MIMI_FFI_LIB` 只配置 Bytecode VM 的动态绑定，不会自动传给原生链接器。传入库目录和库名：
+
+```bash
+cc -c ffi.c -o ffi.o
+ar rcs libmimi_math.a ffi.o
+mimi build main.mimi \
+  --link-search "$PWD" \
+  --link-lib mimi_math \
+  --output app
+./app
+# 输出 42
 ```
 
-### 6.3 Swift 调用 Mimi
+`--link-search DIR`（短写 `-L DIR`）和 `--link-lib NAME`（短写 `-l NAME`）可以重复指定。库名写作 `mimi_math`，不加 `lib` 前缀、文件后缀或 linker 参数。链接库仍须符合目标平台的原生 C ABI 与目标架构。
 
-```swift
-// Swift 端
-import MimiLib
+也可以用 `mimi build --emit-ir main.mimi` 检查外部符号声明生成的 LLVM IR；该操作不执行程序，也不链接最终二进制，因此同时提供的 `--link-search` / `--link-lib` 选项不会参与此输出。
 
-let cap = FileReadCap()
-let result = process_order(orderId: orderId, cap: cap)
-print(result)
-```
+## 4. 合约检查
 
----
+- `mimi run` 默认检查标量外部调用上的 FFI 合约；使用 `--skip-verify-ffi` 可关闭这项运行时检查。
+- `mimi run --verify-ffi` 显式开启检查。`mimi build --verify-ffi` 使用 Z3 验证外部调用前提。
+- `mimi verify main.mimi` 对源码中的合约生成验证结果；`mimi verify --mir main.mimi` 请求 Canonical MIR verifier，并对不支持形状 fail-closed。
 
-## 7. 双向胶水架构
+## 5. 导出与绑定生成
 
-```
-┌─────────────────────────────────────────────────┐
-│                  Mimi 核心                       │
-│  ┌─────────────┐  ┌─────────────┐               │
-│  │  cap 权限   │  │  契约意图   │               │
-│  │  追踪       │  │  元数据     │               │
-│  └──────┬──────┘  └──────┬──────┘               │
-│         │                │                      │
-│         ▼                ▼                      │
-│  ┌─────────────────────────────────┐            │
-│  │     C ABI 动态库               │            │
-│  │  ┌───────┐  ┌───────┐          │            │
-│  │  │ .so   │  │ .h    │          │            │
-│  │  └───────┘  └───────┘          │            │
-│  └─────────────────────────────────┘            │
-└─────────────────────────────────────────────────┘
-         │                │
-         ▼                ▼
-    ┌─────────┐     ┌─────────┐
-    │ Python  │     │  Rust   │
-    │ Swift   │     │  C++    │
-    │ Kotlin  │     │  Go     │
-    └─────────┘     └─────────┘
-```
-
----
-
-## 8. 安全性保证
-
-| 保证 | 机制 |
-|------|------|
-| 权限静态检查 | cap 编译期追踪 |
-| 无隐式权限获取 | cap 必须显式传递 |
-| 补偿自动化 | on failure LIFO 执行 |
-| 意图可追溯 | desc/rule/requires/ensures 元数据 |
-| AI 可审计 | --strict 模式强制审查 |
-
----
-
-## 9. 当前局限
-
-| 局限 | 状态 |
-|------|------|
-| `unsafe` 块 | ⏳ 规划中 |
-| FFI 类型转换自动化 | ⏳ 规划中 |
-| WASM 编译目标 | ⏳ 规划中 |
-| 自动绑定生成器 | ⏳ 规划中 |
+Mimi 导出为共享库和生成语言绑定是另一条工具链：CLI 提供 `mimi build --shared`、`mimi emit-c-headers`、`mimi emit-rust-bindings`、`mimi emit-go-bindings`、`mimi emit-py-bindings`、`mimi emit-node-bindings`、`mimi emit-cpp-bindings`、`mimi emit-java-bindings` 和 `mimi bindgen`。这些命令的存在不扩大本页描述的**导入**标量 ABI；具体生成器的输入限制以实际命令输出为准。

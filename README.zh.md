@@ -6,11 +6,9 @@
 
 [![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-7700%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
-[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-orange.svg)](#)
 
-解释器 + LLVM 18 Codegen 双后端 · Z3 形式化验证 · 稀疏 Flow 状态机 · 线性资源 · Actor 模型 · 会话类型 · Component 边界
+Bytecode VM + LLVM 18 原生后端 · Canonical MIR 岛迁移 · Z3 形式化验证 · 稀疏 Flow 状态机 · 线性资源 · Actor 模型 · 会话类型 · Component 边界
 
 ---
 
@@ -136,7 +134,7 @@ Mimi 是生产编译后端。MimiSpec（`.mms`）已于 0.1.8 移除；直接编
 
 | 特性 | 状态 |
 |------|------|
-| Bytecode VM 解释器（0.1.3 起唯一解释器）+ LLVM 18 codegen（原生二进制）——L1 等价测试 | ✅ |
+| Bytecode VM 解释器（0.1.3 起唯一解释器）+ LLVM 18 codegen（原生二进制）——按已验收切片测试等价，不代表全局 VM/native 等价 | ✅ |
 | Hindley-Milner 类型推断（undo trail + TypeScheme + zonk） | ✅ |
 | 泛型 `<T: Bound>`、递归类型 | ✅ |
 | 枚举 / 记录 / 元组，`match` 穷尽性，`while let` | ✅ |
@@ -146,7 +144,8 @@ Mimi 是生产编译后端。MimiSpec（`.mms`）已于 0.1.8 移除；直接编
 
 | 特性 | 状态 |
 |------|------|
-| `extern "C"`、`repr(C)`、多语言 bindgen（C/C++/Rust/Go/Node.js/Java/Python） | ✅ |
+| 标量 `extern "C"` 导入 | ✅ 窄 C ABI profile：参数为 `i32`/`i64`/`f32`/`f64`/`bool`，结果为标量或 unit；见[FFI 范围与链接](readme/10-ffi.md) |
+| `repr(C)` 与绑定生成器 | 属于单独的导出/绑定工具；这些工具可用不代表导入 FFI 支持任意 ABI |
 | `comptime func` + `quote!` AST 生成 | ✅ |
 | LSP：补全、悬停、跳转定义、合约 lens | ✅ |
 | 包管理器：`mimi.toml`、registry、git 依赖、依赖树 | ✅ |
@@ -166,6 +165,12 @@ bash scripts/setup-llvm-wrapper.sh
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo build --release --features llvm18-host-dynamic
 ```
+
+源码构建前需安装 LLVM 18、Z3 和 libffi 的开发库。wrapper 脚本只配置 `llvm-sys`，不会安装这些系统库。
+
+### 预编译发布包
+
+发布流程会生成在 Ubuntu 22.04 上构建的 Linux x86_64 压缩包；已发布的压缩包见 [GitHub Releases](https://github.com/ontonous/mimi/releases)。包内不会携带 LLVM、Z3 和 libffi 共享库；Ubuntu 22.04 用户需先运行 `sudo apt-get install libllvm18 libz3-4 libffi8`，再启动 `mimi`。
 
 ### Hello, Flow
 
@@ -232,7 +237,7 @@ Source → Lexer → Parser → AST
   Executor       VM            Emitter        (MIR 引擎)
 ```
 
-**铁律**：后端不能回退 raw AST。0.1.11 战役起，生产 `raw_ast()` 调用点为 **零**。默认 `run`/`build`/`verify` 按 island 逐个切换到 Canonical MIR 路由：程序只有在全部消费者预检通过后才走默认 canonical 路由；未建模形状一律 fail-closed 拒绝（绝不静默错译），保留显式 legacy emitter，其剩余调用点（当前 8 个）处于单调下降的删除门禁之下。
+**铁律**：后端不能回退 raw AST。0.1.11 战役起，生产 `raw_ast()` 调用点为 **零**。默认 `run`/`build`/`verify` 按 island 逐个切换到 Canonical MIR 路由：程序只有在全部消费者预检通过后才走默认 canonical 路由；未建模形状一律 fail-closed 拒绝（绝不静默错译）。仍有四类兼容 owner 保留生产 legacy 依赖，因此当前状态不代表全局 legacy 已清零。
 
 ### 依赖主链
 
@@ -302,16 +307,16 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | 命令 | 描述 |
 |------|------|
 | `mimi check <path>` | 类型检查，完整错误报告 |
-| `mimi run <path>` | 运行（解释执行），可选 `--verify-contracts` / `--profile` / `--watch` |
-| `mimi test <path>` | 运行 `test_*` 函数，支持 `--filter` 和 `--verbose` |
-| `mimi build <path>` | 编译为原生二进制（LLVM）。`--emit-ir`、`--shared`、`--target`、`--verify-contracts` |
+| `mimi run <path>` | 通过 Bytecode VM 运行；可选 `--verify-contracts`、`--profile`、`--watch`、`--mir` |
+| `mimi test <path>` | 在一个源文件中运行零参数 `test_*` 函数，支持 `--filter` 和 `--verbose` |
+| `mimi build <path>` | 编译为原生二进制（LLVM）。支持 `--emit-ir`、`--shared`、`--target`、`--verify-contracts`、`--verify-ffi`、可重复使用的 `--link-search` / `--link-lib` |
 | `mimi fmt <files>` | 格式化代码（`--check` 用于 CI） |
 | `mimi lint <files>` | 静态分析（`--fail-on-warnings`） |
 | `mimi verify <path>` | Z3 形式化验证 |
 | `mimi mir <path>` | Lowering 为 canonical MIR 并打印确定性形式（`--receipt` 输出路由回执 manifest，`--all` 包含导入模块） |
 | `mimi disasm <file>` | 反汇编为字节码（调试用） |
 | `mimi lsp` | 启动 LSP 服务器（stdin/stdout） |
-| `mimi init [name]` | 初始化 `mimi.toml` |
+| `mimi init [name]` | 在当前目录创建 `mimi.toml` 和 `main.mimi`；`name` 只设置包名，不创建同名目录 |
 | `mimi add <name>` | 添加依赖（`--version`、`--git`、`--path`） |
 | `mimi remove <name>` | 移除依赖 |
 | `mimi install` | 安装依赖（`--frozen`、`--offline`） |
@@ -321,7 +326,6 @@ Span/Origin → HM → CFG/ownership → CheckedProgram/Resolved IR
 | `mimi publish` | 发布到本地 registry |
 | `mimi search <query>` | 搜索包 |
 | `mimi doc <path>` | 生成文档 |
-| `mimi promote <path>` | 提升 legacy `.mms` 草稿 → `.mimi`（0.1.8 起已从用户可见面移除） |
 | `mimi stats <path>` | 使用统计 |
 | `mimi stat <path>` | 目录分析 |
 | `mimi bindgen <path>` | 生成多语言 FFI 绑定 |
@@ -371,7 +375,7 @@ mimi/
 │   ├── lint.rs                 # 静态分析器
 │   ├── main/                   # CLI 子命令实现（24 个命令）
 │   ├── diagnostic/             # 错误码与格式化
-│   └── tests/                  # 测试套件（7700+ 个 #[test] 函数）
+│   └── tests/                  # Rust 单元和集成测试
 ├── std/                        # 标准库（24 个模块）
 ├── examples/                   # 示例程序（28 个）
 ├── demos/                      # 演示程序（23 个）
@@ -388,9 +392,11 @@ mimi/
 ### 前置条件
 
 - **Rust** 1.75+
-- **LLVM 18**（通过 `scripts/setup-llvm-wrapper.sh` 自动配置）
-- **libffi**（FFI 支持）
-- **Z3**（合约验证；由 `cargo build` 处理）
+- **LLVM 18** 开发库和头文件（`scripts/setup-llvm-wrapper.sh` 配置构建 wrapper，不会安装 LLVM）
+- **Z3** 开发库和头文件
+- **libffi** 开发库和头文件
+
+当前发布流程在 Ubuntu 22.04 上生成动态链接的 Linux x86_64 二进制，发布包不包含系统库。运行它需要 `libLLVM.so.18.1`、`libz3.so.4`、`libffi.so.8` 及其系统依赖；Ubuntu 22.04 对应的软件包为 `libllvm18`、`libz3-4`、`libffi8`。目前不为其他操作系统或架构提供预编译发布包。
 
 ### 测试层级（IDD）
 
@@ -419,7 +425,7 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo test --features llvm18-host-dynamic real_world
 
-# Clippy（零警告门禁）
+# 严格 Clippy 审查（现有 warning 债务可能导致失败）
 env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
   cargo clippy --features llvm18-host-dynamic --all-targets -- -D warnings
 
@@ -427,13 +433,13 @@ env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ```
 
-> **测试提示**：32 核机器上 `--test-threads=4` 全量约 40 秒；实测峰值 RSS 约 300 MB，`--test-threads=16` 是吞吐拐点。Z3 验证子集保持单线程（Z3 arena 不向 OS 归还内存）；`ulimit -v 20000000` 防护保留为保险。详见 [AGENTS.md](AGENTS.md)。
+> **测试提示**：耗时会随机器和测试集变化。本环境下 343 项 CLI 集成测试以 4 个测试线程运行约 56 秒。只包含 Z3 验证的测试子集保持单线程，因为 Z3 arena 不向 OS 归还内存。构建和测试命令见[贡献指南](CONTRIBUTING.md)。
 
 ---
 
 ## 状态
 
-**当前版本**：0.1.10-dev。0.1.9 已发布（2026-08-28）：线性种类 + 权限闭环（cap 真 move + std、小步语义、E0439）；0.40.x 交付 fat-ABI bug-hunt 收口（F-001–F-024）、所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 **Canonical MIR 架构战役**（内部 sprint 0.41，目标 0.1.11）：唯一语义核心（Canonical MIR）由 reference executor、bytecode VM、native/LLVM emitter 与 verifier 机械消费，按 island 逐个迁移、显式能力门禁、未建模形状 fail-closed。2026-09-06 执行计划里程碑 **M0–M3 已全部验收**（稳定化复采、家族组合矩阵、默认入口迁移 + 物理 legacy 删除、Flow 失败闭环），scalar FFI 已在四消费者端到端闭合。删除门禁现状（2026-09-21）：生产 `raw_ast()` 调用点 **0**，legacy emitter 降至 **8** 个调用点，**4** 类兼容 owner 待清。语言语义（内核卡）不变；默认 `run`/`build`/`verify` 只对已证明完整闭合的 island 切换。尚未宣称 VM≡native。
+**当前版本**：0.1.10-dev。0.1.9 已发布（2026-08-28）：线性种类 + 权限闭环（cap 真 move + std、小步语义、E0439）；0.40.x 交付 fat-ABI bug-hunt 收口（F-001–F-024）、所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 **Canonical MIR 架构战役**（内部 sprint 0.41，目标 0.1.11）：Canonical MIR 按 island 逐个迁移，能力门禁显式，未建模形状 fail-closed。执行计划 **M0–M3 已验收**，其中 scalar FFI 仅覆盖窄标量 C ABI；字符串、指针、聚合体、variadic、参数模式、errno、`no_panic` 和非 C ABI 调用在执行入口明确拒绝。2026-09-24 删除审计确认生产 `raw_ast()` 调用点 **0**，仍有四类兼容 owner 保留 legacy 依赖。默认 `run`/`build`/`verify` 仅对完整预检的 island 使用 Canonical MIR，本项目尚未宣称全局 VM≡native。见[FFI 范围与链接](readme/10-ffi.md)。
 
 
 ### 文档索引与外部盲审

@@ -1,14 +1,10 @@
 # LLM Prompt：让 AI 正确编写 Mimi 代码
 
-> ⚠ **文档状态（0.34.33 标注）**：本文档主体写于 v0.7.0 时代，语言自 0.29 起已演进为
-> **Flow-first typestate** 范式并经 0.1.4 语法冻结。下文仅 **§2.4 关键字表已同步到冻结实况**，
-> 其余章节（意图后缀、部分语法示例）可能滞后。权威语法以 `docs/language-spec.md` +
-> `docs/syntax-reference.md`（golden EBNF 渲染副本）为准；Flow/transition 语法见
-> `tests/real_world/` 语料与 README Hello Flow 示例。全文重写已登记（devdocs/v0.34 审计）。
+> ⚠ **旧版草稿，不可作为代码生成合同**：除已明确更新的小节外，正文中的规则和示例未经当前编译器逐项验证。新增代码请以 `docs/language-spec.md` 和本目录中已更新的语法/模块/FFI 指南为准。本文尚未完成整体重写。
 >
-> **目标**：本指南面向需要生成 `.mimi` 代码的大语言模型。读完后，你应能独立生成**语法合法、类型正确、惯用风格**的 Mimi 程序。
+> **用途限制**：仅供历史参考；不要直接照抄示例生成当前 Mimi 程序。
 >
-> **版本**：快照基于 Mimi v0.7.0（v1.2 集成版）；关键字表已按 0.1.4-dev（0.34）冻结实况刷新。
+> **版本**：主体基于 Mimi v0.7.0，后续有零散修订；不保证示例适用于当前编译器。
 > **输出要求**：只输出 `.mimi` 源码文本，不要用 Markdown 代码块包裹（除非用户要求）。
 
 ---
@@ -17,10 +13,9 @@
 
 Mimi 是一门面向 **Intent-as-Code + Safe AI Collaboration** 的系统编程语言。它的核心特点：
 
-- **花括号体** `{ ... }` — 函数、模块、actor 等都用花括号
+- **花括号体** `{ ... }` — 函数、actor 等都用花括号
 - **Move 语义** — 值默认移动，基本类型自动 Copy
 - **契约式编程** — `requires`/`ensures` 直接写在函数签名后
-- **意图后缀** — `$`/`$$` 标记人类锁定，`?`/`??` 标记 AI 可修改区域
 - **Actor 并发** — 轻量级有状态并发实体
 - **线性能力** — `cap` 类型控制敏感权限
 
@@ -32,7 +27,7 @@ Mimi 是一门面向 **Intent-as-Code + Safe AI Collaboration** 的系统编程�
 
 ### 2.1 花括号体
 
-`.mimi` 文件中，函数体、模块体、actor 体、if/else/while/for 的主体**必须用花括号** `{ ... }`：
+`.mimi` 文件中，函数体、actor 体、if/else/while/for 的主体**必须用花括号** `{ ... }`：
 
 ```mimi
 // ✅ 正确
@@ -69,7 +64,7 @@ func add(a: i32, b: i32) -> i32:
 > `mimi mms`/`mimi promote` 已移除。
 
 ```
-module     type       func       fn         actor      newtype
+type       func       fn         actor      newtype
 trait      impl       cap        extern     use        pub
 dyn        where
 let        mut        ref        const      shared     weak
@@ -89,14 +84,13 @@ as
 
 ### 2.5 冒号规则
 
-以下结构名字/签名后**必须**带 `:`：
+旧式 MimiSpec 草图的冒号体已经移除。当前 `.mimi` 源码使用花括号：
 
 ```mimi
-module Name:
-type Name:              // 或 type Name: A | B（枚举）
+type Name { field: i32 }
+func main() -> i32 { 0 }
 ```
 
-**在 .mimi 生产模式中**，`func`、`if`、`else`、`for`、`while` 使用花括号，不带冒号。
 `.mms` 草图模式（`flow Name:`/`func Name(...):`/`ui Name`/`steps:`）已于 0.1.8 移除。
 
 ### 2.6 意图后缀（已移除）
@@ -104,12 +98,7 @@ type Name:              // 或 type Name: A | B（枚举）
 > 0.1.8 Phase E：MimiSpec 的意图后缀 `$`/`$$`/`?`/`??` 已从语言拆离。
 > Mimi 编译器不识别这些后缀。
 
-```mimi
-func$$ critical() { ... }     // ✅ 强锁定
-func? uncertain() { ... }     // ✅ 不确定
-func$? locked_review() { ... }// ✅ 锁定但 AI 可审视
-func?$ wrong() { ... }        // ❌ 非法顺序
-```
+这些后缀属于已拆离的 MimiSpec，不要在当前 `.mimi` 源码中使用。
 
 ---
 
@@ -139,11 +128,11 @@ src/
 
 ```mimi
 // main.mimi
-use crate::models::User;
-use crate::utils::format_user;
+use models;
+use utils;
 
 func main() -> i32 {
-    let user = User { name: "Alice".into(), age: 30 };
+    let user = User { name: "Alice", age: 30 };
     println(format_user(user));
     0
 }
@@ -609,16 +598,17 @@ let result = await future;            // 等待结果
 ## 11. FFI（extern "C"）
 
 ```mimi
-cap SQLiteCap;
-
 extern "C" {
-    func sqlite3_open(path: string, cap @db: SQLiteCap) -> Result<i64, string>;
-    func sqlite3_exec(db: i64, query: string, cap @db: SQLiteCap) -> Result<(), string>;
+    func ffi_add(left: i64, right: i64) -> i64;
+}
+
+func main() -> i32 {
+    println(ffi_add(20 as i64, 22 as i64));
+    0
 }
 ```
 
-- `cap @param: Type` — 移动语义的 cap
-- `&param: Type` — 借用语义的 cap
+只迁移了窄标量 C ABI：参数为 `i32`、`i64`、`f32`、`f64`、`bool`，结果为标量或 unit。字符串、指针、cap、聚合体、variadic 和非 C ABI 均须拒绝。自定义库运行时绑定与原生链接见[FFI 指南](./10-ffi.md)。
 
 ---
 
@@ -634,13 +624,11 @@ extern "C" {
 | ❌ 错误 | ✅ 正确 |
 |--------|--------|
 | `func add(a, b):` | `func add(a: i32, b: i32) -> i32 { ... }` |
-| `module Shop` | `module Shop { ... }` |
+| `module::function()` | `use module_file;` 后直接调用 `function()` |
 | `type Point: x: f64` | `type Point { x: f64 }` |
 | `if x > 0:` | `if x > 0 { ... }` |
 | `for i in 0..10:` | `for i in range(0, 10) { ... }` |
 | `await counter.increment()` | `counter.increment()`（同步调用无需 await） |
-| `@cap FileReadCap` | `cap @fh: FileReadCap`（extern 块中） |
-| `func?$ wrong()` | `func$? correct()`（先锁后疑） |
 | `string s = "hi"` | `let s = "hi"`（let 绑定） |
 
 ---
@@ -652,6 +640,6 @@ extern "C" {
 3. **错误处理**：优先使用 `?` 运算符，避免嵌套 match。
 4. **Actor 方法**：直接调用是同步的，不需要 `await`；只有 `spawn` 创建的 Future 才需要 `await`。
 5. **契约**：`requires`/`ensures` 写在函数签名后、花括号体前，不要写在花括号内。
-6. **cap**：在 extern 块中使用 `cap @param: Type` 语法，不是 `@cap Type`。
+6. **cap**：用于 Mimi 内部的线性能力传递；当前 scalar FFI 不接受 cap 参数。
 7. **模式匹配**：match 必须穷尽所有变体，使用 `_` 通配符处理剩余情况。
 8. **闭包**：使用 `fn(params) -> Ret { body }` 语法，可赋值给变量或传给高阶函数。

@@ -2,12 +2,12 @@ name: Release
 
 # AGENTS §15.1：新 tag 使用纯 semver（0.1.0/0.2.0），不再新增 mimi-v* 前缀。
 # 旧配置只监听 mimi-v*，导致 0.1.x 系列 tag 永远无法触发发布——0.34.33 修复。
-# mimi-v* 保留匹配仅为兼容历史 tag 重推场景。
+# mimi-v 前缀仅保留纯 SemVer 形式，兼容历史稳定版 tag 重推。
 on:
   push:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
-      - "mimi-v*"
+      - "mimi-v[0-9]+.[0-9]+.[0-9]+"
 
 env:
   # llvm-sys 版本为 181.3.0（Cargo.lock）。此变量历史上误写为 LLVM_SYS_180_PREFIX，
@@ -16,13 +16,48 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    name: Verify tag commit with the full CI workflow
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
+    needs: verify
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-mimi
+
+      # Never publish a binary whose embedded package version disagrees with
+      # its stable SemVer tag, or whose release notes silently expand to the
+      # full changelog.
+      - name: Validate release metadata
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          RELEASE_VERSION="${TAG_NAME#mimi-v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tag must be stable SemVer (MAJOR.MINOR.PATCH): $TAG_NAME"
+            exit 1
+          fi
+          CARGO_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "$RELEASE_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag version $RELEASE_VERSION does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+          cargo metadata --locked --no-deps --format-version 1 > /dev/null
+          if ! awk -v prefix="## [$RELEASE_VERSION]" \
+            'index($0, prefix) == 1 && (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) ~ /[[:space:]]/) { found = 1 } END { exit !found }' \
+            CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no top-level release section for [$RELEASE_VERSION]"
+            exit 1
+          fi
 
       # ── 发布前冒烟：release 构建必须能检查真实 Mimi 源码 ──────────
       - name: Build release
@@ -56,17 +91,16 @@ jobs:
           sha256sum "mimi-${VERSION}-${ARCH}-${OS}.tar.gz" > "mimi-${VERSION}-${ARCH}-${OS}.tar.gz.sha256"
           cat "mimi-${VERSION}-${ARCH}-${OS}.tar.gz.sha256"
 
-      # 发布说明只取本版本 CHANGELOG 小节（旧配置整文件灌入每个 release body）；
-      # 找不到对应小节时回退全文，保证 body 非空。
+      # 发布说明只取已校验的本版本 CHANGELOG 小节。
       - name: Extract release notes
         run: |
           awk -v v="$RELEASE_VERSION" '
-            /^## \[/ { if (found) exit; if (index($0, "[" v "]")) found=1 }
+            /^## \[/ { if (found) exit; if ($0 == "## [" v "]" || index($0, "## [" v "] ") == 1) found=1 }
             found { print }
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "::warning::CHANGELOG 中未找到 [$RELEASE_VERSION] 小节，回退全文"
-            cp CHANGELOG.md release-notes.md
+            echo "::error::CHANGELOG.md has no release notes for [$RELEASE_VERSION]"
+            exit 1
           fi
 
       - name: Create GitHub Release

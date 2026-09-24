@@ -1,389 +1,91 @@
 # 06 - Mimi 模块与包管理
 
----
+Mimi 的模块是**文件级合并**：`use` 加载一个 `.mimi` 文件，并把该文件的公开声明合并到当前编译单元。调用导入的函数和类型时直接使用名字，不写模块前缀。
 
-## 1. 文件即模块
+## 1. 导入同目录文件
 
-每个 `.mimi` 文件自动成为一个模块，文件名即模块名：
+目录结构：
 
+```text
+my-project/
+├── main.mimi
+└── math_utils.mimi
 ```
-src/
-├── main.mimi        # main 模块
-├── models.mimi      # models 模块
-└── utils.mimi       # utils 模块
-```
 
----
-
-## 2. 模块声明
-
-### 2.1 使用 module 关键字
+`math_utils.mimi`：
 
 ```mimi
-module Shop {
-    pub func process_order() {
-        // ...
-    }
-
-    func internal_helper() {
-        // ...
-    }
+pub func double(value: i32) -> i32 {
+    value * 2
 }
 ```
 
-### 2.2 嵌套模块
+`main.mimi`：
 
 ```mimi
-module Company {
-    module Engineering {
-        func build_feature() {
-            // ...
-        }
-    }
+use math_utils;
 
-    module Marketing {
-        func launch_campaign() {
-            // ...
-        }
-    }
+func main() -> i32 {
+    println(double(21));
+    0
 }
 ```
 
----
+运行 `mimi run main.mimi` 会打印 `42`。被导入文件中需要对外使用的函数、类型和 trait 必须标为 `pub`；私有声明不会成为导入接口。
 
-## 3. 可见性
+导入后应写 `double(21)`，不能写 `math_utils::double(21)`。`::` 保留给 Flow 转移，例如 `Counter::increment(state)`。
 
-### 3.1 pub 关键字
+## 2. 标准库导入
 
-默认所有定义都是私有的，使用 `pub` 导出：
+标准库同样按文件导入，导出的名字合并到当前作用域：
 
 ```mimi
-module Shop {
-    pub func process_order() { ... }    // 公开
-    func internal_helper() { ... }       // 私有（默认）
+use std::collections;
 
-    pub type Order { ... }               // 公开类型
-    type InternalState { ... }           // 私有类型
-
-    pub actor OrderProcessor { ... }     // 公开 Actor
-    actor InternalCache { ... }          // 私有 Actor
+func main() -> i32 {
+    println(sum([1, 2, 3]));
+    0
 }
 ```
 
-### 3.2 可见性规则
+Map 工具属于 `std::maps`，List 工具属于 `std::collections`。导入后调用 `new(...)`、`get(...)` 等导出名，不写 `maps::get(...)`。如果导入的模块有同名公开声明，Mimi 会报告冲突，不会静默覆盖。
 
-- 私有定义只能在同一模块内访问
-- 公开定义可以被其他模块通过 `use` 导入
-- 嵌套模块可以访问外层模块的私有定义
+## 3. 当前不支持的模块写法
 
-```mimi
-module Outer {
-    let secret = 42;   // 私有
+- 不支持在 `.mimi` 文件里嵌套 `module Name { ... }`；解析器以 E0445 拒绝这种写法。
+- 不支持 `module::function()`、`use std::collections::Map` 这样的符号级路径导入或模块前缀调用。
+- 旧式 `@import` 不属于当前模块入口。用 `use path;` 加载文件。
 
-    module Inner {
-        func get_secret() -> i32 {
-            secret     // OK：嵌套模块可访问外层私有
-        }
-    }
-}
-```
+权威规则见 [`docs/language-spec.md` §6.14](../docs/language-spec.md#614-module-system-use-merge-naming-self-description-and--reservation-stable-039137)。
 
----
+## 4. 包清单与依赖
 
-## 4. 导入
-
-### 4.1 use 导入
-
-```mimi
-use std::collections::Map;
-use crate::models::User;
-use super::helper;
-use another_package::some_func;
-```
-
-### 4.2 路径语法
-
-| 路径 | 含义 |
-|------|------|
-| `std::collections::Map` | 标准库模块 |
-| `crate::models::User` | 当前包的模块 |
-| `super::helper` | 上级模块 |
-| `another_package::func` | 外部包 |
-
-### 4.3 字段与方法访问
-
-```mimi
-// 模块路径用 ::
-let user = User::new("Alice");
-
-// 字段访问用 .
-let name = user.name;
-
-// 方法调用用 .
-let display = user.to_string();
-```
-
-### 4.4 @import 兼容
-
-```mimi
-// 保留兼容，推荐使用 use
-@import "models.mimi"
-@import "utils.mimi"
-```
-
----
-
-## 5. 包管理
-
-### 5.1 mimi.toml
-
-项目根目录的 `mimi.toml` 定义包配置：
-
-```toml
-[package]
-name = "shop"
-version = "0.1.0"
-description = "E-commerce shop"
-
-[dependencies]
-std = "1.0"
-payment-sdk = { path = "../payment-sdk" }
-database = { git = "https://github.com/example/database" }
-```
-
-### 5.2 包管理命令
+在现有目录里运行 `mimi init [name]` 会创建 `mimi.toml` 和缺失的 `main.mimi`。`name` 只写入包名，不会创建同名目录；命令不会覆盖已有 `mimi.toml`。
 
 ```bash
-# 初始化新包
-mimi init my_project
-
-# 添加依赖
-mimi add payment-sdk
-mimi add database --git https://github.com/example/database
-
-# 移除依赖
-mimi remove payment-sdk
-
-# 列出依赖
-mimi list
+mimi init shop
+mimi add local-utils --path ../local-utils
+mimi add http-client --git https://example.com/http-client.git --tag v0.2
+mimi install
+mimi tree
 ```
 
----
+依赖写入 `mimi.toml` 的 `[[dependencies]]` 表。路径依赖、Git 依赖和 registry 版本依赖都可用 `mimi add` 配置；以 `mimi add --help` 查看当前选项。
 
-## 6. 项目结构
+典型项目布局：
 
-```
-my_project/
-├── mimi.toml           # 包配置
-├── src/
-│   ├── main.mimi       # 入口文件
-│   ├── models.mimi     # 数据模型
-│   ├── services/
-│   │   ├── payment.mimi
-│   │   └── auth.mimi
-│   └── utils.mimi
-├── tests/
-│   └── integration.mimi
-└── docs/               # 可选
-    └── design.md       # 设计说明（MimiSpec `.mms` 已于 0.1.8 移除）
+```text
+my-project/
+├── mimi.toml
+├── main.mimi
+├── math_utils.mimi
+└── .mimi/             # 安装的依赖数据
 ```
 
-### 6.1 入口文件
+默认包入口是 `main.mimi`，也可在 `[package]` 中用 `entry` 指定入口文件。
 
-`src/main.mimi` 是程序入口：
+## 5. 补充
 
-```mimi
-func main() -> i32 {
-    println("Hello, Mimi!");
-    0
-}
-```
-
-### 6.2 模块组织
-
-```mimi
-// src/main.mimi
-use crate::models::User;
-use crate::services::payment;
-
-func main() -> i32 {
-    let user = User::new("Alice");
-    payment::process(user);
-    0
-}
-```
-
----
-
-## 7. MimiSpec 集成（已移除）
-
-> 0.1.8 Phase E：模块内 `mms{}` 块与 `--extract-contracts` 均已移除。
-> MimiSpec 不再与模块系统集成。
-
----
-
-## 8. 模块间通信
-
-### 8.1 通过函数调用
-
-```mimi
-// models.mimi
-pub type User {
-    name: string
-    age: i32
-}
-
-// main.mimi
-use crate::models::User;
-
-func main() -> i32 {
-    let user = User { name: "Alice".into(), age: 30 };
-    println(user.name);
-    0
-}
-```
-
-### 8.2 通过 Actor（业务状态活在 Flow）
-
-> 0.1.8 Phase D 废止业务 `mut` 字段，业务状态必须活在 Flow 中。
-
-```mimi
-// counter.mimi
-pub flow Counter {
-    state Ready { count: i32 }
-    transition increment(Ready) -> Ready {
-        return Ready { count: self.count + 1 }
-    }
-    transition get(Ready) -> Ready {
-        return Ready { count: self.count }
-    }
-}
-
-pub actor Counter runs Counter {
-    pub func increment() { self.increment() }
-    pub func get() -> i32 { self.get().count }
-}
-
-// main.mimi
-use crate::counter::Counter;
-
-func main() -> i32 {
-    let c = Counter.spawn();
-    await c.increment();
-    let count = await c.get();
-    println(count);
-    0
-}
-```
-
-### 8.3 通过 Trait
-
-```mimi
-// display.mimi
-pub trait Display {
-    func to_string() -> string;
-}
-
-// models.mimi
-use crate::display::Display;
-
-pub type User {
-    name: string
-}
-
-impl Display for User {
-    func to_string() -> string {
-        "User(" + self.name + ")"
-    }
-}
-```
-
----
-
-## 9. 标准库
-
-Mimi 提供以下标准库模块：
-
-### 9.1 内置函数
-
-以下函数无需导入，直接可用：
-
-| 函数 | 说明 |
-|------|------|
-| `println(msg)` | 打印并换行 |
-| `print(msg)` | 打印不换行 |
-| `eprintln(msg)` | 打印到标准错误 |
-| `assert(cond)` | 断言条件为真 |
-| `assert_eq(a, b)` | 断言两个值相等 |
-| `assert_ne(a, b)` | 断言两个值不相等 |
-| `len(collection)` | 获取长度 |
-| `push(list, item)` | 向列表添加元素 |
-| `pop(list)` | 从列表移除最后一个元素 |
-| `range(start, end)` | 生成整数序列 |
-| `abs(x)` | 绝对值 |
-| `min(a, b)` / `max(a, b)` | 最小值/最大值 |
-| `sqrt(x)` | 平方根 |
-| `floor(x)` / `ceil(x)` / `round(x)` | 取整 |
-| `to_string(val)` | 转换为字符串 |
-
-### 9.2 std 模块
-
-```mimi
-// 基础工具
-use std::prelude
-let doubled = prelude::double(5)        // 10
-let msg = prelude::type_of(42)          // "i32"
-
-// 数学函数
-use std::mymath
-let x = prelude::sqr(5)                 // 25
-let y = mymath::factorial(5)            // 120
-let a = mymath::abs(-3)                 // 3
-
-// 集合操作
-use std::collections
-let total = collections::sum([1, 2, 3]) // 6
-let evens = collections::filter_list(nums, fn(x: i32) -> bool { x % 2 == 0 })
-
-// 字符串操作
-use std::strings
-let upper = strings::to_upper("hello")
-let parts = strings::split("a,b,c", ",")
-
-// 文件系统
-use std::fs
-let content = fs::read("data.txt")
-fs::write("output.txt", "content")
-let exists = fs::exists("config.toml")
-
-// 随机数
-use std::random
-let r = random::random_int(1, 100)
-let pick = random::random_choice(items)
-
-// 文本处理
-use std::text
-let slug = text::slugify("Hello World") // "hello-world"
-```
-
-### 9.3 可用模块
-
-| 模块 | 说明 | 关键函数 |
-|------|------|----------|
-| `std::prelude` | 基础工具 | `identity`, `compose`, `pipe`, `tap`, `fail`, `clamp`, `lerp`, `type_of`, `repeat_action` |
-| `std::io` | I/O 操作 | `print_line`, `print_raw`, `print_err`, `input_line`, `input_int`, `input_float` |
-| `std::mymath` | 数学函数 | `abs`, `factorial`, `fibonacci`, `gcd`, `lcm`, `is_prime`, `mod_pow`, `random_int` |
-| `std::collections` | 集合操作 | `sum`, `map_list`, `filter_list`, `reduce_list`, `find`, `dedup`, `any`, `all`, `partition`, `group_by` |
-| `std::strings` | 字符串处理 | `contains`, `split`, `join`, `replace`, `trim`, `repeat`, `to_upper`, `to_lower`, `capitalize`, `title` |
-| `std::text` | 文本处理 | `slugify`, `wrap_text`, `camel_to_snake`, `is_blank`, `is_numeric` |
-| `std::random` | 随机数 | `random_int`, `random_float`, `random_choice`, `random_sample`, `shuffle` |
-| `std::result` | Result 组合子 | `is_ok_result`, `unwrap_or`, `map_result`, `map_err_result` |
-| `std::fs` | 文件系统 | `read`, `write`, `exists`, `read_lines`, `write_lines`, `file_size` |
-| `std::json` | JSON 操作 | `to_json`, `from_json`, `get_string`, `get_int`, `get_bool`, `array_length` |
-| `std::maps` | Map 操作 | `new`, `get`, `set`, `has_key`, `remove`, `merge`, `to_list`, `filter_keys`, `map_values` |
-| `std::time` | 时间操作 | `timestamp`, `timestamp_ms`, `sleep_ms`, `elapsed`, `duration` |
-| `std::datetime` | 日期时间 | `format_duration_secs`, `days_from_now`, `is_future`, `is_past`, `sleep_until` |
-| `std::net` | 网络操作 | `tcp_connect`, `tcp_listen`, `tcp_send`, `tcp_recv`, `fetch`, `fetch_post` |
-| `std::env` | 环境变量 | `get_var`, `cli_args`, `get_var_or`, `has_var`, `arg_count` |
-| `std::testing` | 测试工具 | `assert_eq_int`, `assert_true`, `assert_false`, `assert_eq_string`, `assert_eq_bool` |
-```
+- `use std::io;` 导入 `print_line` 等标准库 I/O 函数；内建的 `println` 无需导入。
+- 标准库模块清单见仓库根目录 `std/` 和 [README 标准库概览](../README.md#standard-library-24-modules)。
+- MimiSpec `.mms` 和 `mms{}` 已从语言移除；模块系统不加载草图文件。

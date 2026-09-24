@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -485,14 +485,33 @@ pub(crate) fn build(
     path: Option<&Path>,
     output: Option<&Path>,
     emit_ir: bool,
-    strict: bool,
     no_std: bool,
     verify_contracts: bool,
     verify_ffi: bool,
+    link_search_paths: &[PathBuf],
+    link_libraries: &[String],
     shared: bool,
     target: Option<&str>,
     mir: bool,
 ) -> Result<(), String> {
+    for library in link_libraries {
+        if library.is_empty()
+            || library.starts_with('-')
+            || library.starts_with("lib")
+            || library.contains('/')
+            || library.contains('\\')
+            || [".a", ".so", ".dylib", ".dll", ".lib"]
+                .iter()
+                .any(|suffix| library.ends_with(suffix))
+            || !library
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_+.-".contains(&byte))
+        {
+            return Err(format!(
+                "invalid --link-lib value '{library}': use a linker library name (letters, digits, '_', '+', '.', or '-') without a path, leading '-', 'lib' prefix, or file suffix; use --link-search for its directory"
+            ));
+        }
+    }
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
@@ -545,11 +564,7 @@ pub(crate) fn build(
         merged_file.items.push(main_item);
     }
 
-    let checked_program = if strict {
-        mimi::core::check_program_strict(&merged_file)
-    } else {
-        mimi::core::check_program(&merged_file)
-    };
+    let checked_program = mimi::core::check_program(&merged_file);
     let checked_program = match checked_program {
         Ok(program) => program,
         Err(diagnostics) => {
@@ -588,17 +603,13 @@ pub(crate) fn build(
     let scalar_ffi_admitted =
         mimi::core::mir::classify_canonical_mir_route_admission(&checked_program).scalar_ffi;
     let mut canonical_for_build = None;
-    if let Some(reason) = mimi::core::mir::scalar_ffi_boundary_reason(&checked_program) {
+    if let Some(reason) =
+        crate::canonical_dispatch::scalar_ffi_declaration_boundary_diagnostic(&checked_program)
+    {
         if mir {
-            canonical_for_build = Some(crate::canonical_dispatch::build_canonical_program(
-                &checked_program,
-                &merged_file,
-            )?);
+            return Err(format!("canonical MIR build rejected: {reason}"));
         } else {
-            return Err(format!(
-                "default Canonical MIR route rejected: {}: canonical scalar FFI declaration boundary: {reason}",
-                mimi::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
-            ));
+            return Err(format!("default Canonical MIR route rejected: {reason}"));
         }
     }
 
@@ -683,7 +694,6 @@ pub(crate) fn build(
     let context = inkwell::context::Context::create();
     let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
     let mut codegen = codegen::CodeGenerator::new(&context, module_name);
-    codegen.strict = strict;
     codegen.no_std = no_std;
     codegen.verify_contracts = verify_contracts;
     codegen.shared = shared;
@@ -872,14 +882,20 @@ pub(crate) fn build(
     for flag in target_linker_flags(target) {
         cmd.arg(flag);
     }
-    let status = cmd
-        .arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
+    for search_path in link_search_paths {
+        cmd.arg("-L").arg(search_path);
+    }
+    cmd.arg(obj_path.to_str().ok_or("object path is not valid UTF-8")?)
         .arg(
             runtime_lib
                 .to_str()
                 .ok_or("runtime library path is not valid UTF-8")?,
-        )
-        // Link stdlib dependencies *after* the object files so that
+        );
+    for library in link_libraries {
+        cmd.arg(format!("-l{library}"));
+    }
+    let status = cmd
+        // Link user and standard dependencies *after* the object files so that
         // `--as-needed` (the modern ld default) does not drop them
         // when no unresolved symbols have been seen yet.
         .args(

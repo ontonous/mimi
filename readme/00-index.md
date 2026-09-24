@@ -26,7 +26,7 @@
 | [06-模块与包管理](./06-modules.md) | use 导入、模块系统、mimi.toml 包管理 | 所有 Mimi 开发者 |
 | [07-CLI 参考](./07-cli.md) | 所有 CLI 命令详解 | 所有 Mimi 开发者 |
 | [08-示例集](./08-examples.md) | 覆盖所有特性的完整代码示例 | 所有 Mimi 开发者 |
-| [10-FFI 与跨语言](./10-ffi.md) | extern "C"、cap 授权、跨语言调用 | 需要跨语言集成的开发者 |
+| [10-FFI 与跨语言](./10-ffi.md) | 标量 extern "C" 导入范围与链接；导出/绑定工具的边界 | 需要跨语言集成的开发者 |
 
 ---
 
@@ -35,8 +35,9 @@
 ### 安装
 
 ```bash
-cd mimi
-cargo build --release
+bash scripts/setup-llvm-wrapper.sh
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo build --release --features llvm18-host-dynamic
 # 可执行文件在 target/release/mimi
 ```
 
@@ -134,7 +135,7 @@ actor Counter {
 | `cap` 线性能力 | ✅ | `cap`, `.split()`, `drop()` |
 | `comptime` | ✅ | `comptime func`, `quote!` |
 | `mms {}` / `.mms` | ❌（0.1.8 removed） | Parser 硬拒绝；MimiSpec 已从 Mimi 拆离 |
-| `extern "C"` | ✅ | FFI 块 + LLVM codegen |
+| 标量 `extern "C"` 导入 | ✅ 窄 C ABI profile：参数为 `i32`/`i64`/`f32`/`f64`/`bool`，结果为标量或 unit；见 [FFI 指南](./10-ffi.md) |
 | `pub` 可见性 | ✅ | 函数、类型、Actor |
 | 列表推导 | ✅ | `[expr for x in list]` |
 | 分配器 | ✅ | `alloc(Arena)`, `alloc(Bump)`, `alloc(System)` |

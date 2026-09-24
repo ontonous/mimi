@@ -15,7 +15,6 @@ pub(crate) fn run(
     verify_contracts: bool,
     verify_ffi: bool,
     allocator: &str,
-    strict: bool,
     mir: bool,
     watch: bool,
     profile: bool,
@@ -31,7 +30,6 @@ pub(crate) fn run(
             verify_contracts,
             verify_ffi,
             allocator,
-            strict,
             mir,
             extra_args,
         )?;
@@ -42,7 +40,6 @@ pub(crate) fn run(
             verify_contracts,
             verify_ffi,
             allocator,
-            strict,
             mir,
             extra_args,
         )?
@@ -58,7 +55,6 @@ fn run_once(
     verify_contracts: bool,
     verify_ffi: bool,
     allocator: &str,
-    strict: bool,
     mir: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
@@ -73,7 +69,10 @@ fn run_once(
     // CL-H1: size-capped source load (shared with other CLI entry points).
     let source = mimi::path_safety::read_source_capped(path)?;
     if is_sketch(path) {
-        return Err("cannot run a .mms sketch file directly; promote to .mimi first".into());
+        return Err(
+            "MimiSpec .mms sketches are not executable; port the program to a .mimi source file"
+                .into(),
+        );
     }
     if !is_production(path) {
         return Err(format!(
@@ -114,11 +113,7 @@ fn run_once(
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
     loader::merge_prelude_into(&mut merged_file);
 
-    let checked_program = if strict {
-        mimi::core::check_program_strict(&merged_file)
-    } else {
-        mimi::core::check_program(&merged_file)
-    };
+    let checked_program = mimi::core::check_program(&merged_file);
     let checked_program = match checked_program {
         Ok(program) => program,
         Err(diagnostics) => {
@@ -153,6 +148,11 @@ fn run_once(
     // consumer for the migrated production island; it never falls back after
     // starting canonical execution.
     let canonical = if mir {
+        if let Some(reason) =
+            crate::canonical_dispatch::scalar_ffi_declaration_boundary_diagnostic(&checked_program)
+        {
+            return Err(format!("canonical MIR run rejected: {reason}"));
+        }
         Some(crate::canonical_dispatch::build_canonical_program(
             &checked_program,
             &merged_file,
@@ -251,7 +251,6 @@ fn run_watch(
     verify_contracts: bool,
     verify_ffi: bool,
     allocator: &str,
-    strict: bool,
     mir: bool,
     extra_args: &[String],
 ) -> Result<(), String> {
@@ -275,7 +274,6 @@ fn run_watch(
         verify_contracts,
         verify_ffi,
         allocator,
-        strict,
         mir,
         extra_args,
     ) {
@@ -295,7 +293,6 @@ fn run_watch(
                     verify_contracts,
                     verify_ffi,
                     allocator,
-                    strict,
                     mir,
                     extra_args,
                 ) {

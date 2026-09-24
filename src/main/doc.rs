@@ -4,7 +4,8 @@ use std::path::Path;
 pub(crate) fn doc(path: &Path, format: &str, output: Option<&Path>) -> Result<(), String> {
     if path.extension().map(|e| e == "mms").unwrap_or(false) {
         return Err(
-            "MimiSpec (.mms) support is removed in 0.1.8; promote sketches to .mimi first".into(),
+            "MimiSpec (.mms) support is removed; generate documentation from a .mimi source file"
+                .into(),
         );
     }
 

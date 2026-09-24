@@ -42,8 +42,6 @@ mod list;
 mod lsp_cmd;
 #[path = "main/mir_cmd.rs"]
 mod mir_cmd;
-#[path = "main/promote.rs"]
-mod promote;
 #[path = "main/publish.rs"]
 mod publish;
 #[path = "main/remove.rs"]
@@ -77,15 +75,7 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Parse and type-check a .mimi file, reporting all type errors
-    Check {
-        path: Option<PathBuf>,
-        /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
-        #[arg(long)]
-        strict: bool,
-        /// Verify MMS rule attachment consistency
-        #[arg(long)]
-        verify_rules: bool,
-    },
+    Check { path: Option<PathBuf> },
     /// Parse and run a .mimi file
     Run {
         path: Option<PathBuf>,
@@ -101,9 +91,6 @@ enum Command {
         /// Default allocator type: system, arena, or bump
         #[arg(long, default_value = "system")]
         allocator: String,
-        /// Strict mode: only compile MimiSpec $/$$ locked fragments
-        #[arg(long)]
-        strict: bool,
         /// Execute through canonical MIR (experimental; fails closed on unsupported shapes)
         #[arg(long)]
         mir: bool,
@@ -120,20 +107,14 @@ enum Command {
     /// Run test functions (functions named test_*)
     Test {
         path: Option<PathBuf>,
-        /// Default allocator type: system, arena, or bump
-        #[arg(long, default_value = "system")]
-        allocator: String,
         /// Filter tests by pattern (substring match)
         #[arg(long, short)]
         filter: Option<String>,
         /// Show verbose output for failed tests
         #[arg(long, short)]
         verbose: bool,
-        /// Strict mode: only execute MimiSpec $/$$ locked test functions
-        #[arg(long)]
-        strict: bool,
     },
-    /// Initialize a new mimi.toml
+    /// Initialize a package in the current directory; NAME only sets the manifest name
     Init {
         /// Package name
         name: Option<String>,
@@ -189,9 +170,6 @@ enum Command {
     /// Lower a .mimi file to canonical MIR and print the deterministic form
     Mir {
         path: Option<PathBuf>,
-        /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
-        #[arg(long)]
-        strict: bool,
         /// Include imported modules; the merged prelude remains excluded from MIR
         #[arg(long)]
         all: bool,
@@ -229,9 +207,6 @@ enum Command {
         /// Compile through the canonical MIR native backend (experimental; fails closed)
         #[arg(long)]
         mir: bool,
-        /// Strict mode: only compile MimiSpec $/$$ locked fragments
-        #[arg(long)]
-        strict: bool,
         /// no_std mode: compile without libc (freestanding target)
         #[arg(long)]
         no_std: bool,
@@ -241,6 +216,12 @@ enum Command {
         /// Verify extern call sites satisfy preconditions (Z3)
         #[arg(long)]
         verify_ffi: bool,
+        /// Add a native linker search directory for extern symbols (repeatable)
+        #[arg(long = "link-search", short = 'L', value_name = "DIR")]
+        link_search: Vec<PathBuf>,
+        /// Link a native library for extern symbols (repeatable; use the name without `lib` or suffix)
+        #[arg(long = "link-lib", short = 'l', value_name = "LIB")]
+        link_lib: Vec<String>,
         /// Build as shared library (.so) instead of executable
         #[arg(long)]
         shared: bool,
@@ -300,13 +281,6 @@ enum Command {
         /// Output path for Java interface class
         #[arg(long)]
         java: Option<PathBuf>,
-    },
-    /// Promote a .mms file to .mimi (clean placeholders, validate locks)
-    Promote {
-        path: PathBuf,
-        /// Output path (defaults to same name with .mimi extension)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
     },
     /// Generate documentation from Mimi source
     Doc {
@@ -524,18 +498,13 @@ enum WireAction {
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
     let result = match args.cmd {
-        Command::Check {
-            path,
-            strict,
-            verify_rules,
-        } => check::check(path.as_deref(), strict, verify_rules),
+        Command::Check { path } => check::check(path.as_deref()),
         Command::Run {
             path,
             verify_contracts,
             verify_ffi,
             skip_verify_ffi,
             allocator,
-            strict,
             mir,
             watch,
             profile,
@@ -547,7 +516,6 @@ fn main() -> std::process::ExitCode {
                 verify_contracts,
                 ffi_check,
                 &allocator,
-                strict,
                 mir,
                 watch,
                 profile,
@@ -561,17 +529,9 @@ fn main() -> std::process::ExitCode {
         }
         Command::Test {
             path,
-            allocator,
             filter,
             verbose,
-            strict,
-        } => test::test(
-            path.as_deref(),
-            &allocator,
-            filter.as_deref(),
-            verbose,
-            strict,
-        ),
+        } => test::test(path.as_deref(), filter.as_deref(), verbose),
         Command::Init { name } => match std::env::current_dir() {
             Ok(cwd) => init::init(&cwd, name.as_deref()),
             Err(e) => Err(format!("cannot get cwd: {}", e)),
@@ -600,12 +560,7 @@ fn main() -> std::process::ExitCode {
             files,
             fail_on_warnings,
         } => lint_cmd::lint_files(&files, fail_on_warnings),
-        Command::Mir {
-            path,
-            strict,
-            all,
-            receipt,
-        } => mir_cmd::mir(path.as_deref(), strict, all, receipt),
+        Command::Mir { path, all, receipt } => mir_cmd::mir(path.as_deref(), all, receipt),
         Command::Disasm { file } => disasm_cmd::disasm_file(&file),
         Command::Verify {
             path,
@@ -618,20 +573,22 @@ fn main() -> std::process::ExitCode {
             output,
             emit_ir,
             mir,
-            strict,
             no_std,
             verify_contracts,
             verify_ffi,
+            link_search,
+            link_lib,
             shared,
             target,
         } => build::build(
             path.as_deref(),
             output.as_deref(),
             emit_ir,
-            strict,
             no_std,
             verify_contracts,
             verify_ffi,
+            &link_search,
+            &link_lib,
             shared,
             target.as_deref(),
             mir,
@@ -659,7 +616,6 @@ fn main() -> std::process::ExitCode {
         Command::EmitJavaBindings { path, output, java } => {
             emit::emit_java_bindings(path.as_deref(), output.as_deref(), java.as_deref())
         }
-        Command::Promote { path, output } => promote::promote(&path, output.as_deref()),
         Command::Doc {
             path,
             format,

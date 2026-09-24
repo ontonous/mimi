@@ -8896,6 +8896,116 @@ pub func call_right(value: i64) -> i64 { right(value) }
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn canonical_scalar_ffi_native_build_accepts_explicit_link_search_and_library() {
+    if !can_link() || Command::new("ar").arg("--version").output().is_err() {
+        eprintln!("SKIP: C compiler or archiver not available");
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-link-flags-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create CLI linker fixture directory");
+
+    let c_source = dir.join("ffi.c");
+    let c_object = dir.join("ffi.o");
+    let static_library = dir.join("libmimi_cli_ffi.a");
+    fs::write(
+        &c_source,
+        "#include <stdint.h>\nint64_t ffi_cli_link_probe(int64_t value) { return value + 2; }\n",
+    )
+    .expect("write native FFI fixture");
+    let compile_c = Command::new("cc")
+        .arg("-c")
+        .arg(&c_source)
+        .arg("-o")
+        .arg(&c_object)
+        .output()
+        .expect("compile native FFI fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    let archive = Command::new("ar")
+        .arg("rcs")
+        .arg(&static_library)
+        .arg(&c_object)
+        .output()
+        .expect("archive native FFI fixture");
+    assert!(
+        archive.status.success(),
+        "{}",
+        String::from_utf8_lossy(&archive.stderr)
+    );
+
+    let source = dir.join("main.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func ffi_cli_link_probe(value: i64) -> i64; }\nfunc main() -> i32 { println(ffi_cli_link_probe(40 as i64)); 0 }\n",
+    )
+    .expect("write native FFI Mimi fixture");
+    let executable = dir.join("ffi-program");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--link-search")
+        .arg(&dir)
+        .arg("--link-lib")
+        .arg("mimi_cli_ffi")
+        .arg("--output")
+        .arg(&executable)
+        .arg(&source)
+        .env_remove("MIMI_FFI_LIB")
+        .output()
+        .expect("build scalar FFI Mimi fixture");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(&executable)
+        .output()
+        .expect("run scalar FFI native fixture");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"42\n");
+    fs::remove_dir_all(&dir).expect("remove CLI linker fixture directory");
+}
+
+#[test]
+fn native_link_library_option_rejects_paths_and_archive_filenames() {
+    for invalid_library in ["libmimi.a", "mimi.so", "../mimi", "/tmp/mimi"] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg("--link-lib")
+            .arg(invalid_library)
+            .arg("missing-source.mimi")
+            .output()
+            .expect("spawn invalid native linker option probe");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "invalid library name unexpectedly succeeded: {invalid_library}"
+        );
+        assert!(
+            stderr.contains("invalid --link-lib value"),
+            "invalid library value should fail before path resolution: {invalid_library}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn canonical_scalar_ffi_imported_alias_default_consumers_match_explicit_mir() {
     if !can_link() {
         return;
@@ -22002,16 +22112,18 @@ func main() -> string { foreign(42 as i64) }
         let source = dir.join(format!("{label}.mimi"));
         fs::write(&source, source_text).expect("write FFI boundary CLI fixture");
         for command in ["run", "build", "verify"] {
-            // The default route reports the checker-owned declaration boundary;
-            // explicit --mir reaches the same rejection in its canonical
-            // construction/backend consumer. Their diagnostic prefixes differ,
-            // but neither route may execute the host call or enter legacy.
+            // Default and explicit MIR routes share a source-level FFI
+            // boundary diagnostic. Reject before side effects, MIR layout
+            // construction, or compatibility dispatch.
             let mut route_outputs = Vec::new();
             for explicit_mir in [false, true] {
                 let mut invocation = Command::new(mimi_bin());
                 invocation.current_dir(project_root()).arg(command);
                 if explicit_mir {
                     invocation.arg("--mir");
+                }
+                if command == "build" {
+                    invocation.arg("--emit-ir");
                 }
                 let output = invocation
                     .arg(&source)
@@ -22040,33 +22152,28 @@ func main() -> string { foreign(42 as i64) }
                     }
                 );
                 assert!(stdout.is_empty(), "{label} {command}: {stdout}");
-                if explicit_mir == 0 {
-                    assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
-                    assert!(
-                        stderr.contains("canonical scalar FFI declaration boundary"),
-                        "{label} {command}: default route must reject before legacy: {stderr}"
-                    );
-                    assert!(
-                        stderr.contains("MIR-FFI-DECLARATION-001"),
-                        "{label} {command}: default boundary must retain its stable diagnostic code: {stderr}"
-                    );
-                } else {
-                    assert!(
-                        (stderr.contains("FFI") || stderr.contains("ABI"))
-                            && (stderr.contains("MIR validation failed")
-                                || stderr.contains("MIR bytecode")
-                                || stderr.contains("MIR verifier")
-                                || stderr.contains("native backend")),
-                        "{label} {command}: explicit MIR must report a canonical FFI boundary: {stderr}"
-                    );
-                    assert!(
-                        stderr.contains("MIR-FFI-DECLARATION-001"),
-                        "{label} {command}: explicit MIR boundary must retain its stable diagnostic code: {stderr}"
-                    );
-                }
+                assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
+                assert!(
+                    stderr.contains("canonical scalar FFI declaration boundary"),
+                    "{label} {command}: route must reject at the source boundary: {stderr}"
+                );
+                assert!(
+                    stderr.contains("MIR-FFI-DECLARATION-001"),
+                    "{label} {command}: boundary must retain its stable diagnostic code: {stderr}"
+                );
+                assert!(
+                    stderr.contains("Supported declarations use extern \"C\""),
+                    "{label} {command}: boundary should explain the supported scalar ABI: {stderr}"
+                );
                 assert!(
                     !stderr.contains("Validation(["),
                     "{label} {command} leaked debug-shaped MIR error: {stderr}"
+                );
+                assert!(
+                    !stderr.contains("TypeDesc")
+                        && !stderr.contains("StringHandle")
+                        && !stderr.contains("outside the complete scalar endpoint contract"),
+                    "{label} {command} leaked a backend representation detail: {stderr}"
                 );
                 assert!(
                     !stderr.contains("canonical route disposition: legacy"),
@@ -22277,17 +22384,14 @@ pub func call_foreign(value: i64) -> i64 { foreign(value) }
                 stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
                 "imported {command}: {stderr}"
             );
-            if explicit_mir == 0 {
-                assert!(
-                    stderr.contains("canonical scalar FFI declaration boundary"),
-                    "imported {command}: default route must reject before legacy: {stderr}"
-                );
-            } else {
-                assert!(
-                    stderr.contains("MIR validation failed"),
-                    "imported {command}: explicit MIR must report validation: {stderr}"
-                );
-            }
+            assert!(
+                stderr.contains("canonical scalar FFI declaration boundary"),
+                "imported {command}: both routes should explain the source-level boundary: {stderr}"
+            );
+            assert!(
+                stderr.contains("MIR-FFI-DECLARATION-001"),
+                "imported {command}: stable boundary code missing: {stderr}"
+            );
             assert!(!stderr.contains("canonical route disposition: legacy"));
             assert!(!stderr.contains("flow_ast"));
         }
@@ -22351,16 +22455,13 @@ func main() -> i64 {
             "mixed {command} must reject before println effect: {}",
             route_outputs[0].1
         );
-        for (explicit_mir, (_, _, stderr)) in route_outputs.iter().enumerate() {
+        for (_, _, stderr) in &route_outputs {
             assert!(
                 stderr.contains("ABI 'Rust' is outside the canonical C ABI"),
                 "mixed {command}: {stderr}"
             );
-            if explicit_mir == 0 {
-                assert!(stderr.contains("canonical scalar FFI declaration boundary"));
-            } else {
-                assert!(stderr.contains("MIR validation failed"));
-            }
+            assert!(stderr.contains("canonical scalar FFI declaration boundary"));
+            assert!(stderr.contains("MIR-FFI-DECLARATION-001"));
             assert!(!stderr.contains("canonical route disposition: legacy"));
             assert!(!stderr.contains("flow_ast"));
         }
@@ -22505,8 +22606,12 @@ func main() -> i64 { foreign(-1 as i64) }
 
     let mir_stderr = String::from_utf8_lossy(&mir_output.stderr);
     assert!(
-        mir_stderr.contains("MIR validation failed"),
-        "explicit MIR build must retain canonical validation attribution: {mir_stderr}"
+        mir_stderr.contains("canonical scalar FFI declaration boundary"),
+        "explicit MIR build must report the source-level boundary: {mir_stderr}"
+    );
+    assert!(
+        mir_stderr.contains("MIR-FFI-DECLARATION-001"),
+        "explicit MIR build must preserve the stable boundary code: {mir_stderr}"
     );
     assert!(
         mir_stderr.contains("ABI 'Rust' is outside the canonical C ABI"),

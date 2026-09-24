@@ -2,7 +2,7 @@
 
 ## [Unreleased] — 0.1.10-dev
 
-### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-21，游标 R6-22 → R6-1063）
+### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-24，游标 R6-22 → R6-1113）
 
 按 `devdocs/MIR_EXECUTION_PLAN_2026-09-06.md`（M0 稳定化 → M1 家族组合 → M2 默认迁移/
 物理删除 → M3 Flow 失败闭环）完成首轮全部里程碑验收，随后按 §8 队列推进 R6 系列切片。
@@ -31,22 +31,56 @@
   一等 canonical builtin、scalar literal switch 三消费者、f64 literal println、float
   bind/assign/Add/Subtract canonical face（Z3 IEEE symbolic domain）、int-literal widen
   assign 算术面、f64 合约比较域、plain-scalar island route candidacy + prelude 解耦。
+- **标量 FFI 与 MIR 消费路径退役加固（R6-1109–1113，09-23–09-24）**：确定性生成式
+  plain-scalar 组合和溢出 trap 用同一 MIR 对拍 reference/bytecode/native；直接 native
+  API 在兼容 emitter 前执行 checker-owned 标量 FFI 边界预检；receiptless bytecode FFI
+  执行路径及 AST-backed interpreter FFI runtime/callback 栈删除；无生产消费者的
+  `Interpreter` CheckedProgram 目录查看器仅保留在测试构建。此项不代表四类通用 legacy
+  owner 清零。
+- **CLI 可用性收口**：删除无效 `promote`、`--strict`、`--verify-rules` 和测试分配器选项；
+  `mimi build` 增加可重复的 `--link-search` / `--link-lib` 原生宿主链接选项；默认与显式
+  `--mir` 对不支持的已调用 FFI 声明在相同源码边界拒绝，文档同步当前模块、测试、FFI 和
+  预编译运行依赖边界。
+- **发布入口加固（尚未到 tag 阶段）**：release tag 在 archive 构建前复用完整 CI；仅接收
+  稳定 SemVer（历史 `mimi-v` 前缀也限制为稳定版本），校验 Cargo 包版本、locked 元数据和
+  同版本 CHANGELOG 小节，发布说明缺失时 fail-closed；README 写明 LLVM 18/Z3/libffi 动态
+  运行依赖；Makefile 全部 Cargo 入口默认使用 setup 脚本生成的 LLVM wrapper。当前 Cargo
+  版本仍是 `0.1.10-dev` 且没有 `0.1.11` 发布小节，因此不能产出新版本 tag。
 - **门禁与工具**：real_world `run_suite` 已知差距 drift 检测（R6-1056）；unsafe SAFETY
   gate 基线 37→0（R6-1058）。
 - **可移植性探查**：Android 四目标（aarch64/armv7/i686/x86_64）cfg check 通过（需
   `blake3/pure`，不宣称链接或运行）；wasm32 保持上游依赖层阻断记录。
-- **删除门禁现状（2026-09-21）**：`raw_ast()` 生产调用点 **0**；`compile_func_legacy`
-  匹配 **8**；四类兼容 owner **4/0/8/4** 未清零，物理删除条件未满足前不删。
+- **删除门禁现状（2026-09-24）**：`raw_ast()` 生产调用点 **0**；四类兼容 owner 仍各有
+  真实依赖，生产 body accessor 4 处、`compile_func_legacy` 6 处；scalar FFI direct
+  expression legacy references **0**。不宣称全局 legacy 清零；R6-1114 的 Codegen
+  legacy 调用点依赖矩阵是后续工作，不是本 scalar FFI profile 的剩余验收项。
 
 不变量类别：L1（同一 `MirProgram` 的 reference/bytecode/native/verifier 可观察等价 +
 三方差分 harness）/ L2（validator 与 route selector 在任何后端消费前拒绝非法/未建模
 MIR，禁止隐式 fallback）/ L3（drop/clone/transfer 由 TypeDesc + 显式 MIR 操作 + glue
 合同共同证明；native Valgrind 定向 0 errors）。
 
-测试：src 内 `#[test]` 函数 6,456 → 约 7,736；新鲜 all-target 基线（2026-09-18，
-R6-1028 时点）lib 7,408/0/10 ignored、main 203/0、builtin 4/0、real_world 33/0、
-real_world_cli 289/0、stress 62/0/28 ignored、trap 2/0；每切片附正/负 fixture 与
-CLI 门禁，不再次 push、不发布、不打 tag。
+验收记录（2026-09-24，LLVM 18 dynamic wrapper）：`cargo test --all-targets`
+（20 GB 虚拟内存上限、`RUST_TEST_THREADS=2`）lib 7,533/0/10 ignored、main 215/0、
+builtin 4/0、real_world 33/0、real_world_cli 343/0、stress 62/0/28 ignored、trap 2/0；
+codegen/interpreter/parser 三个 Criterion harness 均通过。完整 `cargo test` 文档测试
+1/0/5 ignored；Valgrind 22/22、ASan 5/5。L1 `dual_`、L2 `typecheck::`、FFI、
+`codegen_e2e`、单线程 Z3 子集、fmt、unsafe、edge-isolation、MIR native/legacy-owner
+audits及 release 性能门禁通过。8 线程 all-target 尝试中一个 f64 verifier obligation
+触发既有 5 秒 Z3 timeout；该测试单线程复跑 1/1，2 线程 all-target 全量复跑通过；未
+提高 solver timeout 或屏蔽测试。严格 Clippy 仍有 478 条 library / 494 条 lib-test
+诊断（主要是 runtime unsafe 文档/块、旧 Inkwell pointer API 与既有 dead/unused/unreachable
+lint），本次变更 Rust 文件无 Clippy 定位；普通 rustc warning 为 115 条 library / 118 条
+lib-test。ASan 定向 5/5 通过，未形成本轮 ASan 债务。全语料 `dispatch --zero` 仍在
+`actor_nested_func_capture.mimi` 与
+`actor_nested_func_shadow.mimi` 各报告一个 compatibility fallback，不代表标量 FFI
+profile 的 default/direct 闭环回退；不宣称全局零 fallback。`make test-dogfood` 中
+taskq/ledger check-test-build-run 通过，mimichat check/test 通过但 native build 因
+E0713 拒绝 actor handle pointer 与 actor state struct 的 aggregate return 布局不匹配；
+mimichat-modern 未到达；同一命令还输出若干非致命 Component IR runtime registry warning。
+E0713 是未迁移 legacy codegen 的既有 actor ABI 债务，不能通过放宽 layout verifier 修复，
+登记到 R6-1114 CodegenLegacyRemainder。wasm32 仍是上游依赖层未满足构建前提，Android
+只完成四目标 cfg check，不冒充链接/运行支持。版本仍为开发版，未 push、发布或打 tag。
 
 ### Canonical MIR 架构战役（内部 sprint 0.41.x，2026-08-31 – 2026-09-05，s0–s144）
 

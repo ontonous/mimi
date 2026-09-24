@@ -92,19 +92,21 @@ _This project adheres to the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). All
 ### 构建与测试
 
 ```bash
-# 首次构建
+# 首次构建：默认链接配置是 LLVM 18 动态宿主模式
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build
 
 # 运行测试
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
 
-# Clippy（零通过门禁）
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --deny warnings
+# Clippy 审查（仓库仍有已知 warning 债务，-D warnings 当前可能失败）
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
 
 # 格式化
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt -- --check
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt -- --check
 ```
+
+Clippy 的非零退出需区分本次引入的 lint 与已有基线债务；不要通过新增全局 allow 或放宽不变量来得到绿色结果。
 
 ---
 

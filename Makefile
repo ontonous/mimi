@@ -2,6 +2,11 @@
 
 .PHONY: test test-all test-stress test-stress-heavy test-stress-fuzz test-realworld test-realworld-cli test-build-race test-fuzz test-fuzz-quick test-fuzz-ci ci-full test-dispatch-zero test-dogfood
 
+# Match scripts/setup-llvm-wrapper.sh for every Cargo target, including the
+# generic test/lint recipes that do not set the prefix inline.
+LLVM_SYS_181_PREFIX ?= /tmp/llvm-wrapper
+export LLVM_SYS_181_PREFIX
+
 # Default: run all non-ignored tests
 test:
 	cargo test
@@ -16,26 +21,26 @@ test-all:
 
 # Run the PR-gate stress smoke suite (fast)
 test-stress:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test stress
 
 # Run heavy stress variants (nightly)
 test-stress-heavy:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress -- --ignored
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test stress -- --ignored
 
 # Run only the stress fuzz smoke tests (parser/json/wire)
 test-stress-fuzz:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress fuzz_ -- --nocapture
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test stress fuzz_ -- --nocapture
 # Real-world dual-backend suite: compile/run every corpus through both
 # the bytecode VM and native codegen.
 test-realworld:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test real_world -- --test-threads=4
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test real_world -- --test-threads=4
 
 test-realworld-cli:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test real_world_cli -- --test-threads=1
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test real_world_cli -- --test-threads=1
 
 # Parallel mimi build archive-race regression
 test-build-race:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo test --test stress stress_parallel_mimi_build_no_archive_race -- --nocapture
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo test --test stress stress_parallel_mimi_build_no_archive_race -- --nocapture
 
 # Zero legacy-fallback hard gate: every corpus program must dispatch 100%
 # through the resolved slice.
@@ -44,7 +49,7 @@ test-dispatch-zero:
 
 # Hand-written 0.1.7 dogfood projects + legacy real-project regression gate.
 test-dogfood:
-	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper}" cargo build --bin mimi
+	LLVM_SYS_181_PREFIX="$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" cargo build --bin mimi
 	./target/debug/mimi check projects/mimi-taskq/src/main.mimi
 	./target/debug/mimi test projects/mimi-taskq/src/main.mimi
 	./target/debug/mimi build projects/mimi-taskq/src/main.mimi -o /tmp/mimi-taskq-dogfood
@@ -68,15 +73,15 @@ test-dogfood:
 
 # Quick fuzz: run each proptest target with minimal iterations
 test-fuzz-quick:
-	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=10 cargo test fuzz_ -- --nocapture
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper} PROPTEST_CASES=10 cargo test fuzz_ -- --nocapture
 
 # Full fuzz: run each proptest target with standard iterations
 test-fuzz:
-	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=100 cargo test fuzz_ -- --nocapture
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper} PROPTEST_CASES=100 cargo test fuzz_ -- --nocapture
 
 # CI fuzz: aggressive iterations for continuous integration
 test-fuzz-ci:
-	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-$${PWD}/.llvm-wrapper} PROPTEST_CASES=1000 cargo test fuzz_ 2>&1
+	LLVM_SYS_181_PREFIX=$${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper} PROPTEST_CASES=1000 cargo test fuzz_ 2>&1
 
 # Run all fuzz corpus seed tests
 test-fuzz-corpus:

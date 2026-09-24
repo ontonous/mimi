@@ -10,12 +10,7 @@ use std::path::Path;
 use crate::{is_production, resolve_path};
 use mimi::diagnostic::format::{format_diagnostic_with_registry, strip_ansi};
 
-pub(crate) fn mir(
-    path: Option<&Path>,
-    strict: bool,
-    all: bool,
-    receipt: bool,
-) -> Result<(), String> {
+pub(crate) fn mir(path: Option<&Path>, all: bool, receipt: bool) -> Result<(), String> {
     let path = resolve_path(path)?;
     if !is_production(&path) {
         return Err(format!(
@@ -44,11 +39,7 @@ pub(crate) fn mir(
     };
     mimi::loader::merge_prelude_into(&mut file);
 
-    let checked = match if strict {
-        mimi::core::check_program_strict(&file)
-    } else {
-        mimi::core::check_program(&file)
-    } {
+    let checked = match mimi::core::check_program(&file) {
         Ok(checked) => checked,
         Err(diagnostics) => {
             let fallback_filename = path.display().to_string();

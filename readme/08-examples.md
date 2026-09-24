@@ -1,5 +1,7 @@
 # 08 - Mimi 示例集
 
+> 这份示例集横跨多个语法版本。模块、FFI 和测试示例已按当前规则更新；其他章节仍可能反映旧 API。开始新代码前请对照[语法手册](./01-syntax.md)、[模块说明](./06-modules.md)和[标准库目录](../std/)。
+
 ---
 
 ## 1. Hello World
@@ -326,8 +328,9 @@ func main() -> i32 {
 
 ## 12. 模块与导入
 
+`models.mimi`：
+
 ```mimi
-// models.mimi
 pub type User {
     name: string
     age: i32
@@ -336,9 +339,12 @@ pub type User {
 pub func new_user(name: string, age: i32) -> User {
     User { name: name, age: age }
 }
+```
 
-// main.mimi
-use crate::models::{User, new_user};
+`main.mimi`：
+
+```mimi
+use models;
 
 func main() -> i32 {
     let user = new_user("Alice", 30);
@@ -358,63 +364,38 @@ func main() -> i32 {
 
 ## 14. FFI 外部函数
 
-```mimi
-cap SQLiteCap;
-
-extern "C" {
-    fn sqlite3_open(path: string, cap @db: SQLiteCap) -> Result<i64, string>;
-    fn sqlite3_exec(db: i64, query: string, cap @db: SQLiteCap) -> Result<(), string>;
-    fn sqlite3_close(db: i64, cap @db: SQLiteCap) -> Result<(), string>;
-}
-
-func init_database(path: string, cap: SQLiteCap) -> Result<i64, string> {
-    let db = sqlite3_open(path, cap)?;
-    Ok(db)
-}
-```
-
----
-
-## 15. 完整示例：简单 HTTP 服务器
+`main.mimi`：
 
 ```mimi
-cap NetListenCap;
-cap NetAcceptCap;
-
 extern "C" {
-    fn listen(addr: string, cap @srv: NetListenCap) -> Result<i64, string>;
-    fn accept(server: i64, cap @cl: NetAcceptCap) -> Result<(i64, string), string>;
-    fn send(client: i64, data: string) -> Result<(), string>;
-    fn close(client: i64) -> Result<(), string>;
-}
-
-actor HttpServer {
-    mut server_fd: i64 = 0;
-
-    func start(addr: string, cap: NetListenCap) {
-        self.server_fd = listen(addr, cap)?;
-    }
-
-    func handle_request(client_fd: i64) {
-        let (fd, request) = accept(self.server_fd, 0)?;
-        let response = "HTTP/1.1 200 OK\n\nHello, Mimi!";
-        send(fd, response)?;
-        close(fd)?;
-    }
+    func ffi_add(left: i64, right: i64) -> i64;
 }
 
 func main() -> i32 {
-    let server = HttpServer.spawn();
-    server.start("0.0.0.0:8080", net_listen_cap);
-
-    loop {
-        let client = server.accept_connection();
-        spawn server.handle_request(client);
-    }
-
+    println(ffi_add(20 as i64, 22 as i64));
     0
 }
 ```
+
+`extern "C"` 导入当前只接受窄标量 ABI。这个例子需要自行提供 `ffi_add` 的 C 实现；动态绑定与原生链接的完整步骤见[FFI 指南](./10-ffi.md)。SQLite 的字符串和指针 ABI 不在当前支持范围。
+
+---
+
+## 15. 网络 API
+
+```mimi
+use std::net;
+
+func main() -> i32 {
+    let response = fetch("https://example.com");
+    if response.is_ok() {
+        println(response.unwrap());
+    }
+    0
+}
+```
+
+网络封装使用内建网络函数与 `std::net`，不是把字符串或 socket 句柄通过用户声明的 FFI 传给 C。当前底层网络失败仍可能触发运行时错误，不能把 `NetError` 的每个分支都当作可恢复结果。
 
 ---
 
@@ -450,17 +431,13 @@ func main() -> i32 {
 ## 17. 标准库使用
 
 ```mimi
-// 数学函数
-use std::mymath
+use std::mymath;
 
 func main() -> i32 {
-    let x = prelude::sqr(5)          // 25
-    let y = prelude::cube_int(3)     // 27
-    let z = prelude::clamp(15, 0, 10) // 10
-    let f = mymath::factorial(5)     // 120
-    let fib = mymath::fibonacci(10)  // 55
+    let f = factorial(5);
+    let fib = fibonacci(10);
 
-    println("Square:", x, "Factorial:", f)
+    println("Factorial:", f, "Fibonacci:", fib);
     0
 }
 ```
@@ -470,27 +447,13 @@ func main() -> i32 {
 ## 18. 测试框架
 
 ```mimi
-// test_math.mimi
+use std::testing;
+
 func test_addition() {
-    assert_eq(2 + 2, 4)
+    assert_eq_int(2 + 2, 4)
 }
 
-func test_string_operations() {
-    let s = "hello world"
-    assert_eq(len(s), 11)
-    assert_eq(to_string(42), "42")
-}
-
-func test_list_operations() {
-    let nums = [1, 2, 3]
-    assert_eq(len(nums), 3)
-    assert_eq(sum(nums), 6)
-}
-
-func test_edge_cases() {
-    assert_ne(1, 2)
-    assert(10 > 5)
-}
+func main() -> i32 { 0 }
 ```
 
 运行测试：
@@ -515,20 +478,17 @@ my_project/
 ├── mimi.toml
 ├── main.mimi
 ├── models.mimi
-└── utils/
-    ├── math.mimi
-    └── string.mimi
+└── math_utils.mimi
 ```
 
+`models.mimi` 和 `math_utils.mimi` 用 `pub` 导出声明；Mimi 的 `use` 导入文件并合并公开名字。
+
 ```mimi
-// main.mimi
-use crate::models::User
-use crate::utils::math::calculate_tax
+use models;
+use math_utils;
 
 func main() -> i32 {
-    let user = User { name: "Alice", balance: 1000.0 }
-    let tax = calculate_tax(user.balance)
-    println("Tax:", tax)
+    println(double(21));
     0
 }
 ```

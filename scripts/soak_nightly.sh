@@ -9,7 +9,7 @@
 #   MIMI_SOAK_SECONDS=900 scripts/soak_nightly.sh   # 15min short soak
 set -euo pipefail
 
-LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-$PWD/.llvm-wrapper}"
+LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
 export LLVM_SYS_181_PREFIX
 DURATION_SECS="${MIMI_SOAK_SECONDS:-86400}"
 

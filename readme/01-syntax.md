@@ -189,7 +189,7 @@ let snake_case = 2;        // 蛇形命名（推荐）
 |------|------|------|
 | 变量/函数 | snake_case | `my_func`, `let my_var` |
 | 类型/ADT | PascalCase | `MyType`, `Shape` |
-| 模块 | PascalCase | `module MyModule` |
+| 源文件导入 | snake_case | `use math_utils;` |
 | Actor | PascalCase | `actor Counter` |
 | Cap | PascalCase | `cap FileReadCap` |
 | Trait | PascalCase | `trait Display` |
@@ -254,13 +254,12 @@ let snake_case = 2;        // 蛇形命名（推荐）
 | 运算符 | 含义 |
 |--------|------|
 | `.` | 字段访问 / 方法调用 |
-| `::` | 模块路径 |
+| `::` | Flow 转移调用 |
 | `?` | 错误传播（try） |
 | `..` | 范围 / 切片 |
-| `...` | 草图模式占位符 |
+| `...` | variadic 声明语法（不属于当前标量 FFI profile） |
 | `=>` | match 分支箭头 |
 | `->` | 返回类型 |
-| `@` | extern 块中的 cap 标注（如 `cap @param: Type`） |
 
 ### 5.7 运算符优先级（从低到高）
 
@@ -748,84 +747,35 @@ func sort_list<T>(list: List<T>) where T: Comparable {
 
 ```mimi
 extern "C" {
-    func read_file(path: string, cap @fh: FileReadCap) -> string;
-    func write_file(path: string, data: string, cap @fh: FileWriteCap) -> Result<(), string>;
-    func simple_func(x: i32) -> i32;
+    func abs(value: i32) -> i32;
 }
 ```
 
-- `cap @param: Type` — 移动语义的 cap 参数
-- `&param: Type` — 借用语义的 cap 参数
-- 无标注 — 普通参数
+当前默认 Canonical MIR FFI 只接受 C ABI 标量参数 `i32`、`i64`、`f32`、`f64`、`bool`，以及标量或 unit 结果。字符串、指针、回调、聚合体、variadic 和非 C ABI 声明不在此执行 profile 内；详见[FFI 范围与链接](./10-ffi.md)。
 
 ---
 
-## 13. 模块系统
+## 13. 模块与文件导入
 
-### 12.1 模块声明
+Mimi 使用文件级 `use` 合并模型：
 
 ```mimi
-module Shop {
-    // 模块内容
-    func process_order() { ... }
+// math_utils.mimi 导出：pub func double(value: i32) -> i32 { value * 2 }
+use math_utils;
+
+func main() -> i32 {
+    println(double(21));
+    0
 }
 ```
 
-### 12.2 可见性
-
-```mimi
-module Shop {
-    pub func process_order() { ... }    // 公开
-    func internal_helper() { ... }       // 私有（默认）
-}
-```
-
-### 12.3 导入
-
-```mimi
-use std::collections::Map;
-use crate::models::User;
-use super::helper;
-use another_package::some_func;
-```
-
-### 12.4 路径语法
-
-```mimi
-let user = User::new("Alice");      // 模块路径用 ::
-let name = user.name;               // 字段访问用 .
-let display = user.to_string();     // 方法调用用 .
-```
+`use math_utils;` 加载同目录的 `math_utils.mimi`，公开声明以裸名进入当前作用域。内联 `module` 块、符号级路径导入和 `math_utils::double(...)` 调用均不支持。完整说明见[模块与包管理](./06-modules.md)。
 
 ---
 
-## 14. 模块与包管理
+## 14. 包管理
 
-### 13.1 项目结构
-
-```
-my_project/
-├── mimi.toml           # 包配置
-├── src/
-│   ├── main.mimi       # 入口
-│   ├── domain.mimi     # 领域模块
-│   └── services/
-│       └── payment.mimi
-└── tests/
-    └── integration.mimi
-```
-
-### 13.2 mimi.toml
-
-```toml
-[package]
-name = "shop"
-version = "0.1.0"
-
-[dependencies]
-std = "1.0"
-payment-sdk = { path = "../payment-sdk" }
-```
+在现有目录运行 `mimi init [name]` 创建 `mimi.toml` 和缺失的 `main.mimi`；`name` 只设置包名，不创建同名目录。依赖用 `mimi add` 添加、`mimi install` 安装，详见[CLI 参考](./07-cli.md)。
 
 ---
 

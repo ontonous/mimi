@@ -10,7 +10,7 @@
 #   rustup toolchain install nightly --component rust-src
 set -euo pipefail
 
-LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-$PWD/.llvm-wrapper}"
+LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
 export LLVM_SYS_181_PREFIX
 TARGET=x86_64-unknown-linux-gnu
 THREADS=1

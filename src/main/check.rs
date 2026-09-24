@@ -6,7 +6,7 @@ use mimi::diagnostic::format::{
 };
 use mimi::lexer;
 
-pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Result<(), String> {
+pub(crate) fn check(path: Option<&Path>) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let sketch = is_sketch(&path);
@@ -69,11 +69,7 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
     // Auto-merge standard library prelude (identity, clamp, is_even, etc.)
     mimi::loader::merge_prelude_into(&mut file);
 
-    let check_result = if strict {
-        mimi::core::check_program_strict(&file).map(|_| ())
-    } else {
-        mimi::core::check_program(&file).map(|_| ())
-    };
+    let check_result = mimi::core::check_program(&file).map(|_| ());
     if let Err(diagnostics) = check_result {
         eprintln!(
             "{} has {} type error(s):",
@@ -97,23 +93,6 @@ pub(crate) fn check(path: Option<&Path>, strict: bool, verify_rules: bool) -> Re
             }
         }
         return Err("type checking failed".into());
-    }
-
-    // Verify MMS rule attachment consistency
-    if verify_rules {
-        let rule_errors = mimi::core::verify_rules(&file);
-        if !rule_errors.is_empty() {
-            eprintln!(
-                "✗ {} has {} rule error(s):",
-                path.display(),
-                rule_errors.len()
-            );
-            for e in &rule_errors {
-                eprintln!("  - {}", e);
-            }
-            return Err("rule verification failed".into());
-        }
-        println!("✓ {} rules verified", path.display());
     }
 
     println!("✓ {} checked successfully", path.display());
