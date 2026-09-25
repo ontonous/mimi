@@ -489,6 +489,26 @@ fn compile_checked_routes_concrete_protocol_method_without_legacy_access() {
 }
 
 #[test]
+fn compile_checked_keeps_dynamic_protocol_method_on_legacy_owner() {
+    let source = include_str!("../../tests/fixtures/mir_protocol_method_dyn.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "dyn_protocol_legacy_compatibility");
+    codegen
+        .compile_checked(&program)
+        .expect("dynamic protocol dispatch must retain its compatibility emitter");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access()
+        .contains(&crate::core::LegacyBodyConsumer::CodegenLegacyRemainder));
+}
+
+#[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

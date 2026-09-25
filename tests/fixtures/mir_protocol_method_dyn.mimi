@@ -1,0 +1,19 @@
+trait Read {
+    func read() -> i32
+}
+
+type Counter { value: i32 }
+
+impl Read for Counter {
+    func read() -> i32 { self.value }
+}
+
+func read_dynamic(value: dyn Read) -> i32 {
+    value.read()
+}
+
+func main() -> i32 {
+    let counter = Counter { value: 41 }
+    let dynamic: dyn Read = counter
+    read_dynamic(dynamic)
+}

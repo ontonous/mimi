@@ -23402,6 +23402,56 @@ fn canonical_mir_concrete_record_protocol_method_uses_default_route() {
     );
 }
 
+#[test]
+fn dynamic_protocol_method_neighbor_keeps_default_legacy_compatibility() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_protocol_method_dyn.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn dynamic protocol-method run");
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(
+        run.status.code(),
+        Some(41),
+        "dynamic protocol dispatch must keep working: {run_stderr}"
+    );
+    assert!(run.stdout.is_empty());
+    assert!(run_stderr.contains("canonical route disposition: legacy"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-dynamic-protocol-compatibility-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn dynamic protocol-method build");
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "dynamic protocol compatibility build must succeed: {build_stderr}"
+    );
+    assert!(build_stderr.contains("canonical route disposition: legacy"));
+    let native = Command::new(&binary)
+        .output()
+        .expect("execute dynamic protocol compatibility binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(41));
+    assert!(native.stdout.is_empty());
+    assert!(native.stderr.is_empty());
+}
+
 // R6-1049: the scalar-assign face (root-level statement, direct local target,
 // Identity/NumericWiden conversion, i32/i64/bool target ABI) routes canonical
 // and agrees across all three consumers.  This pins the record-composition

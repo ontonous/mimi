@@ -4556,6 +4556,17 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
 /// exception local to record admission; other MIR islands still treat user
 /// traits and impls as mixed coverage.
 fn has_flat_record_mixed_coverage(program: &CheckedProgram) -> bool {
+    // Dynamic/opaque trait values require the compatibility fat-pointer and
+    // vtable path. A direct concrete ProtocolMethod on a Copy record does not
+    // make any callable that stores or receives a trait object safe for the
+    // flat-record MIR profile.
+    if program
+        .resolved_types()
+        .iter()
+        .any(|(_, ty)| matches!(ty, ResolvedType::Trait { .. }))
+    {
+        return true;
+    }
     let protocol_method = flat_record_protocol_method(program);
     has_mixed_coverage_with_record_protocol(program, protocol_method.as_ref())
 }

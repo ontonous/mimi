@@ -1973,6 +1973,21 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_trait_object_sibling_keeps_legacy_compatibility_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_protocol_method_dyn.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::MixedCoverage
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Legacy(LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate)
+        ));
+    }
+
+    #[test]
     fn copy_record_update_is_complete_and_uses_canonical_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_record_update.mimi"
