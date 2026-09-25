@@ -1592,22 +1592,6 @@ impl Parser {
             tok.col,
         ))
     }
-
-    fn parse_item_block(&mut self) -> Result<Vec<Item>, ParseError> {
-        let mut items = Vec::new();
-        self.skip_newlines();
-        let end = if self.is_sketch() {
-            TokenKind::Dedent
-        } else {
-            TokenKind::RBrace
-        };
-        while !self.at(&end) && !self.at(&TokenKind::Eof) {
-            items.push(self.parse_item()?);
-            self.skip_newlines();
-        }
-        self.expect(end, if self.is_sketch() { "dedent" } else { "`}`" })?;
-        Ok(items)
-    }
 }
 
 #[cfg(test)]

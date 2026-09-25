@@ -9160,63 +9160,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|v| v.into_int_value())
     }
 
-    /// Does `ty`, when stored as a *payload* of an enclosing `Option`/`Result`, get
-    /// heap-boxed (the `{disc, box_ptr, payload}` external form, with the inner
-    /// aggregate itself stored reversed as `{value, box_ptr}`)?  This happens for
-    /// `Option`/`Result` whose payload values hold a scalar (e.g. `Option<i64>`,
-    /// `Result<i64,string>`); container payloads (`List`, `Map`, `Set`, records,
-    /// tuples) are stored inline instead.  A bare scalar/string is never boxed.
-    fn json_is_boxable(&self, ty: &crate::ast::Type) -> bool {
-        let nty = self.json_norm(ty);
-        match &nty {
-            crate::ast::Type::Option(inner) => self.json_holds_scalar(inner),
-            crate::ast::Type::Result(ok, _) => self.json_holds_scalar(ok),
-            _ => false,
-        }
-    }
-
-    /// Does `ty` transitively carry a scalar/string value (used to decide boxing)?
-    fn json_holds_scalar(&self, ty: &crate::ast::Type) -> bool {
-        let nty = self.json_norm(ty);
-        match &nty {
-            crate::ast::Type::Name(n, _) => matches!(
-                n.as_str(),
-                "i8" | "i16"
-                    | "i32"
-                    | "i64"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "char"
-                    | "bool"
-                    | "f32"
-                    | "f64"
-                    | "string"
-            ),
-            crate::ast::Type::Option(inner) => self.json_holds_scalar(inner),
-            crate::ast::Type::Result(ok, err) => {
-                self.json_holds_scalar(ok) || self.json_holds_scalar(err)
-            }
-            _ => false,
-        }
-    }
-
-    /// When `inner` is the payload of an `Option`/`Result`, does it get heap-boxed
-    /// (stored reversed as `{value, box_ptr}`)? This is true only for an `Option`/
-    /// `Result` *aggregate* whose payload holds a scalar — i.e. `Option<i64>`,
-    /// `Result<i64,…>`, `Option<Option<i64>>`, etc. A plain scalar inner (`i64`)
-    /// or a container/record/tuple inner is stored inline, not boxed.
-    fn json_inner_boxable(&self, inner: &crate::ast::Type) -> bool {
-        let nty = self.json_norm(inner);
-        match nty.unlocated() {
-            crate::ast::Type::Option(_) | crate::ast::Type::Result(_, _) => {
-                self.json_holds_scalar(inner)
-            }
-            _ => false,
-        }
-    }
-
     /// The *runtime storage layout* of a Mimi value as stored inside an
     /// `Option<T>` / `Result<T, E>` payload slot (or as a list element / record
     /// field).  This deliberately mirrors the actual ABI the compiler emits,
@@ -9274,34 +9217,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// The *embedded / boxed* storage layout of `ty` when it appears as a heap-boxed
-    /// payload of an enclosing `Option`/`Result`.  A boxable `Option<T>` is stored
-    /// reversed as `{value, box_ptr}` (disc becomes `(box_ptr != 0)`); a boxable
-    /// `Result<T,E>` keeps `{disc, T, E}` (its fields are inlined by the runtime).
-    fn json_storage_llvm_boxed(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
-        use crate::ast::Type;
-        let i64_ty = self.context.i64_type();
-        match ty.unlocated() {
-            Type::Option(inner) => {
-                // reversed boxed form: {payload_value, box_ptr}
-                let v = self.json_storage_llvm(inner)?;
-                Some(
-                    self.context
-                        .struct_type(&[v, BasicTypeEnum::IntType(i64_ty)], false)
-                        .into(),
-                )
-            }
-            Type::Result(_, _) => self.json_storage_llvm(ty),
-            Type::Name(n, _) if n == "List" => Some(self.list_struct_type().into()),
-            Type::Name(n, _) if n == "string" => Some(BasicTypeEnum::IntType(i64_ty)),
-            Type::Name(n, _) => match n.as_str() {
-                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => Some(BasicTypeEnum::IntType(i64_ty)),
-                _ => self.llvm_type_for(ty),
-            },
-            _ => self.llvm_type_for(ty),
-        }
-    }
-
     /// Can the recursive generator fully serialize this type (all inner types
     /// handled)? Map/Set/enum return false and fall through to legacy.
     fn json_is_fully_handled(&self, ty: &crate::ast::Type) -> bool {
@@ -9352,14 +9267,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             crate::ast::Type::Tuple(elems) => elems.iter().all(|e| self.json_is_fully_handled(e)),
             _ => false,
         }
-    }
-
-    /// Build the LLVM struct type for the `string` type (used for field GEP).
-    fn json_string_struct_type(&self) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
-        let t = self
-            .llvm_type_for(&crate::ast::Type::Name("string".to_string(), vec![]))
-            .ok_or_else(|| CompileError::Generic("no llvm type for string".into()))?;
-        Ok(t.into_struct_type())
     }
 
     /// Call a runtime JSON helper that returns a fresh `*mut c_char`.
