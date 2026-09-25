@@ -998,6 +998,12 @@ pub extern "C" fn mimi_set_generation(handle: i64) -> i64 {
 }
 
 #[no_mangle]
+/// Try to read a Map size, storing zero on failure when `out` is non-null.
+///
+/// # Safety
+/// `out` must be null or point to a properly aligned, writable `i64` that
+/// remains valid for the duration of this call. The handle is validated by
+/// the runtime and reported through the returned status code.
 pub unsafe extern "C" fn mimi_map_try_size(handle: i64, out: *mut i64) -> i32 {
     match map_acquire(handle) {
         Ok(lease) => {
@@ -1017,6 +1023,12 @@ pub unsafe extern "C" fn mimi_map_try_size(handle: i64, out: *mut i64) -> i32 {
 }
 
 #[no_mangle]
+/// Try to read a Set size, storing zero on failure when `out` is non-null.
+///
+/// # Safety
+/// `out` must be null or point to a properly aligned, writable `i64` that
+/// remains valid for the duration of this call. The handle is validated by
+/// the runtime and reported through the returned status code.
 pub unsafe extern "C" fn mimi_set_try_size(handle: i64, out: *mut i64) -> i32 {
     match set_acquire(handle) {
         Ok(lease) => {

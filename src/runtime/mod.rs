@@ -3242,10 +3242,23 @@ pub extern "C" fn mimi_map_new() -> MapHandle {
 }
 
 #[no_mangle]
+/// Destroy a Map runtime handle.
+///
+/// `mimi_map_destroy` releases only payloads explicitly registered as
+/// Map-owned. Values supplied through `mimi_map_set` remain externally owned.
+///
+/// # Safety
+/// `handle` must be zero or a MapHandle returned by this runtime. After
+/// destroying a nonzero handle, do not use it again. Any ValueHandle borrowed
+/// through `mimi_map_values` must stop being used before the Map is destroyed.
 pub unsafe extern "C" fn mimi_map_destroy(handle: MapHandle) {
     let _ = handle::map_destroy(handle);
 }
 
+/// Return the number of entries in a live Map. A zero handle has size zero.
+///
+/// # Safety
+/// A nonzero `handle` must be a live MapHandle returned by this runtime.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     if handle == 0 {
@@ -3260,7 +3273,7 @@ pub unsafe extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
 static MIMI_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_make_token() -> i64 {
+pub extern "C" fn mimi_make_token() -> i64 {
     MIMI_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64
 }
 
@@ -3295,6 +3308,14 @@ pub unsafe extern "C" fn mimi_map_get(
     map_from_handle(handle).inner.get(&s).copied().unwrap_or(0)
 }
 
+/// Create a persistent shallow clone of a Map handle. The new handle owns an
+/// independent key/value table; raw `ValueHandle`s in that table are copied,
+/// while only explicitly registered Map-owned payload records are shared.
+///
+/// # Safety
+/// A nonzero `handle` must be a live MapHandle for the duration of this call.
+/// The caller must keep externally owned values in the source table alive for
+/// as long as either Map may expose them.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_clone(handle: MapHandle) -> MapHandle {
     if handle == 0 {
@@ -3335,12 +3356,14 @@ pub unsafe extern "C" fn mimi_map_set(
 
 /// Format a type-erased value without probing arbitrary addresses. Strings
 /// arrive as explicitly tagged handles created by `mimi_any_string_clone`;
-/// every other bit pattern is formatted as an integer.
+/// every other bit pattern is formatted as an integer. The caller owns the
+/// returned C string and must release it with `mimi_string_free`.
 ///
-/// The caller owns the returned C string and must release it with
-/// `mimi_string_free`.
+/// This function validates tagged handles against the runtime provenance
+/// registry before reading and formats unregistered values as integers, so no
+/// caller-supplied pointer precondition is required.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi::c_char {
     let rendered = match copy_registered_any_string(value) {
         Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         None => value.to_string(),
@@ -3729,11 +3752,27 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
 }
 
 #[no_mangle]
+/// Return a newly allocated key list in deterministic key order.
+///
+/// # Safety
+/// `handle` must be zero or a live MapHandle for the duration of this call.
+/// The returned MimiList is owned by the caller and must be released exactly
+/// once with `mimi_list_free(list, true)`.
 pub unsafe extern "C" fn mimi_map_keys(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, false)
 }
 
 #[no_mangle]
+/// Return a newly allocated list containing borrowed `ValueHandle` slots.
+/// Freeing the list releases its shell and slot array, not the referenced
+/// values.
+///
+/// # Safety
+/// `handle` must be zero or a live MapHandle for the duration of this call.
+/// Keep the Map and every externally owned value backing a returned handle
+/// alive until that handle is no longer used. The returned MimiList is owned
+/// by the caller and must be released exactly once with
+/// `mimi_list_free(list, true)`.
 pub unsafe extern "C" fn mimi_map_values(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, true)
 }
@@ -24439,7 +24478,7 @@ mod audit_wave1_tests {
             mimi_any_string_clone(text.as_ptr() as *const std::ffi::c_char, text.len() as i64)
         };
         assert_eq!(handle & 1, 1);
-        let raw = unsafe { mimi_any_to_string(handle) };
+        let raw = mimi_any_to_string(handle);
         assert!(!raw.is_null());
         // SAFETY: raw is a valid runtime-allocated C string.
         let decoded = unsafe { cstr_to_string(raw) };
@@ -24453,7 +24492,7 @@ mod audit_wave1_tests {
     #[test]
     fn any_decoders_never_dereference_unregistered_integer_handles() {
         for value in [0, 5, 15, 0x7fff_ffff_f001, -1] {
-            let rendered = unsafe { mimi_any_to_string(value) };
+            let rendered = mimi_any_to_string(value);
             assert!(!rendered.is_null());
             assert_eq!(unsafe { cstr_to_string(rendered) }, value.to_string());
             mimi_free(rendered.cast());
@@ -24474,7 +24513,7 @@ mod audit_wave1_tests {
                 copy_registered_any_string(handle).as_deref(),
                 Some(text.as_bytes())
             );
-            let rendered = unsafe { mimi_any_to_string(handle) };
+            let rendered = mimi_any_to_string(handle);
             assert_eq!(unsafe { cstr_to_string(rendered) }, text);
             mimi_free(rendered.cast());
             mimi_free((handle as usize & !1) as *mut std::ffi::c_void);
