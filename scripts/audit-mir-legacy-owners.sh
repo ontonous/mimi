@@ -1378,6 +1378,63 @@ else
     printf 'scalar_evidence_marker_sequence_status=ok\n'
 fi
 
+require_codegen_legacy_body_class_tripwire() {
+    local body_class="$1"
+    local test_name="$2"
+    local class_marker="$3"
+    local body
+    body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
+        "$ROOT_DIR/src/codegen/tests.rs")"
+    if [ -z "$body" ]; then
+        printf 'owner_audit_error=missing_codegen_legacy_body_class_tripwire class=%s test=%s\n' \
+            "$body_class" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg -F 'LegacyBodyConsumer::CodegenLegacyRemainder' >/dev/null; then
+        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_owner class=%s test=%s\n' \
+            "$body_class" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg 'test_legacy_body_access\(\)' >/dev/null; then
+        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_access_assertion class=%s test=%s\n' \
+            "$body_class" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg 'assert(_eq|_ne)?!' >/dev/null; then
+        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_test_assertion class=%s test=%s\n' \
+            "$body_class" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg -F "$class_marker" >/dev/null; then
+        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker class=%s test=%s marker=%s\n' \
+            "$body_class" "$test_name" "$class_marker" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'codegen_legacy_body_class_tripwire=%s test=%s\n' "$body_class" "$test_name"
+}
+
+require_codegen_legacy_body_class_tripwire \
+    dynamic-trait \
+    compile_checked_keeps_dynamic_protocol_method_on_legacy_owner \
+    'mir_protocol_method_dyn.mimi'
+require_codegen_legacy_body_class_tripwire \
+    flow-transition \
+    compile_checked_keeps_flow_transition_on_legacy_owner \
+    'Counter__inc__from_Zero'
+require_codegen_legacy_body_class_tripwire \
+    export-wrapper \
+    compile_checked_keeps_export_wrapper_body_on_legacy_owner \
+    'owner_tripwire_export__mimi_export_body'
+require_codegen_legacy_body_class_tripwire \
+    actor-method \
+    compile_checked_keeps_actor_method_on_legacy_owner \
+    'OwnerTripwireWorker__read__method'
+
 owner_count=0
 condition_inventory=''
 for owner in \

@@ -509,6 +509,105 @@ fn compile_checked_keeps_dynamic_protocol_method_on_legacy_owner() {
 }
 
 #[test]
+fn compile_checked_keeps_flow_transition_on_legacy_owner() {
+    let source = include_str!("../../tests/real_world/flow_counter.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "flow_transition_legacy_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("legacy Flow transition must remain compilable");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(
+        codegen
+            .module
+            .get_function("Counter__inc__from_Zero")
+            .is_some(),
+        "the retained Flow transition body must be emitted"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
+fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
+    let source = r#"
+        extern "C" func owner_tripwire_export(value: i32) -> i32 {
+            value + 1
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "export_wrapper_legacy_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("legacy C export wrapper must remain compilable");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen
+        .module
+        .get_function("owner_tripwire_export")
+        .is_some());
+    assert!(codegen
+        .module
+        .get_function("owner_tripwire_export__mimi_export_body")
+        .is_some());
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
+fn compile_checked_keeps_actor_method_on_legacy_owner() {
+    let source = r#"
+        actor OwnerTripwireWorker {
+            value: i32
+            func read() -> i32 { self.value }
+        }
+        func main() -> i32 {
+            let worker = OwnerTripwireWorker.spawn()
+            worker.read()
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "actor_body_legacy_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("legacy actor method must remain compilable");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen
+        .module
+        .get_function("OwnerTripwireWorker__read__method")
+        .is_some());
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
