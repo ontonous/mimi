@@ -1740,16 +1740,39 @@ fn protocol_method_call_uses_checker_method_identity_across_mir_consumers() {
     assert!(program.functions().contains_key(&target));
     assert_eq!(method.2.len(), 1);
 
-    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect("reference ProtocolMethod execution");
-    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(42)
+    );
     let bytecode = crate::interp::bytecode::compile_mir_program(&program)
         .expect("bytecode ProtocolMethod consumer");
     assert!(!bytecode.functions.is_empty());
+    assert!(
+        bytecode.ast.is_none(),
+        "ProtocolMethod bytecode must be AST-free"
+    );
+    let bytecode_value = crate::interp::bytecode::BytecodeVM::new(bytecode)
+        .run_value()
+        .expect("bytecode ProtocolMethod execution");
+    assert!(matches!(bytecode_value, crate::interp::Value::Int(42)));
     crate::codegen::mir::validate_mir_native(&program).expect("native ProtocolMethod validator");
     crate::verifier::validate_mir_capabilities(&program)
         .expect("verifier ProtocolMethod capability gate");
+    if crate::tests::can_link() {
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_protocol_method");
+        generator
+            .compile_mir_native(&program)
+            .expect("native ProtocolMethod consumer");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native ProtocolMethod execution");
+        assert_eq!(native.exit_code, Some(42));
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+    }
 }
 
 #[test]

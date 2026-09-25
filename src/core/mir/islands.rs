@@ -3662,7 +3662,7 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
     }
 
     if unsupported_record_declared
-        || has_mixed_coverage(program)
+        || has_flat_record_mixed_coverage(program)
         || flat_record_body_has_unmigrated_shape(program)
     {
         FlatCopyRecordAdmission::MixedCoverage
@@ -4389,13 +4389,20 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 if is_admitted_scalar_print_call(program, call) {
                     false
                 } else {
+                    let is_protocol_method_call = matches!(
+                        call.callee,
+                        crate::core::ir::ResolvedCallee::ProtocolMethod { .. }
+                    );
+                    let admitted_protocol_call = is_protocol_method_call
+                        && is_admitted_flat_record_protocol_call(program, call);
                     matches!(
                         call.callee,
                         crate::core::ir::ResolvedCallee::Builtin(ref builtin)
                             if !matches!(builtin.as_str(), "Some" | "None" | "Ok" | "Err")
                     ) || !call.effects.is_empty()
                         || !call.session.is_empty()
-                        || call.permission.is_some()
+                        || ((is_protocol_method_call || call.permission.is_some())
+                            && !admitted_protocol_call)
                         || call.arguments.iter().any(|argument| {
                             expr_has_unmigrated_shape(
                                 program,
@@ -4539,9 +4546,36 @@ pub(super) fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::
 }
 
 pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
+    has_mixed_coverage_with_record_protocol(program, None)
+}
+
+/// The flat Copy-record profile has one small static ProtocolMethod shape
+/// whose complete typed body is already consumed by all MIR backends: one
+/// non-generic trait, one concrete record impl, and one no-argument method
+/// whose body is exactly a read of one scalar field from `self`. Keep this
+/// exception local to record admission; other MIR islands still treat user
+/// traits and impls as mixed coverage.
+fn has_flat_record_mixed_coverage(program: &CheckedProgram) -> bool {
+    let protocol_method = flat_record_protocol_method(program);
+    has_mixed_coverage_with_record_protocol(program, protocol_method.as_ref())
+}
+
+fn has_mixed_coverage_with_record_protocol(
+    program: &CheckedProgram,
+    admitted_protocol_method: Option<&NodeId>,
+) -> bool {
     fn is_runtime_origin(origin: &crate::core::Origin) -> bool {
         matches!(origin, crate::core::Origin::RuntimeSystem { .. })
     }
+
+    let has_user_protocol_items = program
+        .traits()
+        .values()
+        .any(|trait_def| !is_prelude_origin(program, &trait_def.origin))
+        || program
+            .impls()
+            .values()
+            .any(|impl_def| !is_prelude_origin(program, &impl_def.origin));
 
     let mixed = program.has_imports()
         || program
@@ -4551,14 +4585,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
         || !program.sessions().is_empty()
         || !program.actors().is_empty()
         || !program.capabilities().is_empty()
-        || program
-            .traits()
-            .values()
-            .any(|trait_def| !is_prelude_origin(program, &trait_def.origin))
-        || program
-            .impls()
-            .values()
-            .any(|impl_def| !is_prelude_origin(program, &impl_def.origin))
+        || (has_user_protocol_items && admitted_protocol_method.is_none())
         || !program.extern_blocks().is_empty()
         || program
             .transitions()
@@ -4636,14 +4663,182 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
         // separate ownership proof and must remain on the compatibility
         // verifier until that contract has its own MIR consumer island.
         || program.resolved_signatures().values().any(|signature| {
-            signature.parameters.iter().any(|parameter| {
-                matches!(
-                    parameter.permission,
-                    Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
-                )
-            })
+            signature
+                .parameters
+                .iter()
+                .any(|parameter| {
+                    let is_admitted_receiver = admitted_protocol_method
+                        .is_some_and(|method| method == &signature.owner)
+                        && parameter.name == "self"
+                        && matches!(
+                            parameter.permission,
+                            Some(
+                                crate::core::ir::Permission::View
+                                    | crate::core::ir::Permission::Mutate
+                            )
+                        );
+                    matches!(
+                        parameter.permission,
+                        Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+                    ) && !is_admitted_receiver
+                })
         });
     mixed
+}
+
+/// Return the unique impl method admitted by the flat Copy-record protocol
+/// slice. This predicate uses only checker-owned declarations, signatures,
+/// and ResolvedBody, and intentionally recognizes a single direct field read
+/// so the broader legacy trait/vtable surface stays on its compatibility
+/// owner until it has a separate MIR contract.
+fn flat_record_protocol_method(program: &CheckedProgram) -> Option<NodeId> {
+    let user_traits = program
+        .traits()
+        .values()
+        .filter(|trait_def| !is_prelude_origin(program, &trait_def.origin))
+        .collect::<Vec<_>>();
+    let user_impls = program
+        .impls()
+        .values()
+        .filter(|impl_def| !is_prelude_origin(program, &impl_def.origin))
+        .collect::<Vec<_>>();
+    let [trait_def] = user_traits.as_slice() else {
+        return None;
+    };
+    let [impl_def] = user_impls.as_slice() else {
+        return None;
+    };
+    if trait_def.methods.len() != 1
+        || trait_def.method_signatures.len() != 1
+        || impl_def.methods.len() != 1
+        || impl_def.method_signatures.len() != 1
+        || trait_def.methods[0] != impl_def.methods[0]
+        || trait_def.method_signatures[0].name != trait_def.methods[0]
+        || impl_def.method_signatures[0].name != trait_def.methods[0]
+        || !trait_def.method_signatures[0].params.is_empty()
+        || !impl_def.method_signatures[0].params.is_empty()
+        || !trait_def.method_signatures[0].effects.is_empty()
+        || !impl_def.method_signatures[0].effects.is_empty()
+        || impl_def.trait_name != trait_def.qualified_name
+    {
+        return None;
+    }
+
+    // Equality with this canonical non-generic key rules out generic trait
+    // arguments without consulting source syntax.
+    let record_type = program.type_defs().values().find(|definition| {
+        definition.qualified_name == impl_def.type_name
+            && definition.kind == crate::core::ResolvedTypeKind::Record
+            && matches!(definition.origin, crate::core::Origin::User(_))
+            && is_flat_copy_record_definition(program, definition)
+    })?;
+    if impl_def.qualified_name
+        != format!(
+            "{}:for:{}",
+            trait_def.qualified_name, record_type.qualified_name
+        )
+    {
+        return None;
+    }
+
+    let method_prefix = format!(
+        "function:{}::{}:",
+        impl_def.qualified_name, trait_def.methods[0]
+    );
+    let mut method_functions = program
+        .functions()
+        .values()
+        .filter(|function| function.node_id.0.starts_with(&method_prefix));
+    let function = method_functions.next()?;
+    if method_functions.next().is_some()
+        || !function.generics.is_empty()
+        || !function.generic_binders.is_empty()
+        || !function.effects.is_empty()
+        || function.is_async
+        || function.is_comptime
+        || function.extern_abi.is_some()
+    {
+        return None;
+    }
+    let callable = program.callables().get(&function.node_id)?;
+    let signature = &callable.signature;
+    if signature.owner != function.node_id
+        || !signature.generic_parameters.is_empty()
+        || !signature.effects.is_empty()
+        || signature.parameters.len() != 1
+        || signature.parameters[0].name != "self"
+        || signature.parameters[0].has_default
+        || signature.parameters[0].permission == Some(crate::core::ir::Permission::Consume)
+        || !callable.body.captures.is_empty()
+        || !callable.body.default_values.is_empty()
+        || !callable.body.root.statements.is_empty()
+    {
+        return None;
+    }
+    let Some(ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program.resolved_types().get(&signature.parameters[0].ty)
+    else {
+        return None;
+    };
+    if item.as_str() != record_type.node_id.0 || !arguments.is_empty() {
+        return None;
+    }
+    let result = callable.body.root.result.as_deref()?;
+    let crate::core::ir::ResolvedExprKind::Load(place) = &result.kind else {
+        return None;
+    };
+    let [crate::core::ir::ResolvedProjection::Field { field, ty, .. }] =
+        place.projections.as_slice()
+    else {
+        return None;
+    };
+    if place.base != callable.body.parameters.first()?.clone()
+        || !record_type
+            .field_ids
+            .values()
+            .any(|candidate| candidate == field)
+        || &signature.result != ty
+        || result.ty != *ty
+    {
+        return None;
+    }
+    Some(function.node_id.clone())
+}
+
+fn is_admitted_flat_record_protocol_call(program: &CheckedProgram, call: &ResolvedCall) -> bool {
+    let Some(method_owner) = flat_record_protocol_method(program) else {
+        return false;
+    };
+    let Some(callable) = program.callables().get(&method_owner) else {
+        return false;
+    };
+    let Some(receiver) = callable.signature.parameters.first() else {
+        return false;
+    };
+    let Some(impl_def) = program
+        .impls()
+        .values()
+        .find(|impl_def| !is_prelude_origin(program, &impl_def.origin))
+    else {
+        return false;
+    };
+    let crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method } = &call.callee else {
+        return false;
+    };
+    method.as_str() == method_owner.0
+        && protocol.0 == format!("trait:{}", impl_def.trait_name)
+        && call.permission == Some(crate::core::ir::Permission::Mutate)
+        && call.effects.is_empty()
+        && call.session.is_empty()
+        && call.type_arguments.is_empty()
+        && call.result == callable.signature.result
+        && call.arguments.len() == 1
+        && call.arguments[0].parameter == receiver.id
+        && call.arguments[0].value.ty == receiver.ty
+        && call.arguments[0].conversion.kind == crate::core::ir::CheckedConversionKind::Identity
+        && call.arguments[0].conversion.from == receiver.ty
+        && call.arguments[0].conversion.to == receiver.ty
 }
 
 /// Scan the checker-owned type references that make up a whole program.

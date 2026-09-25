@@ -1870,6 +1870,109 @@ mod tests {
     }
 
     #[test]
+    fn concrete_flat_record_protocol_field_read_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_protocol_method.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("closed concrete ProtocolMethod field read must route canonical");
+        };
+        assert!(program
+            .functions()
+            .keys()
+            .any(|owner| { owner.0.starts_with("function:Read:for:Counter::read:") }));
+        assert!(program.functions().values().any(|function| {
+            function
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        mimi::core::mir::MirInstructionKind::Call {
+                            callee: mimi::core::ir::ResolvedCallee::ProtocolMethod { .. },
+                            ..
+                        }
+                    )
+                })
+        }));
+    }
+
+    #[test]
+    fn flat_record_protocol_admission_rejects_non_closed_method_shapes() {
+        let cases = [
+            (
+                "computed field method",
+                r#"
+                    trait Read { func read() -> i32 }
+                    type Counter { value: i32 }
+                    impl Read for Counter { func read() -> i32 { self.value + 1 } }
+                    func main() -> i32 { let counter = Counter { value: 41 }; counter.read() }
+                "#,
+            ),
+            (
+                "generic impl without a call site",
+                r#"
+                    trait Read { func read() -> i32 }
+                    type Counter { value: i32 }
+                    impl<T> Read for Counter { func read() -> i32 { self.value } }
+                    func main() -> i32 { let counter = Counter { value: 41 }; counter.value }
+                "#,
+            ),
+            (
+                "trait with an additional method",
+                r#"
+                    trait Read { func read() -> i32; func read_again() -> i32 }
+                    type Counter { value: i32 }
+                    impl Read for Counter {
+                        func read() -> i32 { self.value }
+                        func read_again() -> i32 { self.value }
+                    }
+                    func main() -> i32 { let counter = Counter { value: 41 }; counter.read() }
+                "#,
+            ),
+            (
+                "method with stdout side effect",
+                r#"
+                    trait Read { func read() -> i32 }
+                    type Counter { value: i32 }
+                    impl Read for Counter {
+                        func read() -> i32 { println(self.value); self.value }
+                    }
+                    func main() -> i32 { let counter = Counter { value: 41 }; counter.read() }
+                "#,
+            ),
+            (
+                "multiple implementations",
+                r#"
+                    trait Read { func read() -> i32 }
+                    type Counter { value: i32 }
+                    type OtherCounter { value: i32 }
+                    impl Read for Counter { func read() -> i32 { self.value } }
+                    impl Read for OtherCounter { func read() -> i32 { self.value } }
+                    func main() -> i32 { let counter = Counter { value: 41 }; counter.read() }
+                "#,
+            ),
+        ];
+        for (label, source) in cases {
+            let (checked, file) = checked(source);
+            assert_eq!(
+                mimi::core::mir::classify_flat_copy_record_admission(&checked),
+                mimi::core::mir::FlatCopyRecordAdmission::MixedCoverage,
+                "{label} admission must stay closed"
+            );
+            let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+                panic!("{label} must not enter a route or legacy fallback");
+            };
+            assert!(reason.contains("flat Copy record"), "{label}: {reason}");
+        }
+    }
+
+    #[test]
     fn copy_record_update_is_complete_and_uses_canonical_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_record_update.mimi"

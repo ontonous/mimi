@@ -23324,6 +23324,84 @@ fn canonical_mir_record_print_routes_canonical_across_consumers() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// R6-1129: a single concrete trait method that reads one scalar field from
+// `self` is already represented and executed by the same Canonical MIR
+// program on all three consumers. The default run/build/verify selector now
+// admits exactly this closed shape; neighboring trait implementations remain
+// mixed coverage and cannot silently reach a legacy emitter.
+#[test]
+fn canonical_mir_concrete_record_protocol_method_uses_default_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_protocol_method.mimi");
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default protocol-method run");
+    let run_stderr = String::from_utf8_lossy(&default_run.stderr);
+    assert_eq!(
+        default_run.status.code(),
+        Some(42),
+        "default protocol-method run must execute: {run_stderr}"
+    );
+    assert!(default_run.stdout.is_empty());
+    assert!(
+        !run_stderr.contains("canonical route disposition: legacy"),
+        "default run must not re-enter the compatibility route: {run_stderr}"
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-protocol-method-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default protocol-method build");
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "default protocol-method build must succeed: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("canonical route disposition: legacy"),
+        "default build must not re-enter the compatibility route: {build_stderr}"
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("execute default protocol-method binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+    assert!(native_run.stdout.is_empty());
+    assert!(native_run.stderr.is_empty());
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default protocol-method verify");
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        verify.status.success(),
+        "default no-contract protocol-method verification must succeed: {verify_stderr}"
+    );
+    assert!(
+        !verify_stderr.contains("canonical route disposition: legacy"),
+        "default verifier must not re-enter the compatibility route: {verify_stderr}"
+    );
+}
+
 // R6-1049: the scalar-assign face (root-level statement, direct local target,
 // Identity/NumericWiden conversion, i32/i64/bool target ABI) routes canonical
 // and agrees across all three consumers.  This pins the record-composition
