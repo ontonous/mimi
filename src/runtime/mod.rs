@@ -3349,7 +3349,7 @@ pub unsafe extern "C" fn mimi_map_set(
     // SAFETY: `key` is a valid null-terminated C string returned by a Mimi allocation function
     let s = unsafe { cstr_to_string(key) };
     // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
-    unsafe {
+    {
         map_from_handle(handle).inner.insert(s, value);
     }
 }
@@ -3448,7 +3448,9 @@ pub unsafe extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi
     // SAFETY: `handle` is a valid live handle; `map_from_handle`/`set_from_handle` aborts on invalid handles
     let s = unsafe { cstr_to_string(key) };
     // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
-    unsafe { map_from_handle(handle).inner.remove(&s).is_some() as i32 }
+    {
+        map_from_handle(handle).inner.remove(&s).is_some() as i32
+    }
 }
 
 /// RT-H4 helper: probe whether `[ptr, ptr+len)` spans only mapped pages.
@@ -4849,7 +4851,7 @@ fn list_map_to_string_impl(
                 mimi_map_to_json_f64_serde(handle)
             },
             MapJsonMode::Int => unsafe { mimi_map_to_json_i64(handle) },
-            MapJsonMode::Any => unsafe { mimi_map_to_json_any(handle) },
+            MapJsonMode::Any => mimi_map_to_json_any(handle),
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
         let s = unsafe { cstr_to_string(json_ptr) };
@@ -7060,7 +7062,7 @@ pub unsafe extern "C" fn mimi_map_from_json_f64(json: *const std::ffi::c_char) -
             None => 0,
         };
         // SAFETY: handle is a valid map from mimi_map_new.
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, bits as ValueHandle);
@@ -7181,7 +7183,7 @@ pub unsafe extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char
             mimi_any_string_clone(val.as_ptr() as *const std::ffi::c_char, val.len() as i64)
         };
         // SAFETY: handle is a valid map from mimi_map_new.
-        unsafe {
+        {
             map_from_handle(handle).inner.insert(key, v_handle);
         }
         count += 1;
@@ -7529,7 +7531,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_product_i64(
         }
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: the list header + data array + element packs were all
@@ -7668,7 +7670,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_product_i64(
         let c_val = std::ffi::CString::new(val_json).unwrap_or_default();
         let set_h = mimi_set_from_json_product_i64(c_val.as_ptr(), arity);
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; inserts a `SetHandle` that was just allocated
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -7802,7 +7804,7 @@ pub unsafe extern "C" fn mimi_map_from_json_map_product_i64(
         let c_val = std::ffi::CString::new(val_json).unwrap_or_default();
         let inner_h = mimi_map_from_json_product_i64(c_val.as_ptr(), arity);
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; inserts a `MapHandle` that was just allocated
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, inner_h as ValueHandle);
@@ -7911,7 +7913,7 @@ pub unsafe extern "C" fn mimi_map_from_json_product_i64(
         }
         let vh = ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `key` is a valid `String` and `vh` is a heap-packed product pointer
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: register the malloc'd pack so destroy() reclaims it.
@@ -8107,7 +8109,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_map_product_i64(
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `pack` is a valid heap-allocated result struct
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -8382,7 +8384,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_result_product_i64(
         // SAFETY: `map_from_handle(handle)` returned a valid pointer; `pack` is a valid heap-allocated Option-of-Result struct
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -8463,7 +8465,7 @@ pub unsafe extern "C" fn mimi_map_to_json_option_result_product_i64(
             let res_h = unsafe { *base.add(1) };
             let tmp = mimi_map_new();
             if tmp != 0 {
-                unsafe {
+                {
                     map_from_handle(tmp)
                         .inner
                         .insert("_".into(), res_h as ValueHandle);
@@ -9089,7 +9091,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_option_set_product_i64(
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -9246,7 +9248,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_option_product_i64(
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -10048,7 +10050,7 @@ pub unsafe extern "C" fn mimi_set_to_json_result_list_product_i64(
                 // Display list-of-product via one-entry map helper.
                 let tmp = mimi_map_new();
                 if tmp != 0 {
-                    unsafe {
+                    {
                         map_from_handle(tmp)
                             .inner
                             .insert(String::from("_"), list_ptr as ValueHandle);
@@ -10204,7 +10206,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_map_list_product_i64(
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -10529,7 +10531,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_map_list_product_i64(
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -10952,7 +10954,7 @@ pub unsafe extern "C" fn mimi_map_from_json_map_result_product_i64(
             mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, inner as ValueHandle);
@@ -11241,7 +11243,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_map_list_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -11526,7 +11528,7 @@ pub unsafe extern "C" fn mimi_map_from_json_map_list_product_i64(
             mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, inner as ValueHandle);
@@ -11669,7 +11671,7 @@ pub unsafe extern "C" fn mimi_map_from_json_map_option_product_i64(
             mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, inner as ValueHandle);
@@ -12020,7 +12022,7 @@ pub unsafe extern "C" fn mimi_map_from_json_map_set_product_i64(
             mimi_free(c_obj as *mut _);
         }
         // SAFETY: `map_from_handle(handle)` returns a valid non-null pointer to a `MimiMap` instance; the handle was previously created by `mimi_map_new()` and is still alive
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, inner as ValueHandle);
@@ -12581,7 +12583,7 @@ pub unsafe extern "C" fn mimi_set_to_json_list_product_i64(
             let tmp = mimi_map_new();
             if tmp != 0 && *h != 0 {
                 // SAFETY: `tmp` was just created by `mimi_map_new()` and verified non-zero; `map_from_handle(tmp)` returns a valid `*mut MimiMap`
-                unsafe {
+                {
                     map_from_handle(tmp)
                         .inner
                         .insert("_".into(), *h as ValueHandle);
@@ -12870,7 +12872,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_list_map_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -13015,7 +13017,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_map_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -13169,7 +13171,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_map_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -13314,7 +13316,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_map_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -13468,7 +13470,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_list_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -13622,7 +13624,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_result_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -13779,7 +13781,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_option_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -13936,7 +13938,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -14472,7 +14474,7 @@ pub unsafe extern "C" fn mimi_list_result_option_product_to_json(
         let tmp = mimi_map_new();
         if tmp != 0 {
             // SAFETY: `tmp` was just created by `mimi_map_new()` and verified non-zero; `map_from_handle(tmp)` returns a valid `*mut MimiMap`
-            unsafe {
+            {
                 map_from_handle(tmp)
                     .inner
                     .insert("_".into(), h as ValueHandle);
@@ -14595,7 +14597,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_result_option_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` (verified non-zero at function entry); `map_from_handle(handle)` returns a valid `*mut MimiMap`
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -14862,7 +14864,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_option_list_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 10937) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -14960,7 +14962,7 @@ pub unsafe extern "C" fn mimi_map_to_json_result_option_list_product_i64(
                     let list_ptr = unsafe { *opt_h.add(1) } as *const u8;
                     let tmp = mimi_map_new();
                     if tmp != 0 && !list_ptr.is_null() {
-                        unsafe {
+                        {
                             map_from_handle(tmp)
                                 .inner
                                 .insert("_".into(), list_ptr as ValueHandle);
@@ -15153,7 +15155,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_list_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 11247) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -15371,7 +15373,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_result_list_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 11467) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -15443,7 +15445,7 @@ pub unsafe extern "C" fn mimi_map_to_json_option_result_list_product_i64(
             let res_h = unsafe { *base.add(1) };
             let tmp = mimi_map_new();
             if tmp != 0 {
-                unsafe {
+                {
                     map_from_handle(tmp)
                         .inner
                         .insert("_".into(), res_h as ValueHandle);
@@ -15642,7 +15644,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_set_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 11679) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -15905,7 +15907,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_option_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 11919) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -16092,7 +16094,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_option_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12154) so `map_from_handle(handle)` returns a valid pointer
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -16244,7 +16246,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_result_option_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12298) so `map_from_handle(handle)` returns a valid pointer
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -16396,7 +16398,7 @@ pub unsafe extern "C" fn mimi_map_from_json_set_result_product_i64(
             mimi_free(c_arr as *mut _);
         }
         // SAFETY: `handle` is non-zero (validated at function entry line 12442) so `map_from_handle(handle)` returns a valid pointer
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, set_h as ValueHandle);
@@ -16551,7 +16553,7 @@ pub unsafe extern "C" fn mimi_map_from_json_list_result_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 12587) so `map_from_handle(handle)` returns a valid pointer
         let vh = list_ptr as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this list_ptr was malloc'd by the builder — register so
@@ -16848,7 +16850,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_list_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 12728) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -16921,7 +16923,7 @@ pub unsafe extern "C" fn mimi_map_to_json_option_list_product_i64(
             let list_ptr = unsafe { *base.add(1) } as *const u8;
             let tmp = mimi_map_new();
             if tmp != 0 && !list_ptr.is_null() {
-                unsafe {
+                {
                     map_from_handle(tmp)
                         .inner
                         .insert("_".into(), list_ptr as ValueHandle);
@@ -17200,7 +17202,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_product_i64(
         // SAFETY: `handle` is non-zero (validated at function entry line 13043) so `map_from_handle(handle)` returns a valid pointer
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -17282,7 +17284,7 @@ pub unsafe extern "C" fn mimi_map_to_json_result_list_product_i64(
             // Format one list of product via temporary single-key map helper.
             let tmp = mimi_map_new();
             if tmp != 0 && !list_ptr.is_null() {
-                unsafe {
+                {
                     map_from_handle(tmp)
                         .inner
                         .insert("_".into(), list_ptr as ValueHandle);
@@ -17650,7 +17652,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_option_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -17956,7 +17958,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_map_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -18170,7 +18172,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_map_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -18450,7 +18452,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_map_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -18664,7 +18666,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_list_map_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -18915,7 +18917,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_list_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -19175,7 +19177,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_product_i64(
         }
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -19401,7 +19403,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -19617,7 +19619,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_map_product_i64(
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
         let vh = pack as ValueHandle;
         // SAFETY: `map_from_handle(handle)` returns a valid, properly aligned pointer; `key` is a valid `String`
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: this pack was malloc'd by the builder — register so
@@ -19860,7 +19862,7 @@ pub unsafe extern "C" fn mimi_map_from_json_option_product_i64(
         }
         let vh = ptr as ValueHandle;
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: register the malloc'd option pack so destroy() reclaims it.
@@ -20132,7 +20134,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_product_i64(
         }
         let vh = ptr as ValueHandle;
         // SAFETY: `handle` is a valid `MapHandle` from `mimi_map_new()`; `map_from_handle` aborts on invalid handles
-        unsafe {
+        {
             let mut map_ptr = map_from_handle(handle);
             map_ptr.inner.insert(key, vh);
             // §10-#35: register the malloc'd result pack so destroy() reclaims it.
@@ -20318,7 +20320,7 @@ pub unsafe extern "C" fn mimi_map_from_json_i64(json: *const std::ffi::c_char) -
             None => 0,
         };
         // SAFETY: handle is a valid map from mimi_map_new.
-        unsafe {
+        {
             map_from_handle(handle)
                 .inner
                 .insert(key, v_i64 as ValueHandle);
@@ -22324,7 +22326,7 @@ pub unsafe extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandl
         return handle;
     }
     // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
-    unsafe {
+    {
         set_from_handle(handle).inner.insert(value);
     }
     handle
@@ -22396,7 +22398,7 @@ pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandl
         return handle;
     }
     // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
-    unsafe {
+    {
         let mut set = set_from_handle(handle);
         set.inner.remove(&value);
         if set.string_values.remove(&value) {
