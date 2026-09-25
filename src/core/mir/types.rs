@@ -11679,12 +11679,28 @@ fn ownership_for(
     let ownership = match ty {
         ResolvedType::Primitive(PrimitiveType::String) => MirOwnership::Move,
         ResolvedType::Primitive(_) | ResolvedType::GenericParameter(_) => MirOwnership::Copy,
-        ResolvedType::Nominal { is_linear, .. } => {
-            if *is_linear {
+        ResolvedType::Nominal {
+            is_linear,
+            arguments,
+            ..
+        } => {
+            // Match the checker's concrete-container rule: generic nominal
+            // arguments can carry linear obligations even when the nominal
+            // declaration itself is not intrinsically linear (for example
+            // Map<K, cap> or List<Map<K, cap>>). Keep the outer handle's
+            // ordinary Move ownership when all arguments are non-linear;
+            // propagate only an actual Linear argument. The resulting
+            // unsupported nominal/container glue remains fail-closed until a
+            // concrete owner protocol is materialized.
+            let nominal_ownership = if *is_linear {
                 MirOwnership::Linear
             } else {
                 MirOwnership::Move
-            }
+            };
+            combine_ownership(
+                nominal_ownership,
+                aggregate_ownership(arguments, table, visiting),
+            )
         }
         ResolvedType::Capability(_) => MirOwnership::Linear,
         ResolvedType::Reference { mutable, .. } => {
@@ -12062,6 +12078,49 @@ mod tests {
             assert!(catalog.validate_glue(&id, operation).is_ok());
         }
         assert!(catalog.validate_owned_string(&id).is_ok());
+    }
+
+    #[test]
+    fn materializes_recursive_nominal_linear_ownership() {
+        let mut table = ResolvedTypeTable::new();
+        let key_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("Map key");
+        let capability_id = table
+            .intern_resolved(ResolvedType::Capability(
+                crate::core::NominalTypeId::new("cap:FileReadCap").expect("capability"),
+            ))
+            .expect("capability type");
+        let map_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Map").expect("Map"),
+                arguments: vec![key_id, capability_id],
+                is_linear: false,
+            })
+            .expect("Map<string, cap>");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![map_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<Map<string, cap>>");
+
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        for id in [&map_id, &list_id] {
+            let descriptor = catalog.get(id).expect("nominal descriptor");
+            assert_eq!(
+                descriptor.ownership,
+                MirOwnership::Linear,
+                "linearity must propagate through generic nominal arguments: {}",
+                id.as_str()
+            );
+            assert_eq!(
+                descriptor.glue.drop,
+                MirGlueKind::Unsupported,
+                "unsupported linear container destruction must remain fail-closed"
+            );
+        }
     }
 
     #[test]

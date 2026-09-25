@@ -1,8 +1,8 @@
 // real_world: std::maps wrapper surface including Any-handle conversions.
 //
-// The std::maps wrappers are in-place at the Record/LLVM handle level, just
-// like the builtin map_* functions: set/remove return the same underlying
-// handle after mutation.
+// The std::maps set/remove wrappers preserve their input value by copying its
+// entries before mutation, then return a new Record handle. Keep the snapshots
+// below explicit so both VM and native runs exercise that persistence contract.
 
 use std::maps;
 
@@ -10,6 +10,8 @@ func main() -> i32 {
     let m = new()
     let m2 = set(m, "a", 1)
     let m3 = set(m2, "b", 2)
+    if size(m) != 0 { return 8 }
+    if size(m2) != 1 { return 9 }
     if size(m3) != 2 { return 1 }
     if !has_key(m3, "a") { return 2 }
     let (found_a, va) = get(m3, "a")
@@ -21,5 +23,7 @@ func main() -> i32 {
     if len(pairs) != 2 { return 6 }
     let m4 = remove(m3, "a")
     if size(m4) != 1 { return 7 }
+    if size(m3) != 2 { return 10 }
+    if !has_key(m3, "a") { return 11 }
     0
 }

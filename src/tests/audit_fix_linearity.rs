@@ -977,6 +977,25 @@ func main() -> i32 {
 }
 
 #[test]
+fn audit2_lin_concrete_map_with_cap_requires_consumption() {
+    // Keep the Map half of H2's recursive checker rule pinned independently
+    // of List: the checker tracks a concrete Map<K, cap> as one whole linear
+    // obligation, even though MIR has no safe Map owner/drop glue yet.
+    let src = r#"
+cap Token
+func discard(m: Map<string, cap Token>) -> i32 { 1 }
+func main() -> i32 { 0 }
+"#;
+    let codes = rejection_codes(src);
+    assert!(
+        codes
+            .iter()
+            .any(|code| code == crate::diagnostic::codes::E0256),
+        "discarding a concrete Map<_, cap> must report E0256, got: {codes:?}"
+    );
+}
+
+#[test]
 fn audit2_lin_from_json_nonlinear_still_ok() {
     // Sanity: concrete non-linear targets keep working.
     let src = r#"

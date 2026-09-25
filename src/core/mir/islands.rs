@@ -6959,6 +6959,20 @@ mod tests {
     }
 
     #[test]
+    fn keeps_map_and_dynamic_any_outside_scalar_collection_admission() {
+        let source = "func main() -> i32 { let m = map_new() let found = map_get(m, \"missing\") println(1) 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::MixedCoverage,
+            "an admitted scalar print must not pull legacy Map/Any values into MIR"
+        );
+    }
+
+    #[test]
     fn admits_bare_set_contains_and_materializes_the_shared_set_operation() {
         let tokens = Lexer::new(include_str!(
             "../../../tests/fixtures/mir_native_set_contains_function.mimi"
