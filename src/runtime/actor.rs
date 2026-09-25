@@ -607,7 +607,7 @@ pub unsafe extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
 /// concurrent mailbox operations pinned until they finish, just like the
 /// single-handle `mimi_actor_drop` path.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_actor_drop_all() {
+pub extern "C" fn mimi_actor_drop_all() {
     let actors = {
         let mut registry = live_actors().lock().unwrap_or_else(|e| e.into_inner());
         // `HashMap::drain` leaves its bucket allocation attached to the global

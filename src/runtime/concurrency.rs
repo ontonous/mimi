@@ -15,10 +15,10 @@
 //!   * methods that take the handle and return i64,
 //!   * `_drop` destructor that the codegen cleanup pass emits on scope exit.
 //!
-//! SAFETY invariants are identical to the actor mailbox (see `actor.rs`):
-//! handles are `Box`-allocated and recovered by handle id with a global
-//! mutex-protected table. All public functions are `#[no_mangle] pub
-//! extern "C"` and null-checked.
+//! Handles are opaque integer IDs resolved through the global mutex-protected
+//! table. Exported functions accept scalar values only, so invalid, stale, or
+//! wrong-kind handles are handled by their documented sentinel/no-op behavior
+//! and do not require caller-side pointer validity.
 //!
 //! The `extern "C"` entry points have direct Rust-path callers in
 //! `interp/builtins/concurrency.rs` and `interp/builtins/session.rs`,
@@ -30,11 +30,9 @@
 //! thread's thread-local registry (`MIMI_MUTEX_GUARDS`) and is valid ONLY on
 //! that thread, until `mimi_mutex_unlock` consumes it. Passing a guard
 //! handle to `mimi_mutex_get`/`mimi_mutex_set`/`mimi_mutex_unlock` from a
-//! different thread — or reusing it after it was unlocked — aborts loudly
-//! via `mimi_runtime_abort` (2026-08-05 audit: the old code silently
-//! returned 0 / no-op'd, letting cross-thread misuse masquerade as a
-//! legitimate value). The mutex HANDLE (`mimi_mutex_new`), in contrast, is
-//! global and may be locked from any thread.
+//! different thread — or reusing it after it was unlocked — is logged and
+//! returns a sentinel or no-ops. The mutex HANDLE (`mimi_mutex_new`), in
+//! contrast, is global and may be locked from any thread.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -149,7 +147,7 @@ pub extern "C" fn mimi_atomic_i32_new(value: i32) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i32_load(handle: i64) -> i32 {
+pub extern "C" fn mimi_atomic_i32_load(handle: i64) -> i32 {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -160,7 +158,7 @@ pub unsafe extern "C" fn mimi_atomic_i32_load(handle: i64) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i32_store(handle: i64, value: i32) {
+pub extern "C" fn mimi_atomic_i32_store(handle: i64, value: i32) {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -170,7 +168,7 @@ pub unsafe extern "C" fn mimi_atomic_i32_store(handle: i64, value: i32) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i32_fetch_add(handle: i64, delta: i32) -> i32 {
+pub extern "C" fn mimi_atomic_i32_fetch_add(handle: i64, delta: i32) -> i32 {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -183,7 +181,7 @@ pub unsafe extern "C" fn mimi_atomic_i32_fetch_add(handle: i64, delta: i32) -> i
 /// Compare-and-swap: returns 1 on success, 0 on mismatch. Codegen also
 /// reads back the value via `mimi_atomic_i32_load` after failure.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i32_compare_exchange(
+pub extern "C" fn mimi_atomic_i32_compare_exchange(
     handle: i64,
     expected: i32,
     new_value: i32,
@@ -206,7 +204,7 @@ pub unsafe extern "C" fn mimi_atomic_i32_compare_exchange(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i32_drop(handle: i64) {
+pub extern "C" fn mimi_atomic_i32_drop(handle: i64) {
     let mut table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -223,7 +221,7 @@ pub extern "C" fn mimi_atomic_i64_new(value: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i64_load(handle: i64) -> i64 {
+pub extern "C" fn mimi_atomic_i64_load(handle: i64) -> i64 {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -234,7 +232,7 @@ pub unsafe extern "C" fn mimi_atomic_i64_load(handle: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i64_store(handle: i64, value: i64) {
+pub extern "C" fn mimi_atomic_i64_store(handle: i64, value: i64) {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -244,7 +242,7 @@ pub unsafe extern "C" fn mimi_atomic_i64_store(handle: i64, value: i64) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i64_fetch_add(handle: i64, delta: i64) -> i64 {
+pub extern "C" fn mimi_atomic_i64_fetch_add(handle: i64, delta: i64) -> i64 {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -255,7 +253,7 @@ pub unsafe extern "C" fn mimi_atomic_i64_fetch_add(handle: i64, delta: i64) -> i
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i64_compare_exchange(
+pub extern "C" fn mimi_atomic_i64_compare_exchange(
     handle: i64,
     expected: i64,
     new_value: i64,
@@ -278,7 +276,7 @@ pub unsafe extern "C" fn mimi_atomic_i64_compare_exchange(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_i64_drop(handle: i64) {
+pub extern "C" fn mimi_atomic_i64_drop(handle: i64) {
     let mut table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -296,7 +294,7 @@ pub extern "C" fn mimi_atomic_bool_new(value: i32) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
+pub extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
     let table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -307,7 +305,7 @@ pub unsafe extern "C" fn mimi_atomic_bool_load(handle: i64) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
+pub extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
     let b = value != 0;
     let table = CONCURRENCY_HANDLES
         .lock()
@@ -318,7 +316,7 @@ pub unsafe extern "C" fn mimi_atomic_bool_store(handle: i64, value: i32) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_bool_compare_exchange(
+pub extern "C" fn mimi_atomic_bool_compare_exchange(
     handle: i64,
     expected: i32,
     new_value: i32,
@@ -343,7 +341,7 @@ pub unsafe extern "C" fn mimi_atomic_bool_compare_exchange(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_atomic_bool_drop(handle: i64) {
+pub extern "C" fn mimi_atomic_bool_drop(handle: i64) {
     let mut table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -366,9 +364,10 @@ pub extern "C" fn mimi_mutex_new(value: i64) -> i64 {
 ///
 /// THREAD CONFINEMENT: the returned guard handle lives in this thread's
 /// thread-local registry and may only be used by this thread (see module
-/// docs). Cross-thread or post-unlock use of the guard handle aborts loudly.
+/// docs). Cross-thread or post-unlock use is logged and returns a sentinel or
+/// no-ops.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
+pub extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
     let arc = {
         let table = CONCURRENCY_HANDLES
             .lock()
@@ -404,7 +403,7 @@ pub unsafe extern "C" fn mimi_mutex_lock(handle: i64) -> i64 {
 /// 0 otherwise. Lets the bytecode VM produce a recoverable InterpError
 /// before invoking a runtime mutex accessor.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_guard_valid(guard_handle: i64) -> i64 {
+pub extern "C" fn mimi_mutex_guard_valid(guard_handle: i64) -> i64 {
     MIMI_MUTEX_GUARDS.with(|guards| {
         if guards.borrow().contains_key(&(guard_handle as u64)) {
             1
@@ -415,7 +414,7 @@ pub unsafe extern "C" fn mimi_mutex_guard_valid(guard_handle: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_get(guard_handle: i64) -> i64 {
+pub extern "C" fn mimi_mutex_get(guard_handle: i64) -> i64 {
     // Audit fix (concurrency.rs:340-357): a guard handle missing from the
     // calling thread's registry means cross-thread use (guards are
     // thread-confined) or use after unlock. Fail loud but do not abort the
@@ -430,7 +429,7 @@ pub unsafe extern "C" fn mimi_mutex_get(guard_handle: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_set(guard_handle: i64, value: i64) {
+pub extern "C" fn mimi_mutex_set(guard_handle: i64, value: i64) {
     // Audit fix (concurrency.rs:340-357): see mimi_mutex_get — the old code
     // silently no-op'd for a missing guard handle; fail loud instead.
     MIMI_MUTEX_GUARDS.with(
@@ -446,7 +445,7 @@ pub unsafe extern "C" fn mimi_mutex_set(guard_handle: i64, value: i64) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_unlock(guard_handle: i64) {
+pub extern "C" fn mimi_mutex_unlock(guard_handle: i64) {
     // Audit fix (concurrency.rs:340-357): see mimi_mutex_get — unlocking an
     // unknown guard (other thread / already unlocked) used to silently
     // no-op, leaving the mutex held forever; fail loud instead.
@@ -462,7 +461,7 @@ pub unsafe extern "C" fn mimi_mutex_unlock(guard_handle: i64) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mutex_drop(handle: i64) {
+pub extern "C" fn mimi_mutex_drop(handle: i64) {
     let mut table = CONCURRENCY_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -486,7 +485,7 @@ pub extern "C" fn mimi_channel_new() -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_channel_send(handle: i64, value: i64) {
+pub extern "C" fn mimi_channel_send(handle: i64, value: i64) {
     let tx = {
         let table = CONCURRENCY_HANDLES
             .lock()
@@ -511,7 +510,7 @@ pub unsafe extern "C" fn mimi_channel_send(handle: i64, value: i64) {
 /// returns 0 (batch4/06 P2 documented semantics). Use one channel per
 /// consumer or explicit user-level serialization.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
+pub extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
     // Look up the channel under the global lock, then clone the receiver Arc
     // and drop the global lock *before* blocking on recv(). This prevents a
     // receiver from stalling all other concurrency-handle operations.
@@ -559,7 +558,7 @@ pub unsafe extern "C" fn mimi_channel_recv(handle: i64) -> i64 {
 /// Non-blocking receive. Returns `value` on success, or `-1` if no value is
 /// currently available (channel still open, queue empty).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
+pub extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
     let rx_arc = {
         let table = CONCURRENCY_HANDLES
             .lock()
@@ -590,7 +589,7 @@ pub unsafe extern "C" fn mimi_channel_try_recv(handle: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_channel_drop(handle: i64) {
+pub extern "C" fn mimi_channel_drop(handle: i64) {
     // CRITICAL #15: TOCTOU race analysis:
     // 1. mimi_channel_recv takes the Receiver out of the Arc<Mutex<Option<_>>>
     //    and releases the mutex before calling recv().
@@ -640,10 +639,10 @@ pub extern "C" fn mimi_session_pair() -> i64 {
     ((hb << 32) | (ha & 0xFFFF_FFFFu64)) as i64
 }
 #[no_mangle]
-pub unsafe extern "C" fn mimi_session_lo(pair: i64) -> i64 {
+pub extern "C" fn mimi_session_lo(pair: i64) -> i64 {
     (pair as u64 & 0xFFFF_FFFFu64) as i64
 }
 #[no_mangle]
-pub unsafe extern "C" fn mimi_session_hi(pair: i64) -> i64 {
+pub extern "C" fn mimi_session_hi(pair: i64) -> i64 {
     ((pair as u64) >> 32) as i64
 }

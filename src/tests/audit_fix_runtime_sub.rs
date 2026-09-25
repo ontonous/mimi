@@ -92,10 +92,9 @@ fn audit_quote_new_list_argc_overflow_rejected() {
 
 // ---------------------------------------------------------------------------
 // concurrency.rs fix (2026-08-05 audit, MEDIUM): mutex guard thread
-// confinement. Same-thread lock/get/set/unlock must work; misuse aborts
-// loudly via mimi_runtime_abort (process abort is not testable in-process,
-// so only the positive path is asserted here — see module docs in
-// src/runtime/concurrency.rs for the ABI invariant).
+// confinement. Same-thread lock/get/set/unlock must work; invalid,
+// cross-thread, or post-unlock handles are logged and return a sentinel or
+// no-op, so both failure and valid paths are asserted here.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -106,16 +105,16 @@ fn audit_mutex_invalid_guard_fails_loud_without_abort() {
 
     // Invalid/after-unlock handles must not abort the host process; they log
     // and return a safe sentinel so recovered FFI code can continue.
-    // SAFETY: sentinel handle 1234567 is not in the registry; the runtime logs and returns 0 instead of dereferencing.
-    assert_eq!(unsafe { mimi_mutex_guard_valid(1234567) }, 0);
-    // SAFETY: sentinel handle not in the registry; the lookup misses and returns 0.
-    assert_eq!(unsafe { mimi_mutex_get(1234567) }, 0);
-    // SAFETY: sentinel handle not in the registry; the store no-ops on a lookup miss.
-    unsafe { mimi_mutex_set(1234567, 9) };
-    // SAFETY: sentinel handle not in the registry; the unlock no-ops on a lookup miss.
-    unsafe { mimi_mutex_unlock(1234567) };
-    // SAFETY: double unlock of an unregistered handle stays on the no-op miss path.
-    unsafe { mimi_mutex_unlock(1234567) };
+    // The sentinel handle misses the registry and returns 0.
+    assert_eq!(mimi_mutex_guard_valid(1234567), 0);
+    // The sentinel handle misses the registry and returns 0.
+    assert_eq!(mimi_mutex_get(1234567), 0);
+    // The sentinel handle misses the registry and the store no-ops.
+    mimi_mutex_set(1234567, 9);
+    // The sentinel handle misses the registry and the unlock no-ops.
+    mimi_mutex_unlock(1234567);
+    // Repeating the invalid unlock stays on the no-op miss path.
+    mimi_mutex_unlock(1234567);
 }
 
 #[test]
@@ -127,27 +126,21 @@ fn audit_mutex_guard_same_thread_roundtrip() {
 
     let m = mimi_mutex_new(7);
     assert!(m != 0);
-    // SAFETY: `m` is the live mutex handle from `mimi_mutex_new` above; locking returns a fresh guard handle.
-    let g = unsafe { mimi_mutex_lock(m) };
+    // Locking the live mutex returns a fresh guard handle.
+    let g = mimi_mutex_lock(m);
     assert!(g != 0);
-    // SAFETY: `g` is the live guard handle from the lock above (same thread).
-    assert_eq!(unsafe { mimi_mutex_get(g) }, 7);
-    // SAFETY: `g` is the live same-thread guard handle from the lock above.
-    unsafe { mimi_mutex_set(g, 42) };
-    // SAFETY: `g` is the live same-thread guard handle from the lock above.
-    assert_eq!(unsafe { mimi_mutex_get(g) }, 42);
-    // SAFETY: `g` is the live same-thread guard handle; unlocking is the documented same-thread release.
-    unsafe { mimi_mutex_unlock(g) };
+    // The guard is valid on this thread until unlock.
+    assert_eq!(mimi_mutex_get(g), 7);
+    mimi_mutex_set(g, 42);
+    assert_eq!(mimi_mutex_get(g), 42);
+    mimi_mutex_unlock(g);
     // Re-lock after unlock works (a fresh guard handle).
-    // SAFETY: `m` is the live mutex handle; re-locking after unlock issues a fresh guard.
-    let g2 = unsafe { mimi_mutex_lock(m) };
+    let g2 = mimi_mutex_lock(m);
     assert!(g2 != 0);
-    // SAFETY: `g2` is the live guard handle from the re-lock above (same thread).
-    assert_eq!(unsafe { mimi_mutex_get(g2) }, 42);
-    // SAFETY: `g2` is the live same-thread guard handle; documented same-thread release.
-    unsafe { mimi_mutex_unlock(g2) };
-    // SAFETY: `m` is the live mutex handle from `mimi_mutex_new`, destroyed exactly once with both guards released.
-    unsafe { mimi_mutex_drop(m) };
+    // The replacement guard is valid on this thread until unlock.
+    assert_eq!(mimi_mutex_get(g2), 42);
+    mimi_mutex_unlock(g2);
+    mimi_mutex_drop(m);
 }
 
 // ── 0.35.29 H13: close_fd must not close standard streams ──
