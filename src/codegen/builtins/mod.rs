@@ -4055,7 +4055,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             "to_int" | "int" => self.compile_to_int(args),
             "to_float" | "float" => self.compile_to_float(args),
             "str_parse_float" => self.compile_str_parse_float(args),
-            "to_float" => self.compile_to_float(args),
             "str_index_of" => self.compile_str_index_of(args),
             "str_count_substring" => self.compile_str_count_substring(args),
             "str_repeat" => self.compile_str_repeat(args),

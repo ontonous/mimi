@@ -274,7 +274,7 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("string".into(), vec![]);
                 }
-                "str_trim" | "str_to_upper" => {
+                "str_trim" | "str_to_upper" | "str_to_lower" => {
                     if args.len() != 1 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,
@@ -2174,18 +2174,7 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("string".into(), vec![]);
                 }
-                "str_trim" | "str_to_upper" | "str_to_lower" => {
-                    if args.len() != 1 {
-                        self.emit_code(
-                            crate::diagnostic::codes::E0242,
-                            format!("{} expects 1 argument", name),
-                        );
-                    } else {
-                        self.infer_expr(&args[0], scopes);
-                    }
-                    return Type::Name("string".into(), vec![]);
-                }
-                "str_starts_with" | "str_ends_with" | "str_contains" => {
+                "str_contains" => {
                     if args.len() != 2 {
                         self.emit_code(
                             crate::diagnostic::codes::E0242,

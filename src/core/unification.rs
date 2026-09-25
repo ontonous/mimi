@@ -543,7 +543,6 @@ impl UnificationTable {
             // modules. Bottom-only is the only sound one-directional semantics
             // that preserves that design.
             (Type::Name(n, _), _) if n == "Any" => Ok(()),
-            (Type::TypeVar(_), Type::Name(n, _)) if n == "Any" => Ok(()),
             (Type::Infer, Type::Name(n, _)) if n == "Any" => Ok(()),
             (Type::Name(l, _), Type::Name(n, _)) if n == "Any" && (l == "Any" || l == "_") => {
                 Ok(())

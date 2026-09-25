@@ -801,6 +801,24 @@ func main() -> i32 {
 // ─── Regex builtin type check tests (L2) ──────────────────────
 
 #[test]
+fn typecheck_string_transform_builtins_reject_non_string_values() {
+    for call in [
+        "str_trim([1, 2])",
+        "str_to_upper([1, 2])",
+        "str_to_lower([1, 2])",
+    ] {
+        let src = format!("func main() -> string {{ {call} }}");
+        let errors = check_source(&src).expect_err("string transform must reject List input");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0242)),
+            "expected E0242 for {call}, got {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn typecheck_regex_match_wrong_args() {
     check_source(
         r#"
