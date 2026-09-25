@@ -109,7 +109,7 @@ pub unsafe fn read_mimi_str(
     }
     // Legacy C-string pointers (including .rodata literals) are often not
     // 8-aligned. Do not interpret them as MimiStr.
-    if (slot as usize) % std::mem::align_of::<MimiStr>() != 0 {
+    if !(slot as usize).is_multiple_of(std::mem::align_of::<MimiStr>()) {
         return Err(MIMI_ERR_OLD_STRING_ABI);
     }
     let s = slot as *const MimiStr;
@@ -167,7 +167,7 @@ pub unsafe fn free_mimi_str(slot: *mut std::ffi::c_char) {
     if slot.is_null() {
         return;
     }
-    if (slot as usize) % std::mem::align_of::<MimiStr>() != 0 {
+    if !(slot as usize).is_multiple_of(std::mem::align_of::<MimiStr>()) {
         return;
     }
     let s = slot as *mut MimiStr;
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn mimi_str_list_data_clone(len: i64, data: *const i64) ->
     if count == 0 {
         return std::ptr::null_mut();
     }
-    if (data as usize) % std::mem::align_of::<i64>() != 0
+    if !(data as usize).is_multiple_of(std::mem::align_of::<i64>())
         || !super::pages_mapped(data as usize, bytes)
     {
         return std::ptr::null_mut();
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn mimi_str_list_data_clone(len: i64, data: *const i64) ->
             continue;
         }
         let box_addr = handle as usize;
-        if box_addr % std::mem::align_of::<MimiStr>() != 0
+        if !box_addr.is_multiple_of(std::mem::align_of::<MimiStr>())
             || !super::pages_mapped(box_addr, std::mem::size_of::<MimiStr>())
         {
             unsafe { free_string_list_data(cloned, index) };
@@ -414,7 +414,7 @@ pub unsafe extern "C" fn mimi_str_list_list_data_clone(len: i64, data: *const i6
     if count == 0 {
         return std::ptr::null_mut();
     }
-    if (data as usize) % std::mem::align_of::<i64>() != 0
+    if !(data as usize).is_multiple_of(std::mem::align_of::<i64>())
         || !super::pages_mapped(data as usize, bytes)
     {
         return std::ptr::null_mut();
@@ -436,7 +436,7 @@ pub unsafe extern "C" fn mimi_str_list_list_data_clone(len: i64, data: *const i6
             return std::ptr::null_mut();
         }
         let inner_ptr = inner_handle as *const MimiListAbiPrefix;
-        if (inner_ptr as usize) % std::mem::align_of::<MimiListAbiPrefix>() != 0
+        if !(inner_ptr as usize).is_multiple_of(std::mem::align_of::<MimiListAbiPrefix>())
             || !super::pages_mapped(inner_ptr as usize, std::mem::size_of::<MimiListAbiPrefix>())
         {
             unsafe { free_cloned_string_list_prefixes(cloned, index) };
@@ -461,7 +461,7 @@ pub unsafe extern "C" fn mimi_str_list_list_data_clone(len: i64, data: *const i6
         };
         if inner_count != 0
             && (inner.data.is_null()
-                || (inner.data as usize) % std::mem::align_of::<i64>() != 0
+                || !(inner.data as usize).is_multiple_of(std::mem::align_of::<i64>())
                 || !super::pages_mapped(inner.data as usize, inner_bytes))
         {
             unsafe { free_cloned_string_list_prefixes(cloned, index) };

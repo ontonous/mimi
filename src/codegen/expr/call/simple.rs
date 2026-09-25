@@ -359,8 +359,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let opt_bty = self.llvm_type_for(&opt_elem_ty).ok_or_else(|| {
                     CompileError::LlvmError(format!("to_json: no llvm type for element {}", inner))
                 })?;
-                let opt_struct_ty = match opt_bty {
-                    BasicTypeEnum::StructType(s) => s,
+                match opt_bty {
+                    BasicTypeEnum::StructType(_) => {}
                     _ => {
                         return Err(CompileError::LlvmError(format!(
                             "to_json: expected struct for Option element {}, got {:?}",
@@ -368,7 +368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )))
                     }
                 };
-                let opt_ptr_ty = opt_struct_ty.ptr_type(inkwell::AddressSpace::default());
+                let opt_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 // Generate (once per element type) an internal callback
                 // `i8* cb(i8* elem)` that serializes one `Option<X>` element.
@@ -441,7 +441,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &[
                         BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
                         BasicMetadataTypeEnum::PointerType(
-                            cb_ty.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                         ),
                     ],
                     false,
@@ -9560,8 +9560,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let lp = self
                         .build_int_to_ptr(
                             v,
-                            self.list_struct_type()
-                                .ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "json_lp",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9610,7 +9609,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let hptr = self
                         .build_int_to_ptr(
                             v,
-                            i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "json_set_hp",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9639,7 +9638,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let hptr = self
                         .build_int_to_ptr(
                             v,
-                            i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "json_map_hp",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9672,7 +9671,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let sp = self
                                     .build_int_to_ptr(
                                         v,
-                                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                                        self.context.ptr_type(inkwell::AddressSpace::default()),
                                         "json_rp",
                                     )
                                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9724,7 +9723,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let sp = self
                     .build_int_to_ptr(
                         v,
-                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         "json_tp",
                     )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9759,7 +9758,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let sp = self
                     .build_int_to_ptr(
                         v,
-                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         "json_op",
                     )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9871,7 +9870,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let sp = self
                     .build_int_to_ptr(
                         v,
-                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         "json_rp",
                     )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -10422,7 +10421,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let enum_ptr = self
             .build_int_to_ptr(
                 v,
-                enum_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                self.context.ptr_type(inkwell::AddressSpace::default()),
                 "json_enum_p",
             )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -10588,7 +10587,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let pay_ptr = self
                         .build_int_to_ptr(
                             payload,
-                            struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
                             "json_enum_mf_p",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -10629,7 +10628,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let pay_ptr = self
                     .build_int_to_ptr(
                         payload,
-                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
                         "json_enum_rec_p",
                     )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;

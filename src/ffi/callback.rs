@@ -134,7 +134,9 @@ pub unsafe extern "C" fn callback_trampoline(
                 // integer values being passed as pointers.
                 let userdata_i64 = if userdata.is_null() {
                     0i64
-                } else if (userdata as usize) >= 1024 * 1024 && (userdata as usize) % 8 == 0 {
+                } else if (userdata as usize) >= 1024 * 1024
+                    && (userdata as usize).is_multiple_of(8)
+                {
                     userdata as i64
                 } else {
                     // Suspicious userdata — likely an integer mistaken for a pointer.
@@ -185,7 +187,7 @@ pub unsafe extern "C" fn qsort_trampoline(
     // A valid pointer to an i64 must be 8-byte aligned and look like a
     // heap pointer (≥1MB) rather than a small integer cast to pointer.
     let userdata_addr = userdata as usize;
-    if userdata_addr < 1024 * 1024 || userdata_addr % 8 != 0 {
+    if userdata_addr < 1024 * 1024 || !userdata_addr.is_multiple_of(8) {
         #[cfg(debug_assertions)]
         eprintln!(
             "[mimi] WARNING: qsort_trampoline userdata={} is suspicious \

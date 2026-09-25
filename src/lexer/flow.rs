@@ -846,7 +846,7 @@ impl<'a> LexerState<'a> {
                         continue;
                     }
                     if mode == LexerMode::Sketch {
-                        if spaces % 4 != 0 {
+                        if !spaces.is_multiple_of(4) {
                             return Err(indent_not_multiple_of_four(pos.line, pos.col));
                         }
                         // LX-C6: never panic — stack is seeded with [0]; fall back to 0.

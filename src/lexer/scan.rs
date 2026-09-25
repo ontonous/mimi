@@ -618,7 +618,7 @@ impl<'a> super::Lexer<'a> {
             // real content
             if self.mode == LexerMode::Sketch {
                 // Keep lockstep with flow.rs: spaces % 4 != 0 (LX-M5).
-                if spaces % 4 != 0 {
+                if !spaces.is_multiple_of(4) {
                     return Err(indent_not_multiple_of_four(self.line, self.col));
                 }
                 let current = *self.indent_stack.last().unwrap_or(&0);

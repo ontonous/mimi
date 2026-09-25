@@ -4398,7 +4398,7 @@ fn memory_range_mapped(addr: usize, len: usize) -> bool {
 /// Decode Result Err payload to a JSON string fragment (already escaped/quoted).
 fn decode_result_err_string(err: i64) -> String {
     const MIN_HEAP: i64 = 1_048_576;
-    if err >= MIN_HEAP && (err as u64) % 8 == 0 {
+    if err >= MIN_HEAP && (err as u64).is_multiple_of(8) {
         // Prefer Mimi string struct {ptr, i64} heap layout.
         let base = err as usize;
         // audit-wave1 (audit §10 HIGH): validate BOTH the struct page(s) AND
@@ -22450,7 +22450,7 @@ pub unsafe extern "C" fn mimi_json_serialize(
         return alloc_c_string("[]");
     }
     // FFI-13: Refuse to create a slice from misaligned data.
-    if data as usize % std::mem::align_of::<i64>() != 0 {
+    if !(data as usize).is_multiple_of(std::mem::align_of::<i64>()) {
         return alloc_c_string("[]");
     }
 
