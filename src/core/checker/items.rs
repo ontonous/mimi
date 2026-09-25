@@ -1370,7 +1370,7 @@ impl<'a> Checker<'a> {
                 );
                 if !is_integer {
                     let span = match ty {
-                        crate::ast::Type::Located { meta, .. } => meta.span.clone(),
+                        crate::ast::Type::Located { meta, .. } => meta.span,
                         _ => self.diagnostic_span(),
                     };
                     self.errors.push(Diagnostic::error_code(

@@ -397,7 +397,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let value = args
             .first()
             .copied()
-            .ok_or_else(|| format!("token_id expects 1 argument (a SystemToken)"))?;
+            .ok_or_else(|| "token_id expects 1 argument (a SystemToken)".to_string())?;
         match value {
             BasicMetadataValueEnum::IntValue(iv) => Ok(iv.into()),
             _ => Err(crate::error::CompileError::LlvmError(

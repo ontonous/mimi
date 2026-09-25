@@ -55,10 +55,7 @@ fn expr_has_checked_arith(expr: &Expr) -> bool {
             expr_has_checked_arith(scrutinee)
                 || arms.iter().any(|arm| {
                     expr_has_checked_arith(&arm.body)
-                        || arm
-                            .guard
-                            .as_ref()
-                            .is_some_and(|g| expr_has_checked_arith(g))
+                        || arm.guard.as_ref().is_some_and(expr_has_checked_arith)
                 })
         }
         Expr::Record { fields, .. } => fields.iter().any(|f| expr_has_checked_arith(&f.value)),
@@ -3630,12 +3627,7 @@ impl VerifierCtx {
                 // path-condition implication is implemented.
                 self.assert_callee_ensures_in_expr(session, cond, vars, caller_name, errors);
             }
-            Stmt::While { cond, body: _, .. }
-            | Stmt::For {
-                iterable: cond,
-                body: _,
-                ..
-            } => {
+            Stmt::While { cond, .. } | Stmt::For { iterable: cond, .. } => {
                 // V-C5: loop bodies may execute zero times — do not assert
                 // callee ensures from body as axioms.
                 self.assert_callee_ensures_in_expr(session, cond, vars, caller_name, errors);

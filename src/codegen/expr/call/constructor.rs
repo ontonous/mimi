@@ -1584,8 +1584,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let size_bytes = mapped_sty
                     .size_of()
-                    .map(|c| c.get_zero_extended_constant())
-                    .flatten()
+                    .and_then(|c| c.get_zero_extended_constant())
                     .unwrap_or(16);
                 let heap_ptr = self.malloc_or_abort(
                     self.context.i64_type().const_int(size_bytes, false),

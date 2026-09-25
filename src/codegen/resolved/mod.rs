@@ -4116,7 +4116,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // Some/Ok path: recover payload.
                             self.generator.builder.position_at_end(ok_bb);
                             let target_ty = self.lower_type(&expression.ty)?;
-                            return Ok(self.coerce_to(payload, target_ty)?);
+                            return self.coerce_to(payload, target_ty);
                         }
                         // 0.39.x / BUG N: `Option.map` / `Option.map_err` in
                         // resolved-forced contexts (spawn/await results, Flow

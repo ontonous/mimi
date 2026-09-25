@@ -3761,11 +3761,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let inner_list = obj_type
                             .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
-                            .unwrap_or_else(|| obj_type.as_str());
+                            .unwrap_or(obj_type.as_str());
                         let elem_ty = inner_list
                             .strip_prefix("List<")
                             .and_then(|s| s.strip_suffix('>'))
-                            .unwrap_or_else(|| inner_list)
+                            .unwrap_or(inner_list)
                             .to_string();
                         let inner_val = BasicMetadataValueEnum::PointerValue(list_alloca);
                         let list_json = match self.emit_typed_to_json_dispatch(
@@ -7230,7 +7230,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let loaded = self.build_load(
                                     param_llvm,
                                     *pv,
-                                    &format!("{}_struct_arg", &fdef.params[i].name),
+                                    &format!("{}_struct_arg", fdef.params[i].name),
                                 )?;
                                 *arg = loaded;
                             }
@@ -7267,7 +7267,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 let loaded = self.build_load(
                                     param_llvm,
                                     *pv,
-                                    &format!("{}_struct_arg", &fdef.params[i].name),
+                                    &format!("{}_struct_arg", fdef.params[i].name),
                                 )?;
                                 *arg = loaded;
                             }
@@ -9418,7 +9418,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let parts: Vec<String> = s
                     .get_field_types()
                     .iter()
-                    .map(|f| self.json_type_brief(f.clone()))
+                    .map(|f| self.json_type_brief(*f))
                     .collect();
                 format!("S({})", parts.join(""))
             }
@@ -9445,7 +9445,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let parts: Vec<String> = st
                     .get_field_types()
                     .iter()
-                    .map(|f| self.json_type_brief(f.clone()))
+                    .map(|f| self.json_type_brief(*f))
                     .collect();
                 format!("Ls{}", parts.join(""))
             }
@@ -9728,7 +9728,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "json_tp",
                     )
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                let field_types: Vec<crate::ast::Type> = elems.iter().cloned().collect();
+                let field_types: Vec<crate::ast::Type> = elems.to_vec();
                 let field_indices: Vec<u32> = (0..field_types.len() as u32).collect();
                 let san = Self::json_type_name(ty);
                 self.json_emit_join_slots(
@@ -10592,7 +10592,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "json_enum_mf_p",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    let field_types: Vec<crate::ast::Type> = types.iter().cloned().collect();
+                    let field_types: Vec<crate::ast::Type> = types.to_vec();
                     let field_indices: Vec<u32> = (0..field_types.len() as u32).collect();
                     let san = Self::json_type_name(ty);
                     let inner = self.json_emit_join_slots(
