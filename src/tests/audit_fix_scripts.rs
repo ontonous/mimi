@@ -290,6 +290,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "codegen_legacy_body_class_tripwire=flow-transition test=compile_checked_keeps_flow_transition_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=export-wrapper test=compile_checked_keeps_export_wrapper_body_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=actor-method test=compile_checked_keeps_actor_method_on_legacy_owner",
+        "codegen_legacy_body_class_tripwire=map-any-borrowed test=compile_checked_keeps_map_any_borrowed_access_on_legacy_owner markers=map_get,values",
         "production_legacy_body_file_call_sites=4",
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=6",
@@ -402,6 +403,59 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         ),
         "missing owner-class tripwire omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&owner_tripwire_output.stderr)
+    );
+    let tampered_map_tripwire_script = source_script.replacen(
+        "    compile_checked_keeps_map_any_borrowed_access_on_legacy_owner \\\n",
+        "    compile_checked_missing_map_any_borrowed_owner_test \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_map_tripwire_script,
+        "owner tripwire fixture must replace the Map/Any borrowed test name"
+    );
+    std::fs::write(&script_path, tampered_map_tripwire_script)
+        .expect("write tampered Map/Any owner-class tripwire audit script");
+    let map_tripwire_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered Map/Any owner-class tripwire audit");
+    assert!(
+        !map_tripwire_output.status.success(),
+        "missing Map/Any owner evidence must fail closed:\n{}",
+        String::from_utf8_lossy(&map_tripwire_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&map_tripwire_output.stderr).contains(
+            "owner_audit_error=missing_codegen_legacy_body_class_tripwire class=map-any-borrowed"
+        ),
+        "missing Map/Any owner-class tripwire omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&map_tripwire_output.stderr)
+    );
+    let tampered_map_markers_script =
+        source_script.replacen("    'map_get' \\\n    'values'\n", "", 1);
+    assert!(
+        source_script != tampered_map_markers_script,
+        "owner tripwire fixture must remove both borrowed API markers"
+    );
+    std::fs::write(&script_path, tampered_map_markers_script)
+        .expect("write tampered Map/Any class-marker audit script");
+    let map_markers_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered Map/Any class-marker audit");
+    assert!(
+        !map_markers_output.status.success(),
+        "Map/Any owner class without operation markers must fail closed:\n{}",
+        String::from_utf8_lossy(&map_markers_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&map_markers_output.stderr).contains(
+            "owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker_configuration class=map-any-borrowed"
+        ),
+        "empty Map/Any marker configuration omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&map_markers_output.stderr)
     );
     let tampered_guard_script = source_script.replacen(
         "    'if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)?'",

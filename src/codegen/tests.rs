@@ -608,6 +608,40 @@ fn compile_checked_keeps_actor_method_on_legacy_owner() {
 }
 
 #[test]
+fn compile_checked_keeps_map_any_borrowed_access_on_legacy_owner() {
+    let source = r#"
+        func main() -> i32 {
+            let original = map_new()
+            let map = map_set(original, "k", "borrowed text")
+            let found = map_get(map, "k")
+            let borrowed_values = values(map)
+            println(found.0)
+            println(borrowed_values.len())
+            drop(borrowed_values)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "map_any_borrowed_legacy_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("borrowed Map/Any compatibility body must remain compilable");
+    assert!(codegen.module.get_function("main").is_some());
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder],
+        "Map/Any map_get and values borrows must not enter the Canonical MIR route"
+    );
+}
+
+#[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

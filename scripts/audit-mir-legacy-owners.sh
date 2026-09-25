@@ -1381,8 +1381,16 @@ fi
 require_codegen_legacy_body_class_tripwire() {
     local body_class="$1"
     local test_name="$2"
-    local class_marker="$3"
+    shift 2
+    local -a class_markers=("$@")
+    local marker_summary
     local body
+    if [ "${#class_markers[@]}" -eq 0 ]; then
+        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker_configuration class=%s test=%s\n' \
+            "$body_class" "$test_name" >&2
+        audit_failed=1
+        return
+    fi
     body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
         "$ROOT_DIR/src/codegen/tests.rs")"
     if [ -z "$body" ]; then
@@ -1409,13 +1417,18 @@ require_codegen_legacy_body_class_tripwire() {
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$body" | rg -F "$class_marker" >/dev/null; then
-        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker class=%s test=%s marker=%s\n' \
-            "$body_class" "$test_name" "$class_marker" >&2
-        audit_failed=1
-        return
-    fi
-    printf 'codegen_legacy_body_class_tripwire=%s test=%s\n' "$body_class" "$test_name"
+    for class_marker in "${class_markers[@]}"; do
+        if ! printf '%s\n' "$body" | rg -F "$class_marker" >/dev/null; then
+            printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker class=%s test=%s marker=%s\n' \
+                "$body_class" "$test_name" "$class_marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf -v marker_summary '%s,' "${class_markers[@]}"
+    marker_summary="${marker_summary%,}"
+    printf 'codegen_legacy_body_class_tripwire=%s test=%s markers=%s\n' \
+        "$body_class" "$test_name" "$marker_summary"
 }
 
 require_codegen_legacy_body_class_tripwire \
@@ -1434,6 +1447,11 @@ require_codegen_legacy_body_class_tripwire \
     actor-method \
     compile_checked_keeps_actor_method_on_legacy_owner \
     'OwnerTripwireWorker__read__method'
+require_codegen_legacy_body_class_tripwire \
+    map-any-borrowed \
+    compile_checked_keeps_map_any_borrowed_access_on_legacy_owner \
+    'map_get' \
+    'values'
 
 owner_count=0
 condition_inventory=''
