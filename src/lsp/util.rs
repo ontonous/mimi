@@ -117,14 +117,11 @@ pub(crate) fn hash_func_body(text: &str, func: &FuncDef) -> u64 {
 /// longer truncate the region.
 pub(crate) fn find_enclosing_func_in_items(items: &[Item], cursor_line: usize) -> Option<&FuncDef> {
     for item in items {
-        match item {
-            Item::Func(f) => {
-                let end = f.meta.span.end_line.max(f.meta.span.start_line);
-                if cursor_line >= f.meta.span.start_line && cursor_line <= end {
-                    return Some(f);
-                }
+        if let Item::Func(f) = item {
+            let end = f.meta.span.end_line.max(f.meta.span.start_line);
+            if cursor_line >= f.meta.span.start_line && cursor_line <= end {
+                return Some(f);
             }
-            _ => {}
         }
     }
     None

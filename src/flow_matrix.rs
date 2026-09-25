@@ -122,16 +122,13 @@ fn collect_record_shapes_items(items: &[Item], shapes: &mut HashMap<String, Vec<
 fn expand_items(items: &mut Vec<Item>, shapes: &HashMap<String, Vec<Field>>, module: &str) {
     let mut injected: Vec<Item> = Vec::new();
     for item in items.iter_mut() {
-        match item {
-            Item::Flow(flow) => {
-                expand_flow_with_shapes(flow, shapes, module);
-                // 0.36.4 Fault nominal (裁决 1): inject the per-flow StateId/
-                // EventId nominal enums as top-level TypeDef items in the file
-                // AST — the checker's self.types is NOT a backend input
-                // (from_checked_file_base derives type_defs from the file AST).
-                injected.extend(fault_nominal_type_defs(flow, module));
-            }
-            _ => {}
+        if let Item::Flow(flow) = item {
+            expand_flow_with_shapes(flow, shapes, module);
+            // 0.36.4 Fault nominal (裁决 1): inject the per-flow StateId/
+            // EventId nominal enums as top-level TypeDef items in the file
+            // AST — the checker's self.types is NOT a backend input
+            // (from_checked_file_base derives type_defs from the file AST).
+            injected.extend(fault_nominal_type_defs(flow, module));
         }
     }
     items.extend(injected);

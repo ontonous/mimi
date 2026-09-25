@@ -1456,9 +1456,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(GluePair { clone, drop })
     }
 
-    fn product_plan_fields<'plan>(
-        plan: &'plan GluePlan,
-    ) -> Result<&'plan [GluePlan], CompileError> {
+    fn product_plan_fields(plan: &GluePlan) -> Result<&[GluePlan], CompileError> {
         match plan {
             GluePlan::Tuple(fields) | GluePlan::Record(fields) => Ok(fields),
             _ => Err(CompileError::Unsupported(format!(

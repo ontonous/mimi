@@ -2214,9 +2214,8 @@ fn link_and_observe_module<'ctx>(
         .map_err(|e| e.to_string())?;
 
     // Reuse cached runtime static library
-    let runtime_lib = cached_runtime_lib().map_err(|e| {
+    let runtime_lib = cached_runtime_lib().inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        e
     })?;
 
     let mut object_files = vec![obj_path.clone(), runtime_lib.clone()];

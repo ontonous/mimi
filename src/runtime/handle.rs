@@ -281,7 +281,7 @@ fn lock_sets() -> std::sync::MutexGuard<'static, Table<super::MimiSet>> {
 
 fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
     let gen: HandleGeneration = 1;
-    let index = if let Some(idx) = table.free.pop() {
+    if let Some(idx) = table.free.pop() {
         let slot = &mut table.slots[idx as usize];
         // generation was bumped on destroy; use the current value
         let g = slot.generation;
@@ -304,8 +304,7 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
             obj: Some(Box::new(obj)),
         });
         pack(idx, gen)
-    };
-    index
+    }
 }
 
 pub(super) struct MapLease {

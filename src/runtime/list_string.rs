@@ -785,7 +785,7 @@ mod tests {
 
     #[test]
     fn string_list_cloners_reject_unmapped_and_malformed_inputs() {
-        let invalid = 1usize as *const i64;
+        let invalid = std::ptr::without_provenance::<i64>(1);
         // SAFETY: these deliberately malformed addresses must be rejected by
         // the mapped-page and alignment checks before any dereference.
         assert!(unsafe { mimi_str_list_data_clone(1, invalid) }.is_null());

@@ -7555,7 +7555,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let call = self.build_call(function, metadata_args, "call")?;
         let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let null_i8 = i8_ptr_ty.const_null();
-        let tls_ptrs: Vec<_> = self.pending_callback_tls.drain(..).collect();
+        let tls_ptrs = std::mem::take(&mut self.pending_callback_tls);
         for tls_ptr in tls_ptrs {
             self.build_store(tls_ptr, null_i8)?;
         }
@@ -7965,7 +7965,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "read_lines_each",
         )?;
         // Clear TLS after the call (same as other callback builtins).
-        let tls_ptrs: Vec<_> = self.pending_callback_tls.drain(..).collect();
+        let tls_ptrs = std::mem::take(&mut self.pending_callback_tls);
         for p in tls_ptrs {
             self.build_store(p, i8_ptr.const_null())?;
         }

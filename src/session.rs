@@ -161,11 +161,9 @@ pub fn detect_session_cycle(env: &HashMap<String, SessionType>) -> Option<Vec<St
         color.insert(start.as_str(), 1);
         let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
         let mut path: Vec<&str> = vec![start.as_str()];
-        loop {
-            // Copy the frame out so `stack` can be mutated below (NLL).
-            let Some(&(node, idx)) = stack.last() else {
-                break;
-            };
+        // Copy the frame out so `stack` can be mutated below (NLL). The
+        // condition rechecks the stack on every iteration before indexing it.
+        while let Some(&(node, idx)) = stack.last() {
             let edges = refs.get(node).unwrap_or(&no_edges);
             if idx < edges.len() {
                 let next: &str = edges[idx].as_str();

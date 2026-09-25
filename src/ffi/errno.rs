@@ -468,7 +468,7 @@ impl Errno {
                     if rc == 0 {
                         // The buffer is NUL-terminated by strerror_r.
                         std::ffi::CStr::from_bytes_until_nul(&buf)
-                            .unwrap_or_else(|_| c"")
+                            .unwrap_or(c"")
                             .to_string_lossy()
                             .into_owned()
                     } else {

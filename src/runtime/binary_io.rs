@@ -348,8 +348,7 @@ pub unsafe extern "C" fn mimi_read_lines_json(
     let reader = std::io::BufReader::new(file);
     let mut result = String::from("[");
     let mut first = true;
-    let mut count: i64 = 0;
-    for line in reader.lines() {
+    for (count, line) in (0_i64..).zip(reader.lines()) {
         if count >= MAX_LINE_ITEMS || result.len() > MAX_LINES_JSON_BYTES {
             return std::ptr::null_mut();
         }
@@ -357,7 +356,6 @@ pub unsafe extern "C" fn mimi_read_lines_json(
             Ok(line) => line,
             Err(_) => return std::ptr::null_mut(),
         };
-        count += 1;
         if !first {
             result.push(',');
         }

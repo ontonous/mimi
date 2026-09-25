@@ -671,15 +671,12 @@ impl<'a> Checker<'a> {
     fn seed_linear_type_names(&mut self) {
         fn walk(items: &[Item], out: &mut Vec<String>) {
             for item in items {
-                match item {
-                    Item::Flow(f) => {
-                        let qualified = format!("flow::{}", f.name);
-                        for state in &f.states {
-                            out.push(state.name.clone());
-                            out.push(format!("{}::{}", qualified, state.name));
-                        }
+                if let Item::Flow(f) = item {
+                    let qualified = format!("flow::{}", f.name);
+                    for state in &f.states {
+                        out.push(state.name.clone());
+                        out.push(format!("{}::{}", qualified, state.name));
                     }
-                    _ => {}
                 }
             }
         }
@@ -940,18 +937,15 @@ impl<'a> Checker<'a> {
     pub(crate) fn finalize_zonked_func_types(&mut self) {
         fn function_span(items: &[Item], prefix: &str, target: &str) -> Option<Span> {
             for item in items {
-                match item {
-                    Item::Func(function) => {
-                        let qualified = if prefix.is_empty() {
-                            function.name.clone()
-                        } else {
-                            format!("{prefix}::{}", function.name)
-                        };
-                        if qualified == target {
-                            return Some(function.meta.span);
-                        }
+                if let Item::Func(function) = item {
+                    let qualified = if prefix.is_empty() {
+                        function.name.clone()
+                    } else {
+                        format!("{prefix}::{}", function.name)
+                    };
+                    if qualified == target {
+                        return Some(function.meta.span);
                     }
-                    _ => {}
                 }
             }
             None
