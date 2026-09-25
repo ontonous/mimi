@@ -3278,8 +3278,8 @@ pub extern "C" fn mimi_make_token() -> i64 {
 
 ///
 /// # Safety
-/// `handle` must be a live map handle and `key` must be a valid
-/// NUL-terminated C string (or null, which is a no-op).
+/// `handle` must be zero or a live MapHandle for this call. `key` must be
+/// null or point to a live NUL-terminated C string for this call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
     if handle == 0 || key.is_null() {
@@ -3292,8 +3292,14 @@ pub unsafe extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ff
 
 ///
 /// # Safety
-/// `handle` must be a live map handle and `key` must be a valid
-/// NUL-terminated C string (or null, which is a no-op).
+/// For a nonzero `handle`, it must remain a live MapHandle for this call.
+/// `key` must be null or point to a live NUL-terminated C string for this
+/// call. The returned bits are a borrowed, opaque `ValueHandle`: this function
+/// does not retain the value or its backing storage. Keep at least one Map
+/// owning a Map-created payload alive while using it, and keep any caller-owned
+/// backing alive and stable until the last use through this value or any
+/// shallow Map clone. Interpret the bits only with the ABI representation
+/// used to insert them.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_get(
     handle: MapHandle,
@@ -3334,8 +3340,15 @@ pub unsafe extern "C" fn mimi_map_clone(handle: MapHandle) -> MapHandle {
 /// Insert `value` under `key` in an existing map.
 ///
 /// # Safety
-/// `handle` must be a live map handle. `key` must be a valid
-/// NUL-terminated C string (or null, which is a no-op).
+/// For a nonzero `handle`, it must remain a live MapHandle for this call.
+/// `key` must be null or point to a live NUL-terminated C string for this
+/// call. `value` is copied as opaque bits only: it must match the ABI expected
+/// by later typed consumers, and any pointer-backed storage it refers to must
+/// remain live and stable while this Map, its shallow clones, or borrowed
+/// results can expose it. This function does not retain or release arbitrary
+/// value backing; overwriting an entry does not release the previous external
+/// value. A Map-owned payload record remains tracked until the final clone is
+/// destroyed.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_set(
     handle: MapHandle,
@@ -3345,7 +3358,8 @@ pub unsafe extern "C" fn mimi_map_set(
     if handle == 0 || key.is_null() {
         return;
     }
-    // SAFETY: `key` is a valid null-terminated C string returned by a Mimi allocation function
+    // SAFETY: the caller contract requires `key` to be a live NUL-terminated
+    // C string for this call.
     let s = unsafe { cstr_to_string(key) };
     // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     {
@@ -3437,14 +3451,18 @@ pub extern "C" fn mimi_any_to_float(value: ValueHandle) -> f64 {
 
 ///
 /// # Safety
-/// `handle` must be a live map handle and `key` must be a valid
-/// NUL-terminated C string (or null, which is a no-op).
+/// For a nonzero `handle`, it must remain a live MapHandle for this call.
+/// `key` must be null or point to a live NUL-terminated C string for this
+/// call. Removing an entry only removes its key/value bits; it does not
+/// release caller-owned backing. A payload registered as Map-owned remains
+/// owned by the Map until its final persistent clone is destroyed.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi::c_char) -> i32 {
     if handle == 0 || key.is_null() {
         return 0;
     }
-    // SAFETY: `handle` is a valid live handle; `map_from_handle`/`set_from_handle` aborts on invalid handles
+    // SAFETY: the caller contract requires a live NUL-terminated C string;
+    // the map lease separately validates the live MapHandle.
     let s = unsafe { cstr_to_string(key) };
     // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
     {
@@ -3453,18 +3471,17 @@ pub unsafe extern "C" fn mimi_map_remove(handle: MapHandle, key: *const std::ffi
 }
 
 /// RT-H4 helper: probe whether `[ptr, ptr+len)` spans only mapped pages.
-/// Returns 1 on mapped, 0 otherwise. Never dereferences; mincore only.
+/// Returns 1 when each covered page is mapped, and 0 for null/nonpositive or
+/// over-limit spans, address overflow, or an unmapped page. Never dereferences
+/// `ptr`; `mincore` reports page mapping only, not allocation extent, read
+/// permission, object validity, or lifetime.
 /// Used by legacy display codegen to distinguish an `Err(string)` slot that
 /// stores a bare NUL-terminated data pointer (mincore(field0) fails, field0
 /// is payload bytes) from one that stores a `{ptr,len}` struct pointer
 /// (mincore(field0) succeeds, field0 is the data pointer).
 ///
-/// # Safety
-/// `ptr`/`value` must be a valid `mimi_rc_alloc` allocation (or a
-/// runtime-owned C string for `mimi_any_to_string`) and must not
-/// be used after the matching release/free.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
+pub extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> i64 {
     if ptr.is_null() || len <= 0 {
         return 0;
     }
@@ -3475,19 +3492,23 @@ pub unsafe extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> 
     if len > MAX_READABLE_SPAN {
         return 0;
     }
-    // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX
-    // functions; mincore only queries page mappings, never dereferences.
+    // SAFETY: sysconf has no pointer preconditions. mincore receives an
+    // address value only, a page-aligned address and one-page length, plus a
+    // pointer to a live one-byte output slot. It queries mappings and never
+    // reads from `ptr`.
     unsafe {
-        let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-        let page_size = if page_size == 0 { 4096 } else { page_size };
-        let start = ptr as usize;
-        let end = start.saturating_add(len as usize);
-        let first = start & !(page_size - 1);
-        let last = if end == 0 {
-            0
-        } else {
-            (end - 1) & !(page_size - 1)
+        let Ok(page_size) = usize::try_from(libc::sysconf(libc::_SC_PAGESIZE)) else {
+            return 0;
         };
+        if page_size == 0 || !page_size.is_power_of_two() {
+            return 0;
+        }
+        let start = ptr as usize;
+        let Some(end) = start.checked_add(len as usize) else {
+            return 0;
+        };
+        let first = start & !(page_size - 1);
+        let last = (end - 1) & !(page_size - 1);
         let mut page = first;
         loop {
             let mut mvec: u8 = 0;
@@ -3498,7 +3519,13 @@ pub unsafe extern "C" fn mimi_runtime_ptr_readable(ptr: *const u8, len: i64) -> 
             if page == last {
                 break;
             }
-            page += page_size;
+            let Some(next_page) = page.checked_add(page_size) else {
+                return 0;
+            };
+            if next_page > last {
+                return 0;
+            }
+            page = next_page;
         }
         1
     }
@@ -3605,9 +3632,16 @@ fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
 
 ///
 /// # Safety
-/// Pointer arguments must be valid NUL-terminated C strings (unless
-/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
-/// and key/value arrays must have at least `len` valid elements.
+/// If `n > 0` and both array pointers are non-null, each must be aligned and
+/// readable for at least `min(n, 1_000_000)` `ValueHandle` elements. Mapping
+/// probes do not establish the arrays' allocation extents. Each nonzero key
+/// handle read from `keys` must point to a live NUL-terminated C string; a
+/// zero key handle is skipped. Values are copied as opaque, unretained bits;
+/// their backing must remain live and stable while this Map, its shallow
+/// clones, or borrowed results can expose them. This function never releases
+/// arbitrary value backing. Nonpositive `n` or either null array returns an
+/// empty Map; entries beyond the one-million-element cap are logged and
+/// omitted.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_from_list(
     keys: *mut ValueHandle,
@@ -3844,9 +3878,11 @@ unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
 /// The caller (codegen side) is responsible for freeing via `mimi_string_free`.
 ///
 /// # Safety
-/// Pointer arguments must be valid NUL-terminated C strings (unless
-/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
-/// and key/value arrays must have at least `len` valid elements.
+/// `ptr` must be non-null. For `len > 0`, it must point to at least `len`
+/// readable bytes. The bytes need not be NUL-terminated. Lengths outside
+/// `0..=64 MiB` return zero. A nonzero result is a newly allocated
+/// NUL-terminated copy; the caller owns its base pointer and must release it
+/// exactly once with `mimi_free` or `mimi_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) -> ValueHandle {
     if ptr.is_null() || len < 0 {
@@ -3885,7 +3921,13 @@ pub unsafe extern "C" fn mimi_str_clone(ptr: *const std::ffi::c_char, len: i64) 
 /// may infer a string from the numeric address alone.
 ///
 /// # Safety
-/// If `len > 0`, `ptr` must point to at least `len` readable bytes.
+/// `len` must be in `0..=64 MiB`; other lengths return zero. If `len > 0`,
+/// `ptr` must point to at least `len` readable bytes. Null is accepted only
+/// when `len == 0`. The input need not be NUL-terminated. A nonzero result is
+/// a tagged owner handle; keep it alive until all Map entries, shallow clones,
+/// borrowed handles, and typed consumers that may expose the string have
+/// stopped using it, then clear the low tag bit and release the exact base
+/// allocation once with `mimi_free` or `mimi_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_any_string_clone(
     ptr: *const std::ffi::c_char,
@@ -3926,9 +3968,9 @@ pub unsafe extern "C" fn mimi_any_string_clone(
 /// Handles: \ " \n \r \t \b \f and control chars as \uXXXX.
 ///
 /// # Safety
-/// Pointer arguments must be valid NUL-terminated C strings (unless
-/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
-/// and key/value arrays must have at least `len` valid elements.
+/// `ptr` must be null or point to a live, readable NUL-terminated C string
+/// for this call. The returned non-null C string is owned by the caller and
+/// must be freed exactly once with `mimi_free` or `mimi_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_escape_string(
     ptr: *const std::ffi::c_char,
@@ -7451,9 +7493,10 @@ pub unsafe extern "C" fn mimi_map_to_json_list_product_i64(
 /// `"a":[[1,2],[3,4]]`. Each list is heap-packed as List of product handles.
 ///
 /// # Safety
-/// Pointer arguments must be valid for the documented C ABI
-/// (live runtime objects, NUL-terminated strings, or sized arrays
-/// with matching length arguments).
+/// `json` must be null or point to a live, readable NUL-terminated C string
+/// for this call. A non-null result is a runtime-owned MapHandle; release it
+/// with `mimi_map_destroy`. Null input or an arity outside `1..=16` returns
+/// an empty Map.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_from_json_list_product_i64(
     json: *const std::ffi::c_char,
@@ -7670,9 +7713,10 @@ pub unsafe extern "C" fn mimi_map_to_json_set_product_i64(
 /// `"a":[[1,2],[3,4]]` → Map string → Set of product.
 ///
 /// # Safety
-/// Pointer arguments must be valid for the documented C ABI
-/// (live runtime objects, NUL-terminated strings, or sized arrays
-/// with matching length arguments).
+/// `json` must be null or point to a live, readable NUL-terminated C string
+/// for this call. A non-null result is a runtime-owned MapHandle; release it
+/// with `mimi_map_destroy`. Null input or an arity outside `1..=16` returns
+/// an empty Map.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_from_json_set_product_i64(
     json: *const std::ffi::c_char,
@@ -23615,9 +23659,15 @@ pub extern "C" fn mimi_mir_set_to_list_scalar(handle: SetHandle, kind: i8) -> *m
 
 ///
 /// # Safety
-/// Pointer arguments must be valid for the documented C ABI
-/// (live runtime objects, NUL-terminated strings, or sized arrays
-/// with matching length arguments).
+/// `out_len` may be null; if non-null, it must be aligned and writable for
+/// one `i64` for the duration of this call. A null `out_len` returns null
+/// without writing. A nonzero `handle` must be a live SetHandle. For a
+/// nonempty Set, the returned pointer owns an exact boxed slice of the
+/// reported length; release that exact pointer/length pair once with
+/// `mimi_set_list_free`. The copied elements are opaque handles and are not
+/// retained or released, so caller-owned backing must remain live while they
+/// are used. A zero handle returns null and writes `-1`; an empty Set returns
+/// null and writes `0` when `out_len` is non-null.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_list(
     handle: SetHandle,
@@ -26573,14 +26623,22 @@ mod runtime_ptr_readable_tests {
     #[test]
     fn ptr_readable_rejects_absurd_len_without_scanning() {
         let arr = [0u8; 8];
-        unsafe {
-            // Normal small mapped stack span is readable.
-            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), 8), 1);
-            // A >1MiB len is rejected up front even though the base pointer
-            // is mapped, preventing an unbounded page-mincore loop (P2-5).
-            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), (1 << 20) + 1), 0);
-            assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), i64::MAX), 0);
-        }
+        // Normal small mapped stack span is readable. This is only a page
+        // mapping observation and is not used as a dereference proof.
+        assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), 8), 1);
+        // A >1MiB len is rejected up front even though the base pointer is
+        // mapped, preventing an unbounded page-mincore loop (P2-5).
+        assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), (1 << 20) + 1), 0);
+        assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), i64::MAX), 0);
+        assert_eq!(mimi_runtime_ptr_readable(arr.as_ptr(), 0), 0);
+        assert_eq!(mimi_runtime_ptr_readable(std::ptr::null(), 8), 0);
+    }
+
+    #[test]
+    fn ptr_readable_rejects_address_overflow_without_dereferencing() {
+        let near_address_limit = usize::MAX - 3;
+        let arbitrary = near_address_limit as *const u8;
+        assert_eq!(mimi_runtime_ptr_readable(arbitrary, 8), 0);
     }
 
     #[test]

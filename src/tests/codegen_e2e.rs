@@ -2452,12 +2452,12 @@ fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
         eprintln!("SKIP: linker or Valgrind not available");
         return;
     }
-    // The process-global Any handle table intentionally remains a live root
-    // until process exit. Its tagged string payloads can therefore appear in
-    // Memcheck's "possibly lost" class; this test still fails on invalid
-    // accesses and definite/indirect leaks, and keeps the possible-loss report
-    // visible for the separate Any/map ownership audit. Do not use a Valgrind
-    // suppression here: the category is asserted below as an explicit debt.
+    // This fixture leaves its Map handles and tagged Any owner alive until
+    // process exit. Their table/key and tagged-payload/provenance allocations
+    // can therefore appear in Memcheck's "possibly lost" class. The paired
+    // explicit-destroy test isolates Map table/key release; this probe keeps
+    // the Any and process-lifetime remainder visible. It fails on invalid
+    // accesses and definite/indirect leaks. Do not suppress possible loss.
     let map_valgrind_args = vec![
         "--tool=memcheck".into(),
         "--error-exitcode=1".into(),
@@ -2530,6 +2530,157 @@ fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
         possible_loss_bytes > 0,
         "the process-lifetime Any/map retention must remain visible as a nonzero debt: {}",
         observation.stderr
+    );
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_explicit_map_clone_destroy_releases_tables() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+
+    const C_SHIM: &str = r#"
+        #include <stdint.h>
+
+        typedef uintptr_t MimiMapHandle;
+        typedef uintptr_t MimiValueHandle;
+
+        extern MimiMapHandle mimi_map_new(void);
+        extern MimiMapHandle mimi_map_clone(MimiMapHandle);
+        extern MimiValueHandle mimi_map_get(MimiMapHandle, const char *);
+        extern void mimi_map_set(MimiMapHandle, const char *, MimiValueHandle);
+        extern void mimi_map_destroy(MimiMapHandle);
+
+        static int exercise_clone_destroy_order(int destroy_source_first) {
+            static const char key[] = "key";
+            MimiMapHandle source = mimi_map_new();
+            if (source == 0) return 1;
+            mimi_map_set(source, key, (MimiValueHandle)3);
+            MimiMapHandle clone = mimi_map_clone(source);
+            if (clone == 0) {
+                mimi_map_destroy(source);
+                return 2;
+            }
+
+            if (destroy_source_first) {
+                mimi_map_destroy(source);
+                if (mimi_map_get(clone, key) != (MimiValueHandle)3) {
+                    mimi_map_destroy(clone);
+                    return 3;
+                }
+                mimi_map_destroy(clone);
+            } else {
+                mimi_map_destroy(clone);
+                if (mimi_map_get(source, key) != (MimiValueHandle)3) {
+                    mimi_map_destroy(source);
+                    return 4;
+                }
+                mimi_map_destroy(source);
+            }
+            return 0;
+        }
+
+        int mimi_test_map_clone_destroy_lifecycle(void) {
+            int result = exercise_clone_destroy_order(1);
+            return result != 0 ? result : exercise_clone_destroy_order(0);
+        }
+
+        int mimi_test_no_map_control(void) { return 0; }
+    "#;
+
+    let memcheck_args = || {
+        [
+            "--tool=memcheck",
+            "--error-exitcode=1",
+            "--leak-check=full",
+            "--show-leak-kinds=definite,possible",
+            "--errors-for-leak-kinds=definite,indirect",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    };
+    let control = checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(
+        r#"
+            extern "C" { func mimi_test_no_map_control() -> i32; }
+            func main() -> i32 { mimi_test_no_map_control() }
+        "#,
+        memcheck_args(),
+        Some(C_SHIM.to_owned()),
+    )
+    .expect("checked no-Map control must run under Memcheck");
+    let maps = checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(
+        r#"
+            extern "C" { func mimi_test_map_clone_destroy_lifecycle() -> i32; }
+            func main() -> i32 { mimi_test_map_clone_destroy_lifecycle() }
+        "#,
+        memcheck_args(),
+        Some(C_SHIM.to_owned()),
+    )
+    .expect("explicit Map clone/destroy lifecycle must run under Memcheck");
+
+    assert_eq!(
+        control.exit_code,
+        Some(0),
+        "control Memcheck: {}",
+        control.stderr
+    );
+    assert_eq!(
+        maps.exit_code,
+        Some(0),
+        "Map lifecycle Memcheck: {}",
+        maps.stderr
+    );
+    for (label, stderr) in [
+        ("control", &control.stderr),
+        ("Map lifecycle", &maps.stderr),
+    ] {
+        let no_leak_summary =
+            stderr.contains("All heap blocks were freed -- no leaks are possible");
+        assert!(
+            no_leak_summary || stderr.contains("definitely lost: 0 bytes in 0 blocks"),
+            "{label} must have no definitely-lost allocations: {stderr}"
+        );
+        assert!(
+            no_leak_summary || stderr.contains("indirectly lost: 0 bytes in 0 blocks"),
+            "{label} must have no indirectly-lost allocations: {stderr}"
+        );
+    }
+
+    // These allocation stacks identified the two persistent Map tables and
+    // copied key buffers in the older mixed Map/Any probe. Their absence here
+    // proves explicit destruction closes those owners; it does not account
+    // for the tagged Any allocation/provenance table from that other probe.
+    let possible_loss_trace = maps
+        .stderr
+        .split("LEAK SUMMARY:")
+        .next()
+        .unwrap_or(&maps.stderr);
+    for map_allocation_site in [
+        "mimi_runtime::runtime::cstr_to_string",
+        "HashMap<alloc::string::String, i64>",
+        "RawTable<(alloc::string::String, i64)>",
+    ] {
+        assert!(
+            !possible_loss_trace.contains(map_allocation_site),
+            "explicitly destroyed Maps must not leave the old key/table loss stack `{map_allocation_site}`: {possible_loss_trace}"
+        );
+    }
+
+    let possible_loss_summary = |stderr: &str| {
+        stderr
+            .lines()
+            .find(|line| line.contains("possibly lost:"))
+            .map(str::trim)
+            .unwrap_or("possibly lost: summary unavailable")
+            .to_owned()
+    };
+    eprintln!(
+        "Map/Any attribution: no-Map control `{}`; explicit Map clone/destroy `{}`. Any payload and provenance remain a separate unresolved owner.",
+        possible_loss_summary(&control.stderr),
+        possible_loss_summary(&maps.stderr)
     );
 }
 

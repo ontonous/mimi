@@ -2371,6 +2371,17 @@ pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args(
     src: &str,
     valgrind_args: Vec<String>,
 ) -> Result<NativeRunObservation, String> {
+    checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(src, valgrind_args, None)
+}
+
+/// Checked-codegen Memcheck helper with an optional C shim. The shim is useful
+/// for exercising runtime C ABI owner operations that Mimi intentionally does
+/// not admit into the Canonical MIR scalar FFI profile.
+pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(
+    src: &str,
+    valgrind_args: Vec<String>,
+    extra_c_src: Option<String>,
+) -> Result<NativeRunObservation, String> {
     let file = parse_prod(src);
     let checked_program = core::check_program(&file).map_err(|diags| {
         diags
@@ -2388,6 +2399,7 @@ pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args(
     let valgrind_config = E2EConfig {
         use_valgrind: true,
         valgrind_args,
+        extra_c_src,
         ..Default::default()
     };
     link_and_observe_module(&codegen, &valgrind_config, counter)
