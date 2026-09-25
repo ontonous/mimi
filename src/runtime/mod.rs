@@ -23929,7 +23929,7 @@ pub unsafe extern "C" fn mimi_json_join_list(
     } else {
         elem_size as usize
     };
-    let mut tmp: u64 = 0;
+    let mut tmp: u64;
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
     parts.push(String::from("["));
     for i in 0..lst.len as isize {

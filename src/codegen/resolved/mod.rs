@@ -15583,8 +15583,8 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
             ),
         ];
 
-        let mut total_functions = 0;
-        let mut total_eligible = 0;
+        let mut total_functions: usize = 0;
+        let mut total_eligible: usize = 0;
         let mut rejection_reasons: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
 
@@ -15640,11 +15640,10 @@ func main() -> i32 { println(get_x(make_point(3, 4))); 0 }
         eprintln!("\n=== DISPATCH DIAGNOSTIC SUMMARY ===");
         eprintln!(
             "  Functions: {total_eligible}/{total_functions} eligible ({}%)",
-            if total_functions > 0 {
-                total_eligible * 100 / total_functions
-            } else {
-                0
-            }
+            total_eligible
+                .checked_mul(100)
+                .and_then(|value| value.checked_div(total_functions))
+                .unwrap_or(0)
         );
         eprintln!("  Rejection reasons:");
         for (reason, count) in rejection_reasons.iter().rev() {
