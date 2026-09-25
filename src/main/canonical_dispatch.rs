@@ -443,8 +443,13 @@ pub(crate) fn select_default_route(
             false,
             false,
             option_string_hint,
-            true,
-            false,
+            CopyCandidateFlags {
+                option_i32: true,
+                option_bool: false,
+                option_i64: false,
+                option_f64: false,
+                result_i32: false,
+            },
             "Copy Option<i32> projection candidate is outside complete coverage",
         );
     }
@@ -454,48 +459,61 @@ pub(crate) fn select_default_route(
             false,
             false,
             option_string_hint,
-            false,
-            true,
+            CopyCandidateFlags {
+                option_i32: false,
+                option_bool: true,
+                option_i64: false,
+                option_f64: false,
+                result_i32: false,
+            },
             "Copy Option<bool> projection candidate is outside complete coverage",
         );
     }
     if copy_option_i64_hint && !complete_copy_option_i64_candidate {
-        return reject_migrated_candidates_with_copy_i64(
+        return reject_migrated_candidates_with_copy(
             flow_candidate,
             false,
             false,
             option_string_hint,
-            false,
-            false,
-            true,
+            CopyCandidateFlags {
+                option_i32: false,
+                option_bool: false,
+                option_i64: true,
+                option_f64: false,
+                result_i32: false,
+            },
             "Copy Option<i64> projection candidate is outside complete coverage",
         );
     }
     if copy_option_f64_hint && !complete_copy_option_f64_candidate {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_candidate,
             false,
             false,
             option_string_hint,
-            false,
-            false,
-            false,
-            true,
-            false,
+            CopyCandidateFlags {
+                option_i32: false,
+                option_bool: false,
+                option_i64: false,
+                option_f64: true,
+                result_i32: false,
+            },
             "Copy Option<f64> projection candidate is outside complete coverage",
         );
     }
     if copy_result_i32_hint && !complete_copy_result_i32_candidate {
-        return reject_migrated_candidates_with_copy_result(
+        return reject_migrated_candidates_with_copy(
             flow_candidate,
             false,
             false,
             option_string_hint,
-            copy_option_i32_hint,
-            copy_option_bool_hint,
-            copy_option_i64_hint,
-            copy_option_f64_hint,
-            true,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_hint,
+                option_bool: copy_option_bool_hint,
+                option_i64: copy_option_i64_hint,
+                option_f64: copy_option_f64_hint,
+                result_i32: true,
+            },
             "Copy Result<i32, i32> projection candidate is outside complete coverage",
         );
     }
@@ -620,7 +638,7 @@ pub(crate) fn select_default_route(
                     }
                 }
             };
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_candidate,
                 matches!(
                     profile,
@@ -642,26 +660,28 @@ pub(crate) fn select_default_route(
                     mimi::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant
                         | mimi::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant
                 ),
-                matches!(
-                    profile,
-                    mimi::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant
-                ),
-                matches!(
-                    profile,
-                    mimi::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant
-                ),
-                matches!(
-                    profile,
-                    mimi::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant
-                ),
-                matches!(
-                    profile,
-                    mimi::core::mir::CanonicalMirRouteProfile::CopyOptionF64Variant
-                ),
-                matches!(
-                    profile,
-                    mimi::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant
-                ),
+                CopyCandidateFlags {
+                    option_i32: matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant
+                    ),
+                    option_bool: matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant
+                    ),
+                    option_i64: matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant
+                    ),
+                    option_f64: matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::CopyOptionF64Variant
+                    ),
+                    result_i32: matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant
+                    ),
+                },
                 reason,
             );
         }
@@ -816,8 +836,13 @@ pub(crate) fn select_default_route(
                     false,
                     false,
                     false,
-                    true,
-                    false,
+                    CopyCandidateFlags {
+                        option_i32: true,
+                        option_bool: false,
+                        option_i64: false,
+                        option_f64: false,
+                        result_i32: false,
+                    },
                     "canonical Copy Option<i32> projection candidate did not materialize a supported MIR shape",
                 );
             }
@@ -827,48 +852,61 @@ pub(crate) fn select_default_route(
                     false,
                     false,
                     false,
-                    false,
-                    true,
+                    CopyCandidateFlags {
+                        option_i32: false,
+                        option_bool: true,
+                        option_i64: false,
+                        option_f64: false,
+                        result_i32: false,
+                    },
                     "canonical Copy Option<bool> projection candidate did not materialize a supported MIR shape",
                 );
             }
             if copy_option_i64_hint {
-                return reject_migrated_candidates_with_copy_i64(
+                return reject_migrated_candidates_with_copy(
                     false,
                     false,
                     false,
                     false,
-                    false,
-                    false,
-                    true,
+                    CopyCandidateFlags {
+                        option_i32: false,
+                        option_bool: false,
+                        option_i64: true,
+                        option_f64: false,
+                        result_i32: false,
+                    },
                     "canonical Copy Option<i64> projection candidate did not materialize a supported MIR shape",
                 );
             }
             if copy_option_f64_hint {
-                return reject_migrated_candidates_with_copy_f64(
+                return reject_migrated_candidates_with_copy(
                     false,
                     false,
                     false,
                     false,
-                    false,
-                    false,
-                    false,
-                    true,
-                    false,
+                    CopyCandidateFlags {
+                        option_i32: false,
+                        option_bool: false,
+                        option_i64: false,
+                        option_f64: true,
+                        result_i32: false,
+                    },
                     "canonical Copy Option<f64> projection candidate did not materialize a supported MIR shape",
                 );
             }
             if copy_result_i32_hint {
-                return reject_migrated_candidates_with_copy_result(
+                return reject_migrated_candidates_with_copy(
                     false,
                     false,
                     false,
                     false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    true,
+                    CopyCandidateFlags {
+                        option_i32: false,
+                        option_bool: false,
+                        option_i64: false,
+                        option_f64: false,
+                        result_i32: true,
+                    },
                     "canonical Copy Result<i32, i32> projection candidate did not materialize a supported MIR shape",
                 );
             }
@@ -958,30 +996,34 @@ pub(crate) fn select_default_route(
     // rejection or a canonical admission.
     let session_route_candidate = complete_session_candidate && materialized_session_candidate;
     if flow_route_candidate && !flow_transition_operation {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate || (record_route_candidate && copy_record),
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             "canonical graph did not materialize the selected production operation",
         );
     }
     if flow_candidate && !complete_flow_candidate && !flow_failure_retry_hint {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             true,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             "S8 Flow transition candidate is not complete coverage",
         );
     }
@@ -1013,16 +1055,18 @@ pub(crate) fn select_default_route(
         && !generic_route_candidate
         && !owned_record_route_candidate
     {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             true,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             "flat Copy record materialized inside mixed coverage",
         );
     }
@@ -1042,58 +1086,66 @@ pub(crate) fn select_default_route(
         && !complete_option_string_candidate
         && !complete_option_nested_tuple_candidate
     {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             true,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             "Option<string> variant materialized inside mixed coverage",
         );
     }
     if copy_option_i32_route_candidate && !complete_copy_option_i32_candidate {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            true,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            false,
+            CopyCandidateFlags {
+                option_i32: true,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: false,
+            },
             "Copy Option<i32> variant materialized inside mixed coverage",
         );
     }
     if copy_option_bool_route_candidate && !complete_copy_option_bool_candidate {
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            true,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            false,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: true,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: false,
+            },
             "Copy Option<bool> variant materialized inside mixed coverage",
         );
     }
     if copy_result_i32_route_candidate && !complete_copy_result_i32_candidate {
-        return reject_migrated_candidates_with_copy_result(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            true,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: true,
+            },
             "Copy Result<i32, i32> variant materialized inside mixed coverage",
         );
     }
@@ -1137,16 +1189,18 @@ pub(crate) fn select_default_route(
                     LegacyRouteReason::PlainScalarIslandPreflightCompatibility,
                 );
             }
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 true,
                 record_route_candidate,
                 option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::SCALAR_COLLECTION_ISLAND
@@ -1157,16 +1211,18 @@ pub(crate) fn select_default_route(
 
     if materialized_option_string_candidate {
         if let Err(errors) = mimi::core::mir::validate_option_string_variant_island(canonical) {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 true,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::NON_COPY_OPTION_STRING_VARIANT_ISLAND
@@ -1178,16 +1234,18 @@ pub(crate) fn select_default_route(
     if materialized_option_nested_tuple_candidate {
         if let Err(errors) = mimi::core::mir::validate_option_nested_tuple_variant_island(canonical)
         {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 true,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "nested Option tuple variant {} capability gate failed: {errors:?}",
                     mimi::core::mir::NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND,
@@ -1198,16 +1256,18 @@ pub(crate) fn select_default_route(
 
     if materialized_copy_option_i32_candidate {
         if let Err(errors) = mimi::core::mir::validate_copy_option_i32_variant_island(canonical) {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 option_string_route_candidate,
-                true,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: true,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::COPY_OPTION_I32_VARIANT_ISLAND
@@ -1222,16 +1282,18 @@ pub(crate) fn select_default_route(
             mimi::core::PrimitiveType::Bool,
             mimi::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND,
         ) {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                true,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: true,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND
@@ -1242,16 +1304,18 @@ pub(crate) fn select_default_route(
 
     if materialized_copy_option_i64_candidate {
         if let Err(errors) = mimi::core::mir::validate_copy_option_i64_variant_island(canonical) {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                true,
-                copy_option_f64_route_candidate,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: true,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::COPY_OPTION_I64_VARIANT_ISLAND
@@ -1262,16 +1326,18 @@ pub(crate) fn select_default_route(
 
     if materialized_copy_option_f64_candidate {
         if let Err(errors) = mimi::core::mir::validate_copy_option_f64_variant_island(canonical) {
-            return reject_migrated_candidates_with_copy_f64(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                true,
-                copy_result_i32_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: true,
+                    result_i32: copy_result_i32_route_candidate,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::COPY_OPTION_F64_VARIANT_ISLAND
@@ -1282,16 +1348,18 @@ pub(crate) fn select_default_route(
 
     if materialized_copy_result_i32_candidate {
         if let Err(errors) = mimi::core::mir::validate_copy_result_i32_variant_island(canonical) {
-            return reject_migrated_candidates_with_copy_result(
+            return reject_migrated_candidates_with_copy(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 option_string_route_candidate,
-                copy_option_i32_route_candidate,
-                copy_option_bool_route_candidate,
-                copy_option_i64_route_candidate,
-                copy_option_f64_route_candidate,
-                true,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: true,
+                },
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::COPY_RESULT_I32_VARIANT_ISLAND
@@ -1344,16 +1412,18 @@ pub(crate) fn select_default_route(
                 "S0 flat Copy record candidate is not eligible for the default route: verifier capability gate failed: {error:?}"
             ));
         }
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             format!("verifier capability gate failed: {error:?}"),
         );
     }
@@ -1376,16 +1446,18 @@ pub(crate) fn select_default_route(
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
     }
@@ -1401,16 +1473,18 @@ pub(crate) fn select_default_route(
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             format!("native MIR preflight failed: {errors:?}"),
         );
     }
@@ -1438,16 +1512,18 @@ pub(crate) fn select_default_route(
                         mimi::core::mir::SESSION_CHANNEL_ISLAND
                     ));
                 }
-                return reject_migrated_candidates_with_copy_f64(
+                return reject_migrated_candidates_with_copy(
                     flow_route_candidate,
                     collection_route_candidate,
                     record_route_candidate,
                     option_string_route_candidate,
-                    copy_option_i32_route_candidate,
-                    copy_option_bool_route_candidate,
-                    copy_option_i64_route_candidate,
-                    copy_option_f64_route_candidate,
-                    copy_result_i32_route_candidate,
+                    CopyCandidateFlags {
+                        option_i32: copy_option_i32_route_candidate,
+                        option_bool: copy_option_bool_route_candidate,
+                        option_i64: copy_option_i64_route_candidate,
+                        option_f64: copy_option_f64_route_candidate,
+                        result_i32: copy_result_i32_route_candidate,
+                    },
                     format!("verifier contract pass failed: {error}"),
                 );
             }
@@ -1465,16 +1541,18 @@ pub(crate) fn select_default_route(
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
-        return reject_migrated_candidates_with_copy_f64(
+        return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             option_string_route_candidate,
-            copy_option_i32_route_candidate,
-            copy_option_bool_route_candidate,
-            copy_option_i64_route_candidate,
-            copy_option_f64_route_candidate,
-            copy_result_i32_route_candidate,
+            CopyCandidateFlags {
+                option_i32: copy_option_i32_route_candidate,
+                option_bool: copy_option_bool_route_candidate,
+                option_i64: copy_option_i64_route_candidate,
+                option_f64: copy_option_f64_route_candidate,
+                result_i32: copy_result_i32_route_candidate,
+            },
             "verifier returned an unsupported or inconclusive result",
         );
     }
@@ -1567,13 +1645,21 @@ fn reject_migrated_candidates(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CopyCandidateFlags {
+    option_i32: bool,
+    option_bool: bool,
+    option_i64: bool,
+    option_f64: bool,
+    result_i32: bool,
+}
+
 fn reject_migrated_candidates_with_copy(
     flow_candidate: bool,
     collection_candidate: bool,
     record_candidate: bool,
     option_string_candidate: bool,
-    copy_option_i32_candidate: bool,
-    copy_option_bool_candidate: bool,
+    copy_candidates: CopyCandidateFlags,
     reason: impl Into<String>,
 ) -> DefaultMirRoute {
     let reason = reason.into();
@@ -1585,113 +1671,27 @@ fn reject_migrated_candidates_with_copy(
             option_string_candidate,
             reason,
         )
-    } else if copy_option_i32_candidate {
+    } else if copy_candidates.option_i32 {
         DefaultMirRoute::Rejected(format!(
             "S114 Copy Option<i32> variant candidate is not eligible for the default route: {}",
             reason
         ))
-    } else if copy_option_bool_candidate {
+    } else if copy_candidates.option_bool {
         DefaultMirRoute::Rejected(format!(
             "S115 Copy Option<bool> variant candidate is not eligible for the default route: {}",
             reason
         ))
-    } else {
-        DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
-    }
-}
-
-fn reject_migrated_candidates_with_copy_i64(
-    flow_candidate: bool,
-    collection_candidate: bool,
-    record_candidate: bool,
-    option_string_candidate: bool,
-    copy_option_i32_candidate: bool,
-    copy_option_bool_candidate: bool,
-    copy_option_i64_candidate: bool,
-    reason: impl Into<String>,
-) -> DefaultMirRoute {
-    reject_migrated_candidates_with_copy_f64(
-        flow_candidate,
-        collection_candidate,
-        record_candidate,
-        option_string_candidate,
-        copy_option_i32_candidate,
-        copy_option_bool_candidate,
-        copy_option_i64_candidate,
-        false,
-        false,
-        reason,
-    )
-}
-
-fn reject_migrated_candidates_with_copy_result(
-    flow_candidate: bool,
-    collection_candidate: bool,
-    record_candidate: bool,
-    option_string_candidate: bool,
-    copy_option_i32_candidate: bool,
-    copy_option_bool_candidate: bool,
-    copy_option_i64_candidate: bool,
-    copy_option_f64_candidate: bool,
-    copy_result_i32_candidate: bool,
-    reason: impl Into<String>,
-) -> DefaultMirRoute {
-    reject_migrated_candidates_with_copy_f64(
-        flow_candidate,
-        collection_candidate,
-        record_candidate,
-        option_string_candidate,
-        copy_option_i32_candidate,
-        copy_option_bool_candidate,
-        copy_option_i64_candidate,
-        copy_option_f64_candidate,
-        copy_result_i32_candidate,
-        reason,
-    )
-}
-
-fn reject_migrated_candidates_with_copy_f64(
-    flow_candidate: bool,
-    collection_candidate: bool,
-    record_candidate: bool,
-    option_string_candidate: bool,
-    copy_option_i32_candidate: bool,
-    copy_option_bool_candidate: bool,
-    copy_option_i64_candidate: bool,
-    copy_option_f64_candidate: bool,
-    copy_result_i32_candidate: bool,
-    reason: impl Into<String>,
-) -> DefaultMirRoute {
-    let reason = reason.into();
-    if flow_candidate || collection_candidate || record_candidate || option_string_candidate {
-        reject_migrated_candidates(
-            flow_candidate,
-            collection_candidate,
-            record_candidate,
-            option_string_candidate,
-            reason,
-        )
-    } else if copy_option_i32_candidate {
-        DefaultMirRoute::Rejected(format!(
-            "S114 Copy Option<i32> variant candidate is not eligible for the default route: {}",
-            reason
-        ))
-    } else if copy_option_bool_candidate {
-        DefaultMirRoute::Rejected(format!(
-            "S115 Copy Option<bool> variant candidate is not eligible for the default route: {}",
-            reason
-        ))
-    } else if copy_option_i64_candidate {
+    } else if copy_candidates.option_i64 {
         DefaultMirRoute::Rejected(format!(
             "S116 Copy Option<i64> variant candidate is not eligible for the default route: {}",
             reason
         ))
-    } else if copy_option_f64_candidate {
+    } else if copy_candidates.option_f64 {
         DefaultMirRoute::Rejected(format!(
             "S117 Copy Option<f64> variant candidate is not eligible for the default route: {}",
             reason
         ))
-    } else if copy_result_i32_candidate {
+    } else if copy_candidates.result_i32 {
         DefaultMirRoute::Rejected(format!(
             "S125 Copy Result<i32, i32> variant candidate is not eligible for the default route: {}",
             reason
@@ -1737,6 +1737,127 @@ mod tests {
             .expect("parse");
         let checked = mimi::core::check_program(&file).expect("check");
         (checked, file)
+    }
+
+    #[test]
+    fn migrated_route_candidate_rejection_priority_is_stable() {
+        let all_copy_candidates = CopyCandidateFlags {
+            option_i32: true,
+            option_bool: true,
+            option_i64: true,
+            option_f64: true,
+            result_i32: true,
+        };
+        let rejected_reason = |flow, collection, record, option_string, copy, reason: &str| {
+            match reject_migrated_candidates_with_copy(
+                flow,
+                collection,
+                record,
+                option_string,
+                copy,
+                reason,
+            ) {
+                DefaultMirRoute::Rejected(message) => message,
+                route => panic!("candidate combination must reject, got {route:?}"),
+            }
+        };
+
+        assert!(rejected_reason(
+            true,
+            true,
+            true,
+            true,
+            all_copy_candidates,
+            "generic variant predicate"
+        )
+        .starts_with("S8 Flow transition candidate"));
+        assert!(
+            rejected_reason(false, true, true, true, all_copy_candidates, "plain reason")
+                .starts_with("S11 scalar collection candidate")
+        );
+        assert!(rejected_reason(
+            false,
+            false,
+            true,
+            true,
+            all_copy_candidates,
+            "generic variant predicate"
+        )
+        .starts_with("generic variant predicate candidate"));
+        assert!(rejected_reason(
+            false,
+            false,
+            true,
+            true,
+            all_copy_candidates,
+            "plain reason"
+        )
+        .starts_with("S0 flat Copy record candidate"));
+        assert!(rejected_reason(
+            false,
+            false,
+            false,
+            true,
+            all_copy_candidates,
+            "plain reason"
+        )
+        .starts_with("S30 non-Copy Option<string> variant candidate"));
+
+        let copy_rejections = [
+            (all_copy_candidates, "S114 Copy Option<i32>"),
+            (
+                CopyCandidateFlags {
+                    option_i32: false,
+                    ..all_copy_candidates
+                },
+                "S115 Copy Option<bool>",
+            ),
+            (
+                CopyCandidateFlags {
+                    option_i32: false,
+                    option_bool: false,
+                    ..all_copy_candidates
+                },
+                "S116 Copy Option<i64>",
+            ),
+            (
+                CopyCandidateFlags {
+                    option_i32: false,
+                    option_bool: false,
+                    option_i64: false,
+                    ..all_copy_candidates
+                },
+                "S117 Copy Option<f64>",
+            ),
+            (
+                CopyCandidateFlags {
+                    option_i32: false,
+                    option_bool: false,
+                    option_i64: false,
+                    option_f64: false,
+                    ..all_copy_candidates
+                },
+                "S125 Copy Result<i32, i32>",
+            ),
+        ];
+        for (copy_candidates, expected) in copy_rejections {
+            assert!(
+                rejected_reason(false, false, false, false, copy_candidates, "plain reason")
+                    .starts_with(expected)
+            );
+        }
+
+        assert!(matches!(
+            reject_migrated_candidates_with_copy(
+                false,
+                false,
+                false,
+                false,
+                CopyCandidateFlags::default(),
+                "unrecognized candidate",
+            ),
+            DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
+        ));
     }
 
     #[test]
