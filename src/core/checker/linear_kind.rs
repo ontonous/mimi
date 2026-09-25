@@ -301,8 +301,7 @@ impl<'a> Checker<'a> {
         let Some(param_ty) = self.funcs.get(name).and_then(|(ps, _)| ps.get(param_index)) else {
             return false;
         };
-        let r = Self::param_type_refs_linear_kind(param_ty, &linear);
-        r
+        Self::param_type_refs_linear_kind(param_ty, &linear)
     }
 
     /// 泛型函数 `name` 的第 `param_index` 个参数是否线性黑盒健全（见模块头）。

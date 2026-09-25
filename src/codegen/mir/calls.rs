@@ -891,9 +891,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "session builtin must use the session dispatch path",
             )),
         }
-        .map(|value| {
+        .inspect(|_| {
             let _ = result;
-            value
         })
     }
 

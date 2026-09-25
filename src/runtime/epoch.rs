@@ -128,7 +128,7 @@ fn lock_table() -> std::sync::MutexGuard<'static, Table> {
     table().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn lookup<'a>(tbl: &'a Table, handle: i64) -> Result<(u32, &'a Slot), EpochError> {
+fn lookup(tbl: &Table, handle: i64) -> Result<(u32, &Slot), EpochError> {
     let (index, tag) = unpack(handle)?;
     let slot = tbl.slots.get(index as usize).ok_or(EpochError::Invalid)?;
     if !slot.live {

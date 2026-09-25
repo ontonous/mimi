@@ -17267,7 +17267,7 @@ pub unsafe extern "C" fn mimi_map_from_json_result_option_product_i64(
                     arr.trim_start_matches('[').trim_end_matches(']')
                 ));
                 // Parse as option product: wrap array as single Some element JSON
-                let opt_json = format!("[{}]", &arr);
+                let opt_json = format!("[{}]", arr);
                 let c_opt = alloc_c_string(&opt_json);
                 // Manual option product pack from bare [1,2]
                 let opt_pack_size = 8 + n * 8;

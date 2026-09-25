@@ -142,7 +142,7 @@ mod tests {
                 .expect("generator failed");
             let src = tree.current();
             let tokens = lexer::Lexer::new(&src).tokenize();
-            assert!(tokens.is_ok(), "Failed to lex: {}", &src);
+            assert!(tokens.is_ok(), "Failed to lex: {}", src);
         }
     }
 }

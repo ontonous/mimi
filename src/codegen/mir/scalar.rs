@@ -168,9 +168,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("unary operator {op:?} is not emitted"),
             )),
         }
-        .map(|value| {
+        .inspect(|_| {
             let _ = result;
-            value
         })
     }
 
@@ -326,9 +325,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("binary operator {op:?} is not emitted"),
             )),
         }
-        .map(|value| {
+        .inspect(|_| {
             let _ = result;
-            value
         })
     }
 

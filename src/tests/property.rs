@@ -111,7 +111,7 @@ proptest! {
                 _ => false,
             }
         }
-        if format!("{:?}", &t) == format!("{:?}", &unknown) || is_unknown_like(&t) {
+        if format!("{:?}", t) == format!("{:?}", unknown) || is_unknown_like(&t) {
             prop_assert!(core::same_type(&unknown, &t));
         } else {
             prop_assert!(!core::same_type(&unknown, &t),

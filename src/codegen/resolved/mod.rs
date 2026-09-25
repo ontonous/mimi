@@ -4723,7 +4723,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .generator
                                 .context
                                 .append_basic_block(function, "map_cont");
-                            let is_positive = if is_map { true } else { false };
+                            let is_positive = is_map;
                             let pred = if is_positive {
                                 inkwell::IntPredicate::NE
                             } else {
