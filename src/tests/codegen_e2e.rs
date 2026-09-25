@@ -2462,6 +2462,7 @@ fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
         "--tool=memcheck".into(),
         "--error-exitcode=1".into(),
         "--leak-check=full".into(),
+        "--show-leak-kinds=definite,possible".into(),
         "--errors-for-leak-kinds=definite,indirect".into(),
     ];
     let observation = checked_codegen_compile_and_observe_valgrind_with_args(
@@ -2483,6 +2484,12 @@ fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
         map_valgrind_args,
     )
     .expect("mixed Map<Any> values must run under Valgrind");
+    if std::env::var_os("MIMI_MAP_ANY_VALGRIND_TRACE").is_some() {
+        eprintln!(
+            "Map/Any Valgrind Memcheck details (including possible-loss allocation stacks):\n{}",
+            observation.stderr
+        );
+    }
     assert_eq!(
         observation.exit_code,
         Some(0),
