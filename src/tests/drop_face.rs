@@ -7,8 +7,6 @@
 //! 真实模式。本文件把该面显式固化为正集（全部应绿，双后端），作为 0.39.57
 //! 裁决 (a) `linear drop T` vs (b) 精简 drop-only 泛型面的基线。
 
-use super::*;
-
 fn has_code(errors: &[crate::diagnostic::Diagnostic], code: &str) -> bool {
     errors.iter().any(|d| d.code.as_deref() == Some(code))
 }

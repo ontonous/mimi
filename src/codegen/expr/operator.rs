@@ -795,7 +795,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
                 self.compile_float_binop(op, l, r)
             }
-            (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r))
+            (BasicValueEnum::PointerValue(_), BasicValueEnum::PointerValue(_))
                 if op == BinOp::Add =>
             {
                 self.compile_string_binop(lhs, rhs)

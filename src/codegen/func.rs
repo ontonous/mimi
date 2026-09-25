@@ -3924,7 +3924,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // IR that O0 tolerated by luck and O1 turns into an LLVM abort
         // ("Cannot emit physreg copy instruction").
         if !self.block_has_terminator() {
-            let mut last_val = self.adjust_int_val(last_val, ret_type)?;
+            let last_val = self.adjust_int_val(last_val, ret_type)?;
             let last_val = self.load_return_value_if_needed(last_val)?;
             // GENERIC-RET-ALIGN: aggregate returns must match the declared
             // signature layout too (tuple slot widths) — see the explicit

@@ -4,7 +4,7 @@
 //! forbids AST-type dependencies there; this walks legacy `FuncDef` AST
 //! signatures by design.
 
-use crate::ast::{GenericParam, Type};
+use crate::ast::Type;
 use crate::core::{ResolvedType, ResolvedTypeId, ResolvedTypeTable};
 use std::collections::HashMap;
 

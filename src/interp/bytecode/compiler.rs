@@ -3704,7 +3704,7 @@ impl BytecodeCompiler {
                 if let Some(flow) = self
                     .flow_transition_funcs
                     .keys()
-                    .find(|(f, t, s)| t == method && s == &state_name)
+                    .find(|(_, t, s)| t == method && s == &state_name)
                     .map(|(f, _, _)| f.clone())
                 {
                     // Compile [obj] + args into consecutive registers and emit the
@@ -6422,7 +6422,7 @@ impl BytecodeCompiler {
                         if let Some((flow, _, _)) = self
                             .flow_transition_funcs
                             .keys()
-                            .find(|(f, t, s)| t == method && s == &state_name)
+                            .find(|(_, t, s)| t == method && s == &state_name)
                         {
                             if let Some(target) =
                                 self.flow_transition_target(flow, method, &state_name)

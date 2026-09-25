@@ -32,7 +32,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     let void = ctx.void_type();
     // Boxed Mimi string `{ i8*, i64 }` — used as the return type of runtime
     // string helpers that must preserve embedded NUL bytes (BUG H fix).
-    let str_box_ty = ctx.struct_type(
+    let _str_box_ty = ctx.struct_type(
         &[
             BasicTypeEnum::PointerType(i8_ptr),
             BasicTypeEnum::IntType(i64),

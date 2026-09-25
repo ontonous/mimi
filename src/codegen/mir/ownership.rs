@@ -289,7 +289,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         self.generator.builder.position_at_end(invalid);
         self.emit_abort_with_message("[E0800] canonical MIR variant tag is invalid", subject)?;
         self.generator.builder.position_at_end(merge);
-        let mut cloned = self
+        let cloned = self
             .generator
             .builder
             .build_phi(aggregate.get_type(), "mir_variant_clone_result")

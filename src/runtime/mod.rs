@@ -4090,7 +4090,6 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
 /// Pointer arguments must be valid NUL-terminated C strings (unless
 /// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
 /// and key/value arrays must have at least `len` valid elements.
-#[no_mangle]
 /// Boxed Mimi string returned by runtime string helpers: `{ data_ptr, byte_len }`.
 /// Must match the codegen string struct layout `{ i8*, i64 }` so the result can be
 /// used directly as a Mimi `string` value without re-boxing via `strlen` (BUG H).

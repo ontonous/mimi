@@ -5767,12 +5767,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
                         );
                     // Nested Option/Result Ok payloads start with i1 — not product tuples.
-                    let ok_is_nested = !fields.is_empty()
+                    let _ok_is_nested = !fields.is_empty()
                         && matches!(
                             fields[0],
                             BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
                         );
-                    let ok_is_list = fields.len() == 2
+                    let _ok_is_list = fields.len() == 2
                         && matches!(
                             fields[0],
                             BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
@@ -9233,7 +9233,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn json_storage_llvm(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         use crate::ast::Type;
         let i64_ty = self.context.i64_type();
-        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let _i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         match ty.unlocated() {
             // `Option<T>` is always stored inline as `{disc, payload}` (the
             // discriminant in the low bit of the 8-byte tag at field 0, the payload
@@ -9291,7 +9291,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into(),
                 )
             }
-            Type::Result(ok, err) => self.json_storage_llvm(ty),
+            Type::Result(_, _) => self.json_storage_llvm(ty),
             Type::Name(n, _) if n == "List" => Some(self.list_struct_type().into()),
             Type::Name(n, _) if n == "string" => Some(BasicTypeEnum::IntType(i64_ty)),
             Type::Name(n, _) => match n.as_str() {
@@ -9507,7 +9507,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ty: &crate::ast::Type,
         slot: inkwell::values::PointerValue<'ctx>,
         actual_ty: Option<BasicTypeEnum<'ctx>>,
-        is_boxed: bool,
+        _is_boxed: bool,
     ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
         let nty = self.json_norm(ty);
         let ty = &nty;

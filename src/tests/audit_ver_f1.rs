@@ -17,8 +17,6 @@
 
 #[cfg(test)]
 mod audit_ver_f1 {
-    use super::*;
-
     fn verify(src: &str) -> Vec<crate::verifier::VerificationResult> {
         crate::verifier::verify_source(src).expect("verify_source")
     }

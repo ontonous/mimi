@@ -4996,16 +4996,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // and retarget to the mangled instance, exactly
                                 // like the Function arm.
                                 if let Some(fdef) = self.generator.func_defs.get(name).cloned() {
-                                    let mut ast_map: std::collections::HashMap<
+                                    let ast_map: std::collections::HashMap<
                                         String,
                                         crate::ast::Type,
-                                    >;
-                                    if !call.type_arguments.is_empty() {
-                                        ast_map = resolved_type_args_to_ast(
+                                    > = if !call.type_arguments.is_empty() {
+                                        resolved_type_args_to_ast(
                                             &fdef.generics,
                                             &call.type_arguments,
                                             self.program.resolved_types(),
-                                        );
+                                        )
                                     } else {
                                         // Inferred (non-turbofish) call: recover the
                                         // bindings structurally from argument types.
@@ -5027,12 +5026,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                                 .generics
                                                 .iter()
                                                 .all(|g| recovered.contains_key(&g.name));
-                                        ast_map = if complete {
+                                        if complete {
                                             recovered
                                         } else {
                                             Default::default()
-                                        };
-                                    }
+                                        }
+                                    };
                                     if !fdef.generics.is_empty() && !ast_map.is_empty() {
                                         let mangled =
                                             CodeGenerator::mangle_name(&fdef.name, &ast_map);
@@ -10901,7 +10900,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         data: inkwell::values::PointerValue<'ctx>,
     ) -> Result<(), CompileError> {
         let i64_ty = self.generator.context.i64_type();
-        let ptr_ty = self
+        let _ptr_ty = self
             .generator
             .context
             .ptr_type(inkwell::AddressSpace::default());
@@ -11139,7 +11138,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         outer_len: inkwell::values::IntValue<'ctx>,
         src_outer: inkwell::values::PointerValue<'ctx>,
         dst_outer: inkwell::values::PointerValue<'ctx>,
-        inner_elem_size: u64,
+        _inner_elem_size: u64,
         inner_is_string: bool,
     ) -> Result<(), CompileError> {
         let i64_ty = self.generator.context.i64_type();
