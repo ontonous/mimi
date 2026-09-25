@@ -991,6 +991,150 @@ mod tests {
     }
 
     #[test]
+    fn owned_map_miss_is_absence_and_present_zero_stays_distinguishable() {
+        let owners = Arc::new(AnyOwnerTable::with_capacity(2));
+        let seed = owners
+            .allocate(DescriptorId::I64, AnyValue::I64(0))
+            .expect("zero-valued owner fits");
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        let map = empty
+            .set_transactional("zero", seed, DescriptorId::I64, SetFailpoint::None)
+            .expect("insert zero-valued owner");
+        drop(empty);
+        owners.release(seed).expect("caller releases seed token");
+
+        assert_eq!(owners.live_count(), Ok(1));
+        assert_eq!(map.get_owned("missing"), Ok(None));
+        assert_eq!(owners.live_count(), Ok(1));
+
+        let present = map
+            .get_owned("zero")
+            .expect("present lookup succeeds")
+            .expect("zero-valued entry is present");
+        assert_eq!(owners.read_i64(present, DescriptorId::I64), Ok(0));
+        owners.release(present).expect("release retained lookup");
+        drop(map);
+        assert_eq!(owners.live_count(), Ok(0));
+    }
+
+    #[test]
+    fn owned_map_duplicate_payload_tokens_survive_remove_snapshots_and_drop_once() {
+        let probe = DropProbe::default();
+        let owners = Arc::new(AnyOwnerTable::with_capacity(8));
+        let seed = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("shared", probe.clone())),
+            )
+            .expect("string owner fits");
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        let base = empty
+            .set_transactional("a", seed, DescriptorId::STRING, SetFailpoint::None)
+            .expect("first entry owns a token");
+        drop(empty);
+        owners.release(seed).expect("caller releases seed token");
+
+        let alias = base
+            .get_owned("a")
+            .expect("get succeeds")
+            .expect("first entry exists");
+        let updated = base
+            .set_transactional("b", alias, DescriptorId::STRING, SetFailpoint::None)
+            .expect("second entry retains the same payload independently");
+        owners.release(alias).expect("caller releases get snapshot");
+        assert_eq!(owners.live_count(), Ok(3));
+
+        let removed = updated
+            .remove_snapshot("a")
+            .expect("remove publishes a sibling root retaining b");
+        assert!(!removed.root.entries.contains_key("a"));
+        assert_eq!(
+            owners.read_string(removed.root.entries["b"], DescriptorId::STRING),
+            Ok("shared".into())
+        );
+        assert_eq!(probe.count(), 0);
+
+        drop(base);
+        drop(updated);
+        assert_eq!(owners.live_count(), Ok(1));
+        assert_eq!(probe.count(), 0);
+        assert_eq!(
+            owners.read_string(removed.root.entries["b"], DescriptorId::STRING),
+            Ok("shared".into())
+        );
+
+        drop(removed);
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(probe.count(), 1);
+    }
+
+    #[test]
+    fn owned_map_concurrent_snapshot_retain_read_release_and_drop_balance() {
+        let probe = DropProbe::default();
+        let owners = Arc::new(AnyOwnerTable::with_capacity(16));
+        let seed = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("parallel", probe.clone())),
+            )
+            .expect("string owner fits");
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        let base = empty
+            .set_transactional("key", seed, DescriptorId::STRING, SetFailpoint::None)
+            .expect("map root retains seed");
+        drop(empty);
+        owners.release(seed).expect("caller releases seed token");
+        let shared = Arc::new(base);
+
+        let workers = (0..8)
+            .map(|_| {
+                let shared = shared.clone();
+                let owners = owners.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..64 {
+                        let sibling = shared.as_ref().clone();
+                        let got = sibling
+                            .get_owned("key")
+                            .expect("concurrent get succeeds")
+                            .expect("key remains present");
+                        assert_eq!(
+                            owners.read_string(got, DescriptorId::STRING),
+                            Ok("parallel".into())
+                        );
+                        owners.release(got).expect("release get snapshot");
+
+                        let values = sibling.values_owned().expect("values snapshot succeeds");
+                        assert_eq!(values.len(), 1);
+                        assert_eq!(
+                            owners.read_string(values[0], DescriptorId::STRING),
+                            Ok("parallel".into())
+                        );
+                        owners.release(values[0]).expect("release values snapshot");
+
+                        let removed = sibling
+                            .remove_snapshot("absent")
+                            .expect("unrelated remove creates a valid snapshot");
+                        assert_eq!(
+                            owners.read_string(removed.root.entries["key"], DescriptorId::STRING),
+                            Ok("parallel".into())
+                        );
+                        drop(removed);
+                        drop(sibling);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().expect("concurrent owner operations succeed");
+        }
+        assert_eq!(owners.live_count(), Ok(1));
+        drop(shared);
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(probe.count(), 1);
+    }
+
+    #[test]
     fn owned_map_set_failpoints_rollback_tokens_and_preserve_old_root() {
         let probe = DropProbe::default();
         let owners = Arc::new(AnyOwnerTable::with_capacity(5));
