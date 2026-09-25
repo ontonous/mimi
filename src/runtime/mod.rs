@@ -3154,10 +3154,9 @@ pub unsafe extern "C" fn mimi_map_has_key(handle: MapHandle, key: *const std::ff
     if handle == 0 || key.is_null() {
         return 0;
     }
-    // SAFETY: `handle` is a valid live handle; `map_from_handle`/`set_from_handle` aborts on invalid handles
+    // SAFETY: `key` is non-null and valid for the duration of this call, as required by the function contract.
     let s = unsafe { cstr_to_string(key) };
-    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
-    unsafe { map_from_handle(handle).inner.contains_key(&s) as i32 }
+    map_from_handle(handle).inner.contains_key(&s) as i32
 }
 
 ///
@@ -3172,10 +3171,9 @@ pub unsafe extern "C" fn mimi_map_get(
     if handle == 0 || key.is_null() {
         return 0;
     }
-    // SAFETY: `key` is a valid null-terminated C string returned by a Mimi allocation function
+    // SAFETY: `key` is non-null and valid for the duration of this call, as required by the function contract.
     let s = unsafe { cstr_to_string(key) };
-    // SAFETY: handle validated by `map_from_handle`; deref is in a single scope.
-    unsafe { map_from_handle(handle).inner.get(&s).copied().unwrap_or(0) }
+    map_from_handle(handle).inner.get(&s).copied().unwrap_or(0)
 }
 
 #[no_mangle]
@@ -22217,8 +22215,7 @@ pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHan
     if handle == 0 {
         return 0;
     }
-    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
-    unsafe { set_from_handle(handle).inner.contains(&value) as i64 }
+    set_from_handle(handle).inner.contains(&value) as i64
 }
 
 /// Probe a string Set by logical content. This is the string counterpart to
@@ -22262,8 +22259,7 @@ pub unsafe extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
-    // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
-    unsafe { set_from_handle(handle).inner.len() as i64 }
+    set_from_handle(handle).inner.len() as i64
 }
 
 /// Materialize a scalar Set as a canonical MIR List.
@@ -24218,6 +24214,8 @@ mod handle_registry_tests {
         let h = mimi_set_new();
         let h2 = unsafe { mimi_set_insert(h, 7) };
         assert_eq!(h, h2);
+        assert_eq!(unsafe { mimi_set_contains(h, 7) }, 1);
+        assert_eq!(unsafe { mimi_set_size(h) }, 1);
         unsafe { mimi_set_destroy(h) };
     }
 }
