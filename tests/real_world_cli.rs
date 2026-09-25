@@ -134,7 +134,7 @@ fn temp_build_dir_from_linker_stderr(stderr: &[u8]) -> PathBuf {
         .find("mimi-build-")
         .expect("staging path marker must be present");
     let separator = token[marker..]
-        .find(|character| character == '/' || character == '\\')
+        .find(['/', '\\'])
         .expect("staging path must include an artifact separator");
     PathBuf::from(&token[..marker + separator])
 }
@@ -5089,15 +5089,13 @@ fn canonical_scalar_ffi_f32_contract_imported_module_rejects_before_legacy() {
     ] {
         fs::write(
             dir.join("ffi_types.mimi"),
-            format!(
-                r#"
+            r#"
 pub type Scalar = f32
-pub extern "C" {{
-    func imported_f32_contract(value: Scalar) -> Scalar {{CONTRACT_CLAUSE}};
-}}
-pub func call(value: Scalar) -> Scalar {{ imported_f32_contract(value) }}
+pub extern "C" {
+    func imported_f32_contract(value: Scalar) -> Scalar {CONTRACT_CLAUSE};
+}
+pub func call(value: Scalar) -> Scalar { imported_f32_contract(value) }
 "#
-            )
             .replace("{CONTRACT_CLAUSE}", contract_clause),
         )
         .expect("write imported f32 contract boundary module");

@@ -26,7 +26,6 @@ fn checker_dispatch_names() -> BTreeSet<String> {
     let seg = &src[i..];
     // Walk each `=>` and collect the quoted-name chain before it (arms span
     // multiple lines: `"a"\n | "b"\n | "c" => {`).
-    let bytes = seg.as_bytes();
     let mut k = 0usize;
     while let Some(arrow) = seg[k..].find("=>") {
         let abs_arrow = k + arrow;

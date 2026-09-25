@@ -1123,7 +1123,7 @@ pub(crate) fn select_default_route(
     // therefore either inside this finite envelope or rejected; it cannot
     // re-enter the legacy route.
     if materialized_collection_candidate {
-        if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(canonical) {
             // R6-1052: the plain-scalar stdout face is a route candidacy over
             // a checker-side type scan, not a migrated operation face.  When
             // the island preflight proves the graph carries an operation the
@@ -1156,7 +1156,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_option_string_candidate {
-        if let Err(errors) = mimi::core::mir::validate_option_string_variant_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_option_string_variant_island(canonical) {
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1176,8 +1176,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_option_nested_tuple_candidate {
-        if let Err(errors) =
-            mimi::core::mir::validate_option_nested_tuple_variant_island(&canonical)
+        if let Err(errors) = mimi::core::mir::validate_option_nested_tuple_variant_island(canonical)
         {
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
@@ -1198,7 +1197,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_copy_option_i32_candidate {
-        if let Err(errors) = mimi::core::mir::validate_copy_option_i32_variant_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_copy_option_i32_variant_island(canonical) {
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1219,7 +1218,7 @@ pub(crate) fn select_default_route(
 
     if materialized_copy_option_bool_candidate {
         if let Err(errors) = mimi::core::mir::validate_copy_option_variant_island(
-            &canonical,
+            canonical,
             mimi::core::PrimitiveType::Bool,
             mimi::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND,
         ) {
@@ -1242,7 +1241,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_copy_option_i64_candidate {
-        if let Err(errors) = mimi::core::mir::validate_copy_option_i64_variant_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_copy_option_i64_variant_island(canonical) {
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1262,7 +1261,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_copy_option_f64_candidate {
-        if let Err(errors) = mimi::core::mir::validate_copy_option_f64_variant_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_copy_option_f64_variant_island(canonical) {
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1282,7 +1281,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_copy_result_i32_candidate {
-        if let Err(errors) = mimi::core::mir::validate_copy_result_i32_variant_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_copy_result_i32_variant_island(canonical) {
             return reject_migrated_candidates_with_copy_result(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1302,7 +1301,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_managed_result_call_candidate {
-        if let Err(errors) = mimi::core::mir::validate_managed_result_call_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_managed_result_call_island(canonical) {
             return DefaultMirRoute::Rejected(format!(
                 "{} capability gate failed: {errors:?}",
                 mimi::core::mir::MANAGED_RESULT_CALL_ISLAND
@@ -1311,7 +1310,7 @@ pub(crate) fn select_default_route(
     }
 
     if materialized_session_candidate {
-        if let Err(errors) = mimi::core::mir::validate_session_channel_island(&canonical) {
+        if let Err(errors) = mimi::core::mir::validate_session_channel_island(canonical) {
             return DefaultMirRoute::Rejected(format!(
                 "{} capability gate failed: {errors:?}",
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
@@ -1324,7 +1323,7 @@ pub(crate) fn select_default_route(
     // native/bytecode island.  Scan the complete canonical graph before the
     // verifier's contract pass so every selected consumer has an explicit
     // capability, including no-obligation functions.
-    if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
+    if let Err(error) = mimi::verifier::validate_mir_capabilities(canonical) {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
                 "managed Result direct-call canonical MIR verifier capability gate failed: {error:?}"
@@ -1364,7 +1363,7 @@ pub(crate) fn select_default_route(
     // before use.
     let receipt = canonical.route_receipt("canonical-dispatch-v1");
     if let Err(errors) =
-        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(canonical, &receipt)
     {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
@@ -1390,7 +1389,7 @@ pub(crate) fn select_default_route(
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
     }
-    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&canonical) {
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(canonical) {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(format!(
                 "managed Result direct-call native MIR preflight failed: {errors:?}"
@@ -1421,7 +1420,7 @@ pub(crate) fn select_default_route(
     // or inconclusive verifier result means this program is not yet a complete
     // default-switch island.
     let verifier_ready =
-        match mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new()) {
+        match mimi::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new()) {
             Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
                 &results,
                 exact_f64_flow_failure_route_candidate,
@@ -3450,7 +3449,7 @@ mod tests {
     #[test]
     fn rejected_flow_candidate_cannot_reenter_legacy_route() {
         let source = "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) println(c2.n) c2.n }";
-        let (checked, file) = checked(&source);
+        let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("a recognized Flow candidate must fail closed instead of using legacy");
         };
