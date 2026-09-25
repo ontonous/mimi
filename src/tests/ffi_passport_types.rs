@@ -71,6 +71,13 @@ func main() -> i32 {
 /// A scalar declaration without contracts still uses receipt-bearing MIR.
 #[test]
 fn scalar_ffi_without_contract_reaches_canonical_symbol_lookup() {
+    // MIMI_FFI_LIB is process-global. Other tests temporarily install shared
+    // libraries to exercise the canonical host-binding path, so keep this
+    // missing-symbol probe isolated and deterministic under the default test
+    // harness parallelism.
+    let _ffi_env_guard = FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: i32) -> i32;
