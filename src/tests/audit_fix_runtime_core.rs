@@ -152,12 +152,9 @@ fn runtime_core_tuple_deserialize_empty_string_allocates() {
 fn runtime_core_set_to_list_round_trip_boxed_slice() {
     let h = rt::mimi_set_new();
     assert_ne!(h, 0);
-    // SAFETY: `h` is the live set handle from `mimi_set_new` above; inserting an i64 key touches no Rust data.
-    unsafe { rt::mimi_set_insert(h, 1) };
-    // SAFETY: same live set handle `h` as above.
-    unsafe { rt::mimi_set_insert(h, 2) };
-    // SAFETY: same live set handle `h` as above.
-    unsafe { rt::mimi_set_insert(h, 3) };
+    rt::mimi_set_insert(h, 1);
+    rt::mimi_set_insert(h, 2);
+    rt::mimi_set_insert(h, 3);
     let mut len: i64 = -1;
     // SAFETY: `h` is the live set handle from `mimi_set_new`; the runtime returns a fresh boxed slice and writes its length.
     let ptr = unsafe { rt::mimi_set_to_list(h, &mut len) };
@@ -172,8 +169,7 @@ fn runtime_core_set_to_list_round_trip_boxed_slice() {
     }
     // SAFETY: `ptr`/`len` are the boxed slice returned by `mimi_set_to_list` above.
     unsafe { rt::mimi_set_list_free(ptr, len) };
-    // SAFETY: `h` is the live set handle from `mimi_set_new`; nothing uses it after destruction.
-    unsafe { rt::mimi_set_destroy(h) };
+    rt::mimi_set_destroy(h);
 }
 
 #[test]

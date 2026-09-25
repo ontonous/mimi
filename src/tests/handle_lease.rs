@@ -64,7 +64,7 @@ fn map_stale_generation_is_typed_error() {
     assert_eq!(mimi_handle_last_error(), HANDLE_ERR_STALE);
     // size() on a stale handle must not abort and must not report a live size.
     // SAFETY: stale handle — `mimi_map_size` resolves via the generation check and reports 0 without touching freed storage.
-    let live_sz = unsafe { mimi_map_size(h) };
+    let live_sz = mimi_map_size(h);
     assert_eq!(live_sz, 0);
 }
 
@@ -90,8 +90,7 @@ fn set_c_pin_defers_destroy_until_release() {
 #[test]
 fn set_stale_generation_is_typed_error() {
     let h = mimi_set_new();
-    // SAFETY: `h` is the live set handle created above, destroyed exactly once here.
-    unsafe { mimi_set_destroy(h) };
+    mimi_set_destroy(h);
     let mut sz = 99i64;
     // SAFETY: destroyed handle — the generation check resolves the stale handle to a typed error, never a dereference.
     let err = unsafe { mimi_set_try_size(h, &mut sz) };

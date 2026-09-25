@@ -3256,11 +3256,10 @@ pub unsafe extern "C" fn mimi_map_destroy(handle: MapHandle) {
 }
 
 /// Return the number of entries in a live Map. A zero handle has size zero.
-///
-/// # Safety
-/// A nonzero `handle` must be a live MapHandle returned by this runtime.
+/// Nonzero handles are checked by the runtime registry; stale or invalid
+/// handles follow the runtime's fail-loud handle-error path.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
+pub extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -3755,12 +3754,9 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
 
 #[no_mangle]
 /// Return a newly allocated key list in deterministic key order.
-///
-/// # Safety
-/// `handle` must be zero or a live MapHandle for the duration of this call.
-/// The returned MimiList is owned by the caller and must be released exactly
-/// once with `mimi_list_free(list, true)`.
-pub unsafe extern "C" fn mimi_map_keys(handle: MapHandle) -> *mut MimiList {
+/// A zero handle produces an empty list. The returned `MimiList` is owned by
+/// the caller and must be released exactly once with `mimi_list_free(list, true)`.
+pub extern "C" fn mimi_map_keys(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, false)
 }
 
@@ -3779,7 +3775,7 @@ pub unsafe extern "C" fn mimi_map_values(handle: MapHandle) -> *mut MimiList {
     mimi_map_collect(handle, true)
 }
 
-unsafe fn mimi_map_collect_pair(handle: MapHandle, collect_values: bool) -> MimiListPair {
+fn mimi_map_collect_pair(handle: MapHandle, collect_values: bool) -> MimiListPair {
     let list = mimi_map_collect(handle, collect_values);
     if list.is_null() {
         return MimiListPair {
@@ -3804,13 +3800,12 @@ unsafe fn mimi_map_collect_pair(handle: MapHandle, collect_values: bool) -> Mimi
 }
 
 #[no_mangle]
-///
-/// # Safety
-/// `handle` must be zero or a live `MapHandle` returned by this runtime. The
-/// caller must consume `data` using the returned length and string-list ABI,
-/// then release it through the matching list owner exactly once.
-pub unsafe extern "C" fn mimi_map_keys_pair(handle: MapHandle) -> MimiListPair {
-    unsafe { mimi_map_collect_pair(handle, false) }
+/// Return a new key-list pair for a checked Map handle. A zero handle produces
+/// an empty pair. The returned `data` is owned by the caller; consume it using
+/// the returned length and string-list ABI, then release it through the
+/// matching list owner exactly once.
+pub extern "C" fn mimi_map_keys_pair(handle: MapHandle) -> MimiListPair {
+    mimi_map_collect_pair(handle, false)
 }
 
 #[no_mangle]
@@ -3821,7 +3816,7 @@ pub unsafe extern "C" fn mimi_map_keys_pair(handle: MapHandle) -> MimiListPair {
 /// externally owned value storage alive until those handles are no longer
 /// used, and release the returned data using the matching list ABI.
 pub unsafe extern "C" fn mimi_map_values_pair(handle: MapHandle) -> MimiListPair {
-    unsafe { mimi_map_collect_pair(handle, true) }
+    mimi_map_collect_pair(handle, true)
 }
 
 #[no_mangle]
@@ -3973,6 +3968,17 @@ pub unsafe extern "C" fn mimi_json_escape_string(
 ///   (`{u32 magic, u32 _pad, char* ptr, i64 len}`) introduced by the
 ///   `List<string>` element ABI (see `list_string.rs`). The magic lets us tell
 ///   the two representations apart.
+///
+/// # Safety
+/// `slot` may be null. Otherwise it must point to an initialized, readable
+/// pointer-sized slot. A non-null slot value must point to either a readable
+/// `MimiStr` box or a readable legacy string box whose first field is a
+/// pointer. If the first `u32` equals `MIMI_STR_MAGIC`, the value must be a
+/// valid `MimiStr`; its nonnegative length must fit within `isize::MAX`, and
+/// its non-null byte pointer must be readable for that length. Otherwise the
+/// legacy box's first field must be null or a valid NUL-terminated C string.
+/// These objects and backing bytes must remain readable until this function
+/// returns; the function only borrows them and does not retain them.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_string_value(
     slot: *const std::ffi::c_void,
@@ -4239,22 +4245,24 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
     }
 }
 
-/// Character-index (Unicode scalar) substring `[start, end)`.
-/// Returns a new heap-allocated string; aborts on `start > end` or end OOB.
-///
-/// # Safety
-/// Pointer arguments must be valid NUL-terminated C strings (unless
-/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
-/// and key/value arrays must have at least `len` valid elements.
 /// Boxed Mimi string returned by runtime string helpers: `{ data_ptr, byte_len }`.
-/// Must match the codegen string struct layout `{ i8*, i64 }` so the result can be
-/// used directly as a Mimi `string` value without re-boxing via `strlen` (BUG H).
+/// This matches the codegen string struct layout `{ i8*, i64 }` so the result can
+/// be used directly as a Mimi `string` value without re-boxing via `strlen`.
 #[repr(C)]
 pub struct MimiStrBox {
     pub ptr: *mut std::ffi::c_char,
     pub len: i64,
 }
 
+/// Character-index (Unicode scalar) substring `[start, end)`.
+/// Returns a new heap-allocated string; aborts on `start > end` or end OOB.
+///
+/// # Safety
+/// If `s` is non-null and `0 < len <= 64 MiB`, it must point to `len` readable
+/// bytes for the duration of this call. The bytes need not be NUL-terminated
+/// and may contain embedded NULs. A null pointer or nonpositive length is
+/// treated as an empty string. A non-null pointer with `len > 64 MiB` aborts
+/// before reading the bytes; the length guard does not validate the pointer.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_str_substring(
     s: *const std::ffi::c_char,
@@ -4423,9 +4431,14 @@ pub unsafe extern "C" fn mimi_str_split(
 
 ///
 /// # Safety
-/// Pointer arguments must be valid NUL-terminated C strings (unless
-/// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
-/// and key/value arrays must have at least `len` valid elements.
+/// `list` may be null. Otherwise it must point to a readable, aligned
+/// `MimiList` prefix. For a nonempty list, its data must contain the
+/// `len`-element pointer array and each entry must point to a readable
+/// `MimiStr` box with a readable byte range. A null `sep` or negative
+/// `sep_len` returns an empty string before reading the list. Otherwise `sep`
+/// must point to `sep_len` readable bytes. A non-null `out_len` must point to a
+/// writable `i64`. Inputs are borrowed and must remain valid and unchanged
+/// while the join runs.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_str_join_ll(
     list: *const MimiList,
@@ -4443,6 +4456,16 @@ pub unsafe extern "C" fn mimi_str_join_ll(
     unsafe { list_string::join_fat_string_list(list, sep_bytes, out_len) }
 }
 
+/// Join a runtime string list with `sep`. A null list returns an allocated
+/// empty string; a legacy string-list ABI is rejected with a null result.
+///
+/// # Safety
+/// `list` may be null. Otherwise it must point to a readable, aligned full
+/// `MimiList`; its string-list prefix, data pointer array, and every referenced
+/// `MimiStr` box and byte range must remain valid and unchanged for the call.
+/// `sep` may be null (treated as empty); otherwise it must point to a readable,
+/// NUL-terminated C string for the duration of the call. The function borrows
+/// both inputs and does not retain them.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_str_join(
     list: *const MimiList,
@@ -4648,10 +4671,10 @@ fn list_result_to_json_impl(list: *const MimiList, mode: i64) -> *mut std::ffi::
             } else if mode >= 10 {
                 let map_mode = mode - 10;
                 let json_ptr = match map_mode {
-                    1 => unsafe { mimi_map_to_json_string(ok as MapHandle) },
-                    2 => unsafe { mimi_map_to_json_bool(ok as MapHandle) },
-                    3 => unsafe { mimi_map_to_json_f64_serde(ok as MapHandle) },
-                    _ => unsafe { mimi_map_to_json_i64(ok as MapHandle) },
+                    1 => mimi_map_to_json_string(ok as MapHandle),
+                    2 => mimi_map_to_json_bool(ok as MapHandle),
+                    3 => mimi_map_to_json_f64_serde(ok as MapHandle),
+                    _ => mimi_map_to_json_i64(ok as MapHandle),
                 };
                 // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
                 let s = unsafe { cstr_to_string(json_ptr) };
@@ -4729,10 +4752,10 @@ pub unsafe extern "C" fn mimi_list_option_map_to_json(
                 mimi_map_to_json_product_i64(handle, mode - 10, 0)
             } else {
                 match mode {
-                    1 => unsafe { mimi_map_to_json_string(handle) },
-                    2 => unsafe { mimi_map_to_json_bool(handle) },
-                    3 => unsafe { mimi_map_to_json_f64_serde(handle) },
-                    _ => unsafe { mimi_map_to_json_i64(handle) },
+                    1 => mimi_map_to_json_string(handle),
+                    2 => mimi_map_to_json_bool(handle),
+                    3 => mimi_map_to_json_f64_serde(handle),
+                    _ => mimi_map_to_json_i64(handle),
                 }
             };
             // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -4845,12 +4868,10 @@ fn list_map_to_string_impl(
         // SAFETY: `lst.data` points to a valid, properly aligned value
         let handle = unsafe { *(lst.data as *const i64).offset(i) } as MapHandle;
         let json_ptr = match mode {
-            MapJsonMode::String => unsafe { mimi_map_to_json_string(handle) },
-            MapJsonMode::Bool => unsafe { mimi_map_to_json_bool(handle) },
-            MapJsonMode::Float | MapJsonMode::FloatJson => unsafe {
-                mimi_map_to_json_f64_serde(handle)
-            },
-            MapJsonMode::Int => unsafe { mimi_map_to_json_i64(handle) },
+            MapJsonMode::String => mimi_map_to_json_string(handle),
+            MapJsonMode::Bool => mimi_map_to_json_bool(handle),
+            MapJsonMode::Float | MapJsonMode::FloatJson => mimi_map_to_json_f64_serde(handle),
+            MapJsonMode::Int => mimi_map_to_json_i64(handle),
             MapJsonMode::Any => mimi_map_to_json_any(handle),
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -4888,10 +4909,10 @@ pub extern "C" fn mimi_option_map_to_json(
         unsafe { mimi_map_to_json_product_i64(handle, mode - 10, 0) }
     } else {
         match mode {
-            1 => unsafe { mimi_map_to_json_string(handle) },
-            2 => unsafe { mimi_map_to_json_bool(handle) },
-            3 => unsafe { mimi_map_to_json_f64_serde(handle) },
-            _ => unsafe { mimi_map_to_json_i64(handle) },
+            1 => mimi_map_to_json_string(handle),
+            2 => mimi_map_to_json_bool(handle),
+            3 => mimi_map_to_json_f64_serde(handle),
+            _ => mimi_map_to_json_i64(handle),
         }
     };
     // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -4920,10 +4941,10 @@ pub extern "C" fn mimi_option_set_to_json(
         unsafe { mimi_set_to_json_product_i64(handle, mode - 10, 0) }
     } else {
         match mode {
-            1 => unsafe { mimi_set_to_json_string(handle) },
-            2 => unsafe { mimi_set_to_json_bool(handle) },
-            3 => unsafe { mimi_set_to_json_f64(handle) },
-            _ => unsafe { mimi_set_to_json_i64(handle) },
+            1 => mimi_set_to_json_string(handle),
+            2 => mimi_set_to_json_bool(handle),
+            3 => mimi_set_to_json_f64(handle),
+            _ => mimi_set_to_json_i64(handle),
         }
     };
     // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -4960,10 +4981,10 @@ pub extern "C" fn mimi_result_map_to_json(
             unsafe { mimi_map_to_json_product_i64(ok_handle, mode - 10, 0) }
         } else {
             match mode {
-                1 => unsafe { mimi_map_to_json_string(ok_handle) },
-                2 => unsafe { mimi_map_to_json_bool(ok_handle) },
-                3 => unsafe { mimi_map_to_json_f64_serde(ok_handle) },
-                _ => unsafe { mimi_map_to_json_i64(ok_handle) },
+                1 => mimi_map_to_json_string(ok_handle),
+                2 => mimi_map_to_json_bool(ok_handle),
+                3 => mimi_map_to_json_f64_serde(ok_handle),
+                _ => mimi_map_to_json_i64(ok_handle),
             }
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -4997,10 +5018,10 @@ pub extern "C" fn mimi_result_set_to_json(
             unsafe { mimi_set_to_json_product_i64(ok_handle, mode - 10, 0) }
         } else {
             match mode {
-                1 => unsafe { mimi_set_to_json_string(ok_handle) },
-                2 => unsafe { mimi_set_to_json_bool(ok_handle) },
-                3 => unsafe { mimi_set_to_json_f64(ok_handle) },
-                _ => unsafe { mimi_set_to_json_i64(ok_handle) },
+                1 => mimi_set_to_json_string(ok_handle),
+                2 => mimi_set_to_json_bool(ok_handle),
+                3 => mimi_set_to_json_f64(ok_handle),
+                _ => mimi_set_to_json_i64(ok_handle),
             }
         };
         // SAFETY: `json_ptr` is a heap-allocated C string (or heap block) that was returned by a prior allocation; `mimi_free` is the matching deallocation (mimi_alloc/alloc_c_string path)
@@ -5165,7 +5186,7 @@ pub unsafe extern "C" fn mimi_list_set_to_string(list: *const MimiList) -> *mut 
         }
         // SAFETY: `lst.data` points to a valid, properly aligned value
         let handle = unsafe { *(lst.data as *const i64).offset(i) } as SetHandle;
-        let disp = unsafe { mimi_set_to_display(handle) };
+        let disp = mimi_set_to_display(handle);
         // SAFETY: `disp` is a valid null-terminated C string returned by a Mimi allocation function
         let s = unsafe { cstr_to_string(disp) };
         if !disp.is_null() {
@@ -6830,23 +6851,22 @@ pub unsafe extern "C" fn json_get_element(
 /// Serialize a MapHandle of integer ValueHandles to a JSON object string.
 /// Keys are JSON-escaped; values are printed as decimal integers.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_map_to_json_i64(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
     else {
         return json_cycle_error();
     };
 
-    // SAFETY: handle validated inside map_to_json_values.
-    unsafe { map_to_json_values(handle, MapJsonMode::Int) }
+    map_to_json_values(handle, MapJsonMode::Int)
 }
 
 /// Serialize an untyped Record map (`map_new()` values are `Any`). Tagged
 /// strings render as JSON strings; untagged values render as decimal integers.
 /// Keys sort deterministically.
 ///
-/// # Safety
-/// `handle` must be a live MapHandle returned by `mimi_map_new`/`from_json`
-/// (or 0); it is validated by `map_from_handle` inside `map_to_json_values`.
+/// A zero handle serializes as an empty object. Nonzero handles are checked by
+/// the runtime registry; arbitrary untagged integer values remain numbers and
+/// only registered Any string values are decoded as strings.
 #[no_mangle]
 pub extern "C" fn mimi_map_to_json_any(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
@@ -6854,13 +6874,12 @@ pub extern "C" fn mimi_map_to_json_any(handle: MapHandle) -> *mut std::ffi::c_ch
         return json_cycle_error();
     };
 
-    // SAFETY: handle validated inside map_to_json_values.
-    unsafe { map_to_json_values(handle, MapJsonMode::Any) }
+    map_to_json_values(handle, MapJsonMode::Any)
 }
 
 /// Serialize a MapHandle of 0/1 bool ValueHandles as JSON true/false.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
     else {
         return json_cycle_error();
@@ -6871,7 +6890,7 @@ pub unsafe extern "C" fn mimi_map_to_json_bool(handle: MapHandle) -> *mut std::f
 
 /// Serialize a MapHandle of f64-bit ValueHandles for println Display (compact).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
     else {
         return json_cycle_error();
@@ -6882,7 +6901,7 @@ pub unsafe extern "C" fn mimi_map_to_json_f64(handle: MapHandle) -> *mut std::ff
 
 /// Serialize Map f64 for `to_json` (serde-compatible, whole floats as `2.0`).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_to_json_f64_serde(handle: MapHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_map_to_json_f64_serde(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
     else {
         return json_cycle_error();
@@ -6915,7 +6934,7 @@ fn any_handle_json(value: ValueHandle) -> String {
     }
 }
 
-unsafe fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
+fn map_to_json_values(handle: MapHandle, mode: MapJsonMode) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("{}");
     }
@@ -7193,7 +7212,7 @@ pub unsafe extern "C" fn mimi_map_from_json_string(json: *const std::ffi::c_char
 
 /// Serialize a MapHandle whose values are C-string ValueHandles to JSON.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Map, handle)
     else {
         return json_cycle_error();
@@ -7229,6 +7248,25 @@ pub unsafe extern "C" fn mimi_map_to_json_string(handle: MapHandle) -> *mut std:
 /// Serialize Map values that are heap-packed product-tuple structs of i64 fields.
 /// `arity` is the number of i64 fields (e.g. 2 for `(i32,i32)` after widen).
 /// `display_style`: 0 = JSON arrays `[1,2]`, 1 = Display `(1, 2)`.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Product<i64[arity]>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Product<i64[arity]>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_product_i64(
     handle: MapHandle,
@@ -7285,6 +7323,25 @@ pub unsafe extern "C" fn mimi_map_to_json_product_i64(
 /// Serialize Map values that are heap-packed List of product-tuples.
 /// List layout: `{i64 len, ptr data}` where data is `i64` product handles.
 /// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `[(1, 2)]`.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_product_i64(
     handle: MapHandle,
@@ -7547,6 +7604,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_product_i64(
 
 /// Serialize Map values that are SetHandles of product-tuples.
 /// `display_style`: 0 = JSON set arrays, 1 = Display `Set{(…)}`.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_product_i64(
     handle: MapHandle,
@@ -7681,6 +7757,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_product_i64(
 
 /// Serialize Map values that are MapHandles of product-tuples.
 /// `display_style`: 0 = JSON, 1 = Display with `(a, b)` products.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Map<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Map<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_map_product_i64(
     handle: MapHandle,
@@ -8125,6 +8220,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_map_product_i64(
 }
 
 /// Map of Result of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_map_product_i64(
     handle: MapHandle,
@@ -8408,6 +8522,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_result_product_i64(
 }
 
 /// Map of Option of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Result<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Result<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_result_product_i64(
     handle: MapHandle,
@@ -9107,6 +9240,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_option_set_product_i64(
 }
 
 /// Map of List of Option of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Option<Set<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Option<Set<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_option_set_product_i64(
     handle: MapHandle,
@@ -9264,6 +9416,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_option_product_i64(
 }
 
 /// Map of List of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Option<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Option<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_option_product_i64(
     handle: MapHandle,
@@ -9410,6 +9581,25 @@ pub unsafe extern "C" fn mimi_set_from_json_option_result_product_i64(
 }
 
 /// Set of Option of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Option<Result<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Option<Result<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_option_result_product_i64(
     handle: SetHandle,
@@ -9570,6 +9760,25 @@ pub unsafe extern "C" fn mimi_set_from_json_result_option_product_i64(
 }
 
 /// Set of Result of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Result<Option<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Result<Option<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_result_option_product_i64(
     handle: SetHandle,
@@ -9766,6 +9975,25 @@ pub unsafe extern "C" fn mimi_set_from_json_list_map_product_i64(
 }
 
 /// Set of List of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<List<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<List<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_list_map_product_i64(
     handle: SetHandle,
@@ -9985,6 +10213,25 @@ pub unsafe extern "C" fn mimi_set_from_json_result_list_product_i64(
 }
 
 /// Set of Result of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Result<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Result<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_result_list_product_i64(
     handle: SetHandle,
@@ -10365,6 +10612,25 @@ pub unsafe extern "C" fn mimi_list_map_list_product_to_json(
 }
 
 /// Map of List of Map of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Map<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Map<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_map_list_product_i64(
     handle: MapHandle,
@@ -10547,6 +10813,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_map_list_product_i64(
 }
 
 /// Map of Option of Map of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Map<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Map<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_map_list_product_i64(
     handle: MapHandle,
@@ -10757,6 +11042,25 @@ pub unsafe extern "C" fn mimi_set_from_json_result_map_product_i64(
 }
 
 /// Set of Result of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Result<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Result<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_result_map_product_i64(
     handle: SetHandle,
@@ -10964,6 +11268,25 @@ pub unsafe extern "C" fn mimi_map_from_json_map_result_product_i64(
 }
 
 /// Map of Map of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Map<Result<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Map<Result<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_map_result_product_i64(
     handle: MapHandle,
@@ -11085,6 +11408,25 @@ pub unsafe extern "C" fn mimi_set_from_json_map_set_product_i64(
 }
 
 /// Set of Map of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Map<Set<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Map<Set<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_map_set_product_i64(
     handle: SetHandle,
@@ -11253,6 +11595,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_map_list_product_i64(
 }
 
 /// Map of Set of Map of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Map<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Map<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_map_list_product_i64(
     handle: MapHandle,
@@ -11371,6 +11732,25 @@ pub unsafe extern "C" fn mimi_set_from_json_map_list_product_i64(
 }
 
 /// Set of Map of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Map<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Map<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_map_list_product_i64(
     handle: SetHandle,
@@ -11538,6 +11918,25 @@ pub unsafe extern "C" fn mimi_map_from_json_map_list_product_i64(
 }
 
 /// Map of Map of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Map<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Map<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_map_list_product_i64(
     handle: MapHandle,
@@ -11681,6 +12080,25 @@ pub unsafe extern "C" fn mimi_map_from_json_map_option_product_i64(
 }
 
 /// Map of Map of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Map<Option<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Map<Option<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_map_option_product_i64(
     handle: MapHandle,
@@ -11822,6 +12240,25 @@ pub unsafe extern "C" fn mimi_set_from_json_option_map_product_i64(
 }
 
 /// Set of Option of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Option<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Option<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_option_map_product_i64(
     handle: SetHandle,
@@ -12032,6 +12469,25 @@ pub unsafe extern "C" fn mimi_map_from_json_map_set_product_i64(
 }
 
 /// Map of Map of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Map<Set<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Map<Set<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_map_set_product_i64(
     handle: MapHandle,
@@ -12151,6 +12607,25 @@ pub unsafe extern "C" fn mimi_set_from_json_map_product_i64(
 }
 
 /// Set of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Map<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Map<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_map_product_i64(
     handle: SetHandle,
@@ -12548,6 +13023,25 @@ pub unsafe extern "C" fn mimi_set_from_json_list_product_i64(
 }
 
 /// Set of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<List<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<List<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_list_product_i64(
     handle: SetHandle,
@@ -12882,6 +13376,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_list_map_product_i64(
 }
 
 /// Map of Set of List of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<List<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<List<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_list_map_product_i64(
     handle: MapHandle,
@@ -13033,6 +13546,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_map_product_i64(
 }
 
 /// Map of List of Set of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Set<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Set<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_set_map_product_i64(
     handle: MapHandle,
@@ -13181,6 +13713,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_map_product_i64(
 }
 
 /// Map of Set of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_map_product_i64(
     handle: MapHandle,
@@ -13332,6 +13883,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_map_product_i64(
 }
 
 /// Map of List of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_map_product_i64(
     handle: MapHandle,
@@ -13480,6 +14050,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_list_product_i64(
 }
 
 /// Map of Set of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_list_product_i64(
     handle: MapHandle,
@@ -13640,6 +14229,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_result_product_i64(
 }
 
 /// Map of List of Set of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Set<Result<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Set<Result<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_set_result_product_i64(
     handle: MapHandle,
@@ -13797,6 +14405,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_option_product_i64(
 }
 
 /// Map of List of Set of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Set<Option<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Set<Option<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_set_option_product_i64(
     handle: MapHandle,
@@ -13954,6 +14581,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_set_product_i64(
 }
 
 /// Map of List of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Set<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Set<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_set_product_i64(
     handle: MapHandle,
@@ -14613,6 +15259,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_result_option_product_i64(
 }
 
 /// Map of List of Result of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Result<Option<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Result<Option<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_result_option_product_i64(
     handle: MapHandle,
@@ -14880,6 +15545,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_option_list_product_i64(
 }
 
 /// Map of Result of Option of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Option<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Option<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_option_list_product_i64(
     handle: MapHandle,
@@ -15171,6 +15855,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_list_product_i64(
 }
 
 /// Map of Option of Set of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Set<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Set<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_set_list_product_i64(
     handle: MapHandle,
@@ -15389,6 +16092,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_result_list_product_i64(
 }
 
 /// Map of Option of Result of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Result<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Result<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_result_list_product_i64(
     handle: MapHandle,
@@ -15660,6 +16382,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_set_product_i64(
 }
 
 /// Map of Result of List of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<List<Set<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<List<Set<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_list_set_product_i64(
     handle: MapHandle,
@@ -15923,6 +16664,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_option_product_i64(
 }
 
 /// Map of Result of List of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<List<Option<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<List<Option<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_list_option_product_i64(
     handle: MapHandle,
@@ -16104,6 +16864,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_option_product_i64(
 }
 
 /// Map of Set of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Option<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Option<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_option_product_i64(
     handle: MapHandle,
@@ -16256,6 +17035,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_result_option_product_i64(
 }
 
 /// Map of Set of Result of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Result<Option<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Result<Option<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_result_option_product_i64(
     handle: MapHandle,
@@ -16408,6 +17206,25 @@ pub unsafe extern "C" fn mimi_map_from_json_set_result_product_i64(
 }
 
 /// Map of Set of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Set<Result<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Set<Result<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_set_result_product_i64(
     handle: MapHandle,
@@ -16569,6 +17386,25 @@ pub unsafe extern "C" fn mimi_map_from_json_list_result_product_i64(
 }
 
 /// Map of List of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, List<Result<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, List<Result<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_list_result_product_i64(
     handle: MapHandle,
@@ -16866,6 +17702,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_list_product_i64(
 }
 
 /// Map of Option of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_list_product_i64(
     handle: MapHandle,
@@ -17218,6 +18073,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_product_i64(
 }
 
 /// Map of Result of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<List<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<List<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_list_product_i64(
     handle: MapHandle,
@@ -17668,6 +18542,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_option_product_i64(
 }
 
 /// Map of Result of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Option<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Option<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_option_product_i64(
     handle: MapHandle,
@@ -17974,6 +18867,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_map_product_i64(
 }
 
 /// Map of Result of Set of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Set<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Set<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_set_map_product_i64(
     handle: MapHandle,
@@ -18188,6 +19100,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_map_product_i64(
 }
 
 /// Map of Option of Set of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Set<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Set<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_set_map_product_i64(
     handle: MapHandle,
@@ -18468,6 +19399,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_list_map_product_i64(
 }
 
 /// Map of Result of List of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<List<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<List<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_list_map_product_i64(
     handle: MapHandle,
@@ -18682,6 +19632,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_list_map_product_i64(
 }
 
 /// Map of Option of List of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<List<Map<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<List<Map<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_list_map_product_i64(
     handle: MapHandle,
@@ -18933,6 +19902,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_list_product_i64(
 }
 
 /// Map of Result of Set of List of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Set<List<Product<i64[arity]>>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Set<List<Product<i64[arity]>>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_set_list_product_i64(
     handle: MapHandle,
@@ -19193,6 +20181,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_set_product_i64(
 }
 
 /// Map of Result of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Set<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Set<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_set_product_i64(
     handle: MapHandle,
@@ -19419,6 +20426,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_set_product_i64(
 }
 
 /// Map of Option of Set of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Set<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Set<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_set_product_i64(
     handle: MapHandle,
@@ -19635,6 +20661,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_map_product_i64(
 }
 
 /// Map of Option of Map of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Map<Product<i64[arity]>>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Map<Product<i64[arity]>>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_map_product_i64(
     handle: MapHandle,
@@ -19877,6 +20922,25 @@ pub unsafe extern "C" fn mimi_map_from_json_option_product_i64(
 
 /// Map of Option of product Display/JSON.
 /// `display_style` 0 = JSON, 1 = Display.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Option<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Option<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_option_product_i64(
     handle: MapHandle,
@@ -20150,6 +21214,25 @@ pub unsafe extern "C" fn mimi_map_from_json_result_product_i64(
 }
 
 /// Map of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Map<String, Result<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Map<String, Result<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_map_to_json_result_product_i64(
     handle: MapHandle,
@@ -20450,7 +21533,7 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
 /// are intentionally rejected here: their payload release/equality contract
 /// is a separate shape and must not be smuggled through a shallow handle copy.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_clone_scalar(handle: SetHandle) -> SetHandle {
+pub extern "C" fn mimi_set_clone_scalar(handle: SetHandle) -> SetHandle {
     if handle == 0 {
         return 0;
     }
@@ -20493,13 +21576,13 @@ pub extern "C" fn mimi_result_i64_to_json(disc: i64, ok: i64, err: i64) -> *mut 
 
 /// Display form `Set{1, 2, 3}` (sorted ints) for println dual.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_display(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_display(handle: SetHandle) -> *mut std::ffi::c_char {
     set_to_display_impl(handle, false)
 }
 
 /// Display form `Set{true, false}` for bool-valued sets.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_display_bool(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_display_bool(handle: SetHandle) -> *mut std::ffi::c_char {
     set_to_display_impl(handle, true)
 }
 
@@ -20531,7 +21614,7 @@ fn set_to_display_impl(handle: SetHandle, as_bool: bool) -> *mut std::ffi::c_cha
 
 /// Serialize a SetHandle of integer values to a JSON array string.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Set, handle)
     else {
         return json_cycle_error();
@@ -20561,6 +21644,25 @@ pub unsafe extern "C" fn mimi_set_to_json_i64(handle: SetHandle) -> *mut std::ff
 
 /// Serialize Set of heap-packed product-tuple i64[n] handles.
 /// `display_style`: 0 = JSON `[[1,2]]`, 1 = Display `Set{(1, 2), (3, 4)}`.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Product<i64[arity]>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Product<i64[arity]>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_product_i64(
     handle: SetHandle,
@@ -21637,6 +22739,25 @@ pub unsafe extern "C" fn mimi_set_from_json_result_product_i64(
 }
 
 /// Set of Result of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Result<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Result<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_result_product_i64(
     handle: SetHandle,
@@ -21868,6 +22989,25 @@ pub unsafe extern "C" fn mimi_set_from_json_option_product_i64(
 }
 
 /// Set of Option of product Display/JSON.
+///
+/// # Safety
+/// For a nonzero `handle`, it must be a live runtime handle of the outer
+/// container kind in `Set<Option<Product<i64[arity]>>>`. A zero outer handle is accepted as an empty
+/// container. For meaningful product serialization, `arity` must be 1–16;
+/// other arities take the empty-result path. Stored values must satisfy this
+/// specialization’s `Set<Option<Product<i64[arity]>>>` ABI: every product payload that is read must
+/// be an aligned, live allocation with at least `arity` initialized `i64`
+/// fields; each list header and backing slot array must have the layout and
+/// extent expected by the implementation; and each Option/Result wrapper
+/// must have its expected layout and a valid discriminant before its selected
+/// payload is read. Every nested nonzero Map/Set value must be a live handle
+/// of the required kind. Any non-null string payload actually read must be a
+/// readable NUL-terminated C string. All raw allocations, backing arrays,
+/// nested payloads, and handles used by this call or its helpers must remain
+/// valid and must not be freed or mutated concurrently until the call returns.
+/// Runtime handle checks and mapped-page probes do not establish provenance,
+/// allocation extent, or lifetime for raw product/list/wrapper pointers; the
+/// caller must uphold those properties.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_to_json_option_product_i64(
     handle: SetHandle,
@@ -22035,7 +23175,7 @@ pub unsafe extern "C" fn mimi_set_from_json_product_i64(
 
 /// Serialize a SetHandle of 0/1 bool values to a JSON array of true/false.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Set, handle)
     else {
         return json_cycle_error();
@@ -22069,7 +23209,7 @@ pub unsafe extern "C" fn mimi_set_to_json_bool(handle: SetHandle) -> *mut std::f
 
 /// Serialize a SetHandle of f64-bit values to a JSON number array (serde-style).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Set, handle)
     else {
         return json_cycle_error();
@@ -22107,7 +23247,7 @@ pub unsafe extern "C" fn mimi_set_to_json_f64(handle: SetHandle) -> *mut std::ff
 
 /// Serialize a SetHandle of C-string ValueHandles to a JSON string array.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_json_string(handle: SetHandle) -> *mut std::ffi::c_char {
     let Some(_json_scope) = handle::json_container_scope(handle::JsonContainerKind::Set, handle)
     else {
         return json_cycle_error();
@@ -22178,7 +23318,7 @@ pub unsafe extern "C" fn mimi_set_from_json_f64(json: *const std::ffi::c_char) -
 
 /// Display form `Set{1.5, 2}` for f64-bit sets (sorted by bit pattern / float value).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_display_f64(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("Set{}");
     }
@@ -22252,7 +23392,7 @@ pub unsafe extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char
 
 /// Display form `Set{a, b}` for string-valued sets (sorted by string content).
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_set_to_display_string(handle: SetHandle) -> *mut std::ffi::c_char {
     if handle == 0 {
         return alloc_c_string("Set{}");
     }
@@ -22316,12 +23456,12 @@ pub unsafe extern "C" fn mimi_set_from_json_i64(json: *const std::ffi::c_char) -
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_destroy(handle: SetHandle) {
+pub extern "C" fn mimi_set_destroy(handle: SetHandle) {
     let _ = handle::set_destroy(handle);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> SetHandle {
+pub extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandle) -> SetHandle {
     if handle == 0 {
         return handle;
     }
@@ -22334,6 +23474,14 @@ pub unsafe extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandl
 
 /// Insert a string by content, not by the address of its LLVM literal.
 /// String handles are owned by the Set and released with the Set.
+///
+/// # Safety
+/// If `handle` is nonzero and `0 < len <= 64 MiB`, `ptr` must point to `len`
+/// readable bytes that remain valid and unmodified for the duration of this
+/// call. The bytes need not be NUL-terminated and may contain embedded NULs.
+/// A null pointer or nonpositive length is treated as the empty string; a
+/// length above 64 MiB aborts before the bytes are read. A zero handle returns
+/// before reading `ptr`.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_insert_string(
     handle: SetHandle,
@@ -22365,7 +23513,7 @@ pub unsafe extern "C" fn mimi_set_insert_string(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) -> i64 {
+pub extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -22375,6 +23523,14 @@ pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHan
 /// Probe a string Set by logical content. This is the string counterpart to
 /// `mimi_set_contains(handle, i64)`; ptrtoint would compare distinct global
 /// addresses instead of Mimi string values.
+///
+/// # Safety
+/// If `handle` is nonzero and `0 < len <= 64 MiB`, `ptr` must point to `len`
+/// readable bytes that remain valid and unmodified for the duration of this
+/// call. The bytes need not be NUL-terminated and may contain embedded NULs.
+/// A null pointer or nonpositive length is treated as the empty string; a
+/// length above 64 MiB aborts before the bytes are read. A zero handle returns
+/// before reading `ptr`.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_contains_string(
     handle: SetHandle,
@@ -22393,7 +23549,7 @@ pub unsafe extern "C" fn mimi_set_contains_string(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> SetHandle {
+pub extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> SetHandle {
     if handle == 0 {
         return handle;
     }
@@ -22409,7 +23565,7 @@ pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandl
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
+pub extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     if handle == 0 {
         return 0;
     }
@@ -22426,7 +23582,7 @@ pub unsafe extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
 /// divergence. A null result means an invalid handle, unsupported kind, or
 /// allocation/push failure; an empty Set still returns a non-null empty list.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mir_set_to_list_scalar(handle: SetHandle, kind: i8) -> *mut MimiList {
+pub extern "C" fn mimi_mir_set_to_list_scalar(handle: SetHandle, kind: i8) -> *mut MimiList {
     if handle == 0
         || !matches!(kind, x if x == ListElementKind::I64 as i8 || x == ListElementKind::Bool as i8)
     {
@@ -23784,20 +24940,20 @@ pub type JsonSerCb = extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_
 
 /// Serialize a signed integer-like value as a JSON number.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_json_int_to_string(v: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_json_int_to_string(v: i64) -> *mut std::ffi::c_char {
     alloc_c_string(&v.to_string())
 }
 
 /// Serialize a boolean value as JSON `true` / `false`.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_json_bool_to_string(v: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_json_bool_to_string(v: i64) -> *mut std::ffi::c_char {
     alloc_c_string(if v != 0 { "true" } else { "false" })
 }
 
 /// Serialize an f64 given its bit pattern (matches serde_json shortest
 /// round-trip: whole numbers keep ".0"; non-finite -> "null").
 #[no_mangle]
-pub unsafe extern "C" fn mimi_json_f64_to_string(bits: i64) -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_json_f64_to_string(bits: i64) -> *mut std::ffi::c_char {
     let fv = f64::from_bits(bits as u64);
     let s = if !fv.is_finite() {
         "null".to_string()
@@ -23811,6 +24967,11 @@ pub unsafe extern "C" fn mimi_json_f64_to_string(bits: i64) -> *mut std::ffi::c_
 
 /// Wrap an already-serialized inner JSON string as `{"Some":[<inner>]}`.
 /// Takes ownership of `inner` (frees it).
+///
+/// # Safety
+/// `inner` may be null. Otherwise it must be a uniquely owned, NUL-terminated
+/// C-string allocation compatible with `mimi_free`. This function reads and
+/// frees it; do not alias, reuse, or access the allocation after the call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_some(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
     if inner.is_null() {
@@ -23822,10 +24983,17 @@ pub unsafe extern "C" fn mimi_json_some(inner: *mut std::ffi::c_char) -> *mut st
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn mimi_json_none() -> *mut std::ffi::c_char {
+pub extern "C" fn mimi_json_none() -> *mut std::ffi::c_char {
     alloc_c_string("\"None\"")
 }
 
+/// Wrap an already-serialized inner JSON string as `{"Ok":[<inner>]}`.
+/// Takes ownership of `inner` (frees it).
+///
+/// # Safety
+/// `inner` may be null. Otherwise it must be a uniquely owned, NUL-terminated
+/// C-string allocation compatible with `mimi_free`. This function reads and
+/// frees it; do not alias, reuse, or access the allocation after the call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_ok(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
     if inner.is_null() {
@@ -23836,6 +25004,13 @@ pub unsafe extern "C" fn mimi_json_ok(inner: *mut std::ffi::c_char) -> *mut std:
     alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
 }
 
+/// Wrap an already-serialized inner JSON string as `{"Err":[<inner>]}`.
+/// Takes ownership of `inner` (frees it).
+///
+/// # Safety
+/// `inner` may be null. Otherwise it must be a uniquely owned, NUL-terminated
+/// C-string allocation compatible with `mimi_free`. This function reads and
+/// frees it; do not alias, reuse, or access the allocation after the call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_err(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
     if inner.is_null() {
@@ -23853,6 +25028,14 @@ pub unsafe extern "C" fn mimi_json_err(inner: *mut std::ffi::c_char) -> *mut std
 ///   or null for a nullary (payload-less) variant.
 /// Takes ownership of `frag` (frees it). For a nullary variant returns `"Name"`;
 /// otherwise returns `{"Name":<payload>}`.
+///
+/// # Safety
+/// `name` may be null (treated as empty); otherwise it must be a readable,
+/// NUL-terminated C string. `frag` may be null; otherwise it must be a
+/// uniquely owned, NUL-terminated C-string allocation compatible with
+/// `mimi_free`. The function frees non-null `frag`, so it must not be aliased,
+/// reused, or accessed after the call. Both inputs must remain valid through
+/// the call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_serialize_enum_variant(
     name: *const std::ffi::c_char,
@@ -23868,6 +25051,11 @@ pub unsafe extern "C" fn mimi_json_serialize_enum_variant(
 
 /// Wrap an already-serialized JSON string in `[..]` (single-field tuple enum
 /// payloads). Takes ownership of `frag` (frees it).
+///
+/// # Safety
+/// `frag` may be null. Otherwise it must be a uniquely owned, NUL-terminated
+/// C-string allocation compatible with `mimi_free`. This function reads and
+/// frees it; do not alias, reuse, or access the allocation after the call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_surround_brackets(
     frag: *mut std::ffi::c_char,
@@ -23881,6 +25069,10 @@ pub unsafe extern "C" fn mimi_json_surround_brackets(
 }
 
 /// Allocate a fresh copy of a literal C string (default/unknown enum tag branch).
+///
+/// # Safety
+/// `lit` may be null (treated as empty). Otherwise it must point to a readable,
+/// NUL-terminated C string that remains valid until the copy is complete.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_alloc_literal(
     lit: *const std::ffi::c_char,
@@ -23908,6 +25100,20 @@ pub unsafe extern "C" fn mimi_json_alloc_literal(
 /// `elem_size` is the element stride in bytes (the data array may hold 8-byte
 /// scalars, 16-byte strings, 24-byte records, …); we stride by it instead of
 /// assuming an 8-byte slot array.
+///
+/// # Safety
+/// `list` may be null. Otherwise it must point to an initialized, aligned,
+/// readable `MimiList` prefix. If its data is non-null and `1 <= len <=
+/// 1_000_000`, the data allocation must contain every element and every byte
+/// addressed with the effective stride (`elem_size` when positive, otherwise
+/// 8), with pointer arithmetic staying within the allocation and
+/// `isize::MAX`. The `ser_cb` function must be callable with the C ABI and
+/// accept the slot representation selected by `is_scalar`; it must not retain
+/// the slot pointer, which may be temporary. Each non-null callback result
+/// must be a uniquely owned, NUL-terminated allocation compatible with
+/// `mimi_free`, because this function reads and frees it. Keep the list storage
+/// stable until callbacks return; callbacks must not unwind across the C ABI
+/// or invalidate the list being traversed.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_join_list(
     list: *const MimiList,
@@ -23962,6 +25168,18 @@ pub unsafe extern "C" fn mimi_json_join_list(
 /// serializers. Used for tuples (`is_object == 0`) and records
 /// (`is_object != 0`). `slots[j]` is the slot pointer passed to `cbs[j]`;
 /// `names[j]` (records only) is the JSON object key C string.
+///
+/// # Safety
+/// When `n > 0`, `slots` and `cbs` must point to arrays of at least `n`
+/// readable entries. Each callback must be callable with the C ABI and each
+/// slot must satisfy that callback's slot contract; callbacks must not retain
+/// slot pointers or unwind across the C ABI. In object mode, non-null `names`
+/// must point to at least `n` readable pointers, and each non-null name must
+/// be a readable, NUL-terminated C string. Every non-null callback result must
+/// be a uniquely owned, NUL-terminated allocation compatible with `mimi_free`,
+/// because this function reads and frees it. Arrays, slots, and names must
+/// remain valid and unchanged until their reads/callbacks complete. Null
+/// `slots`/`cbs` or `n <= 0` returns an empty container without reading arrays.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_json_join_slots(
     slots: *const *const std::ffi::c_void,
@@ -24332,7 +25550,7 @@ mod handle_registry_tests {
     fn map_double_destroy_is_noop() {
         let h = mimi_map_new();
         assert_ne!(h, 0);
-        assert_eq!(unsafe { mimi_map_size(h) }, 0);
+        assert_eq!(mimi_map_size(h), 0);
         unsafe { mimi_map_destroy(h) };
         // Second destroy must not free again (would be double-free).
         unsafe { mimi_map_destroy(h) };
@@ -24343,9 +25561,9 @@ mod handle_registry_tests {
     fn set_double_destroy_is_noop() {
         let h = mimi_set_new();
         assert_ne!(h, 0);
-        unsafe { mimi_set_destroy(h) };
-        unsafe { mimi_set_destroy(h) };
-        unsafe { mimi_set_destroy(0) };
+        mimi_set_destroy(h);
+        mimi_set_destroy(h);
+        mimi_set_destroy(0);
     }
 
     #[test]
@@ -24359,18 +25577,18 @@ mod handle_registry_tests {
             assert_eq!(mimi_map_has_key(h, key), 1);
             assert_eq!(mimi_map_get(h, key), 42);
         }
-        assert_eq!(unsafe { mimi_map_size(h) }, 1);
+        assert_eq!(mimi_map_size(h), 1);
         unsafe { mimi_map_destroy(h) };
     }
 
     #[test]
     fn set_insert_on_live_handle_works() {
         let h = mimi_set_new();
-        let h2 = unsafe { mimi_set_insert(h, 7) };
+        let h2 = mimi_set_insert(h, 7);
         assert_eq!(h, h2);
-        assert_eq!(unsafe { mimi_set_contains(h, 7) }, 1);
-        assert_eq!(unsafe { mimi_set_size(h) }, 1);
-        unsafe { mimi_set_destroy(h) };
+        assert_eq!(mimi_set_contains(h, 7), 1);
+        assert_eq!(mimi_set_size(h), 1);
+        mimi_set_destroy(h);
     }
 }
 
@@ -24842,9 +26060,9 @@ mod audit_wave1_tests {
     fn set_to_list_round_trips_through_boxed_slice_free() {
         let h = mimi_set_new();
         assert_ne!(h, 0);
-        unsafe { mimi_set_insert(h, 11) };
-        unsafe { mimi_set_insert(h, 22) };
-        unsafe { mimi_set_insert(h, 33) };
+        mimi_set_insert(h, 11);
+        mimi_set_insert(h, 22);
+        mimi_set_insert(h, 33);
         let mut len: i64 = -1;
         let ptr = unsafe { mimi_set_to_list(h, &mut len as *mut i64) };
         assert!(!ptr.is_null());
@@ -24857,7 +26075,7 @@ mod audit_wave1_tests {
             assert_eq!(vals, vec![11, 22, 33]);
         }
         unsafe { mimi_set_list_free(ptr, len) };
-        unsafe { mimi_set_destroy(h) };
+        mimi_set_destroy(h);
     }
 
     // ── Fix #9: fail-loud json accessors (non-aborting paths only) ────
@@ -25292,7 +26510,7 @@ mod audit_pkgd_tests {
         }
         let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), n) };
         // Loud truncation: only the first 1M entries survive.
-        assert_eq!(unsafe { mimi_map_size(h) }, 1_000_000);
+        assert_eq!(mimi_map_size(h), 1_000_000);
         unsafe { mimi_map_destroy(h) };
         // Free the key strings (map copies them; we own the originals).
         for &k in &keys {
@@ -25310,7 +26528,7 @@ mod audit_pkgd_tests {
         let mut values = vec![1usize as ValueHandle, 2, 3];
         let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 3) };
         assert_eq!(
-            unsafe { mimi_map_size(h) },
+            mimi_map_size(h),
             2,
             "null key must be skipped, valid keys kept"
         );
@@ -25336,7 +26554,7 @@ mod audit_pkgd_tests {
         let mut keys = vec![k1 as ValueHandle, k2 as ValueHandle];
         let mut values = vec![7usize as ValueHandle, 0usize as ValueHandle];
         let h = unsafe { mimi_map_from_list(keys.as_mut_ptr(), values.as_mut_ptr(), 2) };
-        assert_eq!(unsafe { mimi_map_size(h) }, 2);
+        assert_eq!(mimi_map_size(h), 2);
         let out = owned_str(unsafe { mimi_map_to_json_product_i64(h, 2, 0) });
         assert!(out.contains("\"int\":"));
         assert!(out.contains("\"zero\":"));

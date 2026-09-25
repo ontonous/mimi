@@ -299,16 +299,15 @@ pub extern "C" fn mimi_to_json_f64(val: f64) -> *mut std::ffi::c_char {
 /// straight-line memcpy chain + trailing NUL store into a miscompiled
 /// constant-offset store sequence (record display truncation).
 ///
-/// # Safety contract
-/// `buf` must point to an allocation of at least `offset + 1` bytes
-/// (sized_cat_parts allocates exactly total = content + 1 and passes
-/// offset = total - 1). `alloc_size` is that total — M8 (0.35.37) adds it
-/// so the runtime can abort instead of writing out of bounds when a caller
-/// (internal bug or external FFI misuse) passes an offset beyond the
-/// allocation. The runtime has no allocation-size registry for raw
-/// `malloc`'d buffers, so `alloc_size` is the last line of defense against
-/// heap corruption; the primary defense is the checked add in the codegen
-/// emitter that computes `total`.
+/// # Safety
+/// If `buf` is non-null and `offset >= 0`, the caller must ensure that
+/// `buf.add(offset)` is within the same live allocation and points to one
+/// writable byte for the duration of this call. That byte must not be accessed
+/// concurrently through another pointer. `alloc_size` must truthfully describe
+/// an upper bound for this allocation, and `offset < alloc_size`; the function
+/// aborts when `alloc_size <= 0` or `offset >= alloc_size`, but it cannot check
+/// whether the supplied size matches the actual allocation. A null `buf` or
+/// negative `offset` is a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_runtime_buf_nul_terminate(
     buf: *mut u8,
