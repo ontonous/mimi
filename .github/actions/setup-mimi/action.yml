@@ -11,22 +11,41 @@ runs:
       shell: bash
       run: |
         # apt-key is deprecated; install the LLVM signing key into a keyring instead.
-        # apt 源 codename 从宿主发行版派生（jammy/noble 均有 llvm-toolchain-*-18），
-        # 不硬编码发行版——runner 镜像升级（22.04→24.04）不再需要改此处。
+        # The CI and release jobs intentionally pin Ubuntu 22.04 and LLVM 18.1.8;
+        # changing either requires an explicit toolchain migration and fresh evidence.
         CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-jammy}")"
+        if [ "$CODENAME" != "jammy" ]; then
+          echo "Expected Ubuntu 22.04 (jammy) for the pinned LLVM package set, got: $CODENAME" >&2
+          exit 1
+        fi
+        LLVM_DEB_VERSION='1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144'
         wget -qO /tmp/llvm-key.gpg https://apt.llvm.org/llvm-snapshot.gpg.key
         sudo gpg --yes --dearmor -o /usr/share/keyrings/apt-llvm.gpg /tmp/llvm-key.gpg
         echo "deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-18 main" \
           | sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update -qq
-        sudo apt-get install -y -qq llvm-18-dev llvm-18 libllvm18 libclang-18-dev 2>&1 | tail -5
+        sudo apt-get install -y -qq \
+          "llvm-18-dev=${LLVM_DEB_VERSION}" \
+          "llvm-18=${LLVM_DEB_VERSION}" \
+          "libllvm18=${LLVM_DEB_VERSION}" \
+          "libclang-18-dev=${LLVM_DEB_VERSION}" 2>&1 | tail -5
         # libpolly-18-dev may be absent on some mirrors; the wrapper stubs it.
-        sudo apt-get install -y libpolly-18-dev 2>&1 || echo "Polly dev not found; wrapper will stub it"
+        sudo apt-get install -y "libpolly-18-dev=${LLVM_DEB_VERSION}" 2>&1 \
+          || echo "Pinned Polly dev package not found; wrapper will stub it"
         sudo apt-get install -y -qq libz3-dev libffi-dev binutils
 
     - name: Setup LLVM wrapper
       shell: bash
       run: bash scripts/setup-llvm-wrapper.sh
+
+    - name: Verify pinned LLVM version
+      shell: bash
+      run: |
+        actual="$(/tmp/llvm-wrapper/llvm-config --version)"
+        if [ "$actual" != "18.1.8" ]; then
+          echo "Expected LLVM 18.1.8, got: $actual" >&2
+          exit 1
+        fi
 
     - name: Rust toolchain
       uses: dtolnay/rust-toolchain@stable

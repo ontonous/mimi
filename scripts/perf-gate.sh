@@ -29,7 +29,7 @@ fail() { echo "PERF-GATE FAIL: $*" >&2; exit 1; }
 
 if [ ! -f "$BIN" ]; then
     echo "PERF-GATE: building release…"
-    LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release >/dev/null 2>&1 \
+    LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --locked --release >/dev/null 2>&1 \
         || fail "release build failed"
 fi
 
