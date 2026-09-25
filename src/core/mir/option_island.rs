@@ -330,7 +330,7 @@ fn option_body_walk(
                 pattern_is_closed(pattern)
                     && initializer
                         .as_ref()
-                        .is_none_or(|value| option_expr_is_closed(program, value))
+                        .map_or(true, |value| option_expr_is_closed(program, value))
             }
             ResolvedStmtKind::Assign { value, .. } => {
                 // R6-1049: the construction-proven root-level scalar-assign
@@ -342,7 +342,7 @@ fn option_body_walk(
             }
             ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
                 .as_ref()
-                .is_none_or(|expr| option_expr_is_closed(program, expr)),
+                .map_or(true, |expr| option_expr_is_closed(program, expr)),
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
@@ -353,7 +353,7 @@ fn option_body_walk(
     }) && block
         .result
         .as_ref()
-        .is_none_or(|expr| option_expr_is_closed(program, expr))
+        .map_or(true, |expr| option_expr_is_closed(program, expr))
 }
 
 fn pattern_is_closed(pattern: &ResolvedPattern) -> bool {

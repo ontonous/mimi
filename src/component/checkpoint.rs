@@ -373,14 +373,34 @@ mod tests {
         register_core_runtime_abi(&mut gen);
         let ir = gen.build();
         let abi = MimiAbi::from_component_ir(&ir);
-        // Audit 2026-08-05: the phantom MimiString/MimiSlice struct layouts
-        // were removed from the core registry — it now registers opaque
-        // handle types only, so there are no struct layouts to probe.
+        // The canonical checked Map bridge returns an explicitly laid out
+        // `{i64 len, i8* data}` prefix; all other historical phantom string
+        // and slice structs remain absent.
         assert_eq!(
             struct_type_count(&abi),
-            0,
-            "core registry must not declare struct layouts"
+            1,
+            "only the checked Map list prefix has a declared struct layout"
         );
+        let pair = abi
+            .types
+            .iter()
+            .find_map(|ty| match ty {
+                super::super::serialize::MimiAbiType::Struct {
+                    name,
+                    fields,
+                    size,
+                    align,
+                } if name == "MimiListPair" => Some((fields, size, align)),
+                _ => None,
+            })
+            .expect("MimiListPair layout is registered");
+        assert_eq!(*pair.1, Some(16));
+        assert_eq!(*pair.2, Some(8));
+        assert_eq!(pair.0.len(), 2);
+        assert_eq!(pair.0[0].name, "len");
+        assert_eq!(pair.0[0].offset, Some(0));
+        assert_eq!(pair.0[1].name, "data");
+        assert_eq!(pair.0[1].offset, Some(8));
         let faults = probe_layout(&abi);
         assert!(faults.is_empty(), "layout faults: {faults:?}");
     }

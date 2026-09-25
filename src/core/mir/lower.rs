@@ -1715,7 +1715,7 @@ fn is_owned_record_projection_drop_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3 | 4)
+        || !matches!(definition.fields.len(), 2..=4)
         || callable.signature.result != generic_ty
     {
         return false;
@@ -4997,7 +4997,7 @@ fn detect_scalar_record_projection_contract(
                 super::types::MirLayout::Record { fields, .. } => Some(fields.len()),
                 _ => None,
             })
-            .is_some_and(|arity| !matches!(arity, 1 | 2 | 3 | 4 | 5 | 6 | 7));
+            .is_some_and(|arity| !matches!(arity, 1..=7));
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: if unsupported_arity {
@@ -5064,7 +5064,7 @@ fn detect_scalar_record_projection_contract(
                 ),
             }]
         })?;
-    if !matches!(receipt.arity, 1 | 2 | 3 | 4 | 5 | 6 | 7) || function.result != result_ty {
+    if !matches!(receipt.arity, 1..=7) || function.result != result_ty {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message:
@@ -5684,7 +5684,7 @@ pub(crate) fn validate_scalar_record_projection_mir(
     if &expected != contract {
         return Err("generic record projection receipt disagrees with TypeDesc".into());
     }
-    if !matches!(contract.arity, 1 | 2 | 3 | 4 | 5 | 6 | 7) || function.result != result_ty {
+    if !matches!(contract.arity, 1..=7) || function.result != result_ty {
         return Err(
             "generic record projection requires one, two, three, four, five, six, or seven fields and a direct result identity"
                 .into(),
@@ -9129,11 +9129,11 @@ impl<'a> Lowerer<'a> {
             self.error(node, "Flow failure Try Result has no Err variant");
             return;
         };
-        let Some(ok_field) = ok_variant.fields.first() else {
+        let Some(_ok_field) = ok_variant.fields.first() else {
             self.error(node, "Flow failure Try Ok variant has no payload field");
             return;
         };
-        let Some(err_field) = err_variant.fields.first() else {
+        let Some(_err_field) = err_variant.fields.first() else {
             self.error(node, "Flow failure Try Err variant has no payload field");
             return;
         };
@@ -11279,7 +11279,7 @@ impl<'a> Lowerer<'a> {
             operation,
         ) {
             Ok(contract) => Some(contract),
-            Err(message)
+            Err(_message)
                 if type_catalog.get(&list_ty).is_some_and(|descriptor| {
                     matches!(
                         descriptor.layout,
@@ -11353,7 +11353,7 @@ impl<'a> Lowerer<'a> {
         };
         match type_catalog.validated_list_construct_contract(&result_ty, &element_types) {
             Ok(contract) => Some(contract),
-            Err(message)
+            Err(_message)
                 if elements.len() == 1
                     && type_catalog.get(&result_ty).is_some_and(|descriptor| {
                         matches!(

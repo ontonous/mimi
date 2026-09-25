@@ -1262,10 +1262,9 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!(
                         "{subject} variant construction rejected: {message}"
                     ));
-                } else if catalog
-                    .get(&result_ty)
-                    .is_none_or(|descriptor| descriptor.ownership != MirOwnership::Copy)
-                {
+                } else if catalog.get(&result_ty).map_or(true, |descriptor| {
+                    descriptor.ownership != MirOwnership::Copy
+                }) {
                     self.error(format!("{subject} non-Copy variant construction is outside the verifier capability"));
                 }
             }

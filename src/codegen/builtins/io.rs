@@ -1289,6 +1289,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_pointer_value();
                     return Ok((BasicMetadataValueEnum::PointerValue(raw), "%s".to_string()));
                 }
+                // `Any` is an opaque i64 ValueHandle, not a plain integer ABI.
+                // Format it through the runtime's checked handle decoder so
+                // scalar values stay numeric and heap strings render as text.
+                if arg_type == "Any" || arg_type == "any" {
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let any_fn_ty =
+                        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64_ty)], false);
+                    let any_fn = self
+                        .module
+                        .get_function("mimi_any_to_string")
+                        .unwrap_or_else(|| {
+                            self.module.add_function(
+                                "mimi_any_to_string",
+                                any_fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                    let raw = self
+                        .builder
+                        .build_call(
+                            any_fn,
+                            &[BasicMetadataValueEnum::IntValue(*iv)],
+                            "print_any_to_string",
+                        )
+                        .map_err(|e| CompileError::LlvmError(format!("print Any: {e}")))?
+                        .try_as_basic_value_opt()
+                        .ok_or("mimi_any_to_string returned void")?
+                        .into_pointer_value();
+                    self.register_display_alloc(raw);
+                    return Ok((BasicMetadataValueEnum::PointerValue(raw), "%s".to_string()));
+                }
                 // A1: Ensure integer is i64 for printf("%ld").
                 // i1 bool OR typed `bool` (is_ok/is_err return i64 0/1): print
                 // "true"/"false" to match interpreter Display.

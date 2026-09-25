@@ -3742,7 +3742,7 @@ fn validate_transition_contracts(
             if target
                 .values
                 .get(expected)
-                .is_none_or(|value| value.ty != *actual)
+                .map_or(true, |value| value.ty != *actual)
             {
                 errors.push(super::MirValidationError {
                     subject: subject.clone(),
@@ -3951,15 +3951,17 @@ fn validate_flow_transition_instruction(
     if result_value.ty != contract.result
         || (!recoverable && result_value.ty != target.result)
         || (recoverable
-            && type_catalog.get(&result_value.ty).is_none_or(|descriptor| {
-                !matches!(
-                    descriptor.layout,
-                    super::types::MirLayout::Result { ref ok, ref error, .. }
-                        if contract.targets.first() == Some(ok)
-                            && contract.failure.as_ref() == Some(error)
-                            && target.result == contract.result
-                )
-            }))
+            && type_catalog
+                .get(&result_value.ty)
+                .map_or(true, |descriptor| {
+                    !matches!(
+                        descriptor.layout,
+                        super::types::MirLayout::Result { ref ok, ref error, .. }
+                            if contract.targets.first() == Some(ok)
+                                && contract.failure.as_ref() == Some(error)
+                                && target.result == contract.result
+                    )
+                }))
     {
         errors.push(super::MirValidationError {
             subject: subject.into(),
@@ -4025,7 +4027,7 @@ fn materialize_transition_contracts(
         let targets = transition
             .targets
             .iter()
-            .filter_map(|state| state_type(state))
+            .filter_map(state_type)
             .collect::<Vec<_>>();
         if targets.len() != transition.targets.len() {
             errors.push(super::MirValidationError {

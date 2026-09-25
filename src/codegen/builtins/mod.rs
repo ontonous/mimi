@@ -2051,6 +2051,19 @@ fn register_map_record_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // Checked Resolved lists use the public `{i64 len, i8* data}` value ABI;
+    // the runtime wrapper releases its private Box<MimiList> before returning.
+    let map_list_pair = ctx.struct_type(&[i64.into(), i8_ptr.into()], false);
+    module.add_function(
+        "mimi_map_keys_pair",
+        map_list_pair.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_map_values_pair",
+        map_list_pair.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_value_type_name",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
@@ -2129,6 +2142,42 @@ fn register_string_fns<'ctx>(
     module.add_function(
         "mimi_str_free_box",
         _void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_box_take_payload(i64 boxed, i8** out_ptr) -> i64 length
+    module.add_function(
+        "mimi_str_box_take_payload",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_list_data_clone(i64 len, i64* data) -> i64* owned copy
+    module.add_function(
+        "mimi_str_list_data_clone",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(ctx.ptr_type(inkwell::AddressSpace::default())),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_list_list_data_clone(i64 len, i64* data) -> i64* owned deep copy
+    module.add_function(
+        "mimi_str_list_list_data_clone",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(ctx.ptr_type(inkwell::AddressSpace::default())),
+            ],
+            false,
+        ),
         Some(inkwell::module::Linkage::External),
     );
     // mimi_str_box_copy(i8* ptr, i64 len) → i64 (copy `len` bytes then box;
@@ -2365,6 +2414,17 @@ fn register_string_fns<'ctx>(
     // mimi_str_clone(i8*, i64) → i64 (heap-allocated string handle for map storage)
     module.add_function(
         "mimi_str_clone",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_any_string_clone",
         i64.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),

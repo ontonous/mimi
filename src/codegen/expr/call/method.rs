@@ -2774,9 +2774,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Type::Name(n, _) if n == "string" => {
                         // json_get_element already returns a heap-allocated C-string.
                         // 0.1.8 Phase B fat ABI: list<string> slots must store a
-                        // MimiStr box handle. `mimi_str_box` takes ownership of
-                        // the heap-allocated element string, so no extra copy is
-                        // needed.
+                        // MimiStr box handle. `mimi_str_box` copies the
+                        // heap-allocated element string; free the temporary
+                        // after boxing so the list owns exactly one payload.
                         let strlen_fn = self.get_runtime_fn("strlen")?;
                         let str_len = self
                             .build_call(
@@ -2788,17 +2788,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("strlen returned void")?
                             .into_int_value();
                         let box_fn = self.get_runtime_fn("mimi_str_box")?;
+                        let boxed = self
+                            .build_call(
+                                box_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(elem_json),
+                                    BasicMetadataValueEnum::IntValue(str_len),
+                                ],
+                                "elem_str_box",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("mimi_str_box returned void")?
+                            .into_int_value();
+                        let boxed = self.nonzero_string_box_or_abort(boxed, "json_elem_str_box")?;
+                        let free_fn = self.get_runtime_fn("mimi_string_free")?;
                         self.build_call(
-                            box_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(elem_json),
-                                BasicMetadataValueEnum::IntValue(str_len),
-                            ],
-                            "elem_str_box",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("mimi_str_box returned void")?
-                        .into_int_value()
+                            free_fn,
+                            &[BasicMetadataValueEnum::PointerValue(elem_json)],
+                            "elem_json_free_after_box",
+                        )?;
+                        boxed
                     }
                     Type::Name(n, _) if n == "f32" || n == "f64" => {
                         let parser = self.get_runtime_fn("mimi_json_as_f64")?;

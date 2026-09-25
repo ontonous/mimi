@@ -455,10 +455,10 @@ mod tests {
         // Step 7: Layout probe (checkpoint)
         let faults = crate::component::probe_layout(&abi);
         assert!(faults.is_empty(), "layout faults: {:?}", faults);
-        // Phantom fat-pointer structs removed (audit 2026-08-05): the core
-        // registry now only carries opaque handle typedefs.
+        // The checked Map list bridge is the sole public struct ABI. Its
+        // concrete field layout is asserted by the checkpoint test above.
         assert!(abi.types.len() >= 4);
-        assert_eq!(crate::component::struct_type_count(&abi), 0);
+        assert_eq!(crate::component::struct_type_count(&abi), 1);
 
         // Step 8: ABI diff (identical → no changes)
         let diff = crate::component::diff_abi(&abi, &abi2);

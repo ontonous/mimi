@@ -526,7 +526,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("mimi_str_box returned void")?
                         .into_int_value();
-                    return Ok(boxed);
+                    return self.nonzero_string_box_or_abort(boxed, "str_box_ptr");
                 }
                 // 0.39.x (L1 parity fix): a NESTED list literal element
                 // compiles to the list header POINTER (its stack alloca).
@@ -599,7 +599,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("mimi_str_box returned void")?
                         .into_int_value();
-                    return Ok(boxed);
+                    return self.nonzero_string_box_or_abort(boxed, "str_box");
                 }
                 // Always pack using the (possibly inflated) struct's own type —
                 // inflate already rewrote Err to the full Result layout.

@@ -171,6 +171,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("mimi_str_box returned void")?
                         .into_int_value();
+                    let boxed = self.nonzero_string_box_or_abort(boxed, "push_str_box")?;
+                    // mimi_str_box copies; release this temporary after the
+                    // owning box has been created.
+                    // This temporary came from codegen's libc malloc helper,
+                    // so release it with the matching libc free.
+                    let free_fn = self.get_runtime_fn("free")?;
+                    self.build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(buf)],
+                        "push_str_temp_free",
+                    )?;
                     BasicValueEnum::IntValue(boxed)
                 } else {
                     // If we know the list element type and it is a non-scalar, non-string
@@ -390,6 +401,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .try_as_basic_value_opt()
                         .ok_or("mimi_str_box returned void")?
                         .into_int_value();
+                    let boxed = self.nonzero_string_box_or_abort(boxed, "push_str_box")?;
+                    // mimi_str_box copies; release this temporary after the
+                    // owning box has been created.
+                    // This temporary came from codegen's libc malloc helper,
+                    // so release it with the matching libc free.
+                    let free_fn = self.get_runtime_fn("free")?;
+                    self.build_call(
+                        free_fn,
+                        &[BasicMetadataValueEnum::PointerValue(buf)],
+                        "push_str_temp_free",
+                    )?;
                     BasicValueEnum::IntValue(boxed)
                 } else {
                     // A plain nested list value arriving as a struct (rather
@@ -621,12 +643,105 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.builder.position_at_end(store_bb);
                             BasicValueEnum::PointerValue(heap_ptr)
                         } else {
+                            let is_string_any_pair = self
+                                .pending_push_elem_type
+                                .as_deref()
+                                .map(|elem_type| elem_type.replace(' ', "") == "(string,Any)")
+                                .unwrap_or(false)
+                                && matches!(
+                                    fields.as_slice(),
+                                    [BasicTypeEnum::StructType(key_ty), BasicTypeEnum::IntType(value_ty)]
+                                        if value_ty.get_bit_width() == 64
+                                            && matches!(
+                                                key_ty.get_field_types().as_slice(),
+                                                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(len_ty)]
+                                                    if len_ty.get_bit_width() == 64
+                                            )
+                                );
+                            let packed_value = if is_string_any_pair {
+                                // A tuple stored in a generic list is heap-packed
+                                // by value. Copy its string bytes before the
+                                // source string owner can leave scope: std/maps
+                                // builds List<(string, Any)> from keys(m), whose
+                                // List<string> box is released when to_list exits.
+                                // Generic tuple-element destruction is still a
+                                // documented legacy ownership gap, so the copied
+                                // payload remains with the packed tuple until
+                                // that list ownership work lands.
+                                let key = self
+                                    .builder
+                                    .build_extract_value(sv, 0, "push_string_any_key")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple key extract: {e}"))
+                                    })?
+                                    .into_struct_value();
+                                let key_ptr = self
+                                    .builder
+                                    .build_extract_value(key, 0, "push_string_any_key_ptr")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple key ptr: {e}"))
+                                    })?
+                                    .into_pointer_value();
+                                let key_len = self
+                                    .builder
+                                    .build_extract_value(key, 1, "push_string_any_key_len")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple key len: {e}"))
+                                    })?
+                                    .into_int_value();
+                                let clone_fn = self.get_runtime_fn("mimi_str_clone")?;
+                                let clone_call = self
+                                    .builder
+                                    .build_call(
+                                        clone_fn,
+                                        &[
+                                            BasicMetadataValueEnum::PointerValue(key_ptr),
+                                            BasicMetadataValueEnum::IntValue(key_len),
+                                        ],
+                                        "push_string_any_key_clone",
+                                    )
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple key clone: {e}"))
+                                    })?;
+                                let cloned_handle = clone_call
+                                    .try_as_basic_value_opt()
+                                    .ok_or_else(|| {
+                                        CompileError::LlvmError(
+                                            "tuple key clone returned void".into(),
+                                        )
+                                    })?
+                                    .into_int_value();
+                                let cloned_handle =
+                                    self.nonzero_string_box_or_abort(cloned_handle, "tuple_key")?;
+                                let cloned_ptr = self.build_int_to_ptr(
+                                    cloned_handle,
+                                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                                    "push_string_any_key_clone_ptr",
+                                )?;
+                                let cloned_key = self
+                                    .builder
+                                    .build_insert_value(key, cloned_ptr, 0, "push_string_any_key")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple key insert: {e}"))
+                                    })?
+                                    .into_struct_value();
+                                self.builder
+                                    .build_insert_value(sv, cloned_key, 0, "push_string_any_pair")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("tuple insert: {e}"))
+                                    })?
+                                    .into_struct_value()
+                            } else {
+                                sv
+                            };
                             let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
                             let size_val = i64_ty.const_int(size, false);
                             let heap_ptr = self.malloc_or_abort(size_val, "push_struct_val")?;
-                            self.builder.build_store(heap_ptr, sv).map_err(|e| {
-                                CompileError::LlvmError(format!("store error: {}", e))
-                            })?;
+                            self.builder
+                                .build_store(heap_ptr, packed_value)
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("store error: {}", e))
+                                })?;
                             BasicValueEnum::PointerValue(heap_ptr)
                         }
                     }
@@ -775,11 +890,85 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )?
                 .into_float_value(),
             ),
-            Some("string") => self.load_fat_list_string(self.build_int_to_ptr(
-                elem_val,
-                i8_ptr,
-                "pop_str_ptr",
-            )?)?,
+            Some("string") => {
+                // `pop` transfers the removed string into the result. Copying
+                // the list slot's borrowed `{ptr,len}` view would leave the
+                // box owner unreachable after the list length shrinks; freeing
+                // that box would instead invalidate the returned string. Take
+                // the payload out of the ABI v3 box, free the wrapper, and
+                // register the payload as the result's ordinary string owner.
+                let payload_slot = self
+                    .build_entry_alloca(BasicTypeEnum::PointerType(i8_ptr), "pop_string_payload")?;
+                let take_fn = self.get_runtime_fn("mimi_str_box_take_payload")?;
+                let len = self
+                    .builder
+                    .build_call(
+                        take_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(elem_val),
+                            BasicMetadataValueEnum::PointerValue(payload_slot),
+                        ],
+                        "pop_string_take_payload",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("pop string take: {e}")))?
+                    .try_as_basic_value_opt()
+                    .ok_or_else(|| CompileError::LlvmError("pop string take returned void".into()))?
+                    .into_int_value();
+                let invalid = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::SLT,
+                        len,
+                        i64_ty.const_zero(),
+                        "pop_string_box_invalid",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("pop string status: {e}")))?;
+                let function = self
+                    .current_function()
+                    .ok_or_else(|| CompileError::LlvmError("pop string outside function".into()))?;
+                let error_bb = self
+                    .context
+                    .append_basic_block(function, "pop_string_invalid_box");
+                let ok_bb = self
+                    .context
+                    .append_basic_block(function, "pop_string_payload_ok");
+                self.builder
+                    .build_conditional_branch(invalid, error_bb, ok_bb)
+                    .map_err(|e| {
+                        CompileError::LlvmError(format!("pop string status branch: {e}"))
+                    })?;
+                self.builder.position_at_end(error_bb);
+                let abort_fn = self.get_or_declare_abort_fn();
+                let message = self
+                    .builder
+                    .build_global_string_ptr(
+                        "pop encountered an invalid List<string> box",
+                        "pop_string_invalid_msg",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("pop string message: {e}")))?;
+                self.build_call(
+                    abort_fn,
+                    &[BasicMetadataValueEnum::PointerValue(
+                        message.as_pointer_value(),
+                    )],
+                    "pop_string_abort",
+                )?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::LlvmError(format!("pop string unreachable: {e}")))?;
+                self.builder.position_at_end(ok_bb);
+                let payload = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        payload_slot,
+                        "pop_string_payload_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("pop string payload load: {e}")))?
+                    .into_pointer_value();
+                self.register_heap_alloc(payload);
+                self.wrap_string_ptr_len(payload, len)?
+            }
             Some(et)
                 if !et.is_empty()
                     && !matches!(

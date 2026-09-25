@@ -518,6 +518,23 @@ mod tests {
                 &[ptr_u8(), prim_i64.clone()],
                 prim_uintptr.clone(),
             ),
+            // runtime/mod.rs: tagged type-erased string clone.
+            (
+                "mimi_any_string_clone",
+                &[ptr_u8(), prim_i64.clone()],
+                prim_i64.clone(),
+            ),
+            // runtime/mod.rs: checked Map list bridge uses a repr(C) pair.
+            (
+                "mimi_map_keys_pair",
+                &[AbiTypeRef::Opaque("MapHandle".to_string())],
+                AbiTypeRef::Named("MimiListPair".to_string()),
+            ),
+            (
+                "mimi_map_values_pair",
+                &[AbiTypeRef::Opaque("MapHandle".to_string())],
+                AbiTypeRef::Named("MimiListPair".to_string()),
+            ),
             // crypto.rs:256 — 10 params
             (
                 "mimi_str_format",

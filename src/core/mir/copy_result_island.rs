@@ -563,7 +563,7 @@ pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool 
                             .is_some_and(|descriptor| {
                                 descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
                             });
-                    let fallback_is_i32 = fallback.is_none_or(|fallback| {
+                    let fallback_is_i32 = fallback.map_or(true, |fallback| {
                         function
                             .values
                             .get(fallback)
@@ -679,13 +679,12 @@ impl<'a> CopyResultI32VariantValidator<'a> {
                             continue;
                         };
                         if !is_copy_result_i32(self.program, base_ty)
-                            || self
-                                .program
-                                .type_catalog()
-                                .get(result_ty)
-                                .is_none_or(|descriptor| {
+                            || self.program.type_catalog().get(result_ty).map_or(
+                                true,
+                                |descriptor| {
                                     descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32)
-                                })
+                                },
+                            )
                         {
                             self.error(format!(
                                 "{} is outside the Copy Result<i32, i32> projection shape",

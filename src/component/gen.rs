@@ -7,7 +7,7 @@
 //! Future: automated extraction from `register_runtime()` LLVM declarations.
 
 use super::symbol::{AbiCallConv, AbiCallbackCategory, AbiParam, AbiSymbol, AbiSymbolKind};
-use super::types::{AbiPrimitive, AbiTypeRef};
+use super::types::{AbiField, AbiPrimitive, AbiStruct, AbiTypeDef, AbiTypeRef};
 use super::{ComponentIdentity, ComponentIr};
 
 /// ABI generator: builds a ComponentIr from registered runtime exports.
@@ -325,7 +325,7 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     // pointer type; set functions below carry plain `i64`. Opaque renders
     // as `MimiHandle/* Name */` in C; the header preamble emits
     // `typedef uintptr_t MimiHandle;` (c_header.rs).
-    use super::types::{AbiOpaque, AbiTypeDef};
+    use super::types::AbiOpaque;
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "ListHandle".to_string(),
         description: "Opaque handle to a Mimi list (*mut MimiList)".to_string(),
@@ -341,6 +341,24 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.type_def(AbiTypeDef::Opaque(AbiOpaque {
         name: "FutureHandle".to_string(),
         description: "Opaque handle to a Mimi future/task (*mut FutureRepr)".to_string(),
+    }));
+    gen.type_def(AbiTypeDef::Struct(AbiStruct {
+        name: "MimiListPair".to_string(),
+        fields: vec![
+            AbiField {
+                name: "len".to_string(),
+                ty: prim(I64),
+                offset: Some(0),
+            },
+            AbiField {
+                name: "data".to_string(),
+                ty: ptr(prim(U8)),
+                offset: Some(8),
+            },
+        ],
+        is_repr_c: true,
+        size: Some(16),
+        align: Some(8),
     }));
 
     // ── RC / Allocation (runtime/mod.rs:1201-1360) ──
@@ -482,6 +500,16 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
         f.param("map", handle("MapHandle"))
             .returns(handle("ListHandle"))
     });
+    gen.export("mimi_map_keys_pair", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(AbiTypeRef::Named("MimiListPair".to_string()))
+            .effect("alloc")
+    });
+    gen.export("mimi_map_values_pair", |f| {
+        f.param("map", handle("MapHandle"))
+            .returns(AbiTypeRef::Named("MimiListPair".to_string()))
+            .effect("alloc")
+    });
     gen.export("mimi_map_size", |f| {
         f.param("map", handle("MapHandle")).returns(prim(I64))
     });
@@ -579,6 +607,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(prim(UIntPtr))
             .effect("alloc")
     });
+    gen.export("mimi_any_string_clone", |f| {
+        f.param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
     gen.export("mimi_str_concat", |f| {
         f.param("a", ptr(prim(U8)))
             .param("b", ptr(prim(U8)))
@@ -625,7 +659,15 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(handle("ListHandle"))
             .effect("alloc")
     });
+    // Both box entry points copy exactly `len` bytes and return an owning
+    // MimiStr handle. Invalid ranges and allocation failure return handle 0.
     gen.export("mimi_str_box", |f| {
+        f.param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_box_copy", |f| {
         f.param("ptr", ptr(prim(U8)))
             .param("len", prim(I64))
             .returns(prim(I64))
@@ -639,6 +681,26 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     });
     gen.export("mimi_str_free_box", |f| {
         f.param("boxed", prim(I64)).effect("dealloc")
+    });
+    // `pop(List<string>)` transfers the payload out of the v3 box and releases
+    // only the wrapper allocation.
+    gen.export("mimi_str_box_take_payload", |f| {
+        f.param("boxed", prim(I64))
+            .param("out_ptr", ptr(ptr(prim(U8))))
+            .returns(prim(I64))
+            .effect("dealloc")
+    });
+    gen.export("mimi_str_list_data_clone", |f| {
+        f.param("len", prim(I64))
+            .param("data", ptr(prim(I64)))
+            .returns(ptr(prim(I64)))
+            .effect("alloc")
+    });
+    gen.export("mimi_str_list_list_data_clone", |f| {
+        f.param("len", prim(I64))
+            .param("data", ptr(prim(I64)))
+            .returns(ptr(prim(I64)))
+            .effect("alloc")
     });
     gen.export("mimi_list_string_abi_version", |f| f.returns(prim(I32)));
     gen.export("mimi_list_read_string", |f| {
@@ -1676,6 +1738,8 @@ mod tests {
             "mimi_map_has_key",
             "mimi_map_keys",
             "mimi_map_values",
+            "mimi_map_keys_pair",
+            "mimi_map_values_pair",
             "mimi_map_size",
             "mimi_map_destroy",
             "mimi_map_from_list",
@@ -1695,6 +1759,7 @@ mod tests {
             "mimi_set_to_list",
             // String
             "mimi_str_clone",
+            "mimi_any_string_clone",
             "mimi_str_concat",
             "mimi_str_char_at",
             "mimi_str_substring",
@@ -1707,8 +1772,12 @@ mod tests {
             "mimi_to_string_f64",
             "mimi_any_to_string",
             "mimi_str_box",
+            "mimi_str_box_copy",
             "mimi_str_unbox",
             "mimi_str_free_box",
+            "mimi_str_box_take_payload",
+            "mimi_str_list_data_clone",
+            "mimi_str_list_list_data_clone",
             // Runtime control
             "mimi_runtime_abort",
             "mimi_try_exit",

@@ -2338,6 +2338,62 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
     link_and_run_module(&codegen, &E2EConfig::default(), counter)
 }
 
+/// Production `compile_checked` path under Valgrind's memory gate. The legacy
+/// `compile_file` harness can select compatibility emission, so ownership
+/// regressions in the default resolved emitter must use this helper.
+pub(crate) fn checked_codegen_compile_and_run_valgrind(src: &str) -> Result<String, String> {
+    let file = parse_prod(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_checked_valgrind");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    link_and_run_module(
+        &codegen,
+        &E2EConfig {
+            use_valgrind: true,
+            ..E2EConfig::default()
+        },
+        counter,
+    )
+}
+
+/// Production `compile_checked` path under Valgrind, retaining the full
+/// process observation so leak-sensitive tests can assert Memcheck's summary.
+pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args(
+    src: &str,
+    valgrind_args: Vec<String>,
+) -> Result<NativeRunObservation, String> {
+    let file = parse_prod(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_checked_valgrind_observe");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    let valgrind_config = E2EConfig {
+        use_valgrind: true,
+        valgrind_args,
+        ..Default::default()
+    };
+    link_and_observe_module(&codegen, &valgrind_config, counter)
+}
+
 /// Production native path with a structured process observation for
 /// stop-ship receipts. This intentionally enters through compile_checked and
 /// therefore cannot use the test-only compile_file compatibility entry.

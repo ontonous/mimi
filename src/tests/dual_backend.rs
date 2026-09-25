@@ -16715,18 +16715,22 @@ fn dual_maps_from_list_tuple_roundtrip() {
     let src = format!(
         r#"{stdlib}
 func main() -> i32 {{
-    let m = from_list([("a", 1), ("b", 2)])
-    if size(m) != 2 {{ return 1 }}
+    let m = from_list([("a", 1), ("雪", 2), ("", 9)])
+    if size(m) != 3 {{ return 1 }}
     let (found_a, va) = get(m, "a")
     if !found_a || va != 1 {{ return 2 }}
-    let (found_b, vb) = get(m, "b")
+    let (found_b, vb) = get(m, "雪")
     if !found_b || vb != 2 {{ return 3 }}
+    let (found_empty, empty_value) = get(m, "")
+    if !found_empty || empty_value != 9 {{ return 4 }}
     let m2 = from_list(to_list(m))
-    if size(m2) != 2 {{ return 4 }}
-    let (found_b2, vb2) = get(m2, "b")
-    if !found_b2 || vb2 != 2 {{ return 5 }}
+    if size(m2) != 3 {{ return 5 }}
+    let (found_b2, vb2) = get(m2, "雪")
+    if !found_b2 || vb2 != 2 {{ return 6 }}
+    let (found_empty2, empty_value2) = get(m2, "")
+    if !found_empty2 || empty_value2 != 9 {{ return 7 }}
     let m3 = set(m2, "c", 3)
-    if size(m3) != 3 {{ return 6 }}
+    if size(m3) != 4 {{ return 8 }}
     println(size(m3))
     0
 }}
@@ -16745,8 +16749,8 @@ func main() -> i32 {{
     let (_interp_val, interp_stdout) = interp_run.unwrap();
     assert_eq!(
         interp_stdout.trim(),
-        "3",
-        "interpreter stdout mismatch\ninterp: {}\nexpected: 3",
+        "4",
+        "interpreter stdout mismatch\ninterp: {}\nexpected: 4",
         interp_stdout.trim()
     );
     if !can_link() {
@@ -16755,8 +16759,8 @@ func main() -> i32 {{
     let codegen = compile_and_run(src.as_str()).expect("codegen failed");
     assert_eq!(
         codegen.trim(),
-        "3",
-        "codegen mismatch\ncodegen: {}\nexpected: 3",
+        "4",
+        "codegen mismatch\ncodegen: {}\nexpected: 4",
         codegen.trim()
     );
     assert_eq!(
@@ -21584,20 +21588,48 @@ fn dual_prod_map_keys_values_order_deterministic() {
             let m3 = map_set(m2, "apple", 3)
             let m4 = map_set(m3, "mango", 4)
             let m5 = map_set(m4, "kiwi", 5)
-            let ks = keys(m5)
+            let m6 = map_set(m5, "plum", "cherry")
+            let ks = keys(m6)
             println(ks[0])
             println(ks[1])
             println(ks[2])
             println(ks[3])
             println(ks[4])
-            let vs = values(m5)
+            println(ks[5])
+            let vs = values(m6)
             println(vs[0])
-            println(vs[4])
+            println(vs[3])
+            println(vs[5])
             0
         }
         "#,
-        "apple\nkiwi\nmango\nyak\nzebra\n3\n1",
-        "map keys()/values() key-sorted iteration",
+        "apple\nkiwi\nmango\nplum\nyak\nzebra\n3\ncherry\n1",
+        "map keys()/values() key-sorted iteration with heterogeneous Any values",
+    );
+}
+
+#[test]
+fn dual_prod_map_key_value_lists_survive_returns_and_branch_merges() {
+    assert_checked_backends_stdout(
+        r#"
+        func collect_keys(m: Record, choose_left: bool) -> List<string> {
+            if choose_left { keys(m) } else { keys(m) }
+        }
+        func main() -> i32 {
+            let m0 = map_new()
+            let m1 = map_set(m0, "second", "plum")
+            let m2 = map_set(m1, "first", 9)
+            let vals = if true { values(m2) } else { values(m2) }
+            println(vals[0])
+            println(vals[1])
+            let ks = collect_keys(m2, false)
+            println(ks[0])
+            println(ks[1])
+            0
+        }
+        "#,
+        "9\nplum\nfirst\nsecond",
+        "Map list results retain their ABI and owner through function returns and branch merges",
     );
 }
 

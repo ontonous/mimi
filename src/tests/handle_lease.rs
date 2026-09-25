@@ -1,4 +1,4 @@
-//! Phase B shipped Map/Set handle lease + generation tests.
+//! Map/Set operation-lease, C lifetime-pin, and generation tests.
 //!
 //! Drives the real runtime entry points (`mimi_map_*` / `mimi_set_*`),
 //! not a reimplemented protocol.
@@ -13,7 +13,7 @@ use crate::runtime::{
 };
 
 #[test]
-fn map_lease_destroy_waits_active_op() {
+fn map_c_pin_defers_destroy_until_release() {
     let h = mimi_map_new();
     assert_ne!(h, 0);
     let key = b"k\0".as_ptr() as *const std::ffi::c_char;
@@ -69,7 +69,7 @@ fn map_stale_generation_is_typed_error() {
 }
 
 #[test]
-fn set_lease_destroy_waits_active_op() {
+fn set_c_pin_defers_destroy_until_release() {
     let h = mimi_set_new();
     assert_ne!(h, 0);
     assert_eq!(mimi_set_lease_acquire(h), HANDLE_OK);

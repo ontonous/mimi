@@ -241,7 +241,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "try_prop_box",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("try prop ptr: {e}")))?;
-            self.claim_closure_env(box_ptr);
+            self.claim_closure_env(box_ptr)?;
             let ret_struct_ty = self.context.struct_type(
                 &[
                     BasicTypeEnum::IntType(self.context.i32_type()),

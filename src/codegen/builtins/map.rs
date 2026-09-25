@@ -250,7 +250,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_store(typed, sv)?;
                         self.build_ptr_to_int(typed, i64_ty, "map_set_list_p_h")?
                     } else {
-                        // Heap-copy string literal so mimi_any_to_string can detect it
+                        // Copy a string literal into an explicitly tagged Any handle.
                         let strlen_fn = self
                             .module
                             .get_function("strlen")
@@ -263,9 +263,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .ok_or("strlen returned void")?
                             .into_int_value();
                         let clone_fn = self
-                            .module
-                            .get_function("mimi_str_clone")
-                            .ok_or("mimi_str_clone not declared")?;
+                            .get_runtime_fn("mimi_any_string_clone")
+                            .map_err(|error| error.to_string())?;
                         let result = self
                             .builder
                             .build_call(
@@ -276,9 +275,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 ],
                                 "str_clone_lit",
                             )
-                            .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                            .map_err(|e| format!("mimi_any_string_clone call error: {}", e))?;
                         call_try_basic_value(&result)
-                            .ok_or("mimi_str_clone returned void")?
+                            .ok_or("mimi_any_string_clone returned void")?
                             .into_int_value()
                     }
                 } else {
@@ -321,28 +320,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let ptr = self
                         .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
                         .into_pointer_value();
-                    // Use strlen rather than extract field 1 (actor deserialization
-                    // may leave the length field corrupt). This ensures correctness
-                    // for both actor-deserialized and locally-constructed strings.
-                    let strlen_fn = self
-                        .module
-                        .get_function("strlen")
-                        .ok_or("strlen not declared")?;
+                    // Keep the checker-known byte length: `strlen` would truncate
+                    // embedded NUL bytes and lose the Mimi string ABI contract.
                     let len = self
                         .builder
-                        .build_call(
-                            strlen_fn,
-                            &[BasicMetadataValueEnum::PointerValue(ptr)],
-                            "strlen_s",
-                        )
-                        .map_err(|e| format!("strlen call error: {}", e))?
-                        .try_as_basic_value_opt()
-                        .ok_or("strlen returned void")?
+                        .build_extract_value(sv, 1, "map_set_str_len")
+                        .map_err(|e| format!("map_set string length error: {e}"))?
                         .into_int_value();
                     let clone_fn = self
-                        .module
-                        .get_function("mimi_str_clone")
-                        .ok_or("mimi_str_clone not declared")?;
+                        .get_runtime_fn("mimi_any_string_clone")
+                        .map_err(|error| error.to_string())?;
                     let result = self
                         .builder
                         .build_call(
@@ -353,9 +340,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ],
                             "str_clone_var",
                         )
-                        .map_err(|e| format!("mimi_str_clone call error: {}", e))?;
+                        .map_err(|e| format!("mimi_any_string_clone call error: {}", e))?;
                     call_try_basic_value(&result)
-                        .ok_or("mimi_str_clone returned void")?
+                        .ok_or("mimi_any_string_clone returned void")?
                         .into_int_value()
                 } else {
                     // Product tuple / multi-field struct: widen int fields to
@@ -792,18 +779,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Err("keys: first arg must be i64 map handle".into()),
         };
         let func = self
-            .module
-            .get_function("mimi_map_keys")
-            .ok_or("mimi_map_keys not declared")?;
+            .get_runtime_fn("mimi_map_keys_pair")
+            .map_err(|error| error.to_string())?;
         let result = self
             .builder
             .build_call(
                 func,
                 &[BasicMetadataValueEnum::IntValue(map_handle)],
-                "map_keys_call",
+                "map_keys_pair_call",
             )
             .map_err(|e| format!("map_keys error: {}", e))?;
-        Ok(call_try_basic_value(&result).ok_or("mimi_map_keys returned void")?)
+        let list = call_try_basic_value(&result)
+            .ok_or("mimi_map_keys_pair returned void")?
+            .into_struct_value();
+        self.register_returned_string_list(list, self.list_struct_type())
+            .map_err(|error| error.to_string())?;
+        Ok(list.into())
     }
 
     pub(super) fn compile_map_values(
@@ -818,17 +809,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Err("values: first arg must be i64 map handle".into()),
         };
         let func = self
-            .module
-            .get_function("mimi_map_values")
-            .ok_or("mimi_map_values not declared")?;
+            .get_runtime_fn("mimi_map_values_pair")
+            .map_err(|error| error.to_string())?;
         let result = self
             .builder
             .build_call(
                 func,
                 &[BasicMetadataValueEnum::IntValue(map_handle)],
-                "map_values_call",
+                "map_values_pair_call",
             )
             .map_err(|e| format!("map_values error: {}", e))?;
-        Ok(call_try_basic_value(&result).ok_or("mimi_map_values returned void")?)
+        let list = call_try_basic_value(&result)
+            .ok_or("mimi_map_values_pair returned void")?
+            .into_struct_value();
+        let data = self
+            .builder
+            .build_extract_value(list, 1, "map_values_pair_data")
+            .map_err(|error| format!("map_values pair data error: {error}"))?
+            .into_pointer_value();
+        self.register_heap_alloc(data);
+        Ok(list.into())
     }
 }

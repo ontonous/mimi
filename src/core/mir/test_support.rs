@@ -775,10 +775,8 @@ pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitch
 pub(crate) struct DirectFlatCopyEnumConstructFixture {
     pub(crate) program: MirProgram,
     pub(crate) function: NodeId,
-    pub(crate) source_ty: ResolvedTypeId,
     pub(crate) nominal: crate::core::ir::NominalTypeId,
     pub(crate) number: NodeId,
-    pub(crate) number_field: NodeId,
 }
 
 pub(crate) fn direct_flat_copy_enum_construct_fixture() -> DirectFlatCopyEnumConstructFixture {
@@ -875,9 +873,7 @@ pub(crate) fn direct_flat_copy_enum_construct_fixture() -> DirectFlatCopyEnumCon
     DirectFlatCopyEnumConstructFixture {
         program,
         function: owner,
-        source_ty: switch.source_ty,
         nominal: switch.nominal,
         number: switch.number,
-        number_field,
     }
 }

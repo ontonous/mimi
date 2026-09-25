@@ -279,7 +279,7 @@ pub(crate) fn validate_protocol_method_abi(
         if caller
             .values
             .get(result)
-            .is_none_or(|value| value.ty != target.result)
+            .map_or(true, |value| value.ty != target.result)
         {
             errors
                 .push("protocol method result TypeDesc disagrees with canonical method ABI".into());
@@ -3875,7 +3875,7 @@ pub(crate) fn validate_transfer_event_boundaries(
 
     let reaches_argument = |value: &MirValueId, arguments: &[MirValueId]| {
         let mut seen = BTreeSet::new();
-        let mut pending = arguments.iter().cloned().collect::<Vec<_>>();
+        let mut pending = arguments.to_vec();
         while let Some(candidate) = pending.pop() {
             if candidate == *value || !seen.insert(candidate.clone()) {
                 if candidate == *value {
@@ -4786,20 +4786,20 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                     )
                 })
                 .unwrap_or_default();
-            let effect_suffix = (!effect_receipts.is_empty())
-                .then(|| {
-                    format!(
-                        " [effect_receipts=[{}]]",
-                        effect_receipts
-                            .iter()
-                            .map(|receipt| {
-                                format!("MirCallEffectContract{{{}}}", receipt.canonical_text())
-                            })
-                            .collect::<Vec<_>>()
-                            .join(";")
-                    )
-                })
-                .unwrap_or_default();
+            let effect_suffix = if effect_receipts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [effect_receipts=[{}]]",
+                    effect_receipts
+                        .iter()
+                        .map(|receipt| {
+                            format!("MirCallEffectContract{{{}}}", receipt.canonical_text())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";")
+                )
+            };
             format!(
                 "call {} {}{}({}){}{}",
                 result

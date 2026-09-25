@@ -2745,10 +2745,9 @@ impl MirTypeCatalog {
             let Some(schema) = crate::core::resolved::builtin_record_schema(item.as_str()) else {
                 continue;
             };
-            if catalog
-                .get(id)
-                .is_none_or(|descriptor| !matches!(descriptor.layout, MirLayout::Opaque))
-            {
+            if catalog.get(id).map_or(true, |descriptor| {
+                !matches!(descriptor.layout, MirLayout::Opaque)
+            }) {
                 continue;
             }
             let mut fields = Vec::with_capacity(schema.len());
@@ -7706,7 +7705,7 @@ impl MirTypeCatalog {
         if descriptor.kind != MirTypeKind::Nominal
             || descriptor.abi != MirAbiClass::Aggregate
             || !descriptor.has_canonical_copy_noop_metadata()
-            || !matches!(fields.len(), 1 | 2 | 3 | 4 | 5 | 6 | 7)
+            || !matches!(fields.len(), 1..=7)
         {
             return Err(
                 "generic record projection requires a one-, two-, three-, four-, five-, six-, or seven-field Copy record contract"
@@ -7732,9 +7731,9 @@ impl MirTypeCatalog {
             });
         if result.kind != MirTypeKind::GenericParameter
             || field.ty != *result_ty
-            || self
-                .get(&field.ty)
-                .is_none_or(|field_ty| field_ty.kind != MirTypeKind::GenericParameter)
+            || self.get(&field.ty).map_or(true, |field_ty| {
+                field_ty.kind != MirTypeKind::GenericParameter
+            })
             || !siblings_valid
         {
             return Err(
@@ -7804,9 +7803,9 @@ impl MirTypeCatalog {
             });
         if result.kind != MirTypeKind::GenericParameter
             || selected != result_ty
-            || self
-                .get(selected)
-                .is_none_or(|element| element.kind != MirTypeKind::GenericParameter)
+            || self.get(selected).map_or(true, |element| {
+                element.kind != MirTypeKind::GenericParameter
+            })
             || !siblings_valid
         {
             return Err(
@@ -7876,9 +7875,9 @@ impl MirTypeCatalog {
         }
         if fields.iter().any(|candidate| {
             candidate.ty != *result_ty
-                || self
-                    .get(&candidate.ty)
-                    .is_none_or(|field_ty| field_ty.kind != MirTypeKind::GenericParameter)
+                || self.get(&candidate.ty).map_or(true, |field_ty| {
+                    field_ty.kind != MirTypeKind::GenericParameter
+                })
         }) {
             return Err(
                 "generic owned record projection placeholder requires every field to use the same GenericParameter".into(),
@@ -8686,7 +8685,7 @@ impl MirTypeCatalog {
         else {
             return Err("generic record update result has no canonical record layout".into());
         };
-        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3 | 4) {
+        if nominal != layout_nominal || !matches!(layout_fields.len(), 2..=4) {
             return Err("generic record update nominal/layout disagrees with TypeDesc".into());
         }
         let projections = fields
@@ -8774,7 +8773,7 @@ impl MirTypeCatalog {
         else {
             return Err("generic record move update result has no record layout".into());
         };
-        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3 | 4) {
+        if nominal != layout_nominal || !matches!(layout_fields.len(), 2..=4) {
             return Err("generic record move update nominal/layout disagrees with TypeDesc".into());
         }
         let update_field = fields
@@ -10108,7 +10107,7 @@ impl MirTypeCatalog {
         if contract
             .payload_types
             .first()
-            .is_none_or(|payload| self.validate_owned_string(payload).is_err())
+            .map_or(true, |payload| self.validate_owned_string(payload).is_err())
         {
             return Err(
                 "Result Ok payload must be the canonical owned StringHandle for the Result<string, i32> call ABI contract".into(),

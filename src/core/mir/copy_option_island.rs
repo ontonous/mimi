@@ -337,7 +337,7 @@ fn is_option_with_inner(
     };
     match program.resolved_types().get(inner) {
         Some(crate::core::ir::ResolvedType::Primitive(primitive)) => {
-            expected.is_none_or(|wanted| *primitive == wanted)
+            expected.map_or(true, |wanted| *primitive == wanted)
         }
         _ => false,
     }

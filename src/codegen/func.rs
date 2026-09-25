@@ -623,7 +623,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let BasicValueEnum::PointerValue(env_ptr) =
             self.build_extract_value(sv.into(), 1, "b9_env_claim")?
         {
-            self.claim_closure_env(env_ptr);
+            self.claim_closure_env(env_ptr)?;
         }
         Ok(val)
     }
@@ -809,10 +809,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // registration (transfer, as before); for copied
                             // leaves the borrowed source has no registration
                             // and the claim is a no-op.
-                            if let Ok(BasicValueEnum::PointerValue(data)) =
-                                self.build_extract_value(fsv.into(), 0, "agg_str_data")
+                            if let BasicValueEnum::PointerValue(data) =
+                                self.build_extract_value(fsv.into(), 0, "agg_str_data")?
                             {
-                                self.claim_closure_env(data);
+                                self.claim_closure_env(data)?;
                             }
                         }
                     }
@@ -1327,7 +1327,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?;
             // Reuse the closure-env claim set: a generic "skip this pointer's
             // free, the caller owns it now" mechanism (pointer-compare guard).
-            self.claim_closure_env(box_ptr);
+            self.claim_closure_env(box_ptr)?;
         }
         Ok(())
     }
@@ -2805,9 +2805,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             } else if let Expr::Ident(func_name) = callee.unlocated() {
                                 match func_name.as_str() {
-                                    "keys" | "values" => {
+                                    "keys" => {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
+                                    }
+                                    "values" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<Any>".to_string());
                                     }
                                     "Ok" => {
                                         let full = match call_args.first() {
@@ -2968,8 +2972,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         // functions that return List<string>.
                                         match func_name.as_str() {
                                             "listdir" | "walk_dir" | "str_split" | "words"
-                                            | "lines" | "split" | "sort_str" | "keys"
-                                            | "values" => {
+                                            | "lines" | "split" | "sort_str" | "keys" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),
@@ -2979,6 +2982,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     Type::Name(
                                                         "List".into(),
                                                         vec![Type::Name("string".into(), vec![])],
+                                                    ),
+                                                );
+                                            }
+                                            "values" => {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "List<Any>".to_string());
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "List".into(),
+                                                        vec![Type::Name("Any".into(), vec![])],
                                                     ),
                                                 );
                                             }

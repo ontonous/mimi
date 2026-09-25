@@ -3,8 +3,11 @@
 //! 0.38.36 (B-HANDLE-001): handles are no longer raw Box addresses with a
 //! "caller must not concurrent-destroy" contract. Each handle carries a
 //! [`HandleGeneration`] (this name is **not** Flow `TransitionEpoch`).
-//! Every op acquires a lease; destroy stops new leases, waits until
-//! in-flight leases are zero, then advances generation and frees the object.
+//! Every internal op acquires one exclusive lease. Other threads serialize on
+//! that handle; same-thread reentry fails closed rather than deadlocking or
+//! creating aliased references. C `mimi_*_lease_*` calls are lifetime pins,
+//! kept separate from operation access. Destroy stops new leases and pins,
+//! then frees immediately or after the last outstanding reference drops.
 //! Use of a destroyed / stale handle is a typed [`HandleError`], not UAF.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -18,12 +21,14 @@ pub const HANDLE_OK: i32 = 0;
 pub const HANDLE_ERR_INVALID: i32 = 1;
 pub const HANDLE_ERR_STALE: i32 = 2;
 pub const HANDLE_ERR_DESTROYED: i32 = 3;
+pub const HANDLE_ERR_REENTRANT: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleError {
     Invalid,
     StaleGeneration,
     Destroyed,
+    Reentrant,
 }
 
 impl HandleError {
@@ -32,6 +37,7 @@ impl HandleError {
             HandleError::Invalid => HANDLE_ERR_INVALID,
             HandleError::StaleGeneration => HANDLE_ERR_STALE,
             HandleError::Destroyed => HANDLE_ERR_DESTROYED,
+            HandleError::Reentrant => HANDLE_ERR_REENTRANT,
         }
     }
 }
@@ -55,10 +61,17 @@ pub extern "C" fn mimi_handle_last_error() -> i32 {
 
 struct Slot<T> {
     generation: HandleGeneration,
+    /// Internal operation lease count. It is either zero or one and is
+    /// protected by the table mutex; C lifetime pins use `pins` separately.
     leases: AtomicI64,
+    /// The thread holding the exclusive internal operation lease, if any.
+    active_owner: Option<std::thread::ThreadId>,
+    /// Explicit C ABI lifetime pins. Pins keep the allocation alive but do
+    /// not grant access to the contained Map/Set.
+    pins: AtomicI64,
     /// Destroy has started: no new leases.
     retired: AtomicBool,
-    /// Destroy is waiting for leases to reach zero (finish not yet run).
+    /// Destroy has been requested and frees after operations and pins drain.
     pending_free: AtomicBool,
     obj: Option<Box<T>>,
 }
@@ -66,7 +79,6 @@ struct Slot<T> {
 struct Table<T: Send> {
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
-    cond: Condvar,
 }
 
 impl<T: Send> Table<T> {
@@ -77,12 +89,13 @@ impl<T: Send> Table<T> {
             slots: vec![Slot {
                 generation: 0,
                 leases: AtomicI64::new(0),
+                active_owner: None,
+                pins: AtomicI64::new(0),
                 retired: AtomicBool::new(true),
                 pending_free: AtomicBool::new(false),
                 obj: None,
             }],
             free: Vec::new(),
-            cond: Condvar::new(),
         }
     }
 }
@@ -107,12 +120,156 @@ fn unpack(handle: i64) -> Result<(u32, HandleGeneration), HandleError> {
 
 static MAP_TABLE: std::sync::OnceLock<Mutex<Table<super::MimiMap>>> = std::sync::OnceLock::new();
 static SET_TABLE: std::sync::OnceLock<Mutex<Table<super::MimiSet>>> = std::sync::OnceLock::new();
+static MAP_CONDVAR: std::sync::OnceLock<Condvar> = std::sync::OnceLock::new();
+static SET_CONDVAR: std::sync::OnceLock<Condvar> = std::sync::OnceLock::new();
+
+/// A thread-reentrant gate for recursive Map/Set serialization only. Ordinary
+/// Map/Set operations use per-handle leases and are not globally serialized.
+/// Serializer functions enter this scope before acquiring their first handle,
+/// so two recursive serializer walks cannot hold opposite ends of a handle
+/// graph while waiting on each other.
+struct OperationGate {
+    owner_depth: Mutex<Option<(std::thread::ThreadId, usize)>>,
+    changed: Condvar,
+}
+
+static OPERATION_GATE: std::sync::OnceLock<OperationGate> = std::sync::OnceLock::new();
+
+fn operation_gate() -> &'static OperationGate {
+    OPERATION_GATE.get_or_init(|| OperationGate {
+        owner_depth: Mutex::new(None),
+        changed: Condvar::new(),
+    })
+}
+
+struct SerializerGraphLease {
+    owner: std::thread::ThreadId,
+    _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl SerializerGraphLease {
+    fn acquire() -> Self {
+        let owner = std::thread::current().id();
+        let gate = operation_gate();
+        let mut state = gate
+            .owner_depth
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            match *state {
+                Some((active, _)) if active != owner => {
+                    state = gate
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|error| error.into_inner());
+                }
+                Some((_, depth)) => {
+                    *state = Some((
+                        owner,
+                        depth.checked_add(1).expect("operation depth overflow"),
+                    ));
+                    break;
+                }
+                None => {
+                    *state = Some((owner, 1));
+                    break;
+                }
+            }
+        }
+        Self {
+            owner,
+            _not_send_or_sync: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for SerializerGraphLease {
+    fn drop(&mut self) {
+        let gate = operation_gate();
+        let mut state = gate
+            .owner_depth
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some((owner, depth)) = *state else {
+            return;
+        };
+        debug_assert_eq!(owner, self.owner, "operation gate dropped by non-owner");
+        if owner != self.owner || depth == 0 {
+            return;
+        }
+        if depth == 1 {
+            *state = None;
+            gate.changed.notify_all();
+        } else {
+            *state = Some((owner, depth - 1));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JsonContainerKind {
+    Map,
+    Set,
+}
+
+thread_local! {
+    static JSON_CONTAINER_PATH: std::cell::RefCell<Vec<(JsonContainerKind, i64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Scope for one node in a recursive JSON Map/Set walk. Cyclic edges are
+/// reported as an explicit JSON error object instead of reentering a live
+/// mutable handle and aborting the process.
+pub(super) struct JsonContainerScope {
+    kind: JsonContainerKind,
+    handle: i64,
+    _graph: SerializerGraphLease,
+}
+
+impl Drop for JsonContainerScope {
+    fn drop(&mut self) {
+        JSON_CONTAINER_PATH.with(|path| {
+            let popped = path.borrow_mut().pop();
+            debug_assert_eq!(popped, Some((self.kind, self.handle)));
+        });
+    }
+}
+
+pub(super) fn json_container_scope(
+    kind: JsonContainerKind,
+    handle: i64,
+) -> Option<JsonContainerScope> {
+    let graph = SerializerGraphLease::acquire();
+    let entered = JSON_CONTAINER_PATH.with(|path| {
+        let mut path = path.borrow_mut();
+        if path.contains(&(kind, handle)) {
+            false
+        } else {
+            path.push((kind, handle));
+            true
+        }
+    });
+    if !entered {
+        drop(graph);
+        return None;
+    }
+    Some(JsonContainerScope {
+        kind,
+        handle,
+        _graph: graph,
+    })
+}
 
 fn maps() -> &'static Mutex<Table<super::MimiMap>> {
     MAP_TABLE.get_or_init(|| Mutex::new(Table::new()))
 }
 fn sets() -> &'static Mutex<Table<super::MimiSet>> {
     SET_TABLE.get_or_init(|| Mutex::new(Table::new()))
+}
+fn map_condvar() -> &'static Condvar {
+    MAP_CONDVAR.get_or_init(Condvar::new)
+}
+fn set_condvar() -> &'static Condvar {
+    SET_CONDVAR.get_or_init(Condvar::new)
 }
 
 fn lock_maps() -> std::sync::MutexGuard<'static, Table<super::MimiMap>> {
@@ -129,6 +286,8 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
         // generation was bumped on destroy; use the current value
         let g = slot.generation;
         slot.leases.store(0, Ordering::SeqCst);
+        slot.active_owner = None;
+        slot.pins.store(0, Ordering::SeqCst);
         slot.retired.store(false, Ordering::SeqCst);
         slot.pending_free.store(false, Ordering::SeqCst);
         slot.obj = Some(Box::new(obj));
@@ -138,6 +297,8 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
         table.slots.push(Slot {
             generation: gen,
             leases: AtomicI64::new(0),
+            active_owner: None,
+            pins: AtomicI64::new(0),
             retired: AtomicBool::new(false),
             pending_free: AtomicBool::new(false),
             obj: Some(Box::new(obj)),
@@ -150,19 +311,14 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
 pub(super) struct MapLease {
     handle: i64,
     ptr: *mut super::MimiMap,
+    _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl MapLease {
     pub fn get(&self) -> &super::MimiMap {
         unsafe { &*self.ptr }
     }
-    /// SAFETY: the lease holds a unique borrow of the handle for its lifetime,
-    /// so returning a `&mut` through `&self` is sound only because the runtime
-    /// guarantees no concurrent access to the same handle while a lease is live.
-    /// This mirrors `Rc::get_mut`/`RefCell::get_mut` escape hatches that are
-    /// gated on the caller upholding the single-lease invariant.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut super::MimiMap {
+    pub fn get_mut(&mut self) -> &mut super::MimiMap {
         unsafe { &mut *self.ptr }
     }
     pub fn as_ptr(&self) -> *mut super::MimiMap {
@@ -191,16 +347,14 @@ impl Drop for MapLease {
 pub(super) struct SetLease {
     handle: i64,
     ptr: *mut super::MimiSet,
+    _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl SetLease {
     pub fn get(&self) -> &super::MimiSet {
         unsafe { &*self.ptr }
     }
-    /// SAFETY: see `MapLease::get_mut` — the lease guarantees unique live
-    /// access to the handle for its lifetime.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut super::MimiSet {
+    pub fn get_mut(&mut self) -> &mut super::MimiSet {
         unsafe { &mut *self.ptr }
     }
 }
@@ -238,53 +392,81 @@ pub fn set_new_handle(obj: super::MimiSet) -> i64 {
 pub fn map_acquire(handle: i64) -> Result<MapLease, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
-    let slot = t
-        .slots
-        .get_mut(index as usize)
-        .ok_or(HandleError::Invalid)?;
-    if slot.generation != gen {
-        return Err(HandleError::StaleGeneration);
+    let current = std::thread::current().id();
+    loop {
+        let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+        if slot.generation != gen {
+            return Err(HandleError::StaleGeneration);
+        }
+        if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
+            return Err(HandleError::Destroyed);
+        }
+        match slot.active_owner {
+            Some(owner) if owner == current => return Err(HandleError::Reentrant),
+            Some(_) => {
+                t = map_condvar().wait(t).unwrap_or_else(|e| e.into_inner());
+            }
+            None => {
+                let slot = &mut t.slots[index as usize];
+                slot.active_owner = Some(current);
+                slot.leases.store(1, Ordering::SeqCst);
+                let ptr = slot
+                    .obj
+                    .as_mut()
+                    .map(|b| &mut **b as *mut super::MimiMap)
+                    .ok_or(HandleError::Destroyed)?;
+                clear_handle_error();
+                return Ok(MapLease {
+                    handle,
+                    ptr,
+                    _not_send_or_sync: std::marker::PhantomData,
+                });
+            }
+        }
     }
-    if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
-        return Err(HandleError::Destroyed);
-    }
-    slot.leases.fetch_add(1, Ordering::SeqCst);
-    let ptr = slot
-        .obj
-        .as_mut()
-        .map(|b| &mut **b as *mut super::MimiMap)
-        .ok_or(HandleError::Destroyed)?;
-    clear_handle_error();
-    Ok(MapLease { handle, ptr })
 }
 
 pub fn set_acquire(handle: i64) -> Result<SetLease, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_sets();
-    let slot = t
-        .slots
-        .get_mut(index as usize)
-        .ok_or(HandleError::Invalid)?;
-    if slot.generation != gen {
-        return Err(HandleError::StaleGeneration);
+    let current = std::thread::current().id();
+    loop {
+        let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+        if slot.generation != gen {
+            return Err(HandleError::StaleGeneration);
+        }
+        if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
+            return Err(HandleError::Destroyed);
+        }
+        match slot.active_owner {
+            Some(owner) if owner == current => return Err(HandleError::Reentrant),
+            Some(_) => {
+                t = set_condvar().wait(t).unwrap_or_else(|e| e.into_inner());
+            }
+            None => {
+                let slot = &mut t.slots[index as usize];
+                slot.active_owner = Some(current);
+                slot.leases.store(1, Ordering::SeqCst);
+                let ptr = slot
+                    .obj
+                    .as_mut()
+                    .map(|b| &mut **b as *mut super::MimiSet)
+                    .ok_or(HandleError::Destroyed)?;
+                clear_handle_error();
+                return Ok(SetLease {
+                    handle,
+                    ptr,
+                    _not_send_or_sync: std::marker::PhantomData,
+                });
+            }
+        }
     }
-    if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
-        return Err(HandleError::Destroyed);
-    }
-    slot.leases.fetch_add(1, Ordering::SeqCst);
-    let ptr = slot
-        .obj
-        .as_mut()
-        .map(|b| &mut **b as *mut super::MimiSet)
-        .ok_or(HandleError::Destroyed)?;
-    clear_handle_error();
-    Ok(SetLease { handle, ptr })
 }
 
 fn map_release(handle: i64) -> Result<i64, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
-    let (remaining, should_free, notify) = {
+    let (remaining, should_free) = {
         let slot = t
             .slots
             .get_mut(index as usize)
@@ -292,24 +474,28 @@ fn map_release(handle: i64) -> Result<i64, HandleError> {
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
-        let prev = slot.leases.fetch_sub(1, Ordering::SeqCst);
-        let remaining = prev - 1;
+        if slot.active_owner != Some(std::thread::current().id())
+            || slot.leases.load(Ordering::SeqCst) != 1
+        {
+            return Err(HandleError::Invalid);
+        }
+        slot.active_owner = None;
+        slot.leases.store(0, Ordering::SeqCst);
+        let remaining = slot.pins.load(Ordering::SeqCst);
         let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
-        (remaining, should_free, remaining == 0)
+        (remaining, should_free)
     };
-    if notify {
-        t.cond.notify_all();
-    }
     if should_free {
         finish_map_free(&mut t, index);
     }
+    map_condvar().notify_all();
     Ok(remaining)
 }
 
 fn set_release(handle: i64) -> Result<i64, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_sets();
-    let (remaining, should_free, notify) = {
+    let (remaining, should_free) = {
         let slot = t
             .slots
             .get_mut(index as usize)
@@ -317,36 +503,145 @@ fn set_release(handle: i64) -> Result<i64, HandleError> {
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
-        let prev = slot.leases.fetch_sub(1, Ordering::SeqCst);
-        let remaining = prev - 1;
+        if slot.active_owner != Some(std::thread::current().id())
+            || slot.leases.load(Ordering::SeqCst) != 1
+        {
+            return Err(HandleError::Invalid);
+        }
+        slot.active_owner = None;
+        slot.leases.store(0, Ordering::SeqCst);
+        let remaining = slot.pins.load(Ordering::SeqCst);
         let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
-        (remaining, should_free, remaining == 0)
+        (remaining, should_free)
     };
-    if notify {
-        t.cond.notify_all();
-    }
     if should_free {
         finish_set_free(&mut t, index);
     }
+    set_condvar().notify_all();
+    Ok(remaining)
+}
+
+fn map_pin(handle: i64) -> Result<i64, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_maps();
+    let slot = t
+        .slots
+        .get_mut(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    if slot.generation != gen {
+        return Err(HandleError::StaleGeneration);
+    }
+    if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
+        return Err(HandleError::Destroyed);
+    }
+    let pins = slot.pins.load(Ordering::SeqCst);
+    let next = pins.checked_add(1).ok_or(HandleError::Invalid)?;
+    slot.pins.store(next, Ordering::SeqCst);
+    clear_handle_error();
+    Ok(slot.leases.load(Ordering::SeqCst).saturating_add(next))
+}
+
+fn set_pin(handle: i64) -> Result<i64, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_sets();
+    let slot = t
+        .slots
+        .get_mut(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    if slot.generation != gen {
+        return Err(HandleError::StaleGeneration);
+    }
+    if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
+        return Err(HandleError::Destroyed);
+    }
+    let pins = slot.pins.load(Ordering::SeqCst);
+    let next = pins.checked_add(1).ok_or(HandleError::Invalid)?;
+    slot.pins.store(next, Ordering::SeqCst);
+    clear_handle_error();
+    Ok(slot.leases.load(Ordering::SeqCst).saturating_add(next))
+}
+
+fn map_unpin(handle: i64) -> Result<i64, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_maps();
+    let (remaining, should_free) = {
+        let slot = t
+            .slots
+            .get_mut(index as usize)
+            .ok_or(HandleError::Invalid)?;
+        if slot.generation != gen {
+            return Err(HandleError::StaleGeneration);
+        }
+        let pins = slot.pins.load(Ordering::SeqCst);
+        if pins == 0 {
+            return Err(HandleError::Invalid);
+        }
+        let next = pins - 1;
+        slot.pins.store(next, Ordering::SeqCst);
+        let remaining = next.saturating_add(slot.leases.load(Ordering::SeqCst));
+        let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
+        (remaining, should_free)
+    };
+    if should_free {
+        finish_map_free(&mut t, index);
+    }
+    map_condvar().notify_all();
+    Ok(remaining)
+}
+
+fn set_unpin(handle: i64) -> Result<i64, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_sets();
+    let (remaining, should_free) = {
+        let slot = t
+            .slots
+            .get_mut(index as usize)
+            .ok_or(HandleError::Invalid)?;
+        if slot.generation != gen {
+            return Err(HandleError::StaleGeneration);
+        }
+        let pins = slot.pins.load(Ordering::SeqCst);
+        if pins == 0 {
+            return Err(HandleError::Invalid);
+        }
+        let next = pins - 1;
+        slot.pins.store(next, Ordering::SeqCst);
+        let remaining = next.saturating_add(slot.leases.load(Ordering::SeqCst));
+        let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
+        (remaining, should_free)
+    };
+    if should_free {
+        finish_set_free(&mut t, index);
+    }
+    set_condvar().notify_all();
     Ok(remaining)
 }
 
 fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
     let slot = &mut t.slots[index as usize];
     if let Some(map) = slot.obj.take() {
-        for (vh, kind) in map.owned.iter() {
-            super::free_map_owned_value(*vh, *kind);
-        }
+        // Map-owned payloads are Arc-backed; dropping this Map releases its
+        // references and the payload Drop frees each allocation after the
+        // last sibling clone is gone.
         drop(map);
     }
-    slot.generation = slot.generation.wrapping_add(1);
-    if slot.generation == 0 {
-        slot.generation = 1;
-    }
-    slot.retired.store(false, Ordering::SeqCst);
+    let can_reuse = if let Some(next) = slot.generation.checked_add(1) {
+        slot.generation = next;
+        slot.retired.store(false, Ordering::SeqCst);
+        true
+    } else {
+        // Never let a 32-bit generation wrap and make a very old handle live
+        // again. This slot is permanently retired at exhaustion.
+        slot.retired.store(true, Ordering::SeqCst);
+        false
+    };
     slot.pending_free.store(false, Ordering::SeqCst);
     slot.leases.store(0, Ordering::SeqCst);
-    t.free.push(index);
+    slot.active_owner = None;
+    slot.pins.store(0, Ordering::SeqCst);
+    if can_reuse {
+        t.free.push(index);
+    }
 }
 
 fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
@@ -357,17 +652,25 @@ fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
         }
         drop(set);
     }
-    slot.generation = slot.generation.wrapping_add(1);
-    if slot.generation == 0 {
-        slot.generation = 1;
-    }
-    slot.retired.store(false, Ordering::SeqCst);
+    let can_reuse = if let Some(next) = slot.generation.checked_add(1) {
+        slot.generation = next;
+        slot.retired.store(false, Ordering::SeqCst);
+        true
+    } else {
+        // See finish_map_free: avoid generation wrap resurrecting stale Set handles.
+        slot.retired.store(true, Ordering::SeqCst);
+        false
+    };
     slot.pending_free.store(false, Ordering::SeqCst);
     slot.leases.store(0, Ordering::SeqCst);
-    t.free.push(index);
+    slot.active_owner = None;
+    slot.pins.store(0, Ordering::SeqCst);
+    if can_reuse {
+        t.free.push(index);
+    }
 }
 
-/// Stop new leases. Does not wait or free.
+/// Stop new operation leases and C lifetime pins. Does not wait or free.
 pub fn map_begin_destroy(handle: i64) -> Result<(), HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
@@ -383,6 +686,7 @@ pub fn map_begin_destroy(handle: i64) -> Result<(), HandleError> {
     }
     slot.retired.store(true, Ordering::SeqCst);
     clear_handle_error();
+    map_condvar().notify_all();
     Ok(())
 }
 
@@ -401,73 +705,63 @@ pub fn set_begin_destroy(handle: i64) -> Result<(), HandleError> {
     }
     slot.retired.store(true, Ordering::SeqCst);
     clear_handle_error();
+    set_condvar().notify_all();
     Ok(())
 }
 
-/// Wait until leases are zero, bump generation, free the object.
+/// Finish destroy without blocking. The object is freed now if no internal
+/// operation lease or C lifetime pin remains; otherwise the last release
+/// completes reclamation.
 pub fn map_finish_destroy(handle: i64) -> Result<(), HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
-    // `loop` is intentional: a concurrent release may change `idle`/`gone`
-    // between the snapshot above and the free, so the retry barrier is the
-    // documented spin (see `MapLease`/`SetLease` single-lease invariant).
-    #[allow(clippy::never_loop)]
-    loop {
-        let (stale, gone, idle) = {
-            let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
-            (
-                slot.generation != gen,
-                slot.obj.is_none(),
-                slot.leases.load(Ordering::SeqCst) == 0,
-            )
-        };
-        if stale {
-            return Err(HandleError::StaleGeneration);
-        }
-        if gone {
-            return Ok(());
-        }
-        if idle {
-            finish_map_free(&mut t, index);
-            clear_handle_error();
-            return Ok(());
-        }
-        // Same-thread simulate: last release finishes the free via pending_free.
+    let slot = t
+        .slots
+        .get_mut(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    if slot.generation != gen {
+        return Err(HandleError::StaleGeneration);
+    }
+    if slot.obj.is_none() {
+        return Ok(());
+    }
+    slot.retired.store(true, Ordering::SeqCst);
+    let idle = slot.leases.load(Ordering::SeqCst) == 0 && slot.pins.load(Ordering::SeqCst) == 0;
+    if idle {
+        finish_map_free(&mut t, index);
+    } else {
         t.slots[index as usize]
             .pending_free
             .store(true, Ordering::SeqCst);
-        t.cond.notify_all();
-        clear_handle_error();
-        return Ok(());
     }
+    map_condvar().notify_all();
+    clear_handle_error();
+    Ok(())
 }
 
 pub fn set_finish_destroy(handle: i64) -> Result<(), HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_sets();
-    let (stale, gone, idle) = {
-        let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
-        (
-            slot.generation != gen,
-            slot.obj.is_none(),
-            slot.leases.load(Ordering::SeqCst) == 0,
-        )
-    };
-    if stale {
+    let slot = t
+        .slots
+        .get_mut(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    if slot.generation != gen {
         return Err(HandleError::StaleGeneration);
     }
-    if gone {
+    if slot.obj.is_none() {
         return Ok(());
     }
+    slot.retired.store(true, Ordering::SeqCst);
+    let idle = slot.leases.load(Ordering::SeqCst) == 0 && slot.pins.load(Ordering::SeqCst) == 0;
     if idle {
         finish_set_free(&mut t, index);
-        clear_handle_error();
-        return Ok(());
+    } else {
+        t.slots[index as usize]
+            .pending_free
+            .store(true, Ordering::SeqCst);
     }
-    t.slots[index as usize]
-        .pending_free
-        .store(true, Ordering::SeqCst);
-    t.cond.notify_all();
+    set_condvar().notify_all();
     clear_handle_error();
     Ok(())
 }
@@ -529,7 +823,10 @@ pub fn map_lease_count(handle: i64) -> Result<i64, HandleError> {
     if slot.generation != gen {
         return Err(HandleError::StaleGeneration);
     }
-    Ok(slot.leases.load(Ordering::SeqCst))
+    Ok(slot
+        .leases
+        .load(Ordering::SeqCst)
+        .saturating_add(slot.pins.load(Ordering::SeqCst)))
 }
 
 pub fn set_lease_count(handle: i64) -> Result<i64, HandleError> {
@@ -539,12 +836,15 @@ pub fn set_lease_count(handle: i64) -> Result<i64, HandleError> {
     if slot.generation != gen {
         return Err(HandleError::StaleGeneration);
     }
-    Ok(slot.leases.load(Ordering::SeqCst))
+    Ok(slot
+        .leases
+        .load(Ordering::SeqCst)
+        .saturating_add(slot.pins.load(Ordering::SeqCst)))
 }
 
 pub fn with_map<R>(handle: i64, default: R, f: impl FnOnce(&mut super::MimiMap) -> R) -> R {
     match map_acquire(handle) {
-        Ok(lease) => f(lease.get_mut()),
+        Ok(mut lease) => f(lease.get_mut()),
         Err(e) => {
             set_handle_error(e);
             default
@@ -554,7 +854,7 @@ pub fn with_map<R>(handle: i64, default: R, f: impl FnOnce(&mut super::MimiMap) 
 
 pub fn with_set<R>(handle: i64, default: R, f: impl FnOnce(&mut super::MimiSet) -> R) -> R {
     match set_acquire(handle) {
-        Ok(lease) => f(lease.get_mut()),
+        Ok(mut lease) => f(lease.get_mut()),
         Err(e) => {
             set_handle_error(e);
             default
@@ -568,12 +868,8 @@ pub fn with_set<R>(handle: i64, default: R, f: impl FnOnce(&mut super::MimiSet) 
 
 #[no_mangle]
 pub extern "C" fn mimi_map_lease_acquire(handle: i64) -> i32 {
-    match map_acquire(handle) {
-        Ok(lease) => {
-            // Leak the RAII guard: the matching release is explicit.
-            std::mem::forget(lease);
-            HANDLE_OK
-        }
+    match map_pin(handle) {
+        Ok(_) => HANDLE_OK,
         Err(e) => {
             set_handle_error(e);
             e.code()
@@ -583,7 +879,7 @@ pub extern "C" fn mimi_map_lease_acquire(handle: i64) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn mimi_map_lease_release(handle: i64) -> i32 {
-    match map_release(handle) {
+    match map_unpin(handle) {
         Ok(_) => HANDLE_OK,
         Err(e) => {
             set_handle_error(e);
@@ -594,11 +890,8 @@ pub extern "C" fn mimi_map_lease_release(handle: i64) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn mimi_set_lease_acquire(handle: i64) -> i32 {
-    match set_acquire(handle) {
-        Ok(lease) => {
-            std::mem::forget(lease);
-            HANDLE_OK
-        }
+    match set_pin(handle) {
+        Ok(_) => HANDLE_OK,
         Err(e) => {
             set_handle_error(e);
             e.code()
@@ -608,7 +901,7 @@ pub extern "C" fn mimi_set_lease_acquire(handle: i64) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn mimi_set_lease_release(handle: i64) -> i32 {
-    match set_release(handle) {
+    match set_unpin(handle) {
         Ok(_) => HANDLE_OK,
         Err(e) => {
             set_handle_error(e);
@@ -740,5 +1033,170 @@ pub unsafe extern "C" fn mimi_set_try_size(handle: i64, out: *mut i64) -> i32 {
             }
             e.code()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn new_map() -> i64 {
+        map_new_handle(super::super::MimiMap {
+            inner: Default::default(),
+            owned: Default::default(),
+        })
+    }
+
+    fn new_set() -> i64 {
+        set_new_handle(super::super::MimiSet {
+            inner: Default::default(),
+            string_values: Default::default(),
+        })
+    }
+
+    #[test]
+    fn map_operation_lease_is_exclusive_and_reentry_fails_fast() {
+        let handle = new_map();
+        let lease = map_acquire(handle).unwrap();
+        assert!(matches!(map_acquire(handle), Err(HandleError::Reentrant)));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let lease = map_acquire(handle).unwrap();
+            acquired_tx.send(()).unwrap();
+            drop(lease);
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        drop(lease);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        map_destroy(handle).unwrap();
+    }
+
+    #[test]
+    fn set_operation_lease_is_exclusive_and_reentry_fails_fast() {
+        let handle = new_set();
+        let lease = set_acquire(handle).unwrap();
+        assert!(matches!(set_acquire(handle), Err(HandleError::Reentrant)));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let lease = set_acquire(handle).unwrap();
+            acquired_tx.send(()).unwrap();
+            drop(lease);
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        drop(lease);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        set_destroy(handle).unwrap();
+    }
+
+    #[test]
+    fn serializer_graph_scope_is_reentrant_and_does_not_block_other_handles() {
+        let map = new_map();
+        let set = new_set();
+        let outer = json_container_scope(JsonContainerKind::Map, map).unwrap();
+        let nested = json_container_scope(JsonContainerKind::Set, set).unwrap();
+        assert!(json_container_scope(JsonContainerKind::Map, map).is_none());
+
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _set = set_acquire(set).unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        // Ordinary operations on unrelated handles do not inherit the
+        // serializer-only graph gate.
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        drop(nested);
+        drop(outer);
+
+        map_destroy(map).unwrap();
+        set_destroy(set).unwrap();
+    }
+
+    #[test]
+    fn unmatched_map_pin_release_cannot_steal_operation_lease() {
+        let handle = new_map();
+        assert_eq!(mimi_map_lease_release(handle), HANDLE_ERR_INVALID);
+        let operation = map_acquire(handle).unwrap();
+        assert_eq!(mimi_map_lease_release(handle), HANDLE_ERR_INVALID);
+        assert_eq!(map_lease_count(handle), Ok(1));
+
+        assert_eq!(mimi_map_lease_acquire(handle), HANDLE_OK);
+        assert_eq!(map_lease_count(handle), Ok(2));
+        map_begin_destroy(handle).unwrap();
+        map_finish_destroy(handle).unwrap();
+        drop(operation);
+        assert_eq!(map_lease_count(handle), Ok(1));
+        assert_eq!(mimi_map_lease_release(handle), HANDLE_OK);
+        assert_eq!(map_generation(handle), Err(HandleError::StaleGeneration));
+    }
+
+    #[test]
+    fn unmatched_set_pin_release_cannot_steal_operation_lease() {
+        let handle = new_set();
+        assert_eq!(mimi_set_lease_release(handle), HANDLE_ERR_INVALID);
+        let operation = set_acquire(handle).unwrap();
+        assert_eq!(mimi_set_lease_release(handle), HANDLE_ERR_INVALID);
+        assert_eq!(set_lease_count(handle), Ok(1));
+
+        assert_eq!(mimi_set_lease_acquire(handle), HANDLE_OK);
+        assert_eq!(set_lease_count(handle), Ok(2));
+        set_begin_destroy(handle).unwrap();
+        set_finish_destroy(handle).unwrap();
+        drop(operation);
+        assert_eq!(set_lease_count(handle), Ok(1));
+        assert_eq!(mimi_set_lease_release(handle), HANDLE_OK);
+        assert_eq!(set_generation(handle), Err(HandleError::StaleGeneration));
+    }
+
+    #[test]
+    fn c_lifetime_pin_can_be_released_by_another_thread() {
+        let map = new_map();
+        let set = new_set();
+        assert_eq!(mimi_map_lease_acquire(map), HANDLE_OK);
+        assert_eq!(mimi_set_lease_acquire(set), HANDLE_OK);
+
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send((mimi_map_lease_release(map), mimi_set_lease_release(set)))
+                .unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            (HANDLE_OK, HANDLE_OK)
+        );
+        worker.join().unwrap();
+
+        map_destroy(map).unwrap();
+        set_destroy(set).unwrap();
+    }
+
+    #[test]
+    fn exhausted_generation_retires_slot_instead_of_resurrecting_old_handles() {
+        let first = new_map();
+        let (index, _) = unpack(first).unwrap();
+        {
+            let mut table = lock_maps();
+            table.slots[index as usize].generation = HandleGeneration::MAX;
+        }
+        let terminal = pack(index, HandleGeneration::MAX);
+        map_destroy(terminal).unwrap();
+
+        let next = new_map();
+        assert_ne!(unpack(next).unwrap().0, index);
+        assert!(matches!(map_acquire(terminal), Err(HandleError::Destroyed)));
+        map_destroy(next).unwrap();
     }
 }

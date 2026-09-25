@@ -280,11 +280,11 @@ pub struct CodeGenerator<'ctx> {
     /// Stack of heap-allocated buffer pointers from builtins that need free on scope exit.
     /// Uses RefCell for interior mutability since builtins take &self.
     heap_allocs: std::cell::RefCell<Vec<Vec<HeapEntry<'ctx>>>>,
-    /// B9 (audit): env pointers of escaping closure returns. Populated by
-    /// `claim_returned_closure_env` at return sites; the immediately following
-    /// `free_heap_allocs` emits runtime guards so these envs survive scope
-    /// exit (the caller owns them). Cleared on every `free_heap_allocs` call.
-    claimed_returned_envs: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
+    /// Heap pointer claims for the currently emitted callable. Each value is
+    /// an entry-block alloca containing a pointer, because the claim value may
+    /// be produced in a branch while cleanup runs after a control-flow merge.
+    /// Claims are isolated per callable by `heap_claim_scopes`.
+    claimed_returned_heap_slots: std::cell::RefCell<Vec<inkwell::values::PointerValue<'ctx>>>,
     /// B9 extension: escaped `List<string>` values whose element string data
     /// pointers must survive the callee's early-return flush. Each entry is
     /// an entry-block alloca holding the list struct, plus its LLVM type.
@@ -318,6 +318,10 @@ pub struct CodeGenerator<'ctx> {
             inkwell::types::StructType<'ctx>,
         )>,
     >,
+    /// Parent callable claims saved while a nested/lazy callable is emitted.
+    /// Without this stack a child's heap cleanup could consume pointer slots
+    /// allocated in its caller, producing cross-function LLVM operands.
+    heap_claim_scopes: std::cell::RefCell<Vec<HeapClaimSet<'ctx>>>,
     /// 0.35.23 deep-eval: names of the current legacy-body function's
     /// view/mutate borrow params. Their list storage IS the caller's struct
     /// (pointer ABI) — `claim_returned_lists` must not null their data
@@ -669,6 +673,24 @@ pub struct CodeGenerator<'ctx> {
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
 
+#[derive(Default)]
+struct HeapClaimSet<'ctx> {
+    heap_pointers: Vec<inkwell::values::PointerValue<'ctx>>,
+    string_lists: Vec<(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::types::StructType<'ctx>,
+    )>,
+    string_list_lists: Vec<(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::types::StructType<'ctx>,
+        inkwell::types::StructType<'ctx>,
+    )>,
+    generic_lists: Vec<(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::types::StructType<'ctx>,
+    )>,
+}
+
 /// Entries tracked for scope-exit heap cleanup.
 /// `Ptr(ptr)` = a raw heap pointer to free directly.
 /// `Slot(base, struct_ty, field)` = an alloca of type `struct_ty` (`base`) and
@@ -757,10 +779,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             weak_release_vars: vec![Vec::new()],
             shared_var_names: std::collections::HashSet::new(),
             heap_allocs: std::cell::RefCell::new(vec![Vec::new()]),
-            claimed_returned_envs: std::cell::RefCell::new(Vec::new()),
+            claimed_returned_heap_slots: std::cell::RefCell::new(Vec::new()),
             claimed_returned_string_lists: std::cell::RefCell::new(Vec::new()),
             claimed_returned_string_list_lists: std::cell::RefCell::new(Vec::new()),
             claimed_returned_generic_lists: std::cell::RefCell::new(Vec::new()),
+            heap_claim_scopes: std::cell::RefCell::new(Vec::new()),
             borrow_param_names: std::collections::HashSet::new(),
             heap_boundaries: std::cell::RefCell::new(Vec::new()),
             ensures_stmts: Vec::new(),
@@ -1289,6 +1312,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(alloca)
     }
 
+    /// Allocate and null-initialize a pointer slot in the function entry.
+    /// The initialization is placed immediately after its alloca so it
+    /// dominates every control-flow path; the current insertion point is
+    /// restored before returning.
+    fn build_entry_null_pointer_slot(
+        &self,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot = self.build_entry_alloca(ptr_ty, name)?;
+        let saved = self.builder.get_insert_block();
+        let slot_inst = slot.as_instruction().ok_or_else(|| {
+            CompileError::LlvmError("entry pointer slot is not an instruction".into())
+        })?;
+        if let Some(next) = slot_inst.get_next_instruction() {
+            self.builder.position_before(&next);
+        } else {
+            let parent = slot_inst.get_parent().ok_or_else(|| {
+                CompileError::LlvmError("entry pointer slot has no parent block".into())
+            })?;
+            self.builder.position_at_end(parent);
+        }
+        self.builder
+            .build_store(slot, ptr_ty.const_null())
+            .map_err(|error| {
+                CompileError::LlvmError(format!("entry pointer slot init error: {error}"))
+            })?;
+        if let Some(saved_bb) = saved {
+            self.builder.position_at_end(saved_bb);
+        }
+        Ok(slot)
+    }
+
     /// Build a `store` instruction.
     pub(super) fn build_store(
         &self,
@@ -1562,6 +1618,61 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.position_at_end(ok_bb);
         Ok(ptr)
+    }
+
+    /// Reject a zero string-box handle returned for an invalid range or an
+    /// allocation failure. Treating the zero handle as an empty string would
+    /// silently change the source value and later readers would accept it as
+    /// a valid null slot.
+    pub(super) fn nonzero_string_box_or_abort(
+        &self,
+        boxed: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let is_zero = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                boxed,
+                boxed.get_type().const_zero(),
+                &format!("{name}_is_null"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string box check: {e}")))?;
+        let current_fn = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("no current function for string box validation".into())
+        })?;
+        let err_bb = self
+            .context
+            .append_basic_block(current_fn, &format!("{name}_invalid"));
+        let ok_bb = self
+            .context
+            .append_basic_block(current_fn, &format!("{name}_ok"));
+        self.builder
+            .build_conditional_branch(is_zero, err_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("string box branch: {e}")))?;
+
+        self.builder.position_at_end(err_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let message = self
+            .builder
+            .build_global_string_ptr(
+                "invalid or unallocatable List<string> element",
+                &format!("{name}_invalid_msg"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string box message: {e}")))?;
+        self.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                message.as_pointer_value(),
+            )],
+            &format!("{name}_abort"),
+        )?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("string box unreachable: {e}")))?;
+
+        self.builder.position_at_end(ok_bb);
+        Ok(boxed)
     }
 
     /// v0.29.32: Get or declare `mimi_runtime_abort` (returns !).
@@ -2314,15 +2425,83 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CompileError> {
         let slot =
             self.build_entry_alloca(BasicTypeEnum::StructType(list_ty), "call_string_list_slot")?;
+        self.register_string_list_slot(slot, list_ty)?;
         self.build_store(slot, list_sv)?;
+        Ok(())
+    }
+
+    /// Register an entry-block `List<string>` slot as the complete owner of
+    /// its string boxes and data array. The zero store is placed immediately
+    /// after the alloca so branch-local construction can safely share a
+    /// function-exit cleanup list.
+    pub(super) fn register_string_list_slot(
+        &self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let saved = self.builder.get_insert_block();
+        let entry_bb = self
+            .current_function()
+            .and_then(|function| function.get_first_basic_block())
+            .ok_or_else(|| CompileError::LlvmError("string-list owner outside function".into()))?;
+        if let Some(slot_inst) = slot.as_instruction() {
+            if let Some(next) = slot_inst.get_next_instruction() {
+                self.builder.position_before(&next);
+            } else {
+                self.builder
+                    .position_at_end(slot_inst.get_parent().unwrap_or(entry_bb));
+            }
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        self.build_store(slot, list_ty.const_zero())?;
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::StringListData { slot, list_ty });
         } else {
             return Err(CompileError::LlvmError(
-                "register_returned_string_list has no active heap scope".into(),
+                "register_string_list_slot has no active heap scope".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Register a List<String> slot in the function-root scope. Used when a
+    /// loop-body assignment gives a longer-lived local a fresh value.
+    pub(super) fn register_string_list_slot_root(
+        &self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let saved = self.builder.get_insert_block();
+        let entry_bb = self
+            .current_function()
+            .and_then(|function| function.get_first_basic_block())
+            .ok_or_else(|| CompileError::LlvmError("string-list root outside function".into()))?;
+        if let Some(slot_inst) = slot.as_instruction() {
+            if let Some(next) = slot_inst.get_next_instruction() {
+                self.builder.position_before(&next);
+            } else {
+                self.builder
+                    .position_at_end(slot_inst.get_parent().unwrap_or(entry_bb));
+            }
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        self.build_store(slot, list_ty.const_zero())?;
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
+        let boundary = self.heap_boundaries.borrow().last().copied().unwrap_or(0);
+        let mut guard = self.heap_allocs.borrow_mut();
+        let scope_index = boundary.min(guard.len().saturating_sub(1));
+        let stack = guard.get_mut(scope_index).ok_or_else(|| {
+            CompileError::LlvmError("string-list root registration has no scope".into())
+        })?;
+        stack.push(HeapEntry::StringListData { slot, list_ty });
         Ok(())
     }
 
@@ -2339,7 +2518,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::StructType(list_ty),
             "call_string_list_list_slot",
         )?;
+        self.register_string_list_list_slot(slot, list_ty, elem_list_ty)?;
         self.build_store(slot, list_sv)?;
+        Ok(())
+    }
+
+    pub(super) fn register_string_list_list_slot(
+        &self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let saved = self.builder.get_insert_block();
+        let entry_bb = self
+            .current_function()
+            .and_then(|function| function.get_first_basic_block())
+            .ok_or_else(|| {
+                CompileError::LlvmError("string-list-list owner outside function".into())
+            })?;
+        if let Some(slot_inst) = slot.as_instruction() {
+            if let Some(next) = slot_inst.get_next_instruction() {
+                self.builder.position_before(&next);
+            } else {
+                self.builder
+                    .position_at_end(slot_inst.get_parent().unwrap_or(entry_bb));
+            }
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        self.build_store(slot, list_ty.const_zero())?;
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
             stack.push(HeapEntry::StringListListData {
@@ -2349,9 +2559,53 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         } else {
             return Err(CompileError::LlvmError(
-                "register_returned_string_list_list has no active heap scope".into(),
+                "register_string_list_list_slot has no active heap scope".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Register a nested string-list slot in the function-root scope. This is
+    /// used when a loop-body assignment replaces a value whose local storage
+    /// outlives the current iteration.
+    pub(super) fn register_string_list_list_slot_root(
+        &self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let saved = self.builder.get_insert_block();
+        let entry_bb = self
+            .current_function()
+            .and_then(|function| function.get_first_basic_block())
+            .ok_or_else(|| {
+                CompileError::LlvmError("nested string-list root outside function".into())
+            })?;
+        if let Some(slot_inst) = slot.as_instruction() {
+            if let Some(next) = slot_inst.get_next_instruction() {
+                self.builder.position_before(&next);
+            } else {
+                self.builder
+                    .position_at_end(slot_inst.get_parent().unwrap_or(entry_bb));
+            }
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        self.build_store(slot, list_ty.const_zero())?;
+        if let Some(saved) = saved {
+            self.builder.position_at_end(saved);
+        }
+        let boundary = self.heap_boundaries.borrow().last().copied().unwrap_or(0);
+        let mut guard = self.heap_allocs.borrow_mut();
+        let scope_index = boundary.min(guard.len().saturating_sub(1));
+        let stack = guard.get_mut(scope_index).ok_or_else(|| {
+            CompileError::LlvmError("nested string-list root registration has no scope".into())
+        })?;
+        stack.push(HeapEntry::StringListListData {
+            slot,
+            list_ty,
+            elem_list_ty,
+        });
         Ok(())
     }
 
@@ -2408,10 +2662,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// loading one data field freed the same buffer twice at function exit.
     pub(super) fn has_heap_slot(&self, base: inkwell::values::PointerValue<'ctx>) -> bool {
         let guard = self.heap_allocs.borrow();
-        guard
-            .iter()
-            .flatten()
-            .any(|e| matches!(e, HeapEntry::Slot(b, _, _) if *b == base))
+        guard.iter().flatten().any(|e| {
+            matches!(e, HeapEntry::Slot(b, _, _) if *b == base)
+                || matches!(e, HeapEntry::StringListData { slot, .. } if *slot == base)
+                || matches!(e, HeapEntry::StringListListData { slot, .. } if *slot == base)
+        })
     }
 
     pub(super) fn register_heap_slot(
@@ -2456,10 +2711,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn claim_nested_list_slot(&self, base: inkwell::values::PointerValue<'ctx>) {
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
-            if let Some(pos) = stack
-                .iter()
-                .rposition(|e| matches!(e, HeapEntry::Slot(b, _, _) if *b == base))
-            {
+            if let Some(pos) = stack.iter().rposition(|e| {
+                matches!(e, HeapEntry::Slot(b, _, _) if *b == base)
+                    || matches!(e, HeapEntry::StringListData { slot, .. } if *slot == base)
+                    || matches!(e, HeapEntry::StringListListData { slot, .. } if *slot == base)
+            }) {
                 stack.remove(pos);
             }
         }
@@ -2473,7 +2729,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn claim_last_heap_slot(&self) {
         let mut guard = self.heap_allocs.borrow_mut();
         if let Some(stack) = guard.last_mut() {
-            if let Some(pos) = stack.iter().rposition(|e| matches!(e, HeapEntry::Slot(..))) {
+            if let Some(pos) = stack.iter().rposition(|e| {
+                matches!(
+                    e,
+                    HeapEntry::Slot(..)
+                        | HeapEntry::StringListData { .. }
+                        | HeapEntry::StringListListData { .. }
+                )
+            }) {
                 stack.remove(pos);
             }
         }
@@ -2488,6 +2751,237 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         None
+    }
+
+    /// Remove the newest complete List<String> owner registration from the
+    /// current lexical scope. The caller must have copied or transferred the
+    /// registered value before discarding its owner.
+    pub(super) fn pop_last_string_list_owner(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
+        if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
+            if matches!(stack.last(), Some(HeapEntry::StringListData { .. })) {
+                if let Some(HeapEntry::StringListData { slot, .. }) = stack.pop() {
+                    return Some(slot);
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn string_list_owner_count(&self) -> usize {
+        self.heap_allocs
+            .borrow()
+            .iter()
+            .flatten()
+            .filter(|entry| matches!(entry, HeapEntry::StringListData { .. }))
+            .count()
+    }
+
+    pub(super) fn string_list_list_owner_count(&self) -> usize {
+        self.heap_allocs
+            .borrow()
+            .iter()
+            .flatten()
+            .filter(|entry| matches!(entry, HeapEntry::StringListListData { .. }))
+            .count()
+    }
+
+    pub(super) fn last_string_list_owner_since(
+        &self,
+        count: usize,
+    ) -> Option<inkwell::values::PointerValue<'ctx>> {
+        let scopes = self.heap_allocs.borrow();
+        let total = scopes
+            .iter()
+            .flatten()
+            .filter(|entry| matches!(entry, HeapEntry::StringListData { .. }))
+            .count();
+        if total <= count {
+            return None;
+        }
+        match scopes.last()?.last()? {
+            HeapEntry::StringListData { slot, .. } => Some(*slot),
+            _ => None,
+        }
+    }
+
+    pub(super) fn last_string_list_list_owner_since(
+        &self,
+        count: usize,
+    ) -> Option<inkwell::values::PointerValue<'ctx>> {
+        let scopes = self.heap_allocs.borrow();
+        let total = scopes
+            .iter()
+            .flatten()
+            .filter(|entry| matches!(entry, HeapEntry::StringListListData { .. }))
+            .count();
+        if total <= count {
+            return None;
+        }
+        match scopes.last()?.last()? {
+            HeapEntry::StringListListData { slot, .. } => Some(*slot),
+            _ => None,
+        }
+    }
+
+    /// Release a List<String> value while replacing a local binding. The
+    /// per-flush pointer guard is reset on both sides so an allocator address
+    /// reused by the new value is not mistaken for the old allocation.
+    pub(super) fn release_string_list_value_now(
+        &mut self,
+        value: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        if value.get_type() != list_ty {
+            return Err(CompileError::LlvmError(
+                "List<String> replacement received a mismatched LLVM type".into(),
+            ));
+        }
+        let reset_fn = self.get_runtime_fn("mimi_heap_guard_reset")?;
+        self.builder
+            .build_call(reset_fn, &[], "string_list_replace_guard_reset_before")
+            .map_err(|e| CompileError::LlvmError(format!("string-list replace reset: {e}")))?;
+        self.emit_string_list_struct_free(value, "string_list_replaced", &[], &[], &[], &[])?;
+        self.builder
+            .build_call(reset_fn, &[], "string_list_replace_guard_reset_after")
+            .map_err(|e| CompileError::LlvmError(format!("string-list replace reset: {e}")))?;
+        Ok(())
+    }
+
+    /// Release an old local value unless `other` carries the same data array.
+    /// Callers use this after cloning an assignment RHS: if its temporary
+    /// owner aliases the old local, that temporary will keep the old value
+    /// alive until its own scope flush.
+    pub(super) fn release_string_list_value_unless_same_data(
+        &mut self,
+        value: inkwell::values::StructValue<'ctx>,
+        other: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        if value.get_type() != list_ty || other.get_type() != list_ty {
+            return Err(CompileError::LlvmError(
+                "List<String> replacement received a mismatched LLVM type".into(),
+            ));
+        }
+        let old_data = self
+            .builder
+            .build_extract_value(value, 1, "string_list_replace_old_data")
+            .map_err(|e| CompileError::LlvmError(format!("string-list old data: {e}")))?
+            .into_pointer_value();
+        let new_data = self
+            .builder
+            .build_extract_value(other, 1, "string_list_replace_new_data")
+            .map_err(|e| CompileError::LlvmError(format!("string-list new data: {e}")))?
+            .into_pointer_value();
+        let same = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                old_data,
+                new_data,
+                "string_list_replace_same_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string-list data compare: {e}")))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("List<String> replacement outside function".into())
+        })?;
+        let release_bb = self
+            .context
+            .append_basic_block(function, "string_list_replace_release");
+        let done_bb = self
+            .context
+            .append_basic_block(function, "string_list_replace_done");
+        self.build_cond_br(same, done_bb, release_bb)?;
+        self.builder.position_at_end(release_bb);
+        self.release_string_list_value_now(value, list_ty)?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
+        Ok(())
+    }
+
+    /// Release a nested string-list value while replacing a local binding.
+    /// The outer data array, inner list headers/data, and string boxes are
+    /// all owned by the aggregate and are reclaimed by the same specialized
+    /// destructor used at scope exit.
+    pub(super) fn release_string_list_list_value_now(
+        &mut self,
+        value: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        if value.get_type() != list_ty {
+            return Err(CompileError::LlvmError(
+                "List<List<string>> replacement received a mismatched LLVM type".into(),
+            ));
+        }
+        let slot = self.build_entry_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "string_list_list_replaced",
+        )?;
+        self.build_store(slot, value)?;
+        let reset_fn = self.get_runtime_fn("mimi_heap_guard_reset")?;
+        self.builder
+            .build_call(reset_fn, &[], "string_list_list_replace_guard_reset_before")
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list replace reset: {e}"))
+            })?;
+        self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty, &[], &[], &[], &[])?;
+        self.builder
+            .build_call(reset_fn, &[], "string_list_list_replace_guard_reset_after")
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list replace reset: {e}"))
+            })?;
+        Ok(())
+    }
+
+    /// Release an old nested string-list value unless the new expression has
+    /// a temporary owner carrying the same outer data array. In that case the
+    /// temporary's scope cleanup remains the one owner of the old value.
+    pub(super) fn release_string_list_list_value_unless_same_data(
+        &mut self,
+        value: inkwell::values::StructValue<'ctx>,
+        other: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+        elem_list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        if value.get_type() != list_ty || other.get_type() != list_ty {
+            return Err(CompileError::LlvmError(
+                "List<List<string>> replacement received a mismatched LLVM type".into(),
+            ));
+        }
+        let old_data = self
+            .builder
+            .build_extract_value(value, 1, "string_list_list_replace_old_data")
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list old data: {e}")))?
+            .into_pointer_value();
+        let new_data = self
+            .builder
+            .build_extract_value(other, 1, "string_list_list_replace_new_data")
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list new data: {e}")))?
+            .into_pointer_value();
+        let same = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                old_data,
+                new_data,
+                "string_list_list_replace_same_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list compare: {e}")))?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("List<List<string>> replacement outside function".into())
+        })?;
+        let release_bb = self
+            .context
+            .append_basic_block(function, "string_list_list_replace_release");
+        let done_bb = self
+            .context
+            .append_basic_block(function, "string_list_list_replace_done");
+        self.build_cond_br(same, done_bb, release_bb)?;
+        self.builder.position_at_end(release_bb);
+        self.release_string_list_list_value_now(value, list_ty, elem_list_ty)?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
+        Ok(())
     }
 
     /// Deep-eval 2026-08-09: collect the runtime pointer values of every
@@ -2543,12 +3037,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         out
     }
 
-    /// B9 (audit): record an escaping closure env pointer so the next
-    /// `free_heap_allocs` skips it at scope exit. Ownership of the env
-    /// transfers to the caller, which registers it at its own call site
-    /// (see `track_closure_return_lifetime`).
-    pub(super) fn claim_closure_env(&self, env_ptr: inkwell::values::PointerValue<'ctx>) {
-        self.claimed_returned_envs.borrow_mut().push(env_ptr);
+    /// Record an escaping heap pointer so cleanup skips the allocation whose
+    /// ownership transfers to the caller. Store the value in an entry slot:
+    /// the claim can be produced in a branch or loop, while cleanup may be
+    /// emitted after control-flow merges. Keeping the original SSA value would
+    /// make that cleanup invalid when the value does not dominate its uses.
+    pub(super) fn claim_closure_env(
+        &self,
+        env_ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot = self.build_entry_null_pointer_slot("claimed_returned_heap_ptr")?;
+        self.builder.build_store(slot, env_ptr).map_err(|error| {
+            CompileError::LlvmError(format!("returned heap claim store: {error}"))
+        })?;
+        self.claimed_returned_heap_slots.borrow_mut().push(slot);
+        Ok(())
     }
 
     /// Claim a returned `List<string>` so its element string pointers survive
@@ -2737,7 +3240,27 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn begin_function_heap_scope(&self) {
         let depth = self.heap_allocs.borrow().len();
         self.heap_boundaries.borrow_mut().push(depth);
+        let parent_claims = self.take_heap_claim_set();
+        self.heap_claim_scopes.borrow_mut().push(parent_claims);
         self.push_heap_scope();
+    }
+
+    fn take_heap_claim_set(&self) -> HeapClaimSet<'ctx> {
+        HeapClaimSet {
+            heap_pointers: std::mem::take(&mut *self.claimed_returned_heap_slots.borrow_mut()),
+            string_lists: std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut()),
+            string_list_lists: std::mem::take(
+                &mut *self.claimed_returned_string_list_lists.borrow_mut(),
+            ),
+            generic_lists: std::mem::take(&mut *self.claimed_returned_generic_lists.borrow_mut()),
+        }
+    }
+
+    fn restore_heap_claim_set(&self, claims: HeapClaimSet<'ctx>) {
+        *self.claimed_returned_heap_slots.borrow_mut() = claims.heap_pointers;
+        *self.claimed_returned_string_lists.borrow_mut() = claims.string_lists;
+        *self.claimed_returned_string_list_lists.borrow_mut() = claims.string_list_lists;
+        *self.claimed_returned_generic_lists.borrow_mut() = claims.generic_lists;
     }
 
     /// B9: pop the function-boundary marker and discard (without emitting)
@@ -2757,6 +3280,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         while scopes.len() > boundary {
             scopes.pop();
         }
+        drop(scopes);
+
+        let parent_claims =
+            self.heap_claim_scopes.borrow_mut().pop().ok_or_else(|| {
+                CompileError::LlvmError("function heap claim scope missing".into())
+            })?;
+        // Drop the just-compiled callable's claims and restore its caller's
+        // claim set. Claims refer to allocas in their owning LLVM function and
+        // must never be consumed by another callable's cleanup graph.
+        let _child_claims = self.take_heap_claim_set();
+        self.restore_heap_claim_set(parent_claims);
         Ok(())
     }
 
@@ -2779,7 +3313,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (untracked path, e.g. async poll), falls back to today's single-scope
     /// free emission.
     pub(super) fn flush_heap_scopes_to_boundary(&mut self) -> Result<(), CompileError> {
-        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let claimed = std::mem::take(&mut *self.claimed_returned_heap_slots.borrow_mut());
         let claimed_string_lists =
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
@@ -2806,6 +3340,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .flat_map(|scope| scope.iter().cloned())
                 .collect()
         };
+        if !entries.is_empty() {
+            let reset_fn = self.get_runtime_fn("mimi_heap_guard_reset")?;
+            self.builder
+                .build_call(reset_fn, &[], "heap_guard_reset")
+                .map_err(|e| CompileError::LlvmError(format!("heap guard reset: {e}")))?;
+        }
         for entry in entries {
             // L6: EnumBox needs a tag-conditional free; handle separately.
             if let HeapEntry::EnumBox {
@@ -2818,7 +3358,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 continue;
             }
             if let HeapEntry::StringListData { slot, list_ty } = entry {
-                self.emit_string_list_data_free(slot, list_ty)?;
+                self.emit_string_list_data_free(
+                    slot,
+                    list_ty,
+                    &claimed,
+                    &claimed_string_lists,
+                    &claimed_string_list_lists,
+                    &claimed_generic_lists,
+                )?;
                 self.builder
                     .build_store(slot, list_ty.const_zero())
                     .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
@@ -2830,7 +3377,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 elem_list_ty,
             } = entry
             {
-                self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                self.emit_string_list_list_data_free(
+                    slot,
+                    list_ty,
+                    elem_list_ty,
+                    &claimed,
+                    &claimed_string_lists,
+                    &claimed_string_list_lists,
+                    &claimed_generic_lists,
+                )?;
                 self.builder
                     .build_store(slot, list_ty.const_zero())
                     .map_err(|e| CompileError::LlvmError(format!("string-list-list reset: {e}")))?;
@@ -2922,7 +3477,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // stack to it, the function's registrations are all gone and claims
         // are no longer needed. Stale claims are harmless beyond that: they
         // only suppress frees of pointers that can never equal them.
-        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let claimed = std::mem::take(&mut *self.claimed_returned_heap_slots.borrow_mut());
         let claimed_string_lists =
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
@@ -2939,10 +3494,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             // function's registrations are all gone and claims are no longer
             // needed. Without this, an escaped `List<string>` loses its guard
             // when an inner scope pops and is freed → UAF / double-free.
-            *self.claimed_returned_envs.borrow_mut() = claimed.clone();
+            *self.claimed_returned_heap_slots.borrow_mut() = claimed.clone();
             *self.claimed_returned_string_lists.borrow_mut() = claimed_string_lists.clone();
             *self.claimed_returned_string_list_lists.borrow_mut() =
                 claimed_string_list_lists.clone();
+            *self.claimed_returned_generic_lists.borrow_mut() = claimed_generic_lists.clone();
         }
         if let Some(scope) = scope {
             let free_fn = self
@@ -2999,7 +3555,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     continue;
                 }
                 if let HeapEntry::StringListData { slot, list_ty } = entry {
-                    self.emit_string_list_data_free(slot, list_ty)?;
+                    self.emit_string_list_data_free(
+                        slot,
+                        list_ty,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                        &claimed_generic_lists,
+                    )?;
                     self.builder
                         .build_store(slot, list_ty.const_zero())
                         .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
@@ -3011,7 +3574,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     elem_list_ty,
                 } = entry
                 {
-                    self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                    self.emit_string_list_list_data_free(
+                        slot,
+                        list_ty,
+                        elem_list_ty,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                        &claimed_generic_lists,
+                    )?;
                     self.builder
                         .build_store(slot, list_ty.const_zero())
                         .map_err(|e| {
@@ -3162,7 +3733,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// emit frees again, but those frees execute on a different runtime path
     /// where the slots are null (or belong to that path's own allocations).
     pub(super) fn emit_frees_for_top_scope(&mut self) -> Result<(), CompileError> {
-        let claimed = std::mem::take(&mut *self.claimed_returned_envs.borrow_mut());
+        let claimed = std::mem::take(&mut *self.claimed_returned_heap_slots.borrow_mut());
         let claimed_string_lists =
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
@@ -3217,7 +3788,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     continue;
                 }
                 if let HeapEntry::StringListData { slot, list_ty } = entry {
-                    self.emit_string_list_data_free(slot, list_ty)?;
+                    self.emit_string_list_data_free(
+                        slot,
+                        list_ty,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                        &claimed_generic_lists,
+                    )?;
                     self.builder
                         .build_store(slot, list_ty.const_zero())
                         .map_err(|e| CompileError::LlvmError(format!("string-list reset: {e}")))?;
@@ -3229,7 +3807,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     elem_list_ty,
                 } = entry
                 {
-                    self.emit_string_list_list_data_free(slot, list_ty, elem_list_ty)?;
+                    self.emit_string_list_list_data_free(
+                        slot,
+                        list_ty,
+                        elem_list_ty,
+                        &claimed,
+                        &claimed_string_lists,
+                        &claimed_string_list_lists,
+                        &claimed_generic_lists,
+                    )?;
                     self.builder
                         .build_store(slot, list_ty.const_zero())
                         .map_err(|e| {
@@ -3363,15 +3949,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // an escaping `List<string>` stays guarded across this non-destructive
         // top-scope free (loop break/continue path) until the function's own
         // scope is popped.
-        *self.claimed_returned_envs.borrow_mut() = claimed;
+        *self.claimed_returned_heap_slots.borrow_mut() = claimed;
         *self.claimed_returned_string_lists.borrow_mut() = claimed_string_lists;
         *self.claimed_returned_string_list_lists.borrow_mut() = claimed_string_list_lists;
+        *self.claimed_returned_generic_lists.borrow_mut() = claimed_generic_lists;
         Ok(())
     }
 
     /// Emit a runtime traversal checking whether `ptr` is owned by a claimed
-    /// `List<List<string>>`: an inner list box, an inner data array, or any
-    /// string element inside an inner list.
+    /// `List<List<string>>`: the outer data array, an inner list box, an inner
+    /// data array, or any string element inside an inner list.
     fn emit_string_list_list_contains(
         &mut self,
         ptr: inkwell::values::PointerValue<'ctx>,
@@ -3396,6 +3983,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_extract_value(list_sv, 1, "claimed_sll_outer_data")
             .map_err(|e| CompileError::LlvmError(format!("claimed sll outer data: {e}")))?
             .into_pointer_value();
+        let outer_data_eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                outer_data,
+                ptr,
+                "claimed_sll_outer_data_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed sll outer data eq: {e}")))?;
         let function = self
             .current_function()
             .ok_or_else(|| CompileError::LlvmError("claimed sll outside function".into()))?;
@@ -3415,7 +4011,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             "claimed_sll_found",
         )?;
         self.build_store(outer_idx, i64_ty.const_int(0, false))?;
-        self.build_store(found, self.context.bool_type().const_int(0, false))?;
+        // The outer array is itself a member of the claimed aggregate. Seed
+        // the traversal with that match before checking its nested owners.
+        self.build_store(found, outer_data_eq)?;
         self.build_br(outer_header)?;
 
         self.builder.position_at_end(outer_header);
@@ -3648,7 +4246,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             "claimed_str_list_found",
         )?;
         self.build_store(idx_storage, i64_ty.const_int(0, false))?;
-        self.build_store(found_storage, self.context.bool_type().const_int(0, false))?;
+        // A returned List<string> transfers its array as well as its element
+        // boxes. Include the data pointer so generic Slot cleanup cannot free
+        // the array before the caller receives the list.
+        let data_eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                data,
+                ptr,
+                "claimed_str_list_data_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed str list data cmp: {e}")))?;
+        self.build_store(found_storage, data_eq)?;
         self.build_br(header)?;
 
         self.builder.position_at_end(header);
@@ -3782,11 +4392,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CompileError> {
         let i1_ty = self.context.bool_type();
         let mut matched = i1_ty.const_int(0, false);
-        for env in claimed {
-            let eq = self
-                .builder
-                .build_int_compare(inkwell::IntPredicate::EQ, ptr, *env, "b9_env_eq")
-                .map_err(|e| CompileError::LlvmError(format!("b9 env compare error: {}", e)))?;
+        for (index, env_slot) in claimed.iter().enumerate() {
+            let eq =
+                self.emit_claimed_heap_pointer_eq(ptr, *env_slot, &format!("b9_env_eq_{index}"))?;
             matched = self
                 .builder
                 .build_or(matched, eq, "b9_env_matched")
@@ -3835,6 +4443,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("b9 free merge error: {}", e)))?;
         self.builder.position_at_end(skip_bb);
         Ok(())
+    }
+
+    /// Compare a cleanup pointer with an entry-block claim slot. Both sides
+    /// are loaded/cast in the cleanup block, so claims produced in a branch or
+    /// loop do not leak non-dominating SSA values into later cleanup code.
+    fn emit_claimed_heap_pointer_eq(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        claim_slot: inkwell::values::PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let claimed = self
+            .builder
+            .build_load(ptr_ty, claim_slot, &format!("{name}_load"))
+            .map_err(|error| {
+                CompileError::LlvmError(format!("{name}: claimed pointer load: {error}"))
+            })?
+            .into_pointer_value();
+        // Mimi's supported native ABI uses i64 pointer handles (the runtime
+        // stores List and Result payload pointers in i64 slots).
+        let int_ty = self.context.i64_type();
+        let ptr_bits = self.build_ptr_to_int(ptr, int_ty, &format!("{name}_ptr_bits"))?;
+        let claim_bits = self.build_ptr_to_int(claimed, int_ty, &format!("{name}_claim_bits"))?;
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::EQ, ptr_bits, claim_bits, name)
+            .map_err(|error| CompileError::LlvmError(format!("{name}: pointer compare: {error}")))
     }
 
     /// L6: emit the conditional free for a `HeapEntry::EnumBox`. Loads the
@@ -3938,6 +4573,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         list_sv: inkwell::values::StructValue<'ctx>,
         tag: &str,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
     ) -> Result<(), CompileError> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -3954,6 +4603,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self
             .current_function()
             .ok_or_else(|| CompileError::LlvmError(format!("{tag}: outside function")))?;
+        // Claim the data array before traversing it. The same List<String>
+        // value can be registered through both its local slot and a call
+        // result (for example `let ys = identity(xs)`). Guarding only the
+        // eventual `free(data)` is too late: a second owner would already
+        // have walked freed memory to find its element boxes.
+        let transferred = self.emit_pointer_is_claimed(
+            data,
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+            &format!("{tag}_data"),
+        )?;
+        let claim_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_data_claim"));
+        let owned_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_data_owned"));
+        let done_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_data_done"));
+        self.build_cond_br(transferred, done_bb, claim_bb)?;
+        self.builder.position_at_end(claim_bb);
+        let claim_fn = self.get_runtime_fn("mimi_heap_free_claim")?;
+        let unique_data = self
+            .builder
+            .build_call(
+                claim_fn,
+                &[BasicMetadataValueEnum::PointerValue(data)],
+                &format!("{tag}_data_unique_claim"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: data claim: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: data claim returned void")))?
+            .into_pointer_value();
+        let fresh_data = self
+            .builder
+            .build_is_not_null(unique_data, &format!("{tag}_data_fresh"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: data claim test: {e}")))?;
+        self.build_cond_br(fresh_data, owned_bb, done_bb)?;
+        self.builder.position_at_end(owned_bb);
         let header = self
             .context
             .append_basic_block(function, &format!("{tag}_header"));
@@ -3993,23 +4684,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .into_int_value();
         let elem_ptr = self.build_int_to_ptr(elem_i64, ptr_ty, &format!("{tag}_elem_ptr"))?;
-        // 0.1.8 Phase B fat ABI: list<string> slots contain MimiStr box
-        // handles. Free the box (and its owned bytes) with the dedicated
-        // runtime helper instead of treating the slot as a raw C string.
-        let free_str = self
-            .module
-            .get_function("mimi_str_free_box")
-            .ok_or_else(|| CompileError::LlvmError("mimi_str_free_box not declared".into()))?;
-        let box_i64 = self
-            .build_ptr_to_int(elem_ptr, i64_ty, &format!("{tag}_elem_box_i64"))
-            .map_err(|e| CompileError::LlvmError(format!("{tag}: box i64 {e}")))?;
-        self.builder
-            .build_call(
-                free_str,
-                &[BasicMetadataValueEnum::IntValue(box_i64)],
-                &format!("{tag}_elem_free"),
-            )
-            .map_err(|e| CompileError::LlvmError(format!("{tag}: elem free {e}")))?;
+        self.emit_string_box_free_if_unclaimed(
+            elem_i64,
+            elem_ptr,
+            &format!("{tag}_elem"),
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+        )?;
         let next = self
             .builder
             .build_int_add(idx, i64_ty.const_int(1, false), &format!("{tag}_idx_next"))
@@ -4025,10 +4708,213 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(
                 free_fn,
-                &[BasicMetadataValueEnum::PointerValue(data)],
-                &format!("{tag}_free_data"),
+                &[BasicMetadataValueEnum::PointerValue(unique_data)],
+                &format!("{tag}_data_release"),
             )
-            .map_err(|e| CompileError::LlvmError(format!("{tag}: data free {e}")))?;
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: data free: {e}")))?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
+        Ok(())
+    }
+
+    fn emit_pointer_is_claimed(
+        &mut self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        tag: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let mut matched = self.context.bool_type().const_int(0, false);
+        for (index, env_slot) in claimed.iter().enumerate() {
+            let eq = self.emit_claimed_heap_pointer_eq(
+                ptr,
+                *env_slot,
+                &format!("{tag}_env_eq_{index}"),
+            )?;
+            matched = self
+                .builder
+                .build_or(matched, eq, &format!("{tag}_env_or"))
+                .map_err(|e| CompileError::LlvmError(format!("{tag}: env combine: {e}")))?;
+        }
+        for (slot, list_ty) in claimed_string_lists {
+            let in_list = self.emit_string_list_contains(ptr, *slot, *list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, in_list, &format!("{tag}_str_list_or"))
+                .map_err(|e| CompileError::LlvmError(format!("{tag}: list combine: {e}")))?;
+        }
+        for (slot, list_ty, elem_list_ty) in claimed_string_list_lists {
+            let in_list =
+                self.emit_string_list_list_contains(ptr, *slot, *list_ty, *elem_list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, in_list, &format!("{tag}_nested_list_or"))
+                .map_err(|e| CompileError::LlvmError(format!("{tag}: nested combine: {e}")))?;
+        }
+        for (slot, list_ty) in claimed_generic_lists {
+            let in_list = self.emit_generic_list_contains(ptr, *slot, *list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, in_list, &format!("{tag}_generic_list_or"))
+                .map_err(|e| CompileError::LlvmError(format!("{tag}: generic combine: {e}")))?;
+        }
+        Ok(matched)
+    }
+
+    fn emit_heap_free_if_unclaimed(
+        &mut self,
+        free_fn: inkwell::values::FunctionValue<'ctx>,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        tag: &str,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+    ) -> Result<(), CompileError> {
+        let skip = self.emit_pointer_is_claimed(
+            ptr,
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+            tag,
+        )?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: outside function")))?;
+        let release_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_claim"));
+        let free_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_free"));
+        let done_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_done"));
+        self.build_cond_br(skip, done_bb, release_bb)?;
+        self.builder.position_at_end(release_bb);
+        let claim_fn = self.get_runtime_fn("mimi_heap_free_claim")?;
+        let claimed_ptr = self
+            .builder
+            .build_call(
+                claim_fn,
+                &[BasicMetadataValueEnum::PointerValue(ptr)],
+                &format!("{tag}_unique_claim"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: heap claim: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: heap claim returned void")))?
+            .into_pointer_value();
+        let fresh = self
+            .builder
+            .build_is_not_null(claimed_ptr, &format!("{tag}_fresh"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: fresh test: {e}")))?;
+        self.build_cond_br(fresh, free_bb, done_bb)?;
+        self.builder.position_at_end(free_bb);
+        self.builder
+            .build_call(
+                free_fn,
+                &[BasicMetadataValueEnum::PointerValue(claimed_ptr)],
+                &format!("{tag}_release"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: free: {e}")))?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
+        Ok(())
+    }
+
+    fn emit_string_box_free_if_unclaimed(
+        &mut self,
+        boxed: inkwell::values::IntValue<'ctx>,
+        box_ptr: inkwell::values::PointerValue<'ctx>,
+        tag: &str,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+    ) -> Result<(), CompileError> {
+        let skip = self.emit_pointer_is_claimed(
+            box_ptr,
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+            tag,
+        )?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: outside function")))?;
+        let release_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_claim"));
+        let free_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_free"));
+        let done_bb = self
+            .context
+            .append_basic_block(function, &format!("{tag}_done"));
+        self.build_cond_br(skip, done_bb, release_bb)?;
+        self.builder.position_at_end(release_bb);
+        let claim_fn = self.get_runtime_fn("mimi_heap_free_claim")?;
+        let claimed_ptr = self
+            .builder
+            .build_call(
+                claim_fn,
+                &[BasicMetadataValueEnum::PointerValue(box_ptr)],
+                &format!("{tag}_unique_claim"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: heap claim: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{tag}: heap claim returned void")))?
+            .into_pointer_value();
+        let fresh = self
+            .builder
+            .build_is_not_null(claimed_ptr, &format!("{tag}_fresh"))
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: fresh test: {e}")))?;
+        self.build_cond_br(fresh, free_bb, done_bb)?;
+        self.builder.position_at_end(free_bb);
+        let free_box_fn = self.get_runtime_fn("mimi_str_free_box")?;
+        self.builder
+            .build_call(
+                free_box_fn,
+                &[BasicMetadataValueEnum::IntValue(boxed)],
+                &format!("{tag}_release"),
+            )
+            .map_err(|e| CompileError::LlvmError(format!("{tag}: free box: {e}")))?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
         Ok(())
     }
 
@@ -4036,6 +4922,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         slot: inkwell::values::PointerValue<'ctx>,
         list_ty: inkwell::types::StructType<'ctx>,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
     ) -> Result<(), CompileError> {
         let list_sv = self
             .builder
@@ -4046,7 +4946,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .map_err(|e| CompileError::LlvmError(format!("string list ret load: {e}")))?
             .into_struct_value();
-        self.emit_string_list_struct_free(list_sv, "string_list_ret")
+        self.emit_string_list_struct_free(
+            list_sv,
+            "string_list_ret",
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+        )
     }
 
     /// Free a returned `List<List<string>>`: loop the outer list, free each
@@ -4057,6 +4964,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         slot: inkwell::values::PointerValue<'ctx>,
         list_ty: inkwell::types::StructType<'ctx>,
         elem_list_ty: inkwell::types::StructType<'ctx>,
+        claimed: &[inkwell::values::PointerValue<'ctx>],
+        claimed_string_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_string_list_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
     ) -> Result<(), CompileError> {
         let i64_ty = self.context.i64_type();
         let list_sv = self
@@ -4081,6 +5002,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self.current_function().ok_or_else(|| {
             CompileError::LlvmError("string list list free outside function".into())
         })?;
+        // As with one-level strings, ownership must be claimed before reading
+        // the array. Duplicate aggregate registrations otherwise traverse an
+        // already-freed outer buffer before the final free guard can help.
+        let transferred = self.emit_pointer_is_claimed(
+            data,
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+            "string_list_list_ret_data",
+        )?;
+        let claim_bb = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_data_claim");
+        let owned_bb = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_data_owned");
+        let done_bb = self
+            .context
+            .append_basic_block(function, "string_list_list_ret_data_done");
+        self.build_cond_br(transferred, done_bb, claim_bb)?;
+        self.builder.position_at_end(claim_bb);
+        let claim_fn = self.get_runtime_fn("mimi_heap_free_claim")?;
+        let unique_data = self
+            .builder
+            .build_call(
+                claim_fn,
+                &[BasicMetadataValueEnum::PointerValue(data)],
+                "string_list_list_ret_data_unique_claim",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string list list data claim: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| {
+                CompileError::LlvmError("string list list data claim returned void".into())
+            })?
+            .into_pointer_value();
+        let fresh_data = self
+            .builder
+            .build_is_not_null(unique_data, "string_list_list_ret_data_fresh")
+            .map_err(|e| CompileError::LlvmError(format!("string list list data fresh: {e}")))?;
+        self.build_cond_br(fresh_data, owned_bb, done_bb)?;
+        self.builder.position_at_end(owned_bb);
         let header = self
             .context
             .append_basic_block(function, "string_list_list_ret_header");
@@ -4134,18 +5097,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "string_list_list_ret_inner",
             )?
             .into_struct_value();
-        self.emit_string_list_struct_free(inner_list_sv, "nested_str_list_elem")?;
+        self.emit_string_list_struct_free(
+            inner_list_sv,
+            "nested_str_list_elem",
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+        )?;
         let free_fn = self
             .module
             .get_function("free")
             .ok_or_else(|| CompileError::LlvmError("free not declared".into()))?;
-        self.builder
-            .build_call(
-                free_fn,
-                &[BasicMetadataValueEnum::PointerValue(inner_ptr)],
-                "string_list_list_ret_free_inner_box",
-            )
-            .map_err(|e| CompileError::LlvmError(format!("string list list ret box free: {e}")))?;
+        self.emit_heap_free_if_unclaimed(
+            free_fn,
+            inner_ptr,
+            "string_list_list_ret_inner_box",
+            claimed,
+            claimed_string_lists,
+            claimed_string_list_lists,
+            claimed_generic_lists,
+        )?;
         let next = self
             .builder
             .build_int_add(
@@ -4165,10 +5137,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_call(
                 free_fn,
-                &[BasicMetadataValueEnum::PointerValue(data)],
-                "string_list_list_ret_free_data",
+                &[BasicMetadataValueEnum::PointerValue(unique_data)],
+                "string_list_list_ret_data_release",
             )
-            .map_err(|e| CompileError::LlvmError(format!("string list list ret data free: {e}")))?;
+            .map_err(|e| CompileError::LlvmError(format!("string list list data free: {e}")))?;
+        self.build_br(done_bb)?;
+        self.builder.position_at_end(done_bb);
         Ok(())
     }
 

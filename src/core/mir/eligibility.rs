@@ -74,7 +74,7 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
         if !declaration
             .ret_type
             .as_ref()
-            .is_none_or(|ty| is_scalar_ffi_decl_type(program, ty, true))
+            .map_or(true, |ty| is_scalar_ffi_decl_type(program, ty, true))
             || !declaration
                 .typed_params
                 .iter()
@@ -320,7 +320,7 @@ fn is_exact_cross_state_f64_failure_receipt_for_transition(
         || transition
             .fails
             .as_ref()
-            .is_none_or(|ty| !is_concrete_string_type(ty))
+            .map_or(true, |ty| !is_concrete_string_type(ty))
         || transition.is_fallback
         || transition.is_ffi_pinned
         || !flow.persistent_fields.is_empty()
@@ -403,7 +403,7 @@ fn is_exact_multifield_cross_state_record_receipt(
         || transition
             .fails
             .as_ref()
-            .is_none_or(|ty| !is_concrete_string_type(ty))
+            .map_or(true, |ty| !is_concrete_string_type(ty))
         || transition.is_fallback
         || transition.is_ffi_pinned
         || flow.persistent_fields.len() != 0
@@ -683,15 +683,12 @@ fn exact_cross_state_failure_transition_body(
     else {
         return false;
     };
-    let source_field = match &left.kind {
+    let source_field = matches!(
+        &left.kind,
         ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
             if base == source_local
-                && matches!(projections.as_slice(), [ResolvedProjection::Field { .. }]) =>
-        {
-            true
-        }
-        _ => false,
-    };
+                && matches!(projections.as_slice(), [ResolvedProjection::Field { .. }])
+    );
     if !source_field
         || !matches!(
             right.kind,
@@ -929,7 +926,7 @@ fn exact_failure_match_arm(expression: &ResolvedExpr, payload: &ResolvedPattern)
     else {
         return false;
     };
-    exact_failure_match_arm_for_local(expression, &local)
+    exact_failure_match_arm_for_local(expression, local)
 }
 
 fn exact_failure_match_arm_for_local(
@@ -1746,10 +1743,9 @@ fn is_exact_s8_block(
                 .is_some_and(|value| is_exact_s8_expr(value, transition, saw_transition_call)),
             _ => false,
         })
-        && block
-            .result
-            .as_deref()
-            .is_none_or(|result| is_exact_s8_expr(result, transition, saw_transition_call))
+        && block.result.as_deref().map_or(true, |result| {
+            is_exact_s8_expr(result, transition, saw_transition_call)
+        })
 }
 
 fn is_exact_s8_expr(

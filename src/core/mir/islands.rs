@@ -3177,17 +3177,17 @@ fn generic_list_body_has_operation(root: &crate::core::ir::ResolvedBlock) -> boo
     }
     fn statement_has_operation(statement: &crate::core::ir::ResolvedStmt) -> bool {
         match &statement.kind {
-            ResolvedStmtKind::Bind { initializer, .. } => initializer
-                .as_ref()
-                .is_some_and(|value| expr_has_operation(value)),
+            ResolvedStmtKind::Bind { initializer, .. } => {
+                initializer.as_ref().is_some_and(expr_has_operation)
+            }
             ResolvedStmtKind::Assign { value, .. }
             | ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
             } => expr_has_operation(value),
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
-                .as_ref()
-                .is_some_and(|value| expr_has_operation(value)),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                value.as_ref().is_some_and(expr_has_operation)
+            }
             ResolvedStmtKind::While { condition, body } => {
                 expr_has_operation(condition) || block_has_operation(body)
             }
@@ -3336,17 +3336,17 @@ fn generic_list_body_has_construction(root: &crate::core::ir::ResolvedBlock) -> 
     }
     fn statement_has_construction(statement: &crate::core::ir::ResolvedStmt) -> bool {
         match &statement.kind {
-            ResolvedStmtKind::Bind { initializer, .. } => initializer
-                .as_ref()
-                .is_some_and(|value| expr_has_construction(value)),
+            ResolvedStmtKind::Bind { initializer, .. } => {
+                initializer.as_ref().is_some_and(expr_has_construction)
+            }
             ResolvedStmtKind::Assign { value, .. }
             | ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
             } => expr_has_construction(value),
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
-                .as_ref()
-                .is_some_and(|value| expr_has_construction(value)),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                value.as_ref().is_some_and(expr_has_construction)
+            }
             ResolvedStmtKind::While { condition, body } => {
                 expr_has_construction(condition) || block_has_construction(body)
             }
@@ -3782,7 +3782,7 @@ fn is_scalar_generic_record_definition(
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 1 | 2 | 3 | 4 | 5 | 6 | 7)
+        || !matches!(definition.fields.len(), 1..=7)
     {
         return false;
     }
@@ -3829,7 +3829,7 @@ fn is_owned_generic_record_definition(
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3 | 4)
+        || !matches!(definition.fields.len(), 2..=4)
     {
         return false;
     }
@@ -3896,7 +3896,7 @@ fn is_owned_generic_record_definition(
     fields_admitted
         && ((generic_fields == definition.fields.len() && matches!(definition.fields.len(), 2 | 3))
             || (generic_fields == 1
-                && matches!(definition.fields.len(), 2 | 3 | 4)
+                && matches!(definition.fields.len(), 2..=4)
                 && owned_string_fields + generic_fields == definition.fields.len())
             || (definition.fields.len() == 2
                 && generic_fields == 1
@@ -4114,7 +4114,7 @@ fn is_scalar_generic_record_update_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3 | 4)
+        || !matches!(definition.fields.len(), 2..=4)
     {
         return false;
     }
@@ -4155,7 +4155,7 @@ pub(crate) fn is_owned_generic_record_update_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3 | 4)
+        || !matches!(definition.fields.len(), 2..=4)
     {
         return false;
     }
@@ -5974,7 +5974,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                             self.require_copy_scalar(&operand_ty, subject, "negate operand");
                             self.require_copy_scalar(&result_ty, subject, "negate result");
                             if result_ty != operand_ty
-                                || !is_signed_integer(&self.program.type_catalog(), &operand_ty)
+                                || !is_signed_integer(self.program.type_catalog(), &operand_ty)
                             {
                                 self.error(format!(
                                     "{subject} negate is outside {SCALAR_COLLECTION_ISLAND}"
@@ -5985,8 +5985,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                     ResolvedUnaryOp::Not => {
                         self.require_copy_scalar(&operand_ty, subject, "Not operand");
                         self.require_copy_scalar(&result_ty, subject, "Not result");
-                        if !is_bool(&self.program.type_catalog(), &operand_ty)
-                            || !is_bool(&self.program.type_catalog(), &result_ty)
+                        if !is_bool(self.program.type_catalog(), &operand_ty)
+                            || !is_bool(self.program.type_catalog(), &result_ty)
                         {
                             self.error(format!(
                                 "{subject} Not is outside {SCALAR_COLLECTION_ISLAND}"
@@ -6126,13 +6126,13 @@ impl<'a> ScalarCollectionValidator<'a> {
                 }
                 let valid_input = match *kind {
                     crate::core::mir::types::MirBuiltinKind::PrintlnBool => {
-                        is_bool(&self.program.type_catalog(), &argument_ty)
+                        is_bool(self.program.type_catalog(), &argument_ty)
                     }
                     crate::core::mir::types::MirBuiltinKind::PrintlnInt => {
-                        is_signed_integer(&self.program.type_catalog(), &argument_ty)
+                        is_signed_integer(self.program.type_catalog(), &argument_ty)
                     }
                     crate::core::mir::types::MirBuiltinKind::PrintlnFloat => {
-                        is_f64(&self.program.type_catalog(), &argument_ty)
+                        is_f64(self.program.type_catalog(), &argument_ty)
                     }
                     _ => false,
                 };
@@ -6346,7 +6346,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             MirTerminator::Goto { .. } => {}
             MirTerminator::Branch { condition, .. } => {
                 if let Some(ty) = self.value_type(function, condition, subject) {
-                    if !is_bool(&self.program.type_catalog(), &ty) {
+                    if !is_bool(self.program.type_catalog(), &ty) {
                         self.error(format!(
                             "{subject} branch condition is outside {SCALAR_COLLECTION_ISLAND}"
                         ));
@@ -6622,10 +6622,10 @@ fn binary_supported(
     result: &crate::core::ResolvedTypeId,
     validator: &ScalarCollectionValidator<'_>,
 ) -> bool {
-    let integer = is_signed_integer(&validator.program.type_catalog(), left);
-    let boolean = is_bool(&validator.program.type_catalog(), left);
+    let integer = is_signed_integer(validator.program.type_catalog(), left);
+    let boolean = is_bool(validator.program.type_catalog(), left);
     let float = is_f64(validator.program.type_catalog(), left);
-    let result_is_bool = is_bool(&validator.program.type_catalog(), result);
+    let result_is_bool = is_bool(validator.program.type_catalog(), result);
     match op {
         // Keep this matrix identical to the native MIR validator and the
         // verifier capability gate.  The island must be an intersection of

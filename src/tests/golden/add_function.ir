@@ -376,6 +376,10 @@ declare ptr @mimi_map_keys(i64)
 
 declare ptr @mimi_map_values(i64)
 
+declare { i64, ptr } @mimi_map_keys_pair(i64)
+
+declare { i64, ptr } @mimi_map_values_pair(i64)
+
 declare ptr @mimi_value_type_name(i64)
 
 declare ptr @mimi_str_split(ptr, ptr)
@@ -387,6 +391,12 @@ declare i64 @mimi_str_box(ptr, i64)
 declare i32 @mimi_str_unbox(i64, ptr, ptr)
 
 declare void @mimi_str_free_box(i64)
+
+declare i64 @mimi_str_box_take_payload(i64, ptr)
+
+declare ptr @mimi_str_list_data_clone(i64, ptr)
+
+declare ptr @mimi_str_list_list_data_clone(i64, ptr)
 
 declare i64 @mimi_str_box_copy(ptr, i64)
 
@@ -427,6 +437,8 @@ declare ptr @mimi_to_string_f64(double)
 declare ptr @mimi_to_json_f64(double)
 
 declare i64 @mimi_str_clone(ptr, i64)
+
+declare i64 @mimi_any_string_clone(ptr, i64)
 
 declare void @mimi_string_free(ptr)
 
@@ -1039,6 +1051,8 @@ entry:
 
 define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Single({} %0) {
 entry:
+  %claimed_returned_heap_ptr = alloca ptr, align 8
+  store ptr null, ptr %claimed_returned_heap_ptr, align 8
   %string_ret31 = alloca { ptr, i64 }, align 8
   %string_ret27 = alloca { ptr, i64 }, align 8
   %string_ret23 = alloca { ptr, i64 }, align 8
@@ -1162,6 +1176,7 @@ res_ret_cont:                                     ; preds = %ret_str_malloc_ok, 
   %res_ret_val = phi { ptr, i64 } [ %agg_str_field, %res_ret_heap ], [ %ret_str_new_len, %ret_str_malloc_ok ]
   %agg_str_owned = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, { ptr, i64 } %res_ret_val, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  store ptr %agg_str_data, ptr %claimed_returned_heap_ptr, align 8
   store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_str_owned, ptr %Fault, align 8
   %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0
@@ -1211,6 +1226,8 @@ ret_str_malloc_oom:                               ; preds = %res_ret_copy
 
 define { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } @Main__peer_fault__from_Fault({ { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %0) {
 entry:
+  %claimed_returned_heap_ptr = alloca ptr, align 8
+  store ptr null, ptr %claimed_returned_heap_ptr, align 8
   %tmp13 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %tmp9 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
   %tmp5 = alloca { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, align 8
@@ -1266,6 +1283,7 @@ res_ret_cont:                                     ; preds = %ret_str_malloc_ok, 
   %res_ret_val = phi { ptr, i64 } [ %agg_str_field, %res_ret_heap ], [ %ret_str_new_len, %ret_str_malloc_ok ]
   %agg_str_owned = insertvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_claim_ld, { ptr, i64 } %res_ret_val, 2
   %agg_str_data = extractvalue { ptr, i64 } %agg_str_field, 0
+  store ptr %agg_str_data, ptr %claimed_returned_heap_ptr, align 8
   store { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %agg_str_owned, ptr %Fault, align 8
   %ret_load = load { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } }, ptr %Fault, align 8
   %ret_rec_f = extractvalue { { i32, i64 }, { i32, i64 }, { ptr, i64 }, { { ptr, i64 }, { ptr, i64 }, { ptr, i64 }, { { ptr, i64 }, i32 }, { { ptr, i64 }, { ptr, i64 }, i32, { ptr, i64 } } } } %ret_load, 0

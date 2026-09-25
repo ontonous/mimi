@@ -1271,10 +1271,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 src.starts_with("List").then_some(src)
             }
             "range" => Some("List<i64>".to_string()),
-            // Map collection builtins have concrete list element types. Keep
-            // these visible to tuple lowering so `keys(m)[i]` is wrapped as a
-            // length-aware Mimi string rather than a raw pointer field.
-            "keys" | "values" => Some("List<string>".to_string()),
+            // Map keys are strings, but values are heterogeneous Any handles.
+            // Keep those distinct so list indexing follows the declared ABI.
+            "keys" => Some("List<string>".to_string()),
+            "values" => Some("List<Any>".to_string()),
             // zip: List<(A, B)> — pair of the two source lists' element types.
             // compile_zip now heap-packs each pair (16-byte {a,b} allocation
             // referenced by an 8-byte slot), matching the product-tuple
@@ -1590,6 +1590,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             "getenv" | "base64_decode" | "try_input_line" => {
                 return Some("Result<string,string>".to_string())
             }
+            // The legacy emitter lowers these parsers to `(bool, value)`;
+            // keep tuple-field consumers typed so `println(result.0)` uses
+            // Mimi's textual boolean representation instead of raw `i1`.
+            "str_parse_int" => return Some("(bool, i64)".to_string()),
+            "str_parse_float" => return Some("(bool, f64)".to_string()),
             "str_index_of" => return Some("Option<i32>".to_string()),
             "str_count_substring" => return Some("i32".to_string()),
             "str_replace" | "str_substring" | "str_join" | "str_trim" | "str_to_upper"
@@ -1601,9 +1606,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Some("Result<string,string>".to_string())
             }
             "write_file" | "write_file_bytes" => return Some("Result<(), string>".to_string()),
-            "listdir" | "walk_dir" | "str_split" | "keys" | "values" | "sort_str" => {
+            "listdir" | "walk_dir" | "str_split" | "keys" | "sort_str" => {
                 return Some("List<string>".to_string())
             }
+            "values" => return Some("List<Any>".to_string()),
             // 0.35.23 deep-eval: `let files = args()` (mimi-lint) — the
             // missing mapping made legacy codegen fall back to an i64
             // element type for `for f in files`, and `read_file(f)` then
@@ -2235,8 +2241,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_pointer_value(),
                 _ => return Err("map literal key must be a string".into()),
             };
-            // Value is cast to i64 (ValueHandle) for storage
-            let val_i64 = self.any_value_to_handle(val_val)?;
+            // Strings crossing into Any need an explicit tagged handle with
+            // exact provenance and length. Pointer bits alone are ambiguous
+            // with numeric values and must never be probed by the runtime.
+            let val_is_string =
+                self.expr_is_string(value) || self.infer_object_type(value, vars) == "string";
+            let val_i64 = if val_is_string {
+                let metadata = BasicMetadataValueEnum::from(val_val);
+                let (ptr, len) = self.extract_raw_str_ptr_len(&metadata)?;
+                let clone_fn = self.get_runtime_fn("mimi_any_string_clone")?;
+                let result = self.build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(ptr),
+                        BasicMetadataValueEnum::IntValue(len),
+                    ],
+                    "map_literal_any_string",
+                )?;
+                call_try_basic_value(&result)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_any_string_clone returned void".into())
+                    })?
+                    .into_int_value()
+            } else {
+                self.any_value_to_handle(val_val)?
+            };
             self.build_call(
                 map_set,
                 &[

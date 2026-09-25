@@ -311,7 +311,7 @@ fn nested_tuple_body_walk(
                 nested_tuple_pattern_is_closed(pattern)
                     && initializer
                         .as_ref()
-                        .is_none_or(|value| nested_tuple_expr_is_closed(program, value))
+                        .map_or(true, |value| nested_tuple_expr_is_closed(program, value))
             }
             ResolvedStmtKind::Assign { value, .. } => {
                 // R6-1049: the construction-proven root-level scalar-assign
@@ -321,9 +321,11 @@ fn nested_tuple_body_walk(
                     && super::islands::resolved_assign_is_admitted_scalar_shape(program, statement)
                     && nested_tuple_expr_is_closed(program, value)
             }
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
-                .as_ref()
-                .is_none_or(|expression| nested_tuple_expr_is_closed(program, expression)),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                value.as_ref().map_or(true, |expression| {
+                    nested_tuple_expr_is_closed(program, expression)
+                })
+            }
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
@@ -331,10 +333,9 @@ fn nested_tuple_body_walk(
             ResolvedStmtKind::Drop(_) => true,
             _ => false,
         }
-    }) && block
-        .result
-        .as_ref()
-        .is_none_or(|expression| nested_tuple_expr_is_closed(program, expression))
+    }) && block.result.as_ref().map_or(true, |expression| {
+        nested_tuple_expr_is_closed(program, expression)
+    })
 }
 
 fn nested_tuple_pattern_is_closed(pattern: &ResolvedPattern) -> bool {

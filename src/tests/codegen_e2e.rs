@@ -406,6 +406,38 @@ fn e2e_closure_multiple_capture() {
     assert_eq!(stdout.trim(), "37");
 }
 
+const NESTED_CALLABLE_STRING_LIST_REBIND: &str = r#"
+func main() -> i32 {
+    let outer = ["outer"]
+    let inner = fn() -> i32 {
+        let mut values = ["before"]
+        let mut nested = [["before-nested"]]
+        let mut i = 0
+        while i < 3 {
+            values = ["inner"]
+            nested = [["nested"]]
+            i = i + 1
+        }
+        println(values[0])
+        println(nested[0][0])
+        0
+    }
+    inner()
+    println(outer[0])
+    0
+}
+"#;
+
+#[test]
+fn e2e_nested_callable_string_list_rebinding_uses_local_heap_scope() {
+    if !can_link() {
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(NESTED_CALLABLE_STRING_LIST_REBIND)
+        .expect("nested callable list owners must stay inside their LLVM function");
+    assert_eq!(stdout.trim(), "inner\nnested\nouter");
+}
+
 #[test]
 fn e2e_closure_extern_callback() {
     if !can_link() {
@@ -2195,6 +2227,303 @@ fn e2e_valgrind_list_ops() {
     )
     .expect("src/tests/codegen_e2e.rs:1320 unwrap failed");
     assert_eq!(stdout.trim(), "1\n2\n3\n4\n5\n15");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_local_string_list_literals() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func main() -> i32 {
+            let mut i = 0
+            while i < 6 {
+                let names: List<string> = ["left", "right"]
+                println(names[0])
+                i = i + 1
+            }
+            0
+        }
+    "#,
+    )
+    .expect("resolved local List<string> literals must release each ABI v3 box");
+    assert_eq!(stdout.lines().count(), 6);
+
+    let returned = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func make_names() -> List<string> {
+            let names: List<string> = ["left", "right"]
+            names
+        }
+        func main() -> i32 {
+            let names = make_names()
+            println(names[0])
+            println(names[1])
+            0
+        }
+    "#,
+    )
+    .expect("returned resolved List<string> must transfer all boxes and its data array");
+    assert_eq!(returned.trim(), "left\nright");
+
+    let rebound = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func main() -> i32 {
+            let mut names: List<string> = ["before", "old"]
+            names = ["after"]
+            println(names[0])
+            0
+        }
+    "#,
+    )
+    .expect("rebound resolved List<string> must release each superseded owner once");
+    assert_eq!(rebound.trim(), "after");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_string_list_return_alias() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func identity(xs: List<string>) -> List<string> { xs }
+        func main() -> i32 {
+            let xs: List<string> = ["stable"]
+            if true {
+                let ys = identity(xs)
+                println(ys[0])
+            }
+            println(xs[0])
+            0
+        }
+    "#,
+    )
+    .expect("aliased List<string> call results must not traverse freed storage");
+    assert_eq!(stdout.trim(), "stable\nstable");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_string_list_pop() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func main() -> i32 {
+            let mut names: List<string> = ["first", "last"]
+            let last = pop(names)
+            let first = pop(names)
+            println(last)
+            println(first)
+            println(len(names))
+            0
+        }
+    "#,
+    )
+    .expect("pop(List<string>) must transfer or release its removed string box");
+    assert_eq!(stdout.trim(), "last\nfirst\n0");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_string_list_rebind_returned_value() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func make_names() -> List<string> { ["owned"] }
+        func main() -> i32 {
+            let mut names: List<string> = []
+            let mut i = 0
+            while i < 3 {
+                names = make_names()
+                println(names[0])
+                i = i + 1
+            }
+            println(names[0])
+            0
+        }
+    "#,
+    )
+    .expect("returned List<string> assigned across loop iterations must remain live");
+    assert_eq!(stdout.trim(), "owned\nowned\nowned\nowned");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_string_list_clone_then_mutate() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func make_names() -> List<string> { ["first"] }
+        func main() -> i32 {
+            let mut names: List<string> = make_names()
+            push(names, "second")
+            println(names[0])
+            println(names[1])
+            0
+        }
+    "#,
+    )
+    .expect("bound List<string> copies must remain valid owners through push/realloc");
+    assert_eq!(stdout.trim(), "first\nsecond");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_nested_string_list_literal() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func main() -> i32 {
+            let names: List<List<string>> = [["inner"]]
+            println(names[0][0])
+            0
+        }
+    "#,
+    )
+    .expect("nested List<string> local literals must release inner boxes and arrays");
+    assert_eq!(stdout.trim(), "inner");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_nested_string_list_rebind_returned_value_in_loop() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(
+        r#"
+        func make_names() -> List<List<string>> { [["owned"]] }
+        func main() -> i32 {
+            let mut names: List<List<string>> = make_names()
+            let mut i = 0
+            while i < 3 {
+                names = make_names()
+                println(names[0][0])
+                i = i + 1
+            }
+            println(names[0][0])
+            0
+        }
+    "#,
+    )
+    .expect("returned List<List<string>> assignments must remain live across loop iterations");
+    assert_eq!(stdout.trim(), "owned\nowned\nowned\nowned");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_nested_callable_string_list_rebinding_uses_local_heap_scope() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_valgrind(NESTED_CALLABLE_STRING_LIST_REBIND)
+        .expect("nested callable list owners must pass Valgrind with callable-local cleanup");
+    assert_eq!(stdout.trim(), "inner\nnested\nouter");
+}
+
+#[test]
+#[ignore = "requires Valgrind"]
+fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    // The process-global Any handle table intentionally remains a live root
+    // until process exit. Its tagged string payloads can therefore appear in
+    // Memcheck's "possibly lost" class; this test still fails on invalid
+    // accesses and definite/indirect leaks, and keeps the possible-loss report
+    // visible for the separate Any/map ownership audit. Do not use a Valgrind
+    // suppression here: the category is asserted below as an explicit debt.
+    let map_valgrind_args = vec![
+        "--tool=memcheck".into(),
+        "--error-exitcode=1".into(),
+        "--leak-check=full".into(),
+        "--errors-for-leak-kinds=definite,indirect".into(),
+    ];
+    let observation = checked_codegen_compile_and_observe_valgrind_with_args(
+        r#"
+        func main() -> i32 {
+            let first = map_set(map_new(), "a", 3)
+            let mixed = map_set(first, "b", "cherry")
+            let mut i = 0
+            while i < 32 {
+                let vals = values(mixed)
+                println(vals[0])
+                println(vals[1])
+                drop(vals)
+                i = i + 1
+            }
+            0
+        }
+    "#,
+        map_valgrind_args,
+    )
+    .expect("mixed Map<Any> values must run under Valgrind");
+    assert_eq!(
+        observation.exit_code,
+        Some(0),
+        "Memcheck must report no invalid accesses or definite leaks: {}",
+        observation.stderr
+    );
+    assert_eq!(
+        observation.stdout.lines().take(2).collect::<Vec<_>>(),
+        ["3", "cherry"]
+    );
+    assert!(
+        observation
+            .stderr
+            .contains("definitely lost: 0 bytes in 0 blocks"),
+        "Memcheck must report zero definitely-lost bytes: {}",
+        observation.stderr
+    );
+    assert!(
+        observation
+            .stderr
+            .contains("indirectly lost: 0 bytes in 0 blocks"),
+        "Memcheck must report zero indirectly-lost bytes: {}",
+        observation.stderr
+    );
+    let possible_loss_bytes = observation
+        .stderr
+        .lines()
+        .find_map(|line| {
+            line.split_once("possibly lost:")?
+                .1
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .expect("Memcheck must include its possible-loss summary");
+    assert!(
+        possible_loss_bytes > 0,
+        "the process-lifetime Any/map retention must remain visible as a nonzero debt: {}",
+        observation.stderr
+    );
 }
 
 #[test]

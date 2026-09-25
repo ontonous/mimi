@@ -943,26 +943,36 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // ownership transfers to the caller (mirrors the legacy
         // claim_returned_enum_box in Stmt::Return / emit_return).
         self.generator.claim_returned_enum_box(value, result_type)?;
-        // Determine whether the return type transitively owns heap data.
-        // If so, drain the heap scope (caller takes ownership) instead of
-        // freeing — otherwise the returned pointer(s) dangle.
-        //
-        // Strings:         {ptr, i64}     — ptr is the string data pointer.
-        // Lists:           {i64, ptr}     — ptr is the element data pointer.
-        // Nested records:  any struct with at least one pointer field.
-        //
-        // The resolved emitter's `register_heap_slot` only tracks the data
-        // pointer of list/string allocas.  Any struct field whose LLVM type
-        // is a PointerType *may* reference such a tracked allocation.
-        // 0.34.36 (audit §6.1): the old check was SHALLOW — it only looked at
-        // the top-level fields, so a nested record (`Outer { inner: Inner }`
-        // where `Inner` holds a string/list) whose direct fields were all
-        // StructType fell through to free_heap_allocs and could free the
-        // inner string's data out from under the caller. Recurse into
-        // nested struct fields: any transitively-reachable pointer means the
-        // return owns heap data.
+        // Transfer only the allocations reachable from the returned value.
+        // Draining the entire scope kept the result alive, but also leaked
+        // temporaries that had already been copied into it (for example the
+        // concat buffers used to build a `List<string>` field). The claim
+        // projection understands String, List, nested products, and the
+        // supported collection ownership shapes; the normal cleanup then
+        // releases every unclaimed temporary.
         let return_owns_heap = ownership.requires_scope_drain();
+        let fallthrough_string_return = return_owns_heap
+            && !glue_return_is_independent
+            && matches!(
+                ownership,
+                crate::codegen::abi::ownership::OwnershipClass::StringBox
+            );
         if return_owns_heap && !glue_return_is_independent {
+            let return_type_id = self
+                .program
+                .callable(&callable.owner)
+                .map(|callable| callable.signature.result.clone());
+            if !fallthrough_string_return {
+                self.claim_returned_heap_pointers(value, result_type, return_type_id)?;
+            }
+        }
+        if fallthrough_string_return {
+            // A direct String return can pass through several value-producing
+            // branch blocks. The legacy cleanup slots may have branch-local
+            // registrations, and their generated free graph is not yet
+            // dominance-safe after the merge. Keep the established whole-scope
+            // transfer for this scalar ownership shape; aggregate/list return
+            // cleanup remains exact and frees non-escaping temporaries.
             self.generator.drain_heap_scope();
         } else {
             self.generator.free_heap_allocs()?;
@@ -1540,18 +1550,95 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     })?;
                     let llvm_type = self.lower_type(&metadata.ty)?;
                     if matches!(llvm_type, BasicTypeEnum::StructType(_)) {
+                        let list_shape = resolved_type_display_name(self.program, &metadata.ty);
+                        let is_string_list = list_shape == "List<string>";
+                        let is_string_list_list = list_shape == "List<List<string>>";
                         let storage = self
                             .generator
                             .build_alloca(llvm_type, &metadata.display_name)?;
-                        self.emit_list_literal(elements, frame, Some(storage))?;
+                        self.emit_list_literal(
+                            elements,
+                            frame,
+                            Some(storage),
+                            is_string_list,
+                            is_string_list_list,
+                        )?;
                         frame
                             .locals
                             .insert(local.clone(), ResolvedVarEntry { storage, llvm_type });
                         return Ok(None);
                     }
                 }
+                let string_list_binding = match &pattern.kind {
+                    ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } => body.locals.get(local).is_some_and(|metadata| {
+                        resolved_type_display_name(self.program, &metadata.ty) == "List<string>"
+                    }),
+                    _ => false,
+                };
+                let string_list_list_binding = match &pattern.kind {
+                    ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } => body
+                        .locals
+                        .get(local)
+                        .is_some_and(|metadata| self.string_list_list_shape(&metadata.ty)),
+                    _ => false,
+                };
                 let value = self.emit_expr(initializer, frame)?;
+                let value = if string_list_binding {
+                    self.clone_string_list_value(value)?.into()
+                } else if string_list_list_binding {
+                    self.clone_string_list_list_value(value)?.into()
+                } else {
+                    value
+                };
                 self.bind_pattern(body, pattern, value, frame)?;
+                if string_list_binding {
+                    if let ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } = &pattern.kind
+                    {
+                        if let Some(entry) = frame.locals.get(local).copied() {
+                            let BasicTypeEnum::StructType(list_ty) = entry.llvm_type else {
+                                return Err(CompileError::Unsupported(
+                                    "List<string> binding has a non-struct native layout".into(),
+                                ));
+                            };
+                            if !self.generator.has_heap_slot(entry.storage) {
+                                self.generator
+                                    .register_string_list_slot(entry.storage, list_ty)?;
+                            }
+                        }
+                    }
+                }
+                if string_list_list_binding {
+                    if let ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } = &pattern.kind
+                    {
+                        if let Some(entry) = frame.locals.get(local).copied() {
+                            let BasicTypeEnum::StructType(list_ty) = entry.llvm_type else {
+                                return Err(CompileError::Unsupported(
+                                    "List<List<string>> binding has a non-struct native layout"
+                                        .into(),
+                                ));
+                            };
+                            if !self.generator.has_heap_slot(entry.storage) {
+                                self.generator.register_string_list_list_slot(
+                                    entry.storage,
+                                    list_ty,
+                                    list_ty,
+                                )?;
+                            }
+                        }
+                    }
+                }
                 // 0.37.x: transfer string-temp ownership into the local slot for
                 // simple bindings too. Without this, `let ch = str_char_at(...)`
                 // inside a loop left the heap allocation in the per-iteration
@@ -1590,7 +1677,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // buffer before the next one. Rebindings are handled separately
                 // in the Assign arm below and are promoted to the function root
                 // because their storage outlives the loop body.
-                if matches!(initializer.kind, ResolvedExprKind::Call(_)) {
+                if !string_list_binding
+                    && !string_list_list_binding
+                    && matches!(initializer.kind, ResolvedExprKind::Call(_))
+                {
                     if let ResolvedPatternKind::Binding {
                         local,
                         by_reference: None,
@@ -1631,6 +1721,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 conversion,
             } => {
                 let rhs_expr = value;
+                let string_list_assignment = target.projections.is_empty()
+                    && body.locals.get(&target.base).is_some_and(|local| {
+                        resolved_type_display_name(self.program, &local.ty) == "List<string>"
+                    });
+                let string_list_list_assignment = target.projections.is_empty()
+                    && body
+                        .locals
+                        .get(&target.base)
+                        .is_some_and(|local| self.string_list_list_shape(&local.ty));
+                let prior_string_list_owners = self.generator.string_list_owner_count();
+                let prior_string_list_list_owners = self.generator.string_list_list_owner_count();
                 let value = self.emit_expr(value, frame)?;
                 // SD-7 (0.34.34): narrowing assign into an i32 variable traps
                 // out of range (VM assign-guard parity). Range-check BEFORE
@@ -1658,6 +1759,89 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // projection to detect a direct List-element write (F-016).
                 let target_projections = target.projections.clone();
                 let target = self.root_place(frame, target, false)?;
+                if string_list_list_assignment {
+                    let BasicTypeEnum::StructType(list_ty) = target.llvm_type else {
+                        return Err(CompileError::Unsupported(
+                            "List<List<string>> assignment has a non-struct native layout".into(),
+                        ));
+                    };
+                    let cloned = self.clone_string_list_list_value(value)?;
+                    let old_value = self
+                        .generator
+                        .build_load(target.llvm_type, target.storage, "string_list_list_old")?
+                        .into_struct_value();
+                    if let Some(source_owner) = self
+                        .generator
+                        .last_string_list_list_owner_since(prior_string_list_list_owners)
+                    {
+                        let source_value = self
+                            .generator
+                            .build_load(
+                                BasicTypeEnum::StructType(list_ty),
+                                source_owner,
+                                "string_list_list_assignment_source_owner",
+                            )?
+                            .into_struct_value();
+                        self.generator
+                            .release_string_list_list_value_unless_same_data(
+                                old_value,
+                                source_value,
+                                list_ty,
+                                list_ty,
+                            )?;
+                    } else {
+                        self.generator
+                            .release_string_list_list_value_now(old_value, list_ty, list_ty)?;
+                    }
+                    if !self.generator.has_heap_slot(target.storage) {
+                        self.generator.register_string_list_list_slot_root(
+                            target.storage,
+                            list_ty,
+                            list_ty,
+                        )?;
+                    }
+                    self.generator.build_store(target.storage, cloned)?;
+                    return Ok(None);
+                }
+                if string_list_assignment {
+                    let BasicTypeEnum::StructType(list_ty) = target.llvm_type else {
+                        return Err(CompileError::Unsupported(
+                            "List<string> assignment has a non-struct native layout".into(),
+                        ));
+                    };
+                    let cloned = self.clone_string_list_value(value)?;
+                    let old_value = self
+                        .generator
+                        .build_load(target.llvm_type, target.storage, "string_list_old_value")?
+                        .into_struct_value();
+                    if let Some(source_owner) = self
+                        .generator
+                        .last_string_list_owner_since(prior_string_list_owners)
+                    {
+                        let source_value = self
+                            .generator
+                            .build_load(
+                                BasicTypeEnum::StructType(list_ty),
+                                source_owner,
+                                "string_list_assignment_source_owner",
+                            )?
+                            .into_struct_value();
+                        self.generator.release_string_list_value_unless_same_data(
+                            old_value,
+                            source_value,
+                            list_ty,
+                        )?;
+                    } else {
+                        self.generator
+                            .release_string_list_value_now(old_value, list_ty)?;
+                    }
+                    if !self.generator.has_heap_slot(target.storage) {
+                        self.generator
+                            .register_string_list_slot_root(target.storage, list_ty)?;
+                    }
+                    self.generator.build_store(target.storage, cloned)?;
+                    return Ok(None);
+                }
                 // 0.37.x (dogfood: build string by `w = w + ch` in loops):
                 // resolved string-temp assignments must transfer ownership out
                 // of the per-iteration heap scope. The old code left the concat
@@ -2053,6 +2237,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         elements: &[crate::core::ResolvedExpr],
         frame: &mut ResolvedFrame<'ctx>,
         target: Option<inkwell::values::PointerValue<'ctx>>,
+        is_string_list: bool,
+        is_string_list_list: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let count = elements.len() as u64;
         let i64_ty = self.generator.context.i64_type();
@@ -2070,7 +2256,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // pointers, so resolved list literals must box strings to keep
         // readers/contains/zip/enumerate consistent with the runtime.
         for (i, element) in elements.iter().enumerate() {
+            let prior_string_list_owners = self.generator.string_list_owner_count();
             let value = self.emit_expr(element, frame)?;
+            if resolved_type_display_name(self.program, &element.ty) == "List<string>" {
+                if let Some(inner_slot) = self
+                    .generator
+                    .last_string_list_owner_since(prior_string_list_owners)
+                {
+                    // `emit_expr(List)` returns the aggregate value, so the
+                    // registered slot is not present in `value` itself. If
+                    // this expression created a fresh List<string> owner,
+                    // transfer that exact registration to the enclosing
+                    // List<List<string>> value. A loaded local has no new
+                    // registration and remains independently owned.
+                    self.generator.claim_nested_list_slot(inner_slot);
+                }
+            }
             let iv = if resolved_type_display_name(self.program, &element.ty) == "string" {
                 self.coerce_string_to_i64(value)?
             } else {
@@ -2083,7 +2284,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.generator.build_store(elem_ptr, iv)?;
         }
         match target {
-            None => self.generator.build_list_struct(len_val, data_ptr),
+            None => {
+                let list = self.generator.build_list_struct(len_val, data_ptr)?;
+                if is_string_list {
+                    let slot = list.into_pointer_value();
+                    // Replace the generic data-array owner with a complete
+                    // List<String> owner that also releases every ABI v3 box.
+                    self.generator.claim_nested_list_slot(slot);
+                    self.generator
+                        .register_string_list_slot(slot, self.generator.list_struct_type())?;
+                    Ok(BasicValueEnum::PointerValue(slot))
+                } else if is_string_list_list {
+                    let slot = list.into_pointer_value();
+                    self.generator.claim_nested_list_slot(slot);
+                    let list_ty = self.generator.list_struct_type();
+                    self.generator
+                        .register_string_list_list_slot(slot, list_ty, list_ty)?;
+                    Ok(BasicValueEnum::PointerValue(slot))
+                } else {
+                    Ok(list)
+                }
+            }
             Some(storage) => {
                 let list_ty = self.generator.list_struct_type();
                 let len_gep = self
@@ -2108,10 +2329,308 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_store(data_gep, data_void_ptr)?;
                 // The LOCAL is the buffer owner: push/pop reallocs write this
                 // slot, so the scope-exit free must read this slot.
-                self.generator.register_heap_slot(storage, list_ty, 1)?;
+                if is_string_list {
+                    self.generator.register_string_list_slot(storage, list_ty)?;
+                } else if is_string_list_list {
+                    self.generator
+                        .register_string_list_list_slot(storage, list_ty, list_ty)?;
+                } else {
+                    self.generator.register_heap_slot(storage, list_ty, 1)?;
+                }
                 Ok(storage.into())
             }
         }
+    }
+
+    /// Clone the data and every owned ABI v3 string box of a List<String>.
+    /// Resolved List values are non-linear at the language level, so binding
+    /// or assigning one must not make two lexical owners free the same array.
+    fn clone_string_list_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::StructValue<'ctx>, CompileError> {
+        let BasicValueEnum::StructValue(list) = value else {
+            return Err(CompileError::Unsupported(
+                "List<string> ownership copy requires a native list aggregate".into(),
+            ));
+        };
+        let list_ty = list.get_type();
+        let fields = list_ty.get_field_types();
+        if fields.len() != 2
+            || !matches!(fields[0], BasicTypeEnum::IntType(i) if i.get_bit_width() == 64)
+            || !matches!(fields[1], BasicTypeEnum::PointerType(_))
+        {
+            return Err(CompileError::Unsupported(
+                "List<string> ownership copy received a non-list ABI".into(),
+            ));
+        }
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(list, 0, "string_list_clone_len")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(list, 1, "string_list_clone_data")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone data: {e}")))?
+            .into_pointer_value();
+        let clone_fn = self.generator.get_runtime_fn("mimi_str_list_data_clone")?;
+        let cloned_data = self
+            .generator
+            .builder
+            .build_call(
+                clone_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(len),
+                    BasicMetadataValueEnum::PointerValue(data),
+                ],
+                "string_list_clone_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone call: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("string-list clone returned void".into()))?
+            .into_pointer_value();
+        let has_elements = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                len,
+                len.get_type().const_zero(),
+                "string_list_clone_nonempty",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone len check: {e}")))?;
+        let allocation_failed = self
+            .generator
+            .builder
+            .build_is_null(cloned_data, "string_list_clone_null")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone null: {e}")))?;
+        let invalid = self
+            .generator
+            .builder
+            .build_and(has_elements, allocation_failed, "string_list_clone_failed")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone status: {e}")))?;
+        let function = self
+            .generator
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("List<string> clone outside function".into()))?;
+        let error_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "string_list_clone_error");
+        let ok_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "string_list_clone_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(invalid, error_bb, ok_bb)
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone branch: {e}")))?;
+        self.generator.builder.position_at_end(error_bb);
+        let abort_fn = self.generator.get_or_declare_abort_fn();
+        let message = self
+            .generator
+            .builder
+            .build_global_string_ptr(
+                "invalid or unallocatable List<string> ownership copy",
+                "string_list_clone_error_msg",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone message: {e}")))?;
+        self.generator.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                message.as_pointer_value(),
+            )],
+            "string_list_clone_abort",
+        )?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone unreachable: {e}")))?;
+        self.generator.builder.position_at_end(ok_bb);
+        let cloned = self
+            .generator
+            .builder
+            .build_insert_value(list_ty.get_undef(), len, 0, "string_list_clone_value_len")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone insert len: {e}")))?;
+        self.generator
+            .builder
+            .build_insert_value(cloned, cloned_data, 1, "string_list_clone_value_data")
+            .map_err(|e| CompileError::LlvmError(format!("string-list clone insert data: {e}")))
+            .map(|value| value.into_struct_value())
+    }
+
+    /// Deep-clone the outer data, every inner list header/data array, and all
+    /// ABI v3 string boxes in a `List<List<string>>`. A shallow clone would
+    /// leave two non-linear resolved bindings owning the same nested buffers.
+    fn clone_string_list_list_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::StructValue<'ctx>, CompileError> {
+        let BasicValueEnum::StructValue(list) = value else {
+            return Err(CompileError::Unsupported(
+                "List<List<string>> ownership copy requires a native list aggregate".into(),
+            ));
+        };
+        let list_ty = list.get_type();
+        let fields = list_ty.get_field_types();
+        if fields.len() != 2
+            || !matches!(fields[0], BasicTypeEnum::IntType(i) if i.get_bit_width() == 64)
+            || !matches!(fields[1], BasicTypeEnum::PointerType(_))
+        {
+            return Err(CompileError::Unsupported(
+                "List<List<string>> ownership copy received a non-list ABI".into(),
+            ));
+        }
+
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(list, 0, "string_list_list_clone_len")
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list clone len: {e}")))?
+            .into_int_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(list, 1, "string_list_list_clone_data")
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list clone data: {e}")))?
+            .into_pointer_value();
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_str_list_list_data_clone")?;
+        let cloned_data = self
+            .generator
+            .builder
+            .build_call(
+                clone_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(len),
+                    BasicMetadataValueEnum::PointerValue(data),
+                ],
+                "string_list_list_clone_data",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list clone call: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| {
+                CompileError::LlvmError("nested string-list clone returned void".into())
+            })?
+            .into_pointer_value();
+
+        // Empty lists legitimately have a null cloned data pointer. Reject a
+        // negative length and reject a null result for any non-empty list.
+        let negative_len = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                len,
+                len.get_type().const_zero(),
+                "string_list_list_clone_negative_len",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list length check: {e}"))
+            })?;
+        let has_elements = self
+            .generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                len,
+                len.get_type().const_zero(),
+                "string_list_list_clone_nonempty",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list length check: {e}"))
+            })?;
+        let allocation_failed = self
+            .generator
+            .builder
+            .build_is_null(cloned_data, "string_list_list_clone_null")
+            .map_err(|e| CompileError::LlvmError(format!("nested string-list clone null: {e}")))?;
+        let null_nonempty = self
+            .generator
+            .builder
+            .build_and(
+                has_elements,
+                allocation_failed,
+                "string_list_list_clone_failed",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone status: {e}"))
+            })?;
+        let invalid = self
+            .generator
+            .builder
+            .build_or(
+                negative_len,
+                null_nonempty,
+                "string_list_list_clone_invalid",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone status: {e}"))
+            })?;
+        let function = self.generator.current_function().ok_or_else(|| {
+            CompileError::LlvmError("List<List<string>> clone outside function".into())
+        })?;
+        let error_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "string_list_list_clone_error");
+        let ok_bb = self
+            .generator
+            .context
+            .append_basic_block(function, "string_list_list_clone_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(invalid, error_bb, ok_bb)
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone branch: {e}"))
+            })?;
+        self.generator.builder.position_at_end(error_bb);
+        let abort_fn = self.generator.get_or_declare_abort_fn();
+        let message = self
+            .generator
+            .builder
+            .build_global_string_ptr(
+                "invalid or unallocatable List<List<string>> ownership copy",
+                "string_list_list_clone_error_msg",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone message: {e}"))
+            })?;
+        self.generator.build_call(
+            abort_fn,
+            &[BasicMetadataValueEnum::PointerValue(
+                message.as_pointer_value(),
+            )],
+            "string_list_list_clone_abort",
+        )?;
+        self.generator.builder.build_unreachable().map_err(|e| {
+            CompileError::LlvmError(format!("nested string-list clone unreachable: {e}"))
+        })?;
+        self.generator.builder.position_at_end(ok_bb);
+
+        let cloned = self
+            .generator
+            .builder
+            .build_insert_value(
+                list_ty.get_undef(),
+                len,
+                0,
+                "string_list_list_clone_value_len",
+            )
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone insert len: {e}"))
+            })?;
+        self.generator
+            .builder
+            .build_insert_value(cloned, cloned_data, 1, "string_list_list_clone_value_data")
+            .map_err(|e| {
+                CompileError::LlvmError(format!("nested string-list clone insert data: {e}"))
+            })
+            .map(|value| value.into_struct_value())
     }
 
     fn bind_pattern(
@@ -2354,7 +2873,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // compile_list_expr: malloc data buffer, store elements as i64,
             // build {i64 len, ptr data} struct.
             ResolvedExprKind::List(elements) => {
-                let list_ptr = self.emit_list_literal(elements, frame, None)?;
+                let list_shape = resolved_type_display_name(self.program, &expression.ty);
+                let is_string_list = list_shape == "List<string>";
+                let is_string_list_list = list_shape == "List<List<string>>";
+                let list_ptr = self.emit_list_literal(
+                    elements,
+                    frame,
+                    None,
+                    is_string_list,
+                    is_string_list_list,
+                )?;
                 // build_list_struct returns a pointer to the alloca'd struct.
                 // Load the struct value so the resolved emitter can store it
                 // in local variables (matching tuple semantics).
@@ -2958,12 +3486,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         let BasicTypeEnum::StructType(list_ty) = result_ty else {
                                             return Ok(result.into());
                                         };
-                                        // 0.39.x (L1 parity fix): a
-                                        // legacy-monomorphized instance's
-                                        // list boxes borrowed payload pointers;
-                                        // give the returned list private
-                                        // element copies before registering it
-                                        // for unconditional per-element frees.
+                                        // ABI v3 box construction owns each
+                                        // payload. The helper preserves box
+                                        // identity in case the returned list
+                                        // aliases another live value.
                                         if generic_symbol_override.is_some() {
                                             self.copy_string_list_elements_owned(sv)?;
                                         }
@@ -2971,11 +3497,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                             .register_returned_string_list(sv, list_ty)?;
                                         return Ok(result);
                                     }
-                                    // List<List<string>> from an override call:
-                                    // same borrowed-payload hazard one level
-                                    // deeper; normalize inner elements before
-                                    // the StringListListData registration in
-                                    // track_returned_heap_pointers below.
+                                    // Preserve nested list and box identities;
+                                    // ABI v3 already guarantees owned payloads.
                                     if generic_symbol_override.is_some()
                                         && self.string_list_list_shape(&call.result)
                                     {
@@ -3322,6 +3845,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // and stores back, which only works with a pointer.
                         // When the first argument is a simple local variable,
                         // load its alloca pointer instead of the loaded value.
+                        if name == "push" && call.arguments.len() == 2 {
+                            let list_type = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            self.generator.pending_push_elem_type =
+                                CodeGenerator::strip_list_element_type(&list_type);
+                        }
+                        if name == "pop" && call.arguments.len() == 1 {
+                            let list_type = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            self.generator.pending_pop_elem_type =
+                                CodeGenerator::strip_list_element_type(&list_type);
+                        }
                         if matches!(name, "push" | "pop") && !arguments.is_empty() {
                             if let Some(first_arg) = call.arguments.first() {
                                 use crate::core::ir::ResolvedExprKind;
@@ -7075,12 +7614,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .map(BasicValueEnum::from)
                     .map_err(|e| CompileError::LlvmError(format!("ptr struct load: {e}")))
             }
-            // 0.39.136 (L1): string struct {ptr,i64} → i64 ValueHandle.
-            // Erased-value ABI positions (map_set/map_remove values, Any
-            // slots) store heap C-string handles as raw ints. Extract the
-            // pointer, heap-clone it (mirrors legacy compile_map_set's
-            // strlen+mimi_str_clone: the stored handle must outlive the
-            // source temporary) and ptrtoint. Without this arm every
+            // String struct {ptr,i64} → explicitly tagged i64 Any handle.
+            // Erased-value positions preserve exact provenance and length;
+            // raw pointer handles let arbitrary integers trigger unsafe
+            // string probing. Without this arm every
             // string-valued map_set failed "resolved numeric conversion"
             // and fell the whole function back to legacy.
             (BasicValueEnum::StructValue(sv), BasicTypeEnum::IntType(it))
@@ -7101,26 +7638,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .build_extract_value(sv, 0, "resolved_str_handle_ptr")
                     .map_err(|e| CompileError::LlvmError(format!("resolved str unwrap: {e}")))?
                     .into_pointer_value();
-                let strlen_fn = self
-                    .generator
-                    .module
-                    .get_function("strlen")
-                    .ok_or_else(|| CompileError::LlvmError("strlen not declared".into()))?;
                 let len = self
                     .generator
-                    .build_call(
-                        strlen_fn,
-                        &[BasicMetadataValueEnum::PointerValue(ptr)],
-                        "resolved_str_handle_len",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                    .builder
+                    .build_extract_value(sv, 1, "resolved_str_handle_len")
+                    .map_err(|e| CompileError::LlvmError(format!("resolved str length: {e}")))?
                     .into_int_value();
                 let clone_fn = self
                     .generator
                     .module
-                    .get_function("mimi_str_clone")
-                    .ok_or_else(|| CompileError::LlvmError("mimi_str_clone not declared".into()))?;
+                    .get_function("mimi_any_string_clone")
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_any_string_clone not declared".into())
+                    })?;
                 let handle = self
                     .generator
                     .build_call(
@@ -7129,10 +7659,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             BasicMetadataValueEnum::PointerValue(ptr),
                             BasicMetadataValueEnum::IntValue(len),
                         ],
-                        "resolved_str_handle",
+                        "resolved_any_string_handle",
                     )?
                     .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("mimi_str_clone returned void".into()))?
+                    .ok_or_else(|| {
+                        CompileError::LlvmError("mimi_any_string_clone returned void".into())
+                    })?
                     .into_int_value();
                 let i64_ty = self.generator.context.i64_type();
                 let widened = if handle.get_type().get_bit_width() < 64 {
@@ -7506,7 +8038,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .try_as_basic_value_opt()
             .ok_or("mimi_str_box returned void")?
             .into_int_value();
-        Ok(boxed)
+        self.generator
+            .nonzero_string_box_or_abort(boxed, "resolved_str_box")
     }
 
     /// Coerce a value to i64 for list element storage. Handles int
@@ -12647,250 +13180,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(Some(BasicValueEnum::PointerValue(future_ptr)))
     }
 
-    /// Recursively transform string leaves inside a returned heap-owned
-    /// value into malloc-owned string data. Top-level string returns already
-    /// go through `claim_resolved_string_return`; records containing String
-    /// fields need the same ownership probe so the caller's later
-    /// `free`/`mimi_string_free` never touches a `.rodata` literal.
-    /// Ensure every string element in a `List<string>` is owned by heap
-    /// storage. The list's data array is mutated in place so the returned
-    /// value remains valid and the caller can safely `mimi_string_free` each
-    /// element during scope exit.
+    /// List<string> ABI v3 boxes own their payload at construction. Preserve
+    /// the list and box identities so aliases remain valid; only top-level
+    /// string leaves outside list boxes need return ownership normalization.
     fn ensure_list_string_owned(
         &mut self,
         list_sv: inkwell::values::StructValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let i64_ty = self.generator.context.i64_type();
-        let ptr_ty = self
-            .generator
-            .context
-            .ptr_type(inkwell::AddressSpace::default());
-        let len = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 0, "ret_list_str_len")
-            .map_err(|e| CompileError::LlvmError(format!("ret list str len: {e}")))?
-            .into_int_value();
-        let data = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 1, "ret_list_str_data")
-            .map_err(|e| CompileError::LlvmError(format!("ret list str data: {e}")))?
-            .into_pointer_value();
-        let function = self.generator.current_function().ok_or_else(|| {
-            CompileError::LlvmError("ret list str ensure outside function".into())
-        })?;
-        let header = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_list_str_header");
-        let body = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_list_str_body");
-        let exit = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_list_str_exit");
-        let idx_storage = self
-            .generator
-            .build_alloca(BasicTypeEnum::IntType(i64_ty), "ret_list_str_idx")?;
-        self.generator
-            .build_store(idx_storage, i64_ty.const_int(0, false))?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(header);
-        let idx = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                idx_storage,
-                "ret_list_str_idx_val",
-            )?
-            .into_int_value();
-        let cond = self.generator.builder.build_int_compare(
-            inkwell::IntPredicate::SLT,
-            idx,
-            len,
-            "ret_list_str_cond",
-        );
-        let cond = cond.map_err(|e| CompileError::LlvmError(format!("ret list str cmp: {e}")))?;
-        self.generator.build_cond_br(cond, body, exit)?;
-
-        self.generator.builder.position_at_end(body);
-        let elem_slot =
-            self.generator
-                .build_in_bounds_gep(i64_ty, data, &[idx], "ret_list_str_elem_slot")?;
-        let elem_i64 = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                elem_slot,
-                "ret_list_str_elem_i64",
-            )?
-            .into_int_value();
-        let elem_ptr =
-            self.generator
-                .build_int_to_ptr(elem_i64, ptr_ty, "ret_list_str_elem_ptr")?;
-        // 0.1.8 Phase B fat ABI: each list slot is a MimiStr box handle.
-        // Unpack the box to `{ptr, len}`, ensure the payload is heap-owned,
-        // then update the box's `ptr`/`len` fields in place. The slot must
-        // continue to hold the box pointer (not a raw string pointer).
-        let string_sv = self
-            .generator
-            .load_fat_list_string(elem_ptr)?
-            .into_struct_value();
-        let owned = self
-            .generator
-            .claim_resolved_string_return(string_sv.into())?
-            .into_struct_value();
-        let new_ptr = self
-            .generator
-            .build_extract_value(owned.into(), 0, "ret_list_str_owned_ptr")?
-            .into_pointer_value();
-        let new_len = self
-            .generator
-            .build_extract_value(owned.into(), 1, "ret_list_str_owned_len")?
-            .into_int_value();
-        let i32_ty = self.generator.context.i32_type();
-        let fat_ty = self.generator.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(i32_ty),
-                BasicTypeEnum::IntType(i32_ty),
-                BasicTypeEnum::PointerType(ptr_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let fat_ptr_gep = self
-            .generator
-            .gep()
-            .build_struct_gep(fat_ty, elem_ptr, 2, "ret_list_str_box_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("ret list str box ptr: {e}")))?;
-        self.generator.build_store(fat_ptr_gep, new_ptr)?;
-        let fat_len_gep = self
-            .generator
-            .gep()
-            .build_struct_gep(fat_ty, elem_ptr, 3, "ret_list_str_box_len")
-            .map_err(|e| CompileError::LlvmError(format!("ret list str box len: {e}")))?;
-        self.generator.build_store(fat_len_gep, new_len)?;
-        let next = self
-            .generator
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "ret_list_str_idx_next")
-            .map_err(|e| CompileError::LlvmError(format!("ret list str inc: {e}")))?;
-        self.generator.build_store(idx_storage, next)?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(exit);
         Ok(list_sv.into())
     }
 
-    /// Ensure every inner `List<string>` in a `List<List<string>>` has
-    /// heap-owned string elements. The outer data array contains heap box
-    /// handles; each inner box is mutated in place.
+    /// ABI v3 owns payloads at MimiStr construction. Preserve the outer and
+    /// inner list identities, including any aliases held by the caller.
     fn ensure_string_list_list_owned(
         &mut self,
         list_sv: inkwell::values::StructValue<'ctx>,
-        elem_list_ty: inkwell::types::StructType<'ctx>,
+        _elem_list_ty: inkwell::types::StructType<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let i64_ty = self.generator.context.i64_type();
-        let ptr_ty = self
-            .generator
-            .context
-            .ptr_type(inkwell::AddressSpace::default());
-        let len = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 0, "ret_lsl_len")
-            .map_err(|e| CompileError::LlvmError(format!("ret lsl len: {e}")))?
-            .into_int_value();
-        let data = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 1, "ret_lsl_data")
-            .map_err(|e| CompileError::LlvmError(format!("ret lsl data: {e}")))?
-            .into_pointer_value();
-        let function = self
-            .generator
-            .current_function()
-            .ok_or_else(|| CompileError::LlvmError("ret lsl ensure outside function".into()))?;
-        let header = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_lsl_header");
-        let body = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_lsl_body");
-        let exit = self
-            .generator
-            .context
-            .append_basic_block(function, "ret_lsl_exit");
-        let idx_storage = self
-            .generator
-            .build_alloca(BasicTypeEnum::IntType(i64_ty), "ret_lsl_idx")?;
-        self.generator
-            .build_store(idx_storage, i64_ty.const_int(0, false))?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(header);
-        let idx = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                idx_storage,
-                "ret_lsl_idx_val",
-            )?
-            .into_int_value();
-        let cond = self
-            .generator
-            .builder
-            .build_int_compare(inkwell::IntPredicate::SLT, idx, len, "ret_lsl_cond")
-            .map_err(|e| CompileError::LlvmError(format!("ret lsl cmp: {e}")))?;
-        self.generator.build_cond_br(cond, body, exit)?;
-
-        self.generator.builder.position_at_end(body);
-        let elem_slot =
-            self.generator
-                .build_in_bounds_gep(i64_ty, data, &[idx], "ret_lsl_elem_slot")?;
-        let inner_handle = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                elem_slot,
-                "ret_lsl_inner_handle",
-            )?
-            .into_int_value();
-        let inner_ptr =
-            self.generator
-                .build_int_to_ptr(inner_handle, ptr_ty, "ret_lsl_inner_ptr")?;
-        let inner_sv = self
-            .generator
-            .build_load(
-                BasicTypeEnum::StructType(elem_list_ty),
-                inner_ptr,
-                "ret_lsl_inner",
-            )?
-            .into_struct_value();
-        let owned_inner = self.ensure_list_string_owned(inner_sv)?.into_struct_value();
-        self.generator.build_store(inner_ptr, owned_inner)?;
-        let next = self
-            .generator
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "ret_lsl_idx_next")
-            .map_err(|e| CompileError::LlvmError(format!("ret lsl inc: {e}")))?;
-        self.generator.build_store(idx_storage, next)?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(exit);
         Ok(list_sv.into())
     }
 
-    /// Recursively ensure strings inside a returned value are heap-owned.
-    /// The optional resolved type lets list containers convert their element
-    /// string pointers (which are raw `char*` handles in list data arrays)
-    /// before the caller frees them.
+    /// Normalize standalone string leaves in a returned value. List<string>
+    /// boxes already own their bytes under ABI v3, so list normalization
+    /// preserves their existing list and box identities.
     fn ensure_returned_heap_strings_owned(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -13009,250 +13321,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
     }
 
-    /// 0.39.x (L1 parity fix): give the returned `List<string>` private,
-    /// heap-owned copies of every element payload. Legacy-monomorphized
-    /// instances build list literals with `mimi_str_box`, which boxes
-    /// BORROWED pointers (argument aliases, `.rodata` literals), while the
-    /// caller-side `register_returned_string_list` frees every element box
-    /// payload unconditionally at scope exit — freeing memory the list never
-    /// owned (double-free / free-of-global). Unlike
-    /// `ensure_list_string_owned` this is NOT a probe: the list's destructor
-    /// is unconditional, so each payload must become a private copy.
+    /// ABI v3 makes every MimiStr box own its payload. Keep the same list
+    /// and box identities because other values may alias them.
     fn copy_string_list_elements_owned(
         &mut self,
-        list_sv: inkwell::values::StructValue<'ctx>,
+        _list_sv: inkwell::values::StructValue<'ctx>,
     ) -> Result<(), CompileError> {
-        let i64_ty = self.generator.context.i64_type();
-        let ptr_ty = self
-            .generator
-            .context
-            .ptr_type(inkwell::AddressSpace::default());
-        let len = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 0, "own_list_str_len")
-            .map_err(|e| CompileError::LlvmError(format!("own list str len: {e}")))?
-            .into_int_value();
-        let data = self
-            .generator
-            .builder
-            .build_extract_value(list_sv, 1, "own_list_str_data")
-            .map_err(|e| CompileError::LlvmError(format!("own list str data: {e}")))?
-            .into_pointer_value();
-        let function = self.generator.current_function().ok_or_else(|| {
-            CompileError::LlvmError("own list str elements outside function".into())
-        })?;
-        let header = self
-            .generator
-            .context
-            .append_basic_block(function, "own_list_str_header");
-        let body = self
-            .generator
-            .context
-            .append_basic_block(function, "own_list_str_body");
-        let exit = self
-            .generator
-            .context
-            .append_basic_block(function, "own_list_str_exit");
-        let idx_storage = self
-            .generator
-            .build_alloca(BasicTypeEnum::IntType(i64_ty), "own_list_str_idx")?;
-        self.generator
-            .build_store(idx_storage, i64_ty.const_int(0, false))?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(header);
-        let idx = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                idx_storage,
-                "own_list_str_idx_val",
-            )?
-            .into_int_value();
-        let cond = self.generator.builder.build_int_compare(
-            inkwell::IntPredicate::SLT,
-            idx,
-            len,
-            "own_list_str_cond",
-        );
-        let cond = cond.map_err(|e| CompileError::LlvmError(format!("own list str cmp: {e}")))?;
-        self.generator.build_cond_br(cond, body, exit)?;
-
-        self.generator.builder.position_at_end(body);
-        let elem_slot =
-            self.generator
-                .build_in_bounds_gep(i64_ty, data, &[idx], "own_list_str_elem_slot")?;
-        let elem_i64 = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                elem_slot,
-                "own_list_str_elem_i64",
-            )?
-            .into_int_value();
-        let elem_ptr = self
-            .generator
-            .builder
-            .build_int_to_ptr(elem_i64, ptr_ty, "own_list_str_elem_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("own list str elem ptr: {e}")))?;
-        // Fat box layout {i32, i32, ptr, i64}: fields 2/3 are the payload
-        // {ptr, len}. Replace the payload with a fresh heap copy; the box
-        // itself stays in place (the slot must keep holding the box pointer).
-        let string_sv = self
-            .generator
-            .load_fat_list_string(elem_ptr)?
-            .into_struct_value();
-        let owned = self
-            .generator
-            .heap_copy_string_value(string_sv.into())?
-            .into_struct_value();
-        let new_ptr = self
-            .generator
-            .build_extract_value(owned.into(), 0, "own_list_str_copy_ptr")?
-            .into_pointer_value();
-        let new_len = self
-            .generator
-            .build_extract_value(owned.into(), 1, "own_list_str_copy_len")?
-            .into_int_value();
-        let i32_ty = self.generator.context.i32_type();
-        let fat_ty = self.generator.context.struct_type(
-            &[
-                BasicTypeEnum::IntType(i32_ty),
-                BasicTypeEnum::IntType(i32_ty),
-                BasicTypeEnum::PointerType(ptr_ty),
-                BasicTypeEnum::IntType(i64_ty),
-            ],
-            false,
-        );
-        let fat_ptr_gep = self
-            .generator
-            .gep()
-            .build_struct_gep(fat_ty, elem_ptr, 2, "own_list_str_box_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("own list str box ptr: {e}")))?;
-        self.generator.build_store(fat_ptr_gep, new_ptr)?;
-        let fat_len_gep = self
-            .generator
-            .gep()
-            .build_struct_gep(fat_ty, elem_ptr, 3, "own_list_str_box_len")
-            .map_err(|e| CompileError::LlvmError(format!("own list str box len: {e}")))?;
-        self.generator.build_store(fat_len_gep, new_len)?;
-        let next = self
-            .generator
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "own_list_str_idx_next")
-            .map_err(|e| CompileError::LlvmError(format!("own list str inc: {e}")))?;
-        self.generator.build_store(idx_storage, next)?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(exit);
         Ok(())
     }
 
-    /// 0.39.x (L1 parity fix): same ownership normalization as
-    /// [`Self::copy_string_list_elements_owned`] for `List<List<string>>`
-    /// values returned by legacy-monomorphized instances: walk the outer
-    /// slots, load each inner list box, and give every inner element payload
-    /// a private heap copy so the scope-exit `StringListListData` teardown
-    /// (inner boxes + payloads + arrays) never frees borrowed memory.
+    /// ABI v3 boxes already own every payload. Preserve outer and inner list
+    /// aliases instead of cloning or rewriting the inner box contents.
     fn copy_string_list_list_elements_owned(
         &mut self,
-        outer_sv: inkwell::values::StructValue<'ctx>,
-        elem_list_ty: inkwell::types::StructType<'ctx>,
+        _outer_sv: inkwell::values::StructValue<'ctx>,
+        _elem_list_ty: inkwell::types::StructType<'ctx>,
     ) -> Result<(), CompileError> {
-        let i64_ty = self.generator.context.i64_type();
-        let ptr_ty = self
-            .generator
-            .context
-            .ptr_type(inkwell::AddressSpace::default());
-        let len = self
-            .generator
-            .builder
-            .build_extract_value(outer_sv, 0, "own_llist_len")
-            .map_err(|e| CompileError::LlvmError(format!("own llist len: {e}")))?
-            .into_int_value();
-        let data = self
-            .generator
-            .builder
-            .build_extract_value(outer_sv, 1, "own_llist_data")
-            .map_err(|e| CompileError::LlvmError(format!("own llist data: {e}")))?
-            .into_pointer_value();
-        let function = self
-            .generator
-            .current_function()
-            .ok_or_else(|| CompileError::LlvmError("own llist elements outside function".into()))?;
-        let header = self
-            .generator
-            .context
-            .append_basic_block(function, "own_llist_header");
-        let body = self
-            .generator
-            .context
-            .append_basic_block(function, "own_llist_body");
-        let exit = self
-            .generator
-            .context
-            .append_basic_block(function, "own_llist_exit");
-        let idx_storage = self
-            .generator
-            .build_alloca(BasicTypeEnum::IntType(i64_ty), "own_llist_idx")?;
-        self.generator
-            .build_store(idx_storage, i64_ty.const_int(0, false))?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(header);
-        let idx = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                idx_storage,
-                "own_llist_idx_val",
-            )?
-            .into_int_value();
-        let cond = self.generator.builder.build_int_compare(
-            inkwell::IntPredicate::SLT,
-            idx,
-            len,
-            "own_llist_cond",
-        );
-        let cond = cond.map_err(|e| CompileError::LlvmError(format!("own llist cmp: {e}")))?;
-        self.generator.build_cond_br(cond, body, exit)?;
-
-        self.generator.builder.position_at_end(body);
-        let elem_slot =
-            self.generator
-                .build_in_bounds_gep(i64_ty, data, &[idx], "own_llist_elem_slot")?;
-        let inner_handle = self
-            .generator
-            .build_load(
-                BasicTypeEnum::IntType(i64_ty),
-                elem_slot,
-                "own_llist_inner_handle",
-            )?
-            .into_int_value();
-        let inner_ptr = self
-            .generator
-            .builder
-            .build_int_to_ptr(inner_handle, ptr_ty, "own_llist_inner_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("own llist inner ptr: {e}")))?;
-        let inner_list_sv = self
-            .generator
-            .build_load(
-                BasicTypeEnum::StructType(elem_list_ty),
-                inner_ptr,
-                "own_llist_inner",
-            )?
-            .into_struct_value();
-        self.copy_string_list_elements_owned(inner_list_sv)?;
-        let next = self
-            .generator
-            .builder
-            .build_int_add(idx, i64_ty.const_int(1, false), "own_llist_idx_next")
-            .map_err(|e| CompileError::LlvmError(format!("own llist inc: {e}")))?;
-        self.generator.build_store(idx_storage, next)?;
-        self.generator.build_br(header)?;
-
-        self.generator.builder.position_at_end(exit);
         Ok(())
     }
 
@@ -13440,91 +13524,192 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         type_id: Option<ResolvedTypeId>,
     ) -> Result<(), CompileError> {
         if let Some(type_id) = type_id.as_ref() {
+            match self.program.resolved_types().get(type_id) {
+                Some(ResolvedType::Option(payload_id)) => {
+                    if let (
+                        BasicValueEnum::StructValue(option),
+                        BasicTypeEnum::StructType(option_ty),
+                    ) = (value, ty)
+                    {
+                        if option_ty.count_fields() == 2 {
+                            let payload = self.generator.build_extract_value(
+                                option.into(),
+                                1,
+                                "return_heap_claim_option_payload",
+                            )?;
+                            let payload_ty = option_ty.get_field_types()[1];
+                            self.claim_returned_heap_pointers(
+                                payload,
+                                payload_ty,
+                                Some(payload_id.clone()),
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                    if crate::codegen::abi::ownership::classify_resolved(self.program, payload_id)
+                        .requires_scope_drain()
+                    {
+                        return Err(CompileError::Unsupported(
+                            "returned Option heap payload has an unsupported native ABI shape"
+                                .into(),
+                        ));
+                    }
+                }
+                Some(ResolvedType::Result { ok, error }) => {
+                    if let (
+                        BasicValueEnum::StructValue(result),
+                        BasicTypeEnum::StructType(result_ty),
+                    ) = (value, ty)
+                    {
+                        if result_ty.count_fields() == 3
+                            && matches!(
+                                result_ty.get_field_types()[0],
+                                BasicTypeEnum::IntType(tag) if tag.get_bit_width() == 1
+                            )
+                        {
+                            let fields = result_ty.get_field_types();
+                            let ok_value = self.generator.build_extract_value(
+                                result.into(),
+                                1,
+                                "return_heap_claim_result_ok",
+                            )?;
+                            self.claim_returned_heap_pointers(
+                                ok_value,
+                                fields[1],
+                                Some(ok.clone()),
+                            )?;
+
+                            // Result's error slot is an erased i64 handle. The
+                            // supported string case points at the same
+                            // `{ptr, i64}` box used by return glue; claim both
+                            // the box and its data leaf so common cleanup
+                            // preserves the active Err payload.
+                            if matches!(
+                                self.program.resolved_types().get(error),
+                                Some(ResolvedType::Primitive(PrimitiveType::String))
+                            ) {
+                                if let BasicTypeEnum::IntType(error_slot_ty) = fields[2] {
+                                    if error_slot_ty.get_bit_width() == 64 {
+                                        let error_handle = self.generator.build_extract_value(
+                                            result.into(),
+                                            2,
+                                            "return_heap_claim_result_error",
+                                        )?;
+                                        self.generator
+                                            .claim_returned_result_string_error(error_handle)?;
+                                        return Ok(());
+                                    }
+                                }
+                                return Err(CompileError::Unsupported(
+                                    "returned Result<string-error> has an unsupported native ABI shape"
+                                        .into(),
+                                ));
+                            }
+                            if crate::codegen::abi::ownership::classify_resolved(
+                                self.program,
+                                error,
+                            )
+                            .requires_scope_drain()
+                            {
+                                return Err(CompileError::Unsupported(
+                                    "returned Result heap error has no native ownership claim"
+                                        .into(),
+                                ));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    if crate::codegen::abi::ownership::classify_resolved(self.program, type_id)
+                        .requires_scope_drain()
+                    {
+                        return Err(CompileError::Unsupported(
+                            "returned Result heap payload has an unsupported native ABI shape"
+                                .into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+
             if let Some(ResolvedType::Nominal {
                 item, arguments, ..
             }) = self.program.resolved_types().get(type_id)
             {
-                if item.as_str() == "builtin:type:List"
-                    && arguments.len() == 1
-                    && matches!(
-                        self.program.resolved_types().get(&arguments[0]),
+                if item.as_str() == "builtin:type:List" {
+                    let Some(element_id) = arguments.first() else {
+                        return Err(CompileError::Unsupported(
+                            "returned native List has no resolved element type".into(),
+                        ));
+                    };
+                    let element = self.program.resolved_types().get(element_id);
+                    let is_string = matches!(
+                        element,
                         Some(ResolvedType::Primitive(PrimitiveType::String))
-                    )
-                {
-                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
-                        (value, ty)
-                    {
-                        self.generator.claim_returned_string_list(sv, list_ty)?;
-                    }
-                }
-                if item.as_str() == "builtin:type:List"
-                    && arguments.len() == 1
-                    && matches!(
-                        self.program.resolved_types().get(&arguments[0]),
+                    );
+                    let is_string_list = matches!(
+                        element,
                         Some(ResolvedType::Nominal {
-                            item,
-                            arguments,
+                            item: element_item,
+                            arguments: element_arguments,
                             ..
-                        }) if item.as_str() == "builtin:type:List"
-                            && arguments.len() == 1
+                        }) if element_item.as_str() == "builtin:type:List"
+                            && element_arguments.len() == 1
                             && matches!(
-                                self.program.resolved_types().get(&arguments[0]),
+                                self.program.resolved_types().get(&element_arguments[0]),
                                 Some(ResolvedType::Primitive(PrimitiveType::String))
                             )
-                    )
-                {
-                    if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(list_ty)) =
-                        (value, ty)
-                    {
-                        if let BasicTypeEnum::StructType(elem_list_ty) =
-                            self.lower_type(&arguments[0])?
-                        {
-                            self.generator.claim_returned_string_list_list(
-                                sv,
-                                list_ty,
-                                elem_list_ty,
-                            )?;
-                        }
-                    }
-                }
-                // 0.39.x L1 (E0722 family): a returned generic `List<T>` whose
-                // element type is neither a string nor a nested `List<string>`
-                // owns exactly one heap buffer — its i64 data array. Claim it
-                // (via `claim_returned_generic_list`) so the early-return flush
-                // transfers that buffer's ownership to the caller. This mirrors
-                // `claim_returned_string_list` for `List<string>`, but here the
-                // data array itself is the owned payload (a generic list has no
-                // per-element heap pointers to claim), so `emit_generic_list_contains`
-                // matches the data-array pointer directly.
-                if item.as_str() == "builtin:type:List" && arguments.len() == 1 {
-                    let elem = self.program.resolved_types().get(&arguments[0]);
-                    let elem_is_string =
-                        matches!(elem, Some(ResolvedType::Primitive(PrimitiveType::String)));
-                    let elem_is_nested_string = matches!(
-                        elem,
-                        Some(ResolvedType::Nominal { item: eitem, arguments: eargs, .. })
-                            if eitem.as_str() == "builtin:type:List"
-                                && eargs.len() == 1
-                                && matches!(
-                                    self.program.resolved_types().get(&eargs[0]),
-                                    Some(ResolvedType::Primitive(PrimitiveType::String))
-                                )
                     );
-                    if !elem_is_string && !elem_is_nested_string {
-                        if let (
-                            BasicValueEnum::StructValue(sv),
-                            BasicTypeEnum::StructType(list_ty),
-                        ) = (value, ty)
+                    let (
+                        BasicValueEnum::StructValue(list_value),
+                        BasicTypeEnum::StructType(list_ty),
+                    ) = (value, ty)
+                    else {
+                        return Err(CompileError::Unsupported(
+                            "returned native List has an unsupported LLVM layout".into(),
+                        ));
+                    };
+                    if is_string {
+                        self.generator
+                            .claim_returned_string_list(list_value, list_ty)?;
+                    } else if is_string_list {
+                        let BasicTypeEnum::StructType(element_list_ty) =
+                            self.lower_type(element_id)?
+                        else {
+                            return Err(CompileError::Unsupported(
+                                "returned nested string List has an unsupported element layout"
+                                    .into(),
+                            ));
+                        };
+                        self.generator.claim_returned_string_list_list(
+                            list_value,
+                            list_ty,
+                            element_list_ty,
+                        )?;
+                    } else {
+                        if crate::codegen::abi::ownership::classify_resolved(
+                            self.program,
+                            element_id,
+                        )
+                        .requires_scope_drain()
                         {
-                            self.generator.claim_returned_generic_list(sv, list_ty)?;
+                            return Err(CompileError::Unsupported(
+                                "returned List element ownership has no native cleanup projection"
+                                    .into(),
+                            ));
                         }
+                        self.generator
+                            .claim_returned_generic_list(list_value, list_ty)?;
                     }
+                    // The list claim above is type-directed and includes the
+                    // data array. Recursing over the raw LLVM fields would
+                    // misclassify that array pointer as a closure environment.
+                    return Ok(());
                 }
             }
         }
         match (value, ty) {
             (BasicValueEnum::PointerValue(pv), _) => {
-                self.generator.claim_closure_env(pv);
+                self.generator.claim_closure_env(pv)?;
             }
             (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
                 let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {
@@ -14303,7 +14488,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // to the caller, whose EnumBox registration re-adopts the
                     // box with a tag-conditional free).
                     self.generator.register_heap_box(box_ptr);
-                    self.generator.claim_closure_env(box_ptr);
+                    self.generator.claim_closure_env(box_ptr)?;
                     let payload =
                         self.generator
                             .build_ptr_to_int(box_ptr, i64_ty, "enum_str_box_i")?;
@@ -14595,6 +14780,7 @@ fn resolved_type_display_name(program: &CheckedProgram, ty: &ResolvedTypeId) -> 
         Array { element, .. } => {
             format!("[{}]", resolved_type_display_name(program, element))
         }
+        DynamicAny { .. } => "Any".to_string(),
         FlowStateSet { .. } => "unknown".to_string(),
         _ => "unknown".to_string(),
     }

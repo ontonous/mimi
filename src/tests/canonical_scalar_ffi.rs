@@ -19620,7 +19620,7 @@ fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
     }
     // The seed, recurrence, and two body shapes are part of this regression
     // contract; a failure identifies a stable call-site/value pair.
-    let mut seed = 0x51eed_947_u64;
+    let mut seed = 0x51ee_d947_u64;
     for case_index in 0..8_u64 {
         seed = seed
             .wrapping_mul(6364136223846793005)
@@ -23115,7 +23115,7 @@ func main() -> i64 {
     assert_eq!(native.stdout, "7\n42\n62\n");
     assert_eq!(native.stderr, "");
 
-    let widening_to_f64 = first_receipt.parameter_conversions[0].clone();
+    let widening_to_f64 = first_receipt.parameter_conversions[0];
     let mut forged_conversion_receipts = canonical.ffi_calls().clone();
     forged_conversion_receipts
         .get_mut(&second_id)

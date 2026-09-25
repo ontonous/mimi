@@ -927,8 +927,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Track return types for builtins
                                         match func_name.as_str() {
-                                            "listdir" | "walk_dir" | "str_split" | "keys"
-                                            | "values" => {
+                                            "listdir" | "walk_dir" | "str_split" | "keys" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),
@@ -938,6 +937,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     Type::Name(
                                                         "List".into(),
                                                         vec![Type::Name("string".into(), vec![])],
+                                                    ),
+                                                );
+                                            }
+                                            "values" => {
+                                                self.var_type_names
+                                                    .insert(name.clone(), "List<Any>".to_string());
+                                                self.var_types.insert(
+                                                    name.clone(),
+                                                    Type::Name(
+                                                        "List".into(),
+                                                        vec![Type::Name("Any".into(), vec![])],
                                                     ),
                                                 );
                                             }
@@ -2247,12 +2257,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // element slot) instead of the proper struct/
                             // string pointer.
                             match fn_name.as_str() {
-                                // VALUES-ELEM-ABI: values() elements are
-                                // canonicalized to fat MSTR boxes just like
-                                // keys() (string handles decode; scalars
-                                // stringify), so both need the string ABI.
-                                "listdir" | "walk_dir" | "str_split" | "sort_str" | "keys"
-                                | "values" => {
+                                "listdir" | "walk_dir" | "str_split" | "sort_str" | "keys" => {
                                     self.var_type_names
                                         .insert(name.clone(), "List<string>".to_string());
                                     self.var_types.insert(
@@ -2260,6 +2265,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         Type::Name(
                                             "List".into(),
                                             vec![Type::Name("string".into(), vec![])],
+                                        ),
+                                    );
+                                }
+                                "values" => {
+                                    self.var_type_names
+                                        .insert(name.clone(), "List<Any>".to_string());
+                                    self.var_types.insert(
+                                        name.clone(),
+                                        Type::Name(
+                                            "List".into(),
+                                            vec![Type::Name("Any".into(), vec![])],
                                         ),
                                     );
                                 }
@@ -2327,7 +2343,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .insert(name.clone(), "Result<(), string>".to_string());
                                     }
                                     "words" | "lines" | "split" | "str_split" | "listdir"
-                                    | "walk_dir" | "sort_str" | "keys" | "values" => {
+                                    | "walk_dir" | "sort_str" | "keys" => {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
                                         self.var_types.insert(
@@ -2335,6 +2351,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             Type::Name(
                                                 "List".into(),
                                                 vec![Type::Name("string".into(), vec![])],
+                                            ),
+                                        );
+                                    }
+                                    "values" => {
+                                        self.var_type_names
+                                            .insert(name.clone(), "List<Any>".to_string());
+                                        self.var_types.insert(
+                                            name.clone(),
+                                            Type::Name(
+                                                "List".into(),
+                                                vec![Type::Name("Any".into(), vec![])],
                                             ),
                                         );
                                     }

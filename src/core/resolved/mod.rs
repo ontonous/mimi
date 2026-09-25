@@ -4085,16 +4085,8 @@ pub(crate) fn pattern_sibling_roles(context: &str, patterns: &[Pattern]) -> Vec<
     semantic_sibling_roles(context, patterns, pattern_semantic_key)
 }
 
-pub(crate) fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: usize) -> String {
-    semantic_sibling_role(context, patterns, index, pattern_semantic_key)
-}
-
 pub(crate) fn type_sibling_roles(context: &str, types: &[Type]) -> Vec<String> {
     semantic_sibling_roles(context, types, type_semantic_key)
-}
-
-pub(crate) fn type_sibling_role(context: &str, types: &[Type], index: usize) -> String {
-    semantic_sibling_role(context, types, index, type_semantic_key)
 }
 
 fn match_arm_semantic_key(arm: &crate::ast::MatchArm) -> String {
@@ -4113,10 +4105,6 @@ pub(crate) fn match_arm_roles(context: &str, arms: &[crate::ast::MatchArm]) -> V
     semantic_sibling_roles(context, arms, match_arm_semantic_key)
 }
 
-pub(crate) fn match_arm_role(context: &str, arms: &[crate::ast::MatchArm], index: usize) -> String {
-    semantic_sibling_role(context, arms, index, match_arm_semantic_key)
-}
-
 fn map_entry_semantic_key(entry: &(Expr, Expr)) -> String {
     format!(
         "{}=>{}",
@@ -4127,10 +4115,6 @@ fn map_entry_semantic_key(entry: &(Expr, Expr)) -> String {
 
 pub(crate) fn map_entry_roles(context: &str, entries: &[(Expr, Expr)]) -> Vec<String> {
     semantic_sibling_roles(context, entries, map_entry_semantic_key)
-}
-
-pub(crate) fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usize) -> String {
-    semantic_sibling_role(context, entries, index, map_entry_semantic_key)
 }
 
 pub(crate) fn interpolation_role(
@@ -4572,7 +4556,7 @@ fn collect_type_meta(
                 collect_type_meta(
                     &args[index],
                     &node_id,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     out,
@@ -4627,7 +4611,7 @@ fn collect_type_meta(
                 collect_type_meta(
                     &items[index],
                     &node_id,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     out,
@@ -4642,7 +4626,7 @@ fn collect_type_meta(
                 collect_type_meta(
                     &params[index],
                     &node_id,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     out,
@@ -5143,7 +5127,7 @@ fn collect_item_meta(
                                     collect_type_meta(
                                         &types[index],
                                         &variant_id,
-                                        &child_role,
+                                        child_role,
                                         span,
                                         ids,
                                         out,
@@ -5303,7 +5287,7 @@ fn collect_item_meta(
                 collect_type_meta(
                     &impl_def.trait_args[index],
                     &node_id,
-                    &role,
+                    role,
                     span,
                     ids,
                     out,
@@ -5316,7 +5300,7 @@ fn collect_item_meta(
                 collect_type_meta(
                     &impl_def.type_args[index],
                     &node_id,
-                    &role,
+                    role,
                     span,
                     ids,
                     out,
@@ -5987,15 +5971,7 @@ fn collect_stmt_meta(
             let child_roles = expr_sibling_roles(&format!("{role}.math"), exprs);
             for index in 0..exprs.len() {
                 let child_role = &child_roles[index];
-                collect_expr_meta(
-                    &exprs[index],
-                    owner,
-                    &child_role,
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
+                collect_expr_meta(&exprs[index], owner, child_role, fallback, ids, out, errors);
             }
         }
         Stmt::Assign { target, value } => {
@@ -6339,22 +6315,14 @@ fn collect_expr_meta(
             let child_roles = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
                 let child_role = &child_roles[index];
-                collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
+                collect_expr_meta(&args[index], owner, child_role, fallback, ids, out, errors);
             }
         }
         Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
             let child_roles = expr_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
                 let child_role = &child_roles[index];
-                collect_expr_meta(
-                    &items[index],
-                    owner,
-                    &child_role,
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
+                collect_expr_meta(&items[index], owner, child_role, fallback, ids, out, errors);
             }
         }
         Expr::Comprehension {
@@ -6407,7 +6375,7 @@ fn collect_expr_meta(
                     arm.meta,
                     owner,
                     "match.arm",
-                    &arm_role,
+                    arm_role,
                     fallback,
                     ids,
                     out,
@@ -6591,20 +6559,12 @@ fn collect_expr_meta(
             let child_roles = type_sibling_roles(&format!("{role}.type_argument"), types);
             for index in 0..types.len() {
                 let child_role = &child_roles[index];
-                collect_type_meta(
-                    &types[index],
-                    owner,
-                    &child_role,
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
+                collect_type_meta(&types[index], owner, child_role, fallback, ids, out, errors);
             }
             let arg_roles_batch = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
                 let child_role = &arg_roles_batch[index];
-                collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
+                collect_expr_meta(&args[index], owner, child_role, fallback, ids, out, errors);
             }
         }
         Expr::MapLiteral { entries } => {
@@ -6717,30 +6677,14 @@ fn collect_pattern_meta(
             let child_roles = pattern_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
                 let child_role = &child_roles[index];
-                collect_pattern_meta(
-                    &items[index],
-                    owner,
-                    &child_role,
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
+                collect_pattern_meta(&items[index], owner, child_role, fallback, ids, out, errors);
             }
         }
         PatternKind::Slice(items, rest) => {
             let child_roles = pattern_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
                 let child_role = &child_roles[index];
-                collect_pattern_meta(
-                    &items[index],
-                    owner,
-                    &child_role,
-                    fallback,
-                    ids,
-                    out,
-                    errors,
-                );
+                collect_pattern_meta(&items[index], owner, child_role, fallback, ids, out, errors);
             }
             if let Some(rest) = rest {
                 collect_pattern_meta(
@@ -7853,7 +7797,7 @@ fn collect_stmt_call_sites(
                 collect_expr_call_sites(
                     &exprs[index],
                     owner,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     functions,
@@ -7911,7 +7855,7 @@ fn collect_expr_call_sites(
                 collect_expr_call_sites(
                     &args[index],
                     owner,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     functions,
@@ -7980,7 +7924,7 @@ fn collect_expr_call_sites(
                 collect_expr_call_sites(
                     &items[index],
                     owner,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     functions,
@@ -8255,7 +8199,7 @@ fn collect_expr_call_sites(
                 collect_expr_call_sites(
                     &args[index],
                     owner,
-                    &child_role,
+                    child_role,
                     fallback,
                     ids,
                     functions,
@@ -8659,7 +8603,7 @@ impl<'a> ExpressionKeyIndex<'a> {
                         .entry(key)
                         .or_default()
                         .push(&meta.node_id);
-                    if matched.is_none_or(|current| owner_id > current) {
+                    if matched.map_or(true, |current| owner_id > current) {
                         matched = Some(owner_id);
                     }
                 }
@@ -8695,7 +8639,7 @@ impl<'a> ExpressionKeyIndex<'a> {
             .get(key)
             .into_iter()
             .flatten()
-            .filter(move |(mo, _)| mo.is_none_or(|matched| matched != owner))
+            .filter(move |(mo, _)| mo.map_or(true, |matched| matched != owner))
             .map(|(_, n)| *n)
     }
 
@@ -8714,7 +8658,7 @@ impl<'a> ExpressionKeyIndex<'a> {
             return;
         };
         {
-            for (key, nodes) in bucket.iter() {
+            for (_key, nodes) in bucket.iter() {
                 if nodes.len() < 2 {
                     continue;
                 }
@@ -10203,7 +10147,7 @@ fn build_canonical_function_signatures(
                                 let member_id = ids.anonymous(
                                     &variant_id,
                                     type_kind(&payload[index]),
-                                    &role,
+                                    role,
                                     meta.and_then(|meta| usable_span(meta.span)),
                                     meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
                                     &mut errors,

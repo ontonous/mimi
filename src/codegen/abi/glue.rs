@@ -584,6 +584,67 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Claim the heap leaves of a returned `Result<_, string>` error handle.
+    /// The variant ABI erases this error as an i64 pointer to a `{ptr, i64}`
+    /// StringBox, so a normal LLVM field walk cannot see either allocation.
+    /// A null inactive handle is routed through a zero-initialized box to keep
+    /// the load valid on both Result variants.
+    pub(in crate::codegen) fn claim_returned_result_string_error(
+        &self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        let BasicValueEnum::IntValue(handle) = value else {
+            return Err(CompileError::Unsupported(
+                "returned Result<string-error> requires an i64 payload handle".into(),
+            ));
+        };
+        if handle.get_type().get_bit_width() != 64 {
+            return Err(CompileError::Unsupported(
+                "returned Result<string-error> requires an i64 payload handle".into(),
+            ));
+        }
+        let pointer_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let box_pointer =
+            self.build_int_to_ptr(handle, pointer_type, "claimed_result_error_box")?;
+        let is_null = self
+            .builder
+            .build_is_null(box_pointer, "claimed_result_error_is_null")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("claimed Result error null test: {error}"))
+            })?;
+        let string_ty = self.string_box_type();
+        let zero_box = self.build_entry_alloca(
+            BasicTypeEnum::StructType(string_ty),
+            "claimed_result_error_zero",
+        )?;
+        self.build_store(zero_box, string_ty.const_zero())?;
+        let readable = self
+            .builder
+            .build_select(
+                is_null,
+                zero_box,
+                box_pointer,
+                "claimed_result_error_readable",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("claimed Result error pointer select: {error}"))
+            })?
+            .into_pointer_value();
+        let boxed = self
+            .build_load(
+                BasicTypeEnum::StructType(string_ty),
+                readable,
+                "claimed_result_error_string",
+            )?
+            .into_struct_value();
+        let data = self
+            .build_extract_value(boxed.into(), 0, "claimed_result_error_data")?
+            .into_pointer_value();
+        self.claim_closure_env(box_pointer)?;
+        self.claim_closure_env(data)?;
+        Ok(())
+    }
+
     fn ensure_value_glue(
         &self,
         plan: &GluePlan,

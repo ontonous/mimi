@@ -3790,12 +3790,12 @@ fn eval_flow_transition(
             transition.0
         ));
     }
-    if function.values.get(result).is_none_or(|value| {
+    if function.values.get(result).map_or(true, |value| {
         value.ty != contract.result
             || (!recoverable && value.ty != target.result)
             || (recoverable
                 && (target.result != contract.result
-                    || catalog.get(&contract.result).is_none_or(|descriptor| {
+                    || catalog.get(&contract.result).map_or(true, |descriptor| {
                         !matches!(
                             descriptor.layout,
                             crate::core::mir::types::MirLayout::Result {
@@ -4852,7 +4852,7 @@ fn eval_direct_owned_string_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier direct owned String call result disagrees with target TypeDesc".into(),
@@ -5015,7 +5015,7 @@ fn eval_direct_variant_call(
                     .into(),
             );
         }
-        if receipt.is_none_or(|receipt| {
+        if receipt.map_or(true, |receipt| {
             receipt.mode != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
         }) {
             return Err(
@@ -5579,7 +5579,7 @@ fn eval_materialized_set_facade_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err("MIR verifier Set facade call result disagrees with target TypeDesc".into());
     }
@@ -5663,7 +5663,7 @@ fn eval_materialized_list_facade_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err("MIR verifier List facade call result disagrees with target TypeDesc".into());
     }
@@ -5792,7 +5792,7 @@ fn eval_materialized_list_construct_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier List construction call result disagrees with target TypeDesc".into(),
@@ -5883,7 +5883,7 @@ fn eval_materialized_list_projection_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier List projection call result disagrees with target TypeDesc".into(),
@@ -5964,7 +5964,7 @@ fn eval_materialized_record_projection_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier record projection call result disagrees with target TypeDesc".into(),
@@ -6035,7 +6035,7 @@ fn eval_materialized_record_update_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err("MIR verifier record update call result disagrees with target TypeDesc".into());
     }
@@ -6141,11 +6141,9 @@ fn eval_materialized_owned_record_update_call(
     let result = result
         .as_ref()
         .ok_or_else(|| "MIR verifier owned record update call must produce a result".to_string())?;
-    if function
-        .values
-        .get(result)
-        .is_none_or(|value| value.ty != target.result || value.ty != contract.result_ty)
-    {
+    if function.values.get(result).map_or(true, |value| {
+        value.ty != target.result || value.ty != contract.result_ty
+    }) {
         return Err("MIR verifier owned record update result disagrees with TypeDesc".into());
     }
     let argument = &arguments[0];
@@ -6257,7 +6255,7 @@ fn eval_materialized_tuple_projection_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier tuple projection call result disagrees with target TypeDesc".into(),
@@ -6338,7 +6336,7 @@ fn eval_materialized_owned_record_projection_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier owned record projection call result disagrees with target TypeDesc"
@@ -6455,7 +6453,7 @@ fn eval_materialized_owned_record_projection_drop_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err(
             "MIR verifier owned record move/drop projection call result disagrees with target TypeDesc"
@@ -6671,7 +6669,7 @@ fn eval_materialized_identity_call(
     if function
         .values
         .get(result)
-        .is_none_or(|value| value.ty != target.result)
+        .map_or(true, |value| value.ty != target.result)
     {
         return Err("MIR verifier generic call result disagrees with target TypeDesc".into());
     }

@@ -2399,15 +2399,14 @@ fn materializes_generic_option_unwrap_owned_list_i64_and_bool_family() {
     let instances = program
         .instances()
         .values()
-        .filter_map(|instance| match &instance.contract {
-            MirGenericInstanceContract::ScalarVariantProjection { contract }
-                if contract.projection.nominal.as_str() == "builtin:type:Option"
-                    && contract.projection.ownership == MirOwnership::Move
-                    && contract.projection.move_out_glue == MirGlueKind::List =>
-            {
-                Some(instance)
-            }
-            _ => None,
+        .filter(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Move
+                        && contract.projection.move_out_glue == MirGlueKind::List
+            )
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -3648,9 +3647,9 @@ fn rejects_generic_option_unwrap_for_unsupported_copy_payload_before_legacy() {
 
 #[test]
 fn rejects_generic_result_unwrap_and_option_unwrap_or_before_legacy() {
-    for source in [include_str!(
-        "../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"
-    )] {
+    {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi");
         let checked = checked_program(source);
         let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
             .expect_err("unsupported generic variant projection must fail closed");

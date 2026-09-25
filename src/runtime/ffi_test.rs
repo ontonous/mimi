@@ -178,8 +178,9 @@ pub extern "C" fn __mimi_extern_test_segfault() {
     // Deliberate null pointer dereference — used by FFI safety tests to verify
     // crash handling. Only Mimi test code calls this function.
     // SAFETY: deliberate null-pointer write for FFI crash testing only.
+    let null = std::hint::black_box(std::ptr::null_mut::<i32>());
     unsafe {
-        std::ptr::write_volatile(std::ptr::null_mut::<i32>(), 42);
+        std::ptr::write_volatile(null, 42);
     }
 }
 

@@ -18,10 +18,9 @@ use crate::ast::{
 };
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, expr_sibling_roles, impl_method_owner, impl_qualified_name,
-    interpolation_role, map_entry_role, map_entry_roles, match_arm_role, match_arm_roles,
-    nested_function_owner, pattern_kind, pattern_sibling_role, pattern_sibling_roles,
-    resolve_extern_func_signature_for_call, stable_id_fragment, stmt_anchor, stmt_kind,
-    stmt_sibling_role, stmt_sibling_roles, type_kind, NodeIdBuilder,
+    interpolation_role, map_entry_roles, match_arm_roles, nested_function_owner, pattern_kind,
+    pattern_sibling_roles, resolve_extern_func_signature_for_call, stable_id_fragment, stmt_anchor,
+    stmt_kind, stmt_sibling_roles, type_kind, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -685,22 +684,19 @@ fn collect_transition_syntax<'a>(
     out: &mut BTreeMap<NodeId, &'a crate::ast::TransitionDef>,
 ) {
     for item in items {
-        match item {
-            Item::Flow(flow) => {
-                for transition in &flow.transitions {
-                    if !matches!(transition.meta.origin, AstOrigin::User) {
-                        continue;
-                    }
-                    out.insert(
-                        NodeId(format!(
-                            "transition:{}::{}::{}",
-                            flow.name, transition.name, transition.from_state
-                        )),
-                        transition,
-                    );
+        if let Item::Flow(flow) = item {
+            for transition in &flow.transitions {
+                if !matches!(transition.meta.origin, AstOrigin::User) {
+                    continue;
                 }
+                out.insert(
+                    NodeId(format!(
+                        "transition:{}::{}::{}",
+                        flow.name, transition.name, transition.from_state
+                    )),
+                    transition,
+                );
             }
-            _ => {}
         }
     }
 }
@@ -2343,7 +2339,7 @@ impl BodyLowerer<'_> {
             let node_id = self.ids.anonymous(
                 &self.owner,
                 "match.arm",
-                &arm_role,
+                arm_role,
                 usable_span(arm.meta.span),
                 arm.meta.origin,
                 &mut diagnostics,
@@ -2707,7 +2703,7 @@ impl BodyLowerer<'_> {
                     return self.unsupported(node_id, "named arguments for builtin call");
                 }
                 let argument_role = &sibling_roles_2[index];
-                let value = self.lower_expr(&arguments[index], &argument_role)?;
+                let value = self.lower_expr(&arguments[index], argument_role)?;
                 let conversion = if site.callee == "session_send" && index == 1 {
                     session_action
                         .as_ref()
@@ -2818,7 +2814,7 @@ impl BodyLowerer<'_> {
                     return self.unsupported(node_id, "named arguments for extern call");
                 }
                 let argument_role = &sibling_roles_3[index];
-                let value = self.lower_expr(&arguments[index], &argument_role)?;
+                let value = self.lower_expr(&arguments[index], argument_role)?;
                 let parameter = function
                     .parameter_ids
                     .get(index)
@@ -3663,7 +3659,7 @@ impl BodyLowerer<'_> {
                 return self.unsupported(node_id, "named arguments on local closure call");
             }
             let argument_role = &closure_arg_roles[index];
-            let value = self.lower_expr(argument, &argument_role)?;
+            let value = self.lower_expr(argument, argument_role)?;
             let conversion = if polymorphic || value.ty != parameter_type {
                 CheckedConversion {
                     kind: CheckedConversionKind::Identity,
@@ -5384,7 +5380,7 @@ impl BodyLowerer<'_> {
                 let sibling_roles_10 = expr_sibling_roles(&format!("{role}.element"), elements);
                 for index in 0..elements.len() {
                     let element_role = &sibling_roles_10[index];
-                    places.extend(self.lower_drop_places(&elements[index], &element_role)?);
+                    places.extend(self.lower_drop_places(&elements[index], element_role)?);
                 }
                 if places.is_empty() {
                     return Err(vec![ResolvedBodyError::new(

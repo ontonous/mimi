@@ -378,15 +378,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             },
             Expr::Call(callee, _args) => {
                 if let Expr::Ident(name) = callee.unlocated() {
-                    // VALUES-ELEM-ABI (0.39.x sweep): keys() and values() both
-                    // return List<string> — the runtime canonicalizes every
-                    // element to a fat MSTR box (string handles decode; scalar
-                    // handles stringify), so downstream indexing/printing must
-                    // use the string ABI, not raw i64 slots.
-                    if name == "keys" || name == "values" {
+                    // Preserve the checker contract: keys() is List<string>,
+                    // while values() is List<Any> because map values can be
+                    // heterogeneous. Treating values() as List<string> made
+                    // native indexing decode scalar handles as MimiStr boxes.
+                    if name == "keys" {
                         return Some(Type::Name(
                             "List".to_string(),
                             vec![Type::Name("string".to_string(), vec![])],
+                        ));
+                    }
+                    if name == "values" {
+                        return Some(Type::Name(
+                            "List".to_string(),
+                            vec![Type::Name("Any".to_string(), vec![])],
                         ));
                     }
                     self.func_defs
