@@ -1127,7 +1127,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "S8 Flow transition island"
         };
         if scalar_collection_candidate {
-            if let Err(errors) = crate::core::mir::validate_scalar_collection_island(&canonical) {
+            if let Err(errors) = crate::core::mir::validate_scalar_collection_island(canonical) {
                 // R6-1052: an stdout-only plain-scalar candidate that fails
                 // the island preflight is an explicit compatibility input
                 // (the route it already ran on), not a hard rejection of a
@@ -1146,7 +1146,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         if option_string_candidate {
-            if let Err(errors) = crate::core::mir::validate_option_string_variant_island(&canonical)
+            if let Err(errors) = crate::core::mir::validate_option_string_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1158,7 +1158,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if option_nested_tuple_candidate {
             if let Err(errors) =
-                crate::core::mir::validate_option_nested_tuple_variant_island(&canonical)
+                crate::core::mir::validate_option_nested_tuple_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1170,7 +1170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if copy_option_i32_candidate {
             if let Err(errors) =
-                crate::core::mir::validate_copy_option_i32_variant_island(&canonical)
+                crate::core::mir::validate_copy_option_i32_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1182,7 +1182,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if copy_option_bool_candidate {
             if let Err(errors) = crate::core::mir::validate_copy_option_variant_island(
-                &canonical,
+                canonical,
                 crate::core::PrimitiveType::Bool,
                 crate::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND,
             ) {
@@ -1196,7 +1196,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if copy_option_i64_candidate {
             if let Err(errors) =
-                crate::core::mir::validate_copy_option_i64_variant_island(&canonical)
+                crate::core::mir::validate_copy_option_i64_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1208,7 +1208,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if copy_option_f64_candidate {
             if let Err(errors) =
-                crate::core::mir::validate_copy_option_f64_variant_island(&canonical)
+                crate::core::mir::validate_copy_option_f64_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1220,7 +1220,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if copy_result_i32_candidate {
             if let Err(errors) =
-                crate::core::mir::validate_copy_result_i32_variant_island(&canonical)
+                crate::core::mir::validate_copy_result_i32_variant_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
@@ -1230,7 +1230,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         }
-        if let Err(errors) = crate::verifier::validate_mir_capabilities(&canonical) {
+        if let Err(errors) = crate::verifier::validate_mir_capabilities(canonical) {
             return Err(Self::mir_gate_diagnostics(
                 program,
                 "MIR verifier capability",
@@ -1240,7 +1240,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let receipt = canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
         if let Err(errors) =
-            crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(canonical, &receipt)
         {
             return Err(Self::mir_gate_diagnostics(
                 program,
@@ -1249,11 +1249,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &errors,
             ));
         }
-        if let Err(errors) = crate::codegen::mir::validate_mir_native(&canonical) {
+        if let Err(errors) = crate::codegen::mir::validate_mir_native(canonical) {
             return Err(errors);
         }
         let results =
-            crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new())
+            crate::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new())
                 .map_err(|error| {
                     vec![crate::diagnostic::Diagnostic::error_code(
                         "MIR-VERIFY-001",
@@ -1264,7 +1264,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !crate::verifier::canonical_execution_route_verifier_ready(
             &results,
             crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
-            crate::core::mir::contains_multi_target_flow_union_candidate(&canonical),
+            crate::core::mir::contains_multi_target_flow_union_candidate(canonical),
         ) {
             return Err(vec![crate::diagnostic::Diagnostic::error_code(
                 "MIR-VERIFY-001",

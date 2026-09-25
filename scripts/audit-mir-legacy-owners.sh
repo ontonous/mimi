@@ -443,10 +443,23 @@ native_direct_preflight_receipt_binding() {
     local context
     context="$(sed -n '/fn try_compile_exact_migrated_mir_island(/,/^    fn mir_gate_diagnostics(/p' "$ROOT_DIR/src/codegen/compile.rs")"
     for pattern in \
-        'MIR_NATIVE_DIRECT_ROUTE_PROFILE' \
-        'compile_mir_program_with_route_receipt(&canonical, &receipt)' \
-        'verify_mir_with_route_receipt(&canonical, &receipt, String::new())'; do
+        'MIR_NATIVE_DIRECT_ROUTE_PROFILE'; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=native_direct_preflight_receipt_binding_missing=src/codegen/compile.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    # `canonical` is already `&MirProgram` in this preflight, so Rust accepts
+    # either `canonical` or the redundant `&canonical` at these call sites.
+    # Keep the same MIR variable and receipt required; tolerate only that
+    # source-level spelling difference so needless-borrow cleanup does not
+    # break the semantic route-receipt tripwire.
+    for pattern in \
+        'compile_mir_program_with_route_receipt\(&?canonical, &receipt\)' \
+        'verify_mir_with_route_receipt\(&?canonical, &receipt, String::new\(\)\)'; do
+        if ! printf '%s\n' "$context" | rg "$pattern" >/dev/null; then
             printf 'owner_audit_error=native_direct_preflight_receipt_binding_missing=src/codegen/compile.rs pattern=%s\n' \
                 "$pattern" >&2
             audit_failed=1

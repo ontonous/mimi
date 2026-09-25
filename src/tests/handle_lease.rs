@@ -16,7 +16,7 @@ use crate::runtime::{
 fn map_c_pin_defers_destroy_until_release() {
     let h = mimi_map_new();
     assert_ne!(h, 0);
-    let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+    let key = c"k".as_ptr() as *const std::ffi::c_char;
     // SAFETY: `h` is the live map handle from `mimi_map_new` and `key` is a NUL-terminated literal outliving the call.
     unsafe { mimi_map_set(h, key, 7) };
 
@@ -48,7 +48,7 @@ fn map_c_pin_defers_destroy_until_release() {
 #[test]
 fn map_stale_generation_is_typed_error() {
     let h = mimi_map_new();
-    let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+    let key = c"k".as_ptr() as *const std::ffi::c_char;
     // SAFETY: `h` is the live map handle from `mimi_map_new` and `key` is a NUL-terminated literal outliving the call.
     unsafe { mimi_map_set(h, key, 1) };
     // SAFETY: `h` is the live map handle created above, destroyed exactly once here.

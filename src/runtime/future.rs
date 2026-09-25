@@ -170,7 +170,7 @@ unsafe fn future_release(fut: *mut MimiFutureHeader) {
             Some(l) => l,
             // Corrupt header: fail loud instead of freeing with a wrong layout.
             None => super::mimi_runtime_abort(
-                b"mimi_future_free: corrupt data_capacity in future header\0".as_ptr()
+                c"mimi_future_free: corrupt data_capacity in future header".as_ptr()
                     as *const std::ffi::c_char,
             ),
         };

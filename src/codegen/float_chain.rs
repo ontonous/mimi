@@ -61,7 +61,7 @@ pub(crate) fn mark_cold_trap_branch(
     unsafe {
         let kind_id = inkwell::llvm_sys::core::LLVMGetMDKindIDInContext(
             context.raw(),
-            b"branch_weights\0".as_ptr() as *const std::ffi::c_char,
+            c"branch_weights".as_ptr() as *const std::ffi::c_char,
             b"branch_weights".len() as u32,
         );
         let cold = context.i32_type().const_int(0, false);

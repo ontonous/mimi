@@ -204,7 +204,7 @@ fn runtime_core_from_json_list_builders_set_element_kind() {
     // element_kind is initialized, not garbage.
     let l =
         // SAFETY: the literal is NUL-terminated; the builder returns a Box-allocated list shell this test owns.
-        unsafe { rt::mimi_list_from_json_option_product_i64(b"[null,[7,8]]\0".as_ptr() as _, 2) };
+        unsafe { rt::mimi_list_from_json_option_product_i64(c"[null,[7,8]]".as_ptr() as _, 2) };
     assert!(!l.is_null());
     assert_eq!(
         // SAFETY: `l` is the live list handle returned by the builder above.
@@ -222,7 +222,7 @@ fn runtime_core_from_json_list_builders_set_element_kind() {
     // the private data array.)
     let l2 =
         // SAFETY: the literal is NUL-terminated; the builder returns a Box-allocated list shell this test owns.
-        unsafe { rt::mimi_list_from_json_set_product_i64(b"[[1,2],[3,4]]\0".as_ptr() as _, 2) };
+        unsafe { rt::mimi_list_from_json_set_product_i64(c"[[1,2],[3,4]]".as_ptr() as _, 2) };
     assert!(!l2.is_null());
     assert_eq!(
         // SAFETY: `l2` is the live list handle returned by the builder above.
@@ -237,7 +237,7 @@ fn runtime_core_from_json_list_builders_set_element_kind() {
     // Invalid input still yields a Box-allocated list with a valid kind
     // (the old empty() path left element_kind uninitialized).
     // SAFETY: the literal is NUL-terminated; the invalid-JSON path still returns a Box-allocated (empty) list shell.
-    let l3 = unsafe { rt::mimi_list_from_json_option_product_i64(b"not json\0".as_ptr() as _, 2) };
+    let l3 = unsafe { rt::mimi_list_from_json_option_product_i64(c"not json".as_ptr() as _, 2) };
     assert!(!l3.is_null());
     assert_eq!(
         // SAFETY: `l3` is the live list handle returned by the builder above.

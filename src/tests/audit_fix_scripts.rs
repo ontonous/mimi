@@ -446,6 +446,30 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         "consumer receipt drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&consumer_output.stderr)
     );
+    let tampered_native_preflight_script =
+        source_script.replacen("&?canonical, &receipt", "&?other_canonical, &receipt", 1);
+    assert!(
+        source_script != tampered_native_preflight_script,
+        "native preflight fixture must replace the MIR identity in its receipt check"
+    );
+    std::fs::write(&script_path, tampered_native_preflight_script)
+        .expect("write tampered native preflight audit script");
+    let native_preflight_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered native preflight audit");
+    assert!(
+        !native_preflight_output.status.success(),
+        "native preflight receipt bound to a different MIR must fail closed:\n{}",
+        String::from_utf8_lossy(&native_preflight_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&native_preflight_output.stderr)
+            .contains("owner_audit_error=native_direct_preflight_receipt_binding_missing="),
+        "native preflight identity drift omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&native_preflight_output.stderr)
+    );
     let tampered_provenance_script = source_script.replacen(
         "    'self.compile_mir_native_with_route_receipt(&canonical, &receipt)' \\\n",
         "    'self.missing_native_route_receipt(&canonical, &receipt)' \\\n",

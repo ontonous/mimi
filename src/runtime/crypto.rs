@@ -324,9 +324,8 @@ pub unsafe extern "C" fn mimi_runtime_buf_nul_terminate(
     if alloc_size <= 0 || offset >= alloc_size {
         // mimi_runtime_abort does not return (-> !).
         crate::runtime::mimi_runtime_abort(
-            b"[mimi runtime] mimi_runtime_buf_nul_terminate: offset (with NUL) exceeds \
-              allocation size - heap-corrupting write prevented\0"
-                .as_ptr() as *const std::ffi::c_char,
+            c"[mimi runtime] mimi_runtime_buf_nul_terminate: offset (with NUL) exceeds allocation size - heap-corrupting write prevented"
+                .as_ptr(),
         );
     }
     // SAFETY: caller contract above (allocation covers offset + 1) and the

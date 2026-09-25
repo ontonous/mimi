@@ -8339,7 +8339,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // so it never touches the already-correct `PointerValue`/`StructValue`
                 // forms regular list vars compile to.
                 if let BasicValueEnum::IntValue(iv) = args[i] {
-                    let pname = crate::core::helpers::fmt_type(&param.ty.unlocated());
+                    let pname = crate::core::helpers::fmt_type(param.ty.unlocated());
                     if self.is_list_type_name(&pname) || pname.starts_with("Set") {
                         if let BasicTypeEnum::StructType(st) = target {
                             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());

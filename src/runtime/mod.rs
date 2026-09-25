@@ -2575,8 +2575,9 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     // not silent zero (which collides with legitimate 0**n results).
     if exp < 0 {
         unsafe {
-            mimi_runtime_abort(b"negative exponent not supported for integers\0".as_ptr()
-                as *const std::ffi::c_char);
+            mimi_runtime_abort(
+                c"negative exponent not supported for integers".as_ptr() as *const std::ffi::c_char
+            );
         }
     }
     // wave1-review §5.17 (audit 2026-08-05): mirror the VM's exact bound.
@@ -2588,7 +2589,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
     // old runtime returned 1).
     if exp > u32::MAX as i64 {
         unsafe {
-            mimi_runtime_abort(b"pow: exponent exceeds u32::MAX (integer power)\0".as_ptr()
+            mimi_runtime_abort(c"pow: exponent exceeds u32::MAX (integer power)".as_ptr()
                 as *const std::ffi::c_char);
         }
     }
@@ -2604,7 +2605,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
                 Some(v) => result = v,
                 None => unsafe {
                     mimi_runtime_abort(
-                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
+                        c"integer overflow in power".as_ptr() as *const std::ffi::c_char
                     );
                 },
             }
@@ -2615,7 +2616,7 @@ pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
                 Some(v) => b = v,
                 None => unsafe {
                     mimi_runtime_abort(
-                        b"integer overflow in power\0".as_ptr() as *const std::ffi::c_char
+                        c"integer overflow in power".as_ptr() as *const std::ffi::c_char
                     );
                 },
             }
@@ -4025,9 +4026,7 @@ pub unsafe extern "C" fn mimi_str_char_at(
     // SAFETY: `cstr_to_string` handles null pointers safely.
     let ss = unsafe { cstr_to_string(s) };
     if index < 0 {
-        mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
-        );
+        mimi_runtime_abort(c"str_char_at: index out of bounds".as_ptr() as *const std::ffi::c_char);
     }
     match ss.chars().nth(index as usize) {
         Some(c) => {
@@ -4036,7 +4035,7 @@ pub unsafe extern "C" fn mimi_str_char_at(
             alloc_c_string(encoded)
         }
         None => mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
+            c"str_char_at: index out of bounds".as_ptr() as *const std::ffi::c_char
         ),
     }
 }
@@ -4055,9 +4054,7 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
     index: i64,
 ) -> *mut std::ffi::c_char {
     if s_len < 0 || index < 0 {
-        mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
-        );
+        mimi_runtime_abort(c"str_char_at: index out of bounds".as_ptr() as *const std::ffi::c_char);
     }
     let bytes = if s.is_null() || s_len == 0 {
         &[][..]
@@ -4068,7 +4065,7 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
     let text = match std::str::from_utf8(bytes) {
         Ok(t) => t,
         Err(_) => {
-            mimi_runtime_abort(b"str_char_at: invalid UTF-8\0".as_ptr() as *const std::ffi::c_char);
+            mimi_runtime_abort(c"str_char_at: invalid UTF-8".as_ptr() as *const std::ffi::c_char);
         }
     };
     match text.chars().nth(index as usize) {
@@ -4078,7 +4075,7 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
             alloc_c_string(encoded)
         }
         None => mimi_runtime_abort(
-            b"str_char_at: index out of bounds\0".as_ptr() as *const std::ffi::c_char
+            c"str_char_at: index out of bounds".as_ptr() as *const std::ffi::c_char
         ),
     }
 }
@@ -4114,19 +4111,17 @@ pub unsafe extern "C" fn mimi_str_substring(
     let ss = str_from_ptr_len(s, len);
     if start < 0 || end < 0 {
         mimi_runtime_abort(
-            b"str_substring: index out of bounds\0".as_ptr() as *const std::ffi::c_char
+            c"str_substring: index out of bounds".as_ptr() as *const std::ffi::c_char
         );
     }
     if start > end {
-        mimi_runtime_abort(b"str_substring: start > end\0".as_ptr() as *const std::ffi::c_char);
+        mimi_runtime_abort(c"str_substring: start > end".as_ptr() as *const std::ffi::c_char);
     }
     let chars: Vec<char> = ss.chars().collect();
     let s_idx = start as usize;
     let e_idx = end as usize;
     if e_idx > chars.len() {
-        mimi_runtime_abort(
-            b"str_substring: end out of bounds\0".as_ptr() as *const std::ffi::c_char
-        );
+        mimi_runtime_abort(c"str_substring: end out of bounds".as_ptr() as *const std::ffi::c_char);
     }
     let result: String = chars[s_idx..e_idx].iter().collect();
     let boxed = alloc_c_string(&result);
@@ -4149,7 +4144,7 @@ fn str_from_ptr_len(ptr: *const std::ffi::c_char, len: i64) -> String {
     if len > MAX_STR_LEN {
         unsafe {
             mimi_runtime_abort(
-                b"string builtin: length out of bounds\0".as_ptr() as *const std::ffi::c_char
+                c"string builtin: length out of bounds".as_ptr() as *const std::ffi::c_char
             );
         }
     }
@@ -4183,7 +4178,7 @@ pub unsafe extern "C" fn mimi_str_substring_clamp(
     let si = (start as usize).min(n);
     let ei = (end as usize).min(n);
     if si > ei {
-        mimi_runtime_abort(b"str_substring: start > end\0".as_ptr() as *const std::ffi::c_char);
+        mimi_runtime_abort(c"str_substring: start > end".as_ptr() as *const std::ffi::c_char);
     }
     let result: String = chars[si..ei].iter().collect();
     let boxed = alloc_c_string(&result);
@@ -24197,7 +24192,7 @@ mod handle_registry_tests {
     #[test]
     fn map_ops_on_live_handle_work() {
         let h = mimi_map_new();
-        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        let key = c"k".as_ptr() as *const std::ffi::c_char;
         unsafe {
             mimi_map_set(h, key, 42);
         }
@@ -24447,7 +24442,7 @@ mod audit_wave1_tests {
     fn list_from_json_builders_set_element_kind_and_free_cleanly() {
         // Option of product: elements are malloc'd packs → Record.
         let l1 =
-            unsafe { mimi_list_from_json_option_product_i64(b"[null,[7,8]]\0".as_ptr() as _, 2) };
+            unsafe { mimi_list_from_json_option_product_i64(c"[null,[7,8]]".as_ptr() as _, 2) };
         assert!(!l1.is_null());
         unsafe {
             assert_eq!(mimi_list_element_kind(l1), ListElementKind::Record as i8);
@@ -24455,8 +24450,7 @@ mod audit_wave1_tests {
         }
 
         // Set of product: elements are SetHandles → Set.
-        let l2 =
-            unsafe { mimi_list_from_json_set_product_i64(b"[[1,2],[3,4]]\0".as_ptr() as _, 2) };
+        let l2 = unsafe { mimi_list_from_json_set_product_i64(c"[[1,2],[3,4]]".as_ptr() as _, 2) };
         assert!(!l2.is_null());
         unsafe {
             assert_eq!(mimi_list_element_kind(l2), ListElementKind::Set as i8);
@@ -24478,7 +24472,7 @@ mod audit_wave1_tests {
 
         // Map of product: elements are MapHandles → Map.
         let l3 = unsafe {
-            mimi_list_from_json_map_product_i64(b"[{\"a\":1},{\"b\":2}]\0".as_ptr() as _, 1)
+            mimi_list_from_json_map_product_i64(c"[{\"a\":1},{\"b\":2}]".as_ptr() as _, 1)
         };
         assert!(!l3.is_null());
         unsafe {
@@ -24501,7 +24495,7 @@ mod audit_wave1_tests {
         // Result of product: elements are malloc'd packs → Record.
         let l4 = unsafe {
             mimi_list_from_json_result_product_i64(
-                b"[{\"Ok\":[1,2]},{\"Err\":\"e\"}]\0".as_ptr() as _,
+                c"[{\"Ok\":[1,2]},{\"Err\":\"e\"}]".as_ptr() as _,
                 2,
             )
         };
@@ -24517,7 +24511,7 @@ mod audit_wave1_tests {
     fn list_from_json_builders_invalid_input_empty_with_kind() {
         // Malformed JSON must still yield a Box-allocated list with a valid
         // element_kind (the empty() path used to leave it uninitialized).
-        let l = unsafe { mimi_list_from_json_option_product_i64(b"not json\0".as_ptr() as _, 2) };
+        let l = unsafe { mimi_list_from_json_option_product_i64(c"not json".as_ptr() as _, 2) };
         assert!(!l.is_null());
         unsafe {
             assert_eq!(mimi_list_element_kind(l), ListElementKind::Record as i8);
@@ -24735,7 +24729,7 @@ mod audit_wave1_tests {
         // json_is_valid_json must NEVER abort: 1 for valid...
         assert_eq!(unsafe { mimi_is_valid_json(obj.as_ptr() as _) }, 1);
         // ...0 for malformed.
-        assert_eq!(unsafe { mimi_is_valid_json(b"{oops\0".as_ptr() as _) }, 0);
+        assert_eq!(unsafe { mimi_is_valid_json(c"{oops".as_ptr() as _) }, 0);
     }
 
     #[test]
@@ -24746,13 +24740,13 @@ mod audit_wave1_tests {
         let bad_key_escape = b"{\"\\q\":1}\0";
         let bad_value_control = b"{\"a\":\"\x01\"}\0";
         let bad_key_control = b"{\"\x01\":1}\0";
-        assert!(json_get_inner(bad_value_escape.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
-        assert!(json_get_inner(bad_key_escape.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
-        assert!(json_get_inner(bad_value_control.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
-        assert!(json_get_inner(bad_key_control.as_ptr() as _, b"a\0".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_value_escape.as_ptr() as _, c"a".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_key_escape.as_ptr() as _, c"a".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_value_control.as_ptr() as _, c"a".as_ptr() as _).is_err());
+        assert!(json_get_inner(bad_key_control.as_ptr() as _, c"a".as_ptr() as _).is_err());
         // Valid escaped controls still parse.
         let ok = b"{\"a\":\"\\n\\t\\\"\"}\0";
-        assert!(json_get_inner(ok.as_ptr() as _, b"a\0".as_ptr() as _).is_ok());
+        assert!(json_get_inner(ok.as_ptr() as _, c"a".as_ptr() as _).is_ok());
     }
 
     #[test]
@@ -24806,7 +24800,7 @@ mod audit_pkgd_tests {
         // Same unmapped canonical-userspace hole used by audit_wave1_tests.
         let garbage: ValueHandle = 0x0000_7000_0000_0000;
         let h = mimi_map_new();
-        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        let key = c"k".as_ptr() as *const std::ffi::c_char;
         unsafe {
             mimi_map_set(h, key, garbage);
         }
@@ -24820,7 +24814,7 @@ mod audit_pkgd_tests {
     fn product_serializer_small_handle_serializes_zeros_not_segfault() {
         // Below MIN_HEAP: provably not a heap pointer.
         let h = mimi_map_new();
-        let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+        let key = c"k".as_ptr() as *const std::ffi::c_char;
         unsafe {
             mimi_map_set(h, key, 8);
         }
@@ -24857,7 +24851,7 @@ mod audit_pkgd_tests {
         let garbage: ValueHandle = 0x0000_7000_0000_0000;
         for &f in cases {
             let h = mimi_map_new();
-            let key = b"k\0".as_ptr() as *const std::ffi::c_char;
+            let key = c"k".as_ptr() as *const std::ffi::c_char;
             unsafe {
                 mimi_map_set(h, key, garbage);
             }
@@ -25225,7 +25219,7 @@ mod runtime_ptr_readable_tests {
             };
             mimi_list_push_i64(&mut list, 42);
             mimi_list_push_f64(&mut list, 1.5);
-            mimi_list_push_string(&mut list, b"x\0".as_ptr() as *const std::ffi::c_char);
+            mimi_list_push_string(&mut list, c"x".as_ptr() as *const std::ffi::c_char);
             assert_eq!(list.len, -1, "negative list length must be left untouched");
             let grown = mimi_list_push_grow(&mut list, 4);
             assert!(

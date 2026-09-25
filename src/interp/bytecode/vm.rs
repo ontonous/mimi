@@ -2909,7 +2909,7 @@ impl BytecodeVM {
                     if let Some(shape) = canonical_shape.as_ref() {
                         Self::validate_canonical_list_projection(
                             self.get_reg(ra),
-                            &shape,
+                            shape,
                             "list get",
                         )?;
                     }

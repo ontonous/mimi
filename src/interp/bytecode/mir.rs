@@ -6155,7 +6155,7 @@ mod tests {
             crate::core::mir::types::MirGlueKind::OwnedString
         );
 
-        let bytecode = compile_mir_program(&mir).expect("custom enum MIR bytecode");
+        let bytecode = compile_mir_program(mir).expect("custom enum MIR bytecode");
         let take_proto = bytecode
             .functions
             .iter()
@@ -6170,7 +6170,7 @@ mod tests {
             .iter()
             .any(|op| matches!(op, Op::Drop { .. })));
 
-        let reference = MirReferenceInterpreter::new(&mir)
+        let reference = MirReferenceInterpreter::new(mir)
             .execute(
                 &crate::core::NodeId("function:take".into()),
                 &[MirRuntimeValue::Variant {
@@ -6203,7 +6203,7 @@ mod tests {
             "unexpected bytecode value: {bytecode_value:?}"
         );
 
-        let error = BytecodeVM::new(compile_mir_program(&mir).expect("recompile custom enum MIR"))
+        let error = BytecodeVM::new(compile_mir_program(mir).expect("recompile custom enum MIR"))
             .call_named(
                 fixture.function.0.as_str(),
                 vec![Value::CanonicalVariant {

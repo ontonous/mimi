@@ -34,7 +34,7 @@ fn list_string_old_cstr_abi_is_rejected() {
     );
     assert!(out_ptr.is_null());
 
-    let sep = b",\0".as_ptr() as *const std::ffi::c_char;
+    let sep = c",".as_ptr() as *const std::ffi::c_char;
     // SAFETY: `sep` is a NUL-terminated literal outliving the call; the legacy-ABI list must be rejected, not read.
     let joined = unsafe { mimi_str_join(&old, sep) };
     assert!(

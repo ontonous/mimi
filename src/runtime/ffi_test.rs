@@ -314,8 +314,7 @@ pub unsafe extern "C" fn test_callback_str(
         // SAFETY: `f` is a valid callback pointer; the static literal below is a
         // NUL-terminated C string for the duration of the call.
         Some(f) => unsafe {
-            let s: *const std::ffi::c_char =
-                b"borrowed_static\0".as_ptr() as *const std::ffi::c_char;
+            let s: *const std::ffi::c_char = c"borrowed_static".as_ptr() as *const std::ffi::c_char;
             f(s)
         },
         None => -1,
