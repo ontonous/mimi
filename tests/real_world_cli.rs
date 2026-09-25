@@ -1914,6 +1914,36 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
             );
             assert!(!String::from_utf8_lossy(&build.stderr)
                 .contains("canonical route disposition: legacy"));
+
+            if !contracts {
+                // A no-obligation scalar FFI build still traverses the
+                // canonical verifier/build boundary. Its emitted module must
+                // match the same entry without `--verify-ffi`, for both the
+                // default route and the explicit `--mir` entry point.
+                let mut verify_ffi_build = Command::new(mimi_bin());
+                verify_ffi_build.current_dir(project_root()).arg("build");
+                if explicit_mir {
+                    verify_ffi_build.arg("--mir");
+                }
+                let verify_ffi_build = verify_ffi_build
+                    .args(["--verify-ffi", "--emit-ir"])
+                    .arg(&path)
+                    .env("MIMI_VERBOSE", "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    verify_ffi_build.status.success(),
+                    "no-contract --verify-ffi build explicit_mir={explicit_mir}: {}",
+                    String::from_utf8_lossy(&verify_ffi_build.stderr)
+                );
+                assert_eq!(
+                    verify_ffi_build.stdout,
+                    build.stdout,
+                    "no-contract --verify-ffi must emit the same native MIR for explicit_mir={explicit_mir}"
+                );
+                assert!(!String::from_utf8_lossy(&verify_ffi_build.stderr)
+                    .contains("canonical route disposition: legacy"));
+            }
             let mut verify = Command::new(mimi_bin());
             verify.current_dir(project_root()).arg("verify");
             if explicit_mir {
