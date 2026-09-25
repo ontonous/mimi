@@ -1485,7 +1485,7 @@ fn mir_list_abort(message: &'static [u8]) -> ! {
 /// emitter can turn the failure into a canonical trap rather than guessing an
 /// ABI.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mir_list_new_scalar(kind: i8) -> *mut MimiList {
+pub extern "C" fn mimi_mir_list_new_scalar(kind: i8) -> *mut MimiList {
     let Some(kind) = mir_list_kind(kind) else {
         return std::ptr::null_mut();
     };
@@ -1497,6 +1497,13 @@ pub unsafe extern "C" fn mimi_mir_list_new_scalar(kind: i8) -> *mut MimiList {
 /// The scalar payload is always carried as `i64`; `Bool` uses the same 0/1
 /// storage as the runtime list representation.  A zero return means the
 /// append was rejected (invalid handle/kind or allocation failure).
+///
+/// # Safety
+/// If `list` is non-null, it must point to a live canonical MIR `MimiList`
+/// with the matching `kind`, and its `len`, capacity metadata, and data
+/// allocation must describe the same initialized scalar slots. The caller
+/// must have exclusive access to the list for the duration of this call; no
+/// alias or other thread may read, mutate, or free it concurrently.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_push_scalar(
     list: *mut MimiList,
@@ -1532,6 +1539,13 @@ pub unsafe extern "C" fn mimi_mir_list_push_scalar(
 }
 
 /// Deep-clone a scalar list for canonical native MIR.
+///
+/// # Safety
+/// If `list` is non-null, it must point to a live canonical MIR `MimiList`
+/// whose element kind matches `kind`, with `len`, capacity metadata, and data
+/// allocation in agreement. The list and its storage must remain valid and
+/// unmodified for the duration of this call. The returned list, when non-null,
+/// is a new allocation owned by the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_clone_scalar(
     list: *const MimiList,
@@ -1551,7 +1565,7 @@ pub unsafe extern "C" fn mimi_mir_list_clone_scalar(
     if source.len > 0 && source.data.is_null() {
         return std::ptr::null_mut();
     }
-    let clone = unsafe { mimi_mir_list_new_scalar(kind) };
+    let clone = mimi_mir_list_new_scalar(kind);
     if clone.is_null() {
         return std::ptr::null_mut();
     }
@@ -1577,6 +1591,13 @@ pub unsafe extern "C" fn mimi_mir_list_clone_scalar(
 ///
 /// Out-of-range indices trap with E0803, matching the reference executor and
 /// bytecode List projection. Invalid handles/kinds are E0800 contract traps.
+///
+/// # Safety
+/// `list` must point to a live canonical MIR `MimiList` whose element kind
+/// matches `kind`, with `len`, capacity metadata, and data allocation in
+/// agreement. The list and its storage must remain valid and unmodified for
+/// the duration of this call. An out-of-range `raw_index` terminates through
+/// the runtime trap path.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_get_scalar(
     list: *const MimiList,
@@ -1620,6 +1641,11 @@ pub unsafe extern "C" fn mimi_mir_list_get_scalar(
 /// contract trap rather than a guessed layout.  The surface len result is i32,
 /// so an oversized runtime length has the same E0802 classification as other
 /// checked integer narrowing operations.
+///
+/// # Safety
+/// `list` must point to a live canonical MIR scalar `MimiList` whose element
+/// kind matches `kind`, with valid `len` and capacity metadata. It and its
+/// storage must remain valid and unmodified for the duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i8) -> i32 {
     let Some(expected) = mir_list_kind(kind) else {
@@ -1643,6 +1669,13 @@ pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i
 /// List and are not traversed or transferred. The nested TypeDesc contract is
 /// checked through the dedicated runtime kind tag rather than reinterpreting a
 /// scalar ABI slot.
+///
+/// # Safety
+/// `list` must point to a live canonical MIR `MimiList` with the nested-List
+/// element kind and valid `len`, capacity metadata, and data allocation. It
+/// and its storage must remain valid and unmodified for the duration of this
+/// call. Every initialized child slot must contain an independently owned,
+/// well-formed scalar `MimiList` with an I64 or Bool element kind.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_len_nested(list: *const MimiList) -> i32 {
     if list.is_null() {
@@ -1666,6 +1699,13 @@ pub unsafe extern "C" fn mimi_mir_list_len_nested(list: *const MimiList) -> i32 
 /// shallow pointer return would create two owners for the same child and make
 /// Drop order backend-dependent. Negative indices follow the scalar List
 /// projection rule (Python-style wrapping); invalid storage traps E0800/E0803.
+///
+/// # Safety
+/// `list` must point to a live, well-formed canonical nested `MimiList`; every
+/// initialized child slot must contain a uniquely owned, live scalar `MimiList`
+/// with an I64 or Bool element kind. The outer list and all children must
+/// remain valid and unmodified for the duration of this call. The returned
+/// child clone, when returned, is independently owned by the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_get_nested(
     list: *const MimiList,
@@ -1714,6 +1754,13 @@ pub unsafe extern "C" fn mimi_mir_list_get_nested(
 /// source remains borrowed; every child in the result is independently owned
 /// through `mimi_mir_list_clone_nested`, so reversing never aliases Drop
 /// obligations between source and result.
+///
+/// # Safety
+/// `list` must point to a live, well-formed canonical nested `MimiList` whose
+/// initialized child slots each contain a uniquely owned, live scalar
+/// `MimiList` with an I64 or Bool element kind. The source tree must remain
+/// valid and unmodified for the duration of this call. The returned tree, when
+/// non-null, is a new allocation owned by the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_reverse_nested(list: *const MimiList) -> *mut MimiList {
     if list.is_null() {
@@ -1747,6 +1794,13 @@ pub unsafe extern "C" fn mimi_mir_list_reverse_nested(list: *const MimiList) -> 
 /// is part of the List operation contract: native code must not turn the
 /// surface `reverse(xs)` operation into an in-place mutation merely because
 /// the runtime stores scalar elements in a mutable buffer.
+///
+/// # Safety
+/// `list` must point to a live canonical MIR scalar `MimiList` whose element
+/// kind matches `kind`, with `len`, capacity metadata, and data allocation in
+/// agreement. The source and its storage must remain valid and unmodified for
+/// the duration of this call. The returned list is a new allocation owned by
+/// the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_reverse_scalar(
     list: *const MimiList,
@@ -1795,6 +1849,14 @@ pub unsafe extern "C" fn mimi_mir_list_reverse_scalar(
 /// into a fresh result. This is the runtime half of the TypeDesc contract:
 /// `List.concat` is a two-input MoveOut operation, not a borrowed clone and
 /// not an in-place append that could leave either source obligation alive.
+///
+/// # Safety
+/// Each non-null input must be a live canonical MIR scalar `MimiList` whose
+/// element kind matches `kind`, with valid `len`, capacity metadata, and data
+/// allocation. `left` and `right` must be distinct, uniquely owned objects
+/// with non-aliased storage, and the caller must not access either input during
+/// the call. Both input objects are consumed and freed; the returned list is
+/// independently owned by the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_concat_scalar(
     left: *mut MimiList,
@@ -1826,7 +1888,7 @@ pub unsafe extern "C" fn mimi_mir_list_concat_scalar(
         .len
         .checked_add(right_source.len)
         .unwrap_or_else(|| mir_list_abort(b"[E0800] canonical MIR List concat length overflow\0"));
-    let result = unsafe { mimi_mir_list_new_scalar(kind) };
+    let result = mimi_mir_list_new_scalar(kind);
     if result.is_null() {
         mir_list_abort(b"[E0800] canonical MIR List concat allocation failed\0");
     }
@@ -1859,6 +1921,15 @@ pub unsafe extern "C" fn mimi_mir_list_concat_scalar(
 /// handles into a fresh outer List. The child pointers are moved slot by slot
 /// (not cloned); both source headers and storage are freed after their slots
 /// are nulled, so each child has exactly one resulting owner.
+///
+/// # Safety
+/// `left` and `right` must be distinct, live canonical nested `MimiList`
+/// objects with valid lengths, capacity metadata, and data allocations. Each
+/// initialized child slot must contain a live scalar `MimiList` with an I64 or
+/// Bool element kind. Each input tree must be uniquely owned, contain no
+/// duplicate child pointer, and share no child object or storage with the
+/// other tree. Both input trees are consumed and freed; the returned tree is
+/// owned by the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_concat_nested(
     left: *mut MimiList,
@@ -1893,7 +1964,7 @@ pub unsafe extern "C" fn mimi_mir_list_concat_nested(
         .unwrap_or_else(|| {
             mir_list_abort(b"[E0800] canonical nested MIR List concat length overflow\0")
         });
-    let result = unsafe { mimi_mir_list_new_nested() };
+    let result = mimi_mir_list_new_nested();
     if result.is_null() {
         mir_list_abort(b"[E0800] canonical nested MIR List concat allocation failed\0");
     }
@@ -1923,6 +1994,12 @@ pub unsafe extern "C" fn mimi_mir_list_concat_nested(
 }
 
 /// Drop a scalar list allocated by canonical native MIR.
+///
+/// # Safety
+/// If `list` is non-null, it must be the uniquely owned, live canonical MIR
+/// scalar `MimiList` whose element kind matches `kind`, with valid length,
+/// capacity metadata, and data allocation. The caller must not access or free
+/// it again after this call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
     let Some(expected) = mir_list_kind(kind) else {
@@ -1941,14 +2018,24 @@ pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8
 
 /// Allocate an empty one-level nested List for canonical native MIR.
 /// Nested elements are pointers to child `MimiList` objects; the TypeDesc
-/// contract limits those children to scalar `i32`/`i64`/`bool` Lists.
+/// contract limits those children to scalar I64 or Bool Lists.
 #[no_mangle]
-pub unsafe extern "C" fn mimi_mir_list_new_nested() -> *mut MimiList {
+pub extern "C" fn mimi_mir_list_new_nested() -> *mut MimiList {
     Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::List)))
 }
 
 /// Append one owned child List to a canonical nested List. Ownership of
 /// `child` moves into `list`; a failed append leaves the child untouched.
+///
+/// # Safety
+/// A non-null `list` must be a live canonical nested `MimiList` with valid
+/// length, capacity metadata, and data allocation, and the caller must have
+/// exclusive access to it. A non-null `child` must be a uniquely owned, live
+/// canonical scalar `MimiList` with I64 or Bool elements. The child must not
+/// already be owned by this list, another list, or another alias; nested
+/// storage must not contain duplicate or shared child pointers. A return value
+/// of 1 transfers ownership of `child` to `list`; a return value of 0 leaves
+/// ownership with the caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_push_nested(
     list: *mut MimiList,
@@ -1995,6 +2082,14 @@ pub unsafe extern "C" fn mimi_mir_list_push_nested(
     1
 }
 
+/// Clone a scalar or one-level nested MIR List based on its runtime kind.
+///
+/// # Safety
+/// If `list` is non-null, it must point to a live, well-formed canonical MIR
+/// `MimiList`. If it is nested, every initialized child slot must contain a
+/// uniquely owned, live scalar `MimiList` with an I64 or Bool element kind.
+/// The source tree and its storage must remain valid and unmodified for the
+/// duration of this call.
 unsafe fn mimi_mir_list_clone_any(list: *const MimiList) -> *mut MimiList {
     if list.is_null() {
         return std::ptr::null_mut();
@@ -2008,6 +2103,13 @@ unsafe fn mimi_mir_list_clone_any(list: *const MimiList) -> *mut MimiList {
     }
 }
 
+/// Consume and free a scalar or one-level nested MIR List based on its kind.
+///
+/// # Safety
+/// `list` must be null or the unique live owner of a well-formed canonical MIR
+/// `MimiList`. If it is nested, each initialized child pointer must identify a
+/// uniquely owned live scalar `MimiList`; duplicate/shared children are not
+/// permitted. A non-null list and all recursively owned children are freed.
 unsafe fn mimi_mir_list_drop_any(list: *mut MimiList) {
     if list.is_null() {
         return;
@@ -2024,6 +2126,14 @@ unsafe fn mimi_mir_list_drop_any(list: *mut MimiList) {
 
 /// Deep-clone a one-level nested List. Child element kinds are checked by the
 /// recursive helper rather than inferred from the raw pointer storage.
+///
+/// # Safety
+/// If `list` is non-null, it must point to a live, well-formed canonical
+/// nested `MimiList` whose initialized child slots each contain a uniquely
+/// owned, live scalar `MimiList` with an I64 or Bool element kind. The source
+/// tree and its storage must remain valid and unmodified for the duration of
+/// this call. The returned tree, when non-null, is independently owned by the
+/// caller.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_clone_nested(list: *const MimiList) -> *mut MimiList {
     if list.is_null() || unsafe { (*list).element_kind } != ListElementKind::List {
@@ -2037,7 +2147,7 @@ pub unsafe extern "C" fn mimi_mir_list_clone_nested(list: *const MimiList) -> *m
     if (source_cap > 0 && source.len > source_cap) || source.len > 1_000_000_000 {
         return std::ptr::null_mut();
     }
-    let clone = unsafe { mimi_mir_list_new_nested() };
+    let clone = mimi_mir_list_new_nested();
     if clone.is_null() {
         return std::ptr::null_mut();
     }
@@ -2065,6 +2175,14 @@ pub unsafe extern "C" fn mimi_mir_list_clone_nested(list: *const MimiList) -> *m
 }
 
 /// Deep-drop a one-level nested List and every owned child List.
+///
+/// # Safety
+/// If `list` is non-null, it must be the unique owner of a live, well-formed
+/// canonical nested `MimiList`; every initialized child slot must contain a
+/// uniquely owned live scalar `MimiList` with an I64 or Bool element kind.
+/// Duplicate or shared child pointers are invalid because this function
+/// recursively frees each child. The caller must not access or free the tree
+/// again after this call.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_nested(list: *mut MimiList) {
     if list.is_null() {
@@ -2107,7 +2225,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_scalar_list_clone_and_drop_preserve_i64_storage() {
-        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let list = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!list.is_null());
         unsafe {
             assert_eq!(
@@ -2137,7 +2255,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_scalar_list_reverse_clones_without_mutating_source() {
-        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let list = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!list.is_null());
         for value in [1, 2, 3] {
             assert_eq!(
@@ -2167,8 +2285,8 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_scalar_list_concat_consumes_both_inputs_into_fresh_storage() {
-        let left = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
-        let right = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let left = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
+        let right = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!left.is_null());
         assert!(!right.is_null());
         for value in [1, 2] {
@@ -2206,7 +2324,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_scalar_list_normalizes_bool_storage() {
-        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::Bool as i8) };
+        let list = mimi_mir_list_new_scalar(ListElementKind::Bool as i8);
         assert!(!list.is_null());
         unsafe {
             assert_eq!(
@@ -2227,7 +2345,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_nested_list_clone_and_drop_recurse_through_owned_children() {
-        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let child = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!child.is_null());
         unsafe {
             assert_eq!(
@@ -2235,7 +2353,7 @@ mod canonical_mir_list_tests {
                 1
             );
         }
-        let parent = unsafe { mimi_mir_list_new_nested() };
+        let parent = mimi_mir_list_new_nested();
         assert!(!parent.is_null());
         unsafe {
             assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
@@ -2258,7 +2376,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_nested_list_len_is_borrow_only() {
-        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::Bool as i8) };
+        let child = mimi_mir_list_new_scalar(ListElementKind::Bool as i8);
         assert!(!child.is_null());
         unsafe {
             assert_eq!(
@@ -2266,7 +2384,7 @@ mod canonical_mir_list_tests {
                 1
             );
         }
-        let parent = unsafe { mimi_mir_list_new_nested() };
+        let parent = mimi_mir_list_new_nested();
         assert!(!parent.is_null());
         unsafe {
             assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
@@ -2281,7 +2399,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_nested_list_index_returns_independent_child_clone() {
-        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let child = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!child.is_null());
         unsafe {
             assert_eq!(
@@ -2289,7 +2407,7 @@ mod canonical_mir_list_tests {
                 1
             );
         }
-        let parent = unsafe { mimi_mir_list_new_nested() };
+        let parent = mimi_mir_list_new_nested();
         assert!(!parent.is_null());
         unsafe {
             assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
@@ -2317,8 +2435,8 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_nested_list_reverse_reverses_and_deep_clones_children() {
-        let first = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
-        let second = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let first = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
+        let second = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!first.is_null());
         assert!(!second.is_null());
         unsafe {
@@ -2331,7 +2449,7 @@ mod canonical_mir_list_tests {
                 1
             );
         }
-        let parent = unsafe { mimi_mir_list_new_nested() };
+        let parent = mimi_mir_list_new_nested();
         assert!(!parent.is_null());
         unsafe {
             assert_eq!(mimi_mir_list_push_nested(parent, first), 1);
@@ -2361,8 +2479,8 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_nested_list_concat_moves_children_into_fresh_outer_list() {
-        let left_child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
-        let right_child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let left_child = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
+        let right_child = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!left_child.is_null());
         assert!(!right_child.is_null());
         unsafe {
@@ -2375,8 +2493,8 @@ mod canonical_mir_list_tests {
                 1
             );
         }
-        let left = unsafe { mimi_mir_list_new_nested() };
-        let right = unsafe { mimi_mir_list_new_nested() };
+        let left = mimi_mir_list_new_nested();
+        let right = mimi_mir_list_new_nested();
         assert!(!left.is_null());
         assert!(!right.is_null());
         unsafe {
@@ -2396,7 +2514,7 @@ mod canonical_mir_list_tests {
 
     #[test]
     fn canonical_scalar_list_len_is_read_only_and_kind_checked() {
-        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let list = mimi_mir_list_new_scalar(ListElementKind::I64 as i8);
         assert!(!list.is_null());
         unsafe {
             assert_eq!(
@@ -22285,7 +22403,7 @@ pub unsafe extern "C" fn mimi_mir_set_to_list_scalar(handle: SetHandle, kind: i8
         values.sort_unstable();
         values
     };
-    let list = unsafe { mimi_mir_list_new_scalar(kind) };
+    let list = mimi_mir_list_new_scalar(kind);
     if list.is_null() {
         return std::ptr::null_mut();
     }
