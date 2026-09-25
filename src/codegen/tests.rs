@@ -460,6 +460,35 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_concrete_protocol_method_without_legacy_access() {
+    let source = include_str!("../../tests/fixtures/mir_protocol_method.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical protocol-method MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("protocol-method verifier capability");
+    crate::codegen::mir::validate_mir_native(&canonical)
+        .expect("protocol-method native capability");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "flat_record_protocol_default_route");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native API must use canonical protocol-method MIR");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct protocol-method native route must not access retained legacy bodies"
+    );
+}
+
+#[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
