@@ -1,10 +1,11 @@
 //! Narrow whole-program route for one concrete scalar generic identity call.
 //!
 //! MIR already materializes generic identity instances for several consumers.
-//! This profile admits only `main() -> i32 { identity(41) }`-shaped programs:
-//! one direct generic identity callable, one i32 specialization, and no other
-//! user executable callable. The checker proof and MIR proof are independent;
-//! this module does not infer identity from a symbol spelling or backend ABI.
+//! These profiles admit only `main() -> i32/i64 { identity(literal) }`-shaped
+//! programs: one direct generic identity callable, one matching concrete
+//! scalar specialization, and no other user executable callable. The checker
+//! proof and MIR proof are independent; this module does not infer identity
+//! from a symbol spelling or backend ABI.
 
 use crate::core::ir::{
     ResolvedCallee, ResolvedExprKind, ResolvedLiteral, ResolvedType, ResolvedTypeId,
@@ -16,6 +17,7 @@ use crate::core::{CheckedProgram, NodeId, PrimitiveType};
 use super::{MirGenericInstanceContract, MirInstructionKind, MirTerminator};
 
 pub const SCALAR_GENERIC_IDENTITY_I32_ISLAND: &str = "generic-scalar-identity-i32-v1";
+pub const SCALAR_GENERIC_IDENTITY_I64_ISLAND: &str = "generic-scalar-identity-i64-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarGenericIdentityAdmission {
@@ -30,6 +32,19 @@ pub enum ScalarGenericIdentityAdmission {
 /// callable set must all match the bounded i32 profile.
 pub fn classify_scalar_generic_identity_admission(
     program: &CheckedProgram,
+) -> ScalarGenericIdentityAdmission {
+    classify_scalar_generic_identity_admission_for(program, PrimitiveType::I32)
+}
+
+pub fn classify_scalar_generic_identity_i64_admission(
+    program: &CheckedProgram,
+) -> ScalarGenericIdentityAdmission {
+    classify_scalar_generic_identity_admission_for(program, PrimitiveType::I64)
+}
+
+fn classify_scalar_generic_identity_admission_for(
+    program: &CheckedProgram,
+    primitive: PrimitiveType,
 ) -> ScalarGenericIdentityAdmission {
     let main_id = NodeId("function:main".into());
     let Some(main) = program.callable(&main_id) else {
@@ -46,16 +61,16 @@ pub fn classify_scalar_generic_identity_admission(
     {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     }
-    let Some(i32_id) = checked_i32_type(program) else {
+    let Some(scalar_id) = checked_scalar_type(program, primitive) else {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     };
-    if main.signature.result != i32_id {
+    if main.signature.result != scalar_id {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     }
     let Some(expression) = main.body.root.result.as_deref() else {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     };
-    if expression.ty != i32_id {
+    if expression.ty != scalar_id {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     }
     let ResolvedExprKind::Call(call) = &expression.kind else {
@@ -70,8 +85,8 @@ pub fn classify_scalar_generic_identity_admission(
     if template == &main_id || !is_direct_generic_identity(program, identity) {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     }
-    if call.result != i32_id
-        || call.type_arguments.as_slice() != [i32_id.clone()]
+    if call.result != scalar_id
+        || call.type_arguments.as_slice() != [scalar_id.clone()]
         || call.arguments.len() != 1
         || call.permission.is_some()
         || !call.effects.is_empty()
@@ -82,10 +97,10 @@ pub fn classify_scalar_generic_identity_admission(
     let Some(argument) = call.arguments.first() else {
         return ScalarGenericIdentityAdmission::OutsideProfile;
     };
-    if argument.value.ty != i32_id
+    if argument.value.ty != scalar_id
         || argument.conversion.kind != crate::core::ir::CheckedConversionKind::Identity
-        || argument.conversion.from != i32_id
-        || argument.conversion.to != i32_id
+        || argument.conversion.from != scalar_id
+        || argument.conversion.to != scalar_id
         || !matches!(
             argument.value.kind,
             ResolvedExprKind::Literal(ResolvedLiteral::Int(_))
@@ -125,9 +140,12 @@ pub fn classify_scalar_generic_identity_admission(
     ScalarGenericIdentityAdmission::CompleteCoverage
 }
 
-fn checked_i32_type(program: &CheckedProgram) -> Option<ResolvedTypeId> {
+fn checked_scalar_type(
+    program: &CheckedProgram,
+    primitive: PrimitiveType,
+) -> Option<ResolvedTypeId> {
     program.resolved_types().iter().find_map(|(id, ty)| {
-        matches!(ty, ResolvedType::Primitive(PrimitiveType::I32)).then(|| id.clone())
+        matches!(ty, ResolvedType::Primitive(found) if *found == primitive).then(|| id.clone())
     })
 }
 
@@ -187,63 +205,80 @@ fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> 
 /// This rejects extra entry operations, instances, functions, altered ABI
 /// facts, or any unsupported body shape before a backend sees the program.
 pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    validate_scalar_generic_identity_island_for(
+        program,
+        PrimitiveType::I32,
+        SCALAR_GENERIC_IDENTITY_I32_ISLAND,
+    )
+}
+
+pub fn validate_scalar_generic_identity_i64_island(
+    program: &MirProgram,
+) -> Result<(), Vec<String>> {
+    validate_scalar_generic_identity_island_for(
+        program,
+        PrimitiveType::I64,
+        SCALAR_GENERIC_IDENTITY_I64_ISLAND,
+    )
+}
+
+fn validate_scalar_generic_identity_island_for(
+    program: &MirProgram,
+    primitive: PrimitiveType,
+    island: &str,
+) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
     let main_id = NodeId("function:main".into());
     if program.functions().len() != 2 {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} requires exactly main and one identity instance, got {} functions",
+            "{island} requires exactly main and one identity instance, got {} functions",
             program.functions().len()
         ));
     }
     if !program.transitions().is_empty() {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} does not admit Flow transitions"
-        ));
+        errors.push(format!("{island} does not admit Flow transitions"));
     }
     if !program.ffi_calls().is_empty() {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} does not admit FFI calls"
-        ));
+        errors.push(format!("{island} does not admit FFI calls"));
     }
     let instances = program.instances().values().collect::<Vec<_>>();
     let [instance] = instances.as_slice() else {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} requires exactly one generic instance, got {}",
+            "{island} requires exactly one generic instance, got {}",
             instances.len()
         ));
         return Err(errors);
     };
     let [argument] = instance.arguments.as_slice() else {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity instance requires exactly one type argument"
+            "{island} identity instance requires exactly one type argument"
         ));
         return Err(errors);
     };
     if instance.contract != MirGenericInstanceContract::ScalarIdentity {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} requires the ScalarIdentity contract"
-        ));
+        errors.push(format!("{island} requires the ScalarIdentity contract"));
     }
     let Some(descriptor) = program.type_catalog().get(argument) else {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity argument TypeDesc is absent"
-        ));
+        errors.push(format!("{island} identity argument TypeDesc is absent"));
         return Err(errors);
     };
-    if descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32)
+    let bits = match primitive {
+        PrimitiveType::I32 => 32,
+        PrimitiveType::I64 => 64,
+        _ => {
+            return Err(vec![format!(
+                "{island} internal route requested an unsupported integer primitive"
+            )]);
+        }
+    };
+    if descriptor.kind != MirTypeKind::Primitive(primitive)
         || descriptor.layout != MirLayout::Scalar
-        || descriptor.abi
-            != (MirAbiClass::Integer {
-                bits: 32,
-                signed: true,
-            })
+        || descriptor.abi != (MirAbiClass::Integer { bits, signed: true })
         || descriptor.ownership != crate::core::mir::types::MirOwnership::Copy
         || descriptor.needs_drop_glue
         || descriptor.needs_clone_glue
     {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} requires a Copy i32 TypeDesc"
-        ));
+        errors.push(format!("{island} requires a Copy {primitive:?} TypeDesc"));
     }
     if program
         .type_catalog()
@@ -251,14 +286,12 @@ pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(
         .is_err()
     {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity argument is outside the Copy scalar contract"
+            "{island} identity argument is outside the Copy scalar contract"
         ));
     }
 
     let Some(main) = program.functions().get(&main_id) else {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} is missing canonical function:main"
-        ));
+        errors.push(format!("{island} is missing canonical function:main"));
         return Err(errors);
     };
     if main.result != *argument
@@ -268,24 +301,20 @@ pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(
         || main.values.len() != 2
     {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main ABI/body is outside the closed shape"
+            "{island} main ABI/body is outside the closed shape"
         ));
     }
     let Some(block) = main.blocks.get(&main.entry) else {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main entry block is absent"
-        ));
+        errors.push(format!("{island} main entry block is absent"));
         return Err(errors);
     };
     if !block.parameters.is_empty() {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main entry block has unexpected parameters"
+            "{island} main entry block has unexpected parameters"
         ));
     }
     let [constant, call] = block.instructions.as_slice() else {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main must contain exactly Const and Call"
-        ));
+        errors.push(format!("{island} main must contain exactly Const and Call"));
         return Err(errors);
     };
     let MirInstructionKind::Const {
@@ -294,13 +323,13 @@ pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(
     } = &constant.kind
     else {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main argument must be an in-range i32 integer literal"
+            "{island} main argument must be an in-range {primitive:?} integer literal"
         ));
         return Err(errors);
     };
-    if i32::try_from(*value).is_err() {
+    if primitive == PrimitiveType::I32 && i32::try_from(*value).is_err() {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main integer literal is outside the i32 range"
+            "{island} main integer literal is outside the i32 range"
         ));
         return Err(errors);
     }
@@ -314,7 +343,7 @@ pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(
     } = &call.kind
     else {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} main must call its materialized identity instance"
+            "{island} main must call its materialized identity instance"
         ));
         return Err(errors);
     };
@@ -337,23 +366,19 @@ pub fn validate_scalar_generic_identity_island(program: &MirProgram) -> Result<(
         )
     {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} call target, arguments, result, or return disagree"
+            "{island} call target, arguments, result, or return disagree"
         ));
     }
     let Some(target) = program.functions().get(&instance.function) else {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity target is absent"
-        ));
+        errors.push(format!("{island} identity target is absent"));
         return Err(errors);
     };
     if !target.contracts.is_empty() {
-        errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity target does not admit contracts"
-        ));
+        errors.push(format!("{island} identity target does not admit contracts"));
     }
     if let Err(message) = super::validate_generic_identity_shape(target, argument) {
         errors.push(format!(
-            "{SCALAR_GENERIC_IDENTITY_I32_ISLAND} identity target shape rejected: {message}"
+            "{island} identity target shape rejected: {message}"
         ));
     }
     if errors.is_empty() {

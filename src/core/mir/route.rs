@@ -26,10 +26,10 @@ use super::{
     classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
     classify_option_nested_tuple_variant_admission, classify_option_string_variant_admission,
     classify_scalar_collection_admission, classify_scalar_generic_identity_admission,
-    classify_session_channel_admission, contains_copy_option_i32_variant_candidate,
-    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
-    contains_flat_copy_record_candidate, contains_flow_failure_retry_candidate,
-    contains_generic_option_projection_candidate,
+    classify_scalar_generic_identity_i64_admission, classify_session_channel_admission,
+    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
+    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
+    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
@@ -69,6 +69,7 @@ pub(crate) fn test_route_materialization_count() -> usize {
 pub enum CanonicalMirRouteProfile {
     ScalarFfi,
     ScalarGenericIdentityI32,
+    ScalarGenericIdentityI64,
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
@@ -94,6 +95,7 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::ScalarFfi => "scalar-ffi-v1",
             Self::ScalarGenericIdentityI32 => super::SCALAR_GENERIC_IDENTITY_I32_ISLAND,
+            Self::ScalarGenericIdentityI64 => super::SCALAR_GENERIC_IDENTITY_I64_ISLAND,
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
@@ -130,6 +132,7 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::ScalarFfi => admission.scalar_ffi,
             Self::ScalarGenericIdentityI32 => admission.scalar_generic_identity_i32_complete(),
+            Self::ScalarGenericIdentityI64 => admission.scalar_generic_identity_i64_complete(),
             Self::ScalarCollection => admission.collection_complete(),
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
@@ -162,6 +165,9 @@ impl CanonicalMirRouteProfile {
             Self::ScalarFfi => route.materialized_scalar_ffi_candidate,
             Self::ScalarGenericIdentityI32 => {
                 route.materialized_scalar_generic_identity_i32_candidate
+            }
+            Self::ScalarGenericIdentityI64 => {
+                route.materialized_scalar_generic_identity_i64_candidate
             }
             Self::ScalarCollection => route.materialized_collection_candidate,
             Self::FlatCopyRecord => route.materialized_record_candidate,
@@ -286,6 +292,7 @@ impl CanonicalMirRouteMaterializationError {
 pub struct CanonicalMirRouteAdmission {
     pub scalar_ffi: bool,
     pub scalar_generic_identity_i32: ScalarGenericIdentityAdmission,
+    pub scalar_generic_identity_i64: ScalarGenericIdentityAdmission,
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
@@ -310,6 +317,7 @@ impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
         self.scalar_ffi
             || self.scalar_generic_identity_i32_complete()
+            || self.scalar_generic_identity_i64_complete()
             || !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
             || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
@@ -376,6 +384,13 @@ impl CanonicalMirRouteAdmission {
     pub const fn scalar_generic_identity_i32_complete(self) -> bool {
         matches!(
             self.scalar_generic_identity_i32,
+            ScalarGenericIdentityAdmission::CompleteCoverage
+        )
+    }
+
+    pub const fn scalar_generic_identity_i64_complete(self) -> bool {
+        matches!(
+            self.scalar_generic_identity_i64,
             ScalarGenericIdentityAdmission::CompleteCoverage
         )
     }
@@ -494,6 +509,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_scalar_ffi_candidate: bool,
     pub materialized_scalar_generic_identity_i32_candidate: bool,
+    pub materialized_scalar_generic_identity_i64_candidate: bool,
     pub materialized_collection_candidate: bool,
     /// R6-1052: whether the receipt came from a migrated collection
     /// operation (List/Set op face) rather than the plain-scalar stdout
@@ -527,6 +543,7 @@ pub fn classify_canonical_mir_route_admission(
     CanonicalMirRouteAdmission {
         scalar_ffi: super::is_scalar_ffi_candidate(program),
         scalar_generic_identity_i32: classify_scalar_generic_identity_admission(program),
+        scalar_generic_identity_i64: classify_scalar_generic_identity_i64_admission(program),
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
@@ -602,6 +619,7 @@ pub fn materialize_canonical_mir_route(
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
     if admission.scalar_ffi
         || admission.scalar_generic_identity_i32_complete()
+        || admission.scalar_generic_identity_i64_complete()
         || admission.session_complete()
         || admission.record_complete()
         || admission.collection_complete()
@@ -641,8 +659,9 @@ pub fn materialize_canonical_mir_route(
             message: "scalar FFI admission did not materialize a canonical FFI receipt".into(),
         });
     }
+    let scalar_generic_identity_candidate = contains_scalar_generic_identity_candidate(&canonical);
     let materialized_scalar_generic_identity_i32_candidate =
-        contains_scalar_generic_identity_candidate(&canonical);
+        admission.scalar_generic_identity_i32_complete() && scalar_generic_identity_candidate;
     if admission.scalar_generic_identity_i32_complete()
         && !materialized_scalar_generic_identity_i32_candidate
     {
@@ -656,6 +675,26 @@ pub fn materialize_canonical_mir_route(
         super::validate_scalar_generic_identity_island(&canonical).map_err(|errors| {
             CanonicalMirRouteMaterializationError::Complete {
                 profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: format!("generic scalar identity whole-program validator rejected the graph: {errors:?}"),
+            }
+        })?;
+    }
+    let materialized_scalar_generic_identity_i64_candidate =
+        admission.scalar_generic_identity_i64_complete() && scalar_generic_identity_candidate;
+    if admission.scalar_generic_identity_i64_complete()
+        && !materialized_scalar_generic_identity_i64_candidate
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarGenericIdentityI64,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete generic scalar identity admission did not materialize a ScalarIdentity instance".into(),
+        });
+    }
+    if admission.scalar_generic_identity_i64_complete() {
+        super::validate_scalar_generic_identity_i64_island(&canonical).map_err(|errors| {
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::ScalarGenericIdentityI64,
                 stage: CanonicalMirRouteFailureStage::Coverage,
                 message: format!("generic scalar identity whole-program validator rejected the graph: {errors:?}"),
             }
@@ -928,6 +967,7 @@ pub fn materialize_canonical_mir_route(
         admission,
         materialized_scalar_ffi_candidate,
         materialized_scalar_generic_identity_i32_candidate,
+        materialized_scalar_generic_identity_i64_candidate,
         materialized_collection_candidate,
         materialized_collection_operation_candidate,
         materialized_record_candidate,
@@ -964,6 +1004,12 @@ fn match_complete_or_compatibility(
     } else if admission.scalar_generic_identity_i32_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+            stage,
+            message,
+        }
+    } else if admission.scalar_generic_identity_i64_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarGenericIdentityI64,
             stage,
             message,
         }
@@ -1131,6 +1177,40 @@ mod tests {
                 classify_scalar_generic_identity_admission(&program),
                 ScalarGenericIdentityAdmission::OutsideProfile,
                 "unsupported source shape must remain outside the exact identity profile: {source}"
+            );
+        }
+
+        let i64_program = checked(
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i64 { pass(2147483690) }",
+        );
+        let i64_admission = classify_canonical_mir_route_admission(&i64_program);
+        assert_eq!(
+            i64_admission.scalar_generic_identity_i32,
+            ScalarGenericIdentityAdmission::OutsideProfile
+        );
+        assert_eq!(
+            i64_admission.scalar_generic_identity_i64,
+            ScalarGenericIdentityAdmission::CompleteCoverage
+        );
+        let i64_route = materialize_canonical_mir_route(&i64_program, None)
+            .expect("exact i64 scalar generic identity route must materialize");
+        assert!(CanonicalMirRouteProfile::ScalarGenericIdentityI64.is_admitted(i64_admission));
+        assert!(CanonicalMirRouteProfile::ScalarGenericIdentityI64.is_materialized(&i64_route));
+        crate::core::mir::validate_scalar_generic_identity_i64_island(&i64_route.program)
+            .expect("materialized i64 scalar generic identity route must validate");
+
+        for source in [
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> bool { pass(true) }",
+            "func pass<T>(value: T) -> T { value }\nfunc helper() -> i64 { 0 }\nfunc main() -> i64 { pass(41) }",
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i64 { pass(41) }",
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i64 { pass(pass(41)) }",
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i64 { requires: true; pass(2147483690) }",
+        ] {
+            let program = checked(source);
+            assert_eq!(
+                classify_scalar_generic_identity_i64_admission(&program),
+                ScalarGenericIdentityAdmission::OutsideProfile,
+                "unsupported source shape must remain outside the exact i64 identity profile: {source}"
             );
         }
     }
@@ -1339,6 +1419,7 @@ mod tests {
         let admission = CanonicalMirRouteAdmission {
             scalar_ffi: false,
             scalar_generic_identity_i32: ScalarGenericIdentityAdmission::OutsideProfile,
+            scalar_generic_identity_i64: ScalarGenericIdentityAdmission::OutsideProfile,
             collection: ScalarCollectionAdmission::MixedCoverage,
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,
@@ -1911,6 +1992,7 @@ mod tests {
         let admission = route.admission;
         let profiles = [
             CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+            CanonicalMirRouteProfile::ScalarGenericIdentityI64,
             CanonicalMirRouteProfile::ScalarCollection,
             CanonicalMirRouteProfile::FlatCopyRecord,
             CanonicalMirRouteProfile::S8FlowTransition,
@@ -1937,6 +2019,30 @@ mod tests {
                 profile.is_materialized(&route),
                 matches!(profile, CanonicalMirRouteProfile::ScalarCollection),
                 "profile materialization mapping drifted for {}",
+                profile.as_str()
+            );
+        }
+
+        let i64_program = checked(
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i64 { pass(2147483690) }",
+        );
+        let i64_route = materialize_canonical_mir_route(&i64_program, None)
+            .expect("i64 generic identity route for profile matrix");
+        for profile in [
+            CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+            CanonicalMirRouteProfile::ScalarGenericIdentityI64,
+            CanonicalMirRouteProfile::ScalarCollection,
+        ] {
+            assert_eq!(
+                profile.is_admitted(i64_route.admission),
+                matches!(profile, CanonicalMirRouteProfile::ScalarGenericIdentityI64),
+                "i64 fixture admission mapping drifted for {}",
+                profile.as_str()
+            );
+            assert_eq!(
+                profile.is_materialized(&i64_route),
+                matches!(profile, CanonicalMirRouteProfile::ScalarGenericIdentityI64),
+                "i64 fixture materialization mapping drifted for {}",
                 profile.as_str()
             );
         }

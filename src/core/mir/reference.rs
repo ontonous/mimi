@@ -9949,6 +9949,42 @@ mod tests {
     }
 
     #[test]
+    fn scalar_generic_identity_i64_island_rejects_forged_i32_abi_descriptor() {
+        let source =
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i64 { identity(2147483690) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mut program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        crate::core::mir::validate_scalar_generic_identity_i64_island(&program)
+            .expect("valid scalar i64 identity shape");
+
+        let argument = program
+            .instances()
+            .values()
+            .next()
+            .and_then(|instance| instance.arguments.first())
+            .expect("i64 identity specialization argument")
+            .clone();
+        let mut descriptor = program
+            .type_catalog()
+            .get(&argument)
+            .expect("i64 identity TypeDesc")
+            .clone();
+        descriptor.abi = super::super::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        };
+        program
+            .type_catalog
+            .replace_for_test_only(argument, descriptor);
+        assert!(
+            crate::core::mir::validate_scalar_generic_identity_i64_island(&program).is_err(),
+            "a forged i32 ABI descriptor must not carry the i64 identity profile"
+        );
+    }
+
+    #[test]
     fn concrete_scalar_generic_record_projection_is_canonical_and_borrowed() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_record_projection.mimi");

@@ -455,9 +455,10 @@ pub use eligibility::{
     scalar_ffi_boundary_reason,
 };
 pub use identity_island::{
-    classify_scalar_generic_identity_admission, contains_scalar_generic_identity_candidate,
+    classify_scalar_generic_identity_admission, classify_scalar_generic_identity_i64_admission,
+    contains_scalar_generic_identity_candidate, validate_scalar_generic_identity_i64_island,
     validate_scalar_generic_identity_island, ScalarGenericIdentityAdmission,
-    SCALAR_GENERIC_IDENTITY_I32_ISLAND,
+    SCALAR_GENERIC_IDENTITY_I32_ISLAND, SCALAR_GENERIC_IDENTITY_I64_ISLAND,
 };
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,

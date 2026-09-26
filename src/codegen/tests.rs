@@ -263,8 +263,8 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 #[test]
 fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     let source = r#"
-        func identity<T>(value: T) -> T { value }
-        func main() -> i64 { identity(42) }
+        func choose<T>(left: T, right: T) -> T { left }
+        func main() -> i64 { choose(42, 43) }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -314,6 +314,35 @@ fn compile_checked_routes_scalar_generic_identity_without_legacy_access() {
         crate::core::CheckedProgram::test_legacy_body_access(),
         Vec::<crate::core::LegacyBodyConsumer>::new(),
         "the admitted generic identity must not access a legacy body"
+    );
+}
+
+#[test]
+fn compile_checked_routes_i64_scalar_generic_identity_without_legacy_access() {
+    let source = r#"
+        func identity<T>(value: T) -> T { value }
+        func main() -> i64 { identity(2147483690) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "canonical_generic_identity_i64");
+    codegen
+        .compile_checked(&program)
+        .expect("bounded i64 scalar generic identity must use the canonical MIR route");
+    assert!(
+        codegen.module.get_function("main").is_some(),
+        "canonical i64 generic identity route must emit main"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "the admitted i64 generic identity must not access a legacy body"
     );
 }
 

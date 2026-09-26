@@ -193,7 +193,21 @@ pub(crate) fn select_default_route(
     }
     if admission.scalar_generic_identity_i32_complete() {
         return match materialize_canonical_route(checked, merged_file) {
-            Ok(route) => select_scalar_generic_identity_i32_route(route.program),
+            Ok(route) => select_scalar_generic_identity_route(
+                route.program,
+                mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND,
+                mimi::core::mir::validate_scalar_generic_identity_island,
+            ),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    if admission.scalar_generic_identity_i64_complete() {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) => select_scalar_generic_identity_route(
+                route.program,
+                mimi::core::mir::SCALAR_GENERIC_IDENTITY_I64_ISLAND,
+                mimi::core::mir::validate_scalar_generic_identity_i64_island,
+            ),
             Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
         };
     }
@@ -1602,33 +1616,25 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
 /// materializer has already checked its exact one-instance whole-program
 /// envelope; this repeats the profile gate immediately before each consumer
 /// capability check so the selected graph remains hard-bound to the profile.
-fn select_scalar_generic_identity_i32_route(program: MirProgram) -> DefaultMirRoute {
-    if let Err(errors) = mimi::core::mir::validate_scalar_generic_identity_island(&program) {
-        return DefaultMirRoute::Rejected(format!(
-            "{} MIR island capability: {errors:?}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
-        ));
+fn select_scalar_generic_identity_route(
+    program: MirProgram,
+    island: &'static str,
+    validate: fn(&MirProgram) -> Result<(), Vec<String>>,
+) -> DefaultMirRoute {
+    if let Err(errors) = validate(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} MIR island capability: {errors:?}"));
     }
     if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
-        return DefaultMirRoute::Rejected(format!(
-            "{} MIR verifier capability: {errors:?}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
-        ));
+        return DefaultMirRoute::Rejected(format!("{island} MIR verifier capability: {errors:?}"));
     }
-    let receipt = program.route_receipt(mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND);
+    let receipt = program.route_receipt(island);
     if let Err(errors) =
         mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
     {
-        return DefaultMirRoute::Rejected(format!(
-            "{} MIR bytecode capability: {errors:?}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
-        ));
+        return DefaultMirRoute::Rejected(format!("{island} MIR bytecode capability: {errors:?}"));
     }
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
-        return DefaultMirRoute::Rejected(format!(
-            "{} MIR native capability: {errors:?}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
-        ));
+        return DefaultMirRoute::Rejected(format!("{island} MIR native capability: {errors:?}"));
     }
     match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
         Ok(results)
@@ -1637,13 +1643,11 @@ fn select_scalar_generic_identity_i32_route(program: MirProgram) -> DefaultMirRo
             DefaultMirRoute::Canonical(program)
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
-            "{} MIR verifier returned an unsupported or inconclusive result: {results:?}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+            "{island} MIR verifier returned an unsupported or inconclusive result: {results:?}"
         )),
-        Err(error) => DefaultMirRoute::Rejected(format!(
-            "{} MIR verifier pass failed: {error}",
-            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
-        )),
+        Err(error) => {
+            DefaultMirRoute::Rejected(format!("{island} MIR verifier pass failed: {error}"))
+        }
     }
 }
 

@@ -601,6 +601,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             // builds. Its recognized match face (R6-1089) otherwise dies on
             // preloaded prelude bodies MIR Phase 0 cannot lower before the
             // island validator ever runs.
+            // R6-1133s/t: both complete scalar identity admissions also use
+            // the production prelude-free canonical graph.
+            || admission.scalar_generic_identity_i32_complete()
+            || admission.scalar_generic_identity_i64_complete()
             || admission.copy_option_i32_complete()
             || admission.copy_option_bool_complete()
             || admission.copy_option_i64_complete()
@@ -653,6 +657,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-COVERAGE-001",
                         format!("generic scalar identity canonical MIR coverage failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI64,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("generic scalar identity i64 canonical MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI64,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("generic scalar identity i64 canonical MIR coverage failed: {message}"),
                     ),
                     (
                         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
@@ -1086,6 +1104,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let scalar_generic_identity_i32_candidate =
             route.admission.scalar_generic_identity_i32_complete()
                 && route.materialized_scalar_generic_identity_i32_candidate;
+        let scalar_generic_identity_i64_candidate =
+            route.admission.scalar_generic_identity_i64_complete()
+                && route.materialized_scalar_generic_identity_i64_candidate;
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
@@ -1099,6 +1120,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
         if !scalar_ffi_candidate
             && !scalar_generic_identity_i32_candidate
+            && !scalar_generic_identity_i64_candidate
             && !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
@@ -1123,6 +1145,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "scalar FFI island"
         } else if scalar_generic_identity_i32_candidate {
             crate::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        } else if scalar_generic_identity_i64_candidate {
+            crate::core::mir::SCALAR_GENERIC_IDENTITY_I64_ISLAND
         } else if flow_failure_retry_candidate {
             "recoverable Flow failure island"
         } else if scalar_collection_candidate {
@@ -1168,6 +1192,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         if scalar_generic_identity_i32_candidate {
             if let Err(errors) =
                 crate::core::mir::validate_scalar_generic_identity_island(canonical)
+            {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if scalar_generic_identity_i64_candidate {
+            if let Err(errors) =
+                crate::core::mir::validate_scalar_generic_identity_i64_island(canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
