@@ -1453,6 +1453,35 @@ require_codegen_legacy_body_class_tripwire \
     'map_get' \
     'values'
 
+require_direct_mir_no_legacy_tripwire() {
+    local test_name="$1"
+    local body
+    body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
+        "$ROOT_DIR/src/codegen/tests.rs")"
+    if [ -z "$body" ]; then
+        printf 'owner_audit_error=missing_direct_mir_no_legacy_tripwire test=%s\n' \
+            "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg 'reset_test_legacy_body_access\(\)' >/dev/null; then
+        printf 'owner_audit_error=direct_mir_no_legacy_tripwire_missing_reset test=%s\n' \
+            "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$body" | rg 'test_legacy_body_access\(\)\.is_empty\(\)' >/dev/null; then
+        printf 'owner_audit_error=direct_mir_no_legacy_tripwire_missing_empty_assertion test=%s\n' \
+            "$test_name" >&2
+        audit_failed=1
+        return
+    fi
+    printf 'direct_mir_no_legacy_tripwire=%s\n' "$test_name"
+}
+
+require_direct_mir_no_legacy_tripwire \
+    compile_checked_routes_exact_s8_flow_through_canonical_mir
+
 owner_count=0
 condition_inventory=''
 for owner in \

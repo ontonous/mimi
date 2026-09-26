@@ -258,6 +258,7 @@ fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
     let program = crate::core::check_program(&file).expect("check");
     assert!(crate::core::mir::is_exact_s8_flow_transition(&program));
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s10_s8_canonical_route");
     codegen
@@ -268,6 +269,10 @@ fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
         .get_function("__mimi_transition_Counter__inc__Zero")
         .is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "exact S8 direct native entry must not access retained legacy bodies"
+    );
 }
 
 #[test]

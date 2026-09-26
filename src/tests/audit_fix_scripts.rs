@@ -291,6 +291,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "codegen_legacy_body_class_tripwire=export-wrapper test=compile_checked_keeps_export_wrapper_body_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=actor-method test=compile_checked_keeps_actor_method_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=map-any-borrowed test=compile_checked_keeps_map_any_borrowed_access_on_legacy_owner markers=map_get,values",
+        "direct_mir_no_legacy_tripwire=compile_checked_routes_exact_s8_flow_through_canonical_mir",
         "production_legacy_body_file_call_sites=4",
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=6",
@@ -1047,6 +1048,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
     for round in 1..=2 {
         for test_name in [
             "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
+            "compile_checked_routes_exact_s8_flow_through_canonical_mir",
             "compatibility_verifier_access_is_explicitly_tagged",
             "ffi_checked_preserves_legacy_for_unmigrated_string_contract",
         ] {
