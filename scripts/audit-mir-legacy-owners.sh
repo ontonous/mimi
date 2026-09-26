@@ -355,11 +355,11 @@ retired_checked_directory_viewer_from_production
 
 # The owner accessor is test-instrumented, but Rust privacy does not prevent a
 # future production consumer in the same crate from reading `legacy_file`
-# directly. Keep the one current direct read pinned to source metadata used to
-# construct stable NodeIds; body items and other raw-AST reads must go through
-# an explicitly named LegacyBodyConsumer boundary.
-direct_legacy_file_reads_are_metadata_only() {
-    local reads unapproved metadata_reads owner_accessor_reads accessor_context
+# directly. Canonical lowering now uses CheckedProgram::source_registry() for
+# NodeId construction; only the explicitly tagged body-owner accessor may
+# refer to legacy_file in production.
+direct_legacy_file_reads_are_owner_only() {
+    local reads unapproved obsolete_metadata_reads owner_accessor_reads accessor_context
     reads="$(rg -n '\.legacy_file\b' "$SRC_DIR" \
         --glob '*.rs' \
         --glob '!**/tests.rs' \
@@ -370,14 +370,14 @@ direct_legacy_file_reads_are_metadata_only() {
         return
     fi
 
-    metadata_reads="$(printf '%s\n' "$reads" | rg \
+    obsolete_metadata_reads="$(printf '%s\n' "$reads" | rg \
         'src/core/resolved/mod\.rs:[0-9]+: *let ids = NodeIdBuilder::new\(&program\.legacy_file\.sources\);' || true)"
     owner_accessor_reads="$(printf '%s\n' "$reads" | rg \
         'src/core/resolved/mod\.rs:[0-9]+: *&self\.legacy_file$' || true)"
     accessor_context="$(sed -n \
         '/pub(crate) fn legacy_body_file(/,/pub(crate) fn has_imports(/p' \
         "$ROOT_DIR/src/core/resolved/mod.rs")"
-    if [ "$(printf '%s\n' "$metadata_reads" | rg -c . || true)" -gt 1 ] ||
+    if [ -n "$obsolete_metadata_reads" ] ||
         [ "$(printf '%s\n' "$owner_accessor_reads" | rg -c . || true)" -ne 1 ] ||
         [ "$(printf '%s\n' "$accessor_context" | rg -F -c '&self.legacy_file' || true)" -ne 1 ]; then
         printf 'owner_audit_error=legacy_file_whitelist_shape_changed\n' >&2
@@ -386,7 +386,7 @@ direct_legacy_file_reads_are_metadata_only() {
     fi
 
     unapproved="$(printf '%s\n' "$reads" | rg -v \
-        'src/core/resolved/mod\.rs:[0-9]+: *let ids = NodeIdBuilder::new\(&program\.legacy_file\.sources\);|src/core/resolved/mod\.rs:[0-9]+: *&self\.legacy_file$' || true)"
+        'src/core/resolved/mod\.rs:[0-9]+: *&self\.legacy_file$' || true)"
     if [ -n "$unapproved" ]; then
         printf 'owner_audit_error=unowned_direct_legacy_file_access\n%s\n' \
             "$unapproved" >&2
@@ -394,11 +394,10 @@ direct_legacy_file_reads_are_metadata_only() {
         return
     fi
 
-    printf 'production_direct_legacy_file_accessors=1 source-metadata-reads=%s body_bypasses=0\n' \
-        "$(printf '%s\n' "$metadata_reads" | rg -c . || true)"
+    printf 'production_direct_legacy_file_accessors=1 source-metadata-reads=0 body_bypasses=0\n'
 }
 
-direct_legacy_file_reads_are_metadata_only
+direct_legacy_file_reads_are_owner_only
 
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \

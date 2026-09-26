@@ -9023,7 +9023,7 @@ fn build_canonical_function_signatures(
             crate::core::ResolvedTypeName::primitive,
         )
         .map_err(|error| vec![Diagnostic::error(error.to_string(), Span::UNKNOWN)])?;
-    let ids = NodeIdBuilder::new(&program.legacy_file.sources);
+    let ids = NodeIdBuilder::new(program.source_registry());
     let mut signatures = BTreeMap::new();
     let mut node_types = BTreeMap::new();
     let mut type_operands = BTreeMap::new();

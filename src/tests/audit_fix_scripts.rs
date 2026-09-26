@@ -2660,6 +2660,7 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
                     || line.starts_with("closed_scalar_")
                     || line.starts_with("scalar_evidence_marker_sequence_status=")
                     || line.starts_with("production_legacy_body_file_call_sites=")
+                    || line.starts_with("production_direct_legacy_file_accessors=")
                     || line.starts_with("production_raw_ast_call_sites=")
                     || line.starts_with("production_compile_func_legacy_call_sites=")
                     || line.starts_with("owner_count=")
@@ -2680,6 +2681,12 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
             .iter()
             .any(|line| line.starts_with("owner_deletion_condition_set_digest=")),
         "baseline owner audit omitted condition set digest"
+    );
+    assert!(
+        baseline_summary.iter().any(|line| {
+            line == "production_direct_legacy_file_accessors=1 source-metadata-reads=0 body_bypasses=0"
+        }),
+        "owner audit must keep metadata reads off the retained legacy AST"
     );
 
     let prefix = format!("mimi-legacy-owner-marker-summary-{}-", std::process::id());

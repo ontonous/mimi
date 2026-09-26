@@ -109,6 +109,23 @@ fn checked_program_owns_its_migration_body_input() {
 }
 
 #[test]
+fn resolved_lowering_reads_source_provenance_from_checker_registry() {
+    let file = parse("func main() -> i32 { 42 }");
+    let mut program = crate::core::check_program(&file).expect("check");
+
+    // The checker-owned registry is retained independently from the legacy
+    // surface File. Poisoning the legacy copy must not affect Resolved/MIR
+    // lowering's stable NodeId construction.
+    program.legacy_file.sources = crate::span::SourceRegistry::default();
+
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("MIR lowering uses CheckedProgram source provenance");
+    assert!(mir
+        .functions()
+        .contains_key(&NodeId("function:main".into())));
+}
+
+#[test]
 fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
     let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
 
