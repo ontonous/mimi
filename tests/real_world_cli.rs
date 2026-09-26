@@ -24955,6 +24955,141 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
     );
 }
 
+// R6-1137 L1/L2 tail pin: a capture-free nested callable can still be outside
+// MIR when its actor method needs an unsupported nested declaration and
+// projected actor-field assignment. The default native build remains correct
+// through its explicit compatibility route; direct MIR entries reject the
+// whole shape without retrying legacy.
+#[test]
+fn canonical_mir_nested_shadow_callable_keeps_legacy_and_direct_cli_fails_closed() {
+    let source = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("actor_nested_func_shadow.mimi");
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_nested_shadow_mir_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create nested shadow CLI directory");
+    let native = dir.join("default.out");
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("-o")
+        .arg(&native)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default nested shadow build");
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build.status.success(),
+        "default compatibility build must remain usable: {build_stderr}"
+    );
+    assert!(
+        build_stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "the remaining fallback must be explicit: {build_stderr}"
+    );
+    assert!(
+        build_stderr.contains(
+            "call to qualified function 'Shadower::touch::helper' is not in the resolved native slice"
+        ),
+        "the fallback reason must name the exact nested callable: {build_stderr}"
+    );
+    assert!(native.exists(), "default build must produce its executable");
+    let execution = Command::new(&native)
+        .output()
+        .expect("run default nested shadow executable");
+    assert!(execution.status.success());
+    assert_eq!(execution.stdout, b"42\n101\n");
+
+    let explicit_native = dir.join("explicit-mir.out");
+    let direct = [
+        (
+            "mimi mir",
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("mir")
+                .arg(&source)
+                .output()
+                .expect("spawn nested shadow MIR inspection"),
+        ),
+        (
+            "mimi run --mir",
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("run")
+                .arg(&source)
+                .arg("--mir")
+                .output()
+                .expect("spawn nested shadow explicit MIR run"),
+        ),
+        (
+            "mimi build --mir",
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("build")
+                .arg(&source)
+                .arg("--mir")
+                .arg("-o")
+                .arg(&explicit_native)
+                .output()
+                .expect("spawn nested shadow explicit MIR build"),
+        ),
+        (
+            "mimi verify --mir",
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("verify")
+                .arg(&source)
+                .arg("--mir")
+                .output()
+                .expect("spawn nested shadow explicit MIR verify"),
+        ),
+    ];
+    for (surface, output) in direct {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{surface} must reject unsupported MIR nodes: {stderr}"
+        );
+        assert!(
+            stderr.contains("MIR lowering failed"),
+            "{surface}: {stderr}"
+        );
+        assert!(
+            stderr.contains("structured control flow is not lowered by MIR Phase 0"),
+            "{surface} must identify the nested declaration boundary: {stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "projected assign target requires aggregate glue and is not lowered by MIR Phase 0"
+            ),
+            "{surface} must identify the actor-field assignment boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "explicit MIR request must not retry through legacy: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{surface} must not execute the actor program"
+        );
+    }
+    assert!(
+        !explicit_native.exists(),
+        "failed direct MIR build must not leave a native artifact"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 // R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a
 // helper) plus an admitted stdout effect runs through the direct canonical
 // entries — the explicit `--mir` run and the native `build --mir` —
