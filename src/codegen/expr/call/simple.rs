@@ -7261,7 +7261,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     continue;
                 }
                 if let Type::Name(tn, _) = fdef.params[i].ty.unlocated() {
-                    if tn != "List" && self.type_defs.contains_key(tn) {
+                    // Actor names share a synthetic record TypeDef for state
+                    // field access, but an actor value is an opaque runtime
+                    // pointer handle. Do not load its first state field when
+                    // forwarding the handle to a by-value Mimi parameter.
+                    if tn != "List"
+                        && !self.actor_names.contains(tn)
+                        && self.type_defs.contains_key(tn)
+                    {
                         if let BasicValueEnum::PointerValue(pv) = arg {
                             if let Some(param_llvm) = self.llvm_type_for(&fdef.params[i].ty) {
                                 let loaded = self.build_load(

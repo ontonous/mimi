@@ -33,6 +33,48 @@ fn runtime_functions_are_registered() {
 }
 
 #[test]
+fn actor_runtime_handles_and_state_layouts_are_distinct() {
+    let context = Context::create();
+    let mut cg = CodeGenerator::new(&context, "actor_runtime_value_abi");
+    let actor_name = "Counter".to_string();
+    let actor_state = context.struct_type(&[context.i32_type().into()], false);
+    let actor_ptr = context.ptr_type(inkwell::AddressSpace::default());
+    cg.actor_names.insert(actor_name.clone());
+    cg.type_llvm.insert(actor_name.clone(), actor_state.into());
+
+    let actor_ty = crate::ast::Type::Name(actor_name.clone(), vec![]);
+    assert_eq!(
+        cg.llvm_type_for(&actor_ty),
+        Some(BasicTypeEnum::PointerType(actor_ptr)),
+        "actor value ABI is the opaque runtime handle"
+    );
+    assert_eq!(
+        cg.type_llvm.get(&actor_name),
+        Some(&BasicTypeEnum::StructType(actor_state)),
+        "actor state remains available as its own field struct"
+    );
+
+    let product_ty = crate::ast::Type::Tuple(vec![
+        crate::ast::Type::Name("i32".into(), vec![]),
+        actor_ty.clone(),
+        actor_ty,
+    ]);
+    let product = cg
+        .llvm_type_for(&product_ty)
+        .expect("actor product has a value layout")
+        .into_struct_type();
+    assert_eq!(
+        product.get_field_types(),
+        vec![
+            BasicTypeEnum::IntType(context.i64_type()),
+            BasicTypeEnum::PointerType(actor_ptr),
+            BasicTypeEnum::PointerType(actor_ptr),
+        ],
+        "product ABI widens narrow integers and keeps actor handles as pointers"
+    );
+}
+
+#[test]
 fn alloca_store_load_roundtrip() {
     let context = Context::create();
     with_test_function(&context, |cg| {

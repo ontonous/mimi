@@ -775,9 +775,10 @@ fn require_scalar_type(
                         // are similarly admitted — the resolved emitter
                         // lowers them via the legacy type_defs record layout
                         // (resolved/mod.rs lower_type state: fallback).
-                        // Actor handles are opaque i64 endpoints at the LLVM
-                        // level (mirroring SessionChan). The runtime actor
-                        // dispatch remains in the call/expression layer.
+                        // Actor values use opaque runtime pointer handles;
+                        // SessionChan remains an i64 endpoint. The resolved
+                        // type mapper knows the actor pointer ABI, but runtime
+                        // actor dispatch remains outside this native slice.
                         // 0.1.9 Phase D (0.39.123): SystemToken is an opaque
                         // i64 capability handle — its typed residual surface is
                         // compile-time only (linear move, consumed by

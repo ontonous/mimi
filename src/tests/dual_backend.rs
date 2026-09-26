@@ -8834,6 +8834,73 @@ fn dual_actor_with_param() {
     );
 }
 
+#[test]
+fn dual_actor_runtime_value_parameters_and_product_returns() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(ACTOR_RUNTIME_VALUE_ABI_SOURCE, "42");
+}
+
+const ACTOR_RUNTIME_VALUE_ABI_SOURCE: &str = r#"
+        actor Counter {
+            count: i32 = 0;
+            func add(value: i32) { self.count = self.count + value; }
+            func get() -> i32 { self.count }
+        }
+
+        func relay(value: Counter) -> Counter { value }
+        func pair(left: Counter, right: Counter) -> (Counter, Counter) {
+            (left, right)
+        }
+        func relay_pair(pair: (Counter, Counter)) -> (Counter, Counter) {
+            pair
+        }
+
+        func main() -> i32 {
+            let left = Counter.spawn()
+            let right = Counter.spawn()
+            left.add(19)
+            right.add(23)
+            let handles = relay_pair(pair(relay(left), right))
+            println(handles.0.get() + handles.1.get())
+            0
+        }
+        "#;
+
+#[test]
+fn dual_actor_runtime_value_parameters_and_product_returns_valgrind() {
+    if std::process::Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let (_, interpreter_stdout) = checked_run_source_with_stdout(ACTOR_RUNTIME_VALUE_ABI_SOURCE);
+    assert_eq!(interpreter_stdout.trim(), "42");
+
+    let observation = checked_codegen_compile_and_observe_valgrind_with_args(
+        ACTOR_RUNTIME_VALUE_ABI_SOURCE,
+        vec![
+            "--tool=memcheck".into(),
+            "--error-exitcode=97".into(),
+            "--leak-check=full".into(),
+            "--show-leak-kinds=all".into(),
+            "--errors-for-leak-kinds=definite,indirect".into(),
+        ],
+    )
+    .expect("checked actor-handle tuple program must run under Memcheck");
+    assert_eq!(observation.exit_code, Some(0), "{}", observation.stderr);
+    assert_eq!(observation.stdout.trim(), "42");
+    assert!(
+        observation.stderr.contains("ERROR SUMMARY: 0 errors"),
+        "{}",
+        observation.stderr
+    );
+}
+
 // ─── v0.28.19 — Actor real concurrency (5 L1 tests) ──────────────
 //
 // These tests verify codegen uses the real-concurrency actor mailbox

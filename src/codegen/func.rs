@@ -1947,6 +1947,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .insert(param.name.clone(), inner.as_ref().clone());
                     }
                 }
+                if matches!(resolved.unlocated(), Type::Tuple(_)) {
+                    self.var_type_names
+                        .insert(param.name.clone(), crate::core::fmt_type(&resolved));
+                    self.var_types.insert(param.name.clone(), resolved.clone());
+                }
                 if let Type::DynTrait(_) = resolved.unlocated() {
                     self.var_type_names
                         .insert(param.name.clone(), crate::core::fmt_type(&resolved));
@@ -2897,6 +2902,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                         self.register_list_elem_type(
                                                             name, &resolved,
                                                         );
+                                                    }
+                                                    Type::Tuple(_) => {
+                                                        let resolved =
+                                                            self.substitute_type_params(&ret_ty);
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            crate::core::fmt_type(&resolved),
+                                                        );
+                                                        self.var_types
+                                                            .insert(name.clone(), resolved);
                                                     }
                                                     // 0.40.1.9 (F-005): `let f = make()`
                                                     // where make returns a closure
@@ -4587,5 +4602,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.position_at_end(bb);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod actor_handle_return_layout_tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_return_alignment_keeps_rejecting_pointer_integer_layouts() {
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "actor_handle_layout_negative");
+        let function_type = context.i64_type().fn_type(&[], false);
+        let function = generator
+            .module
+            .add_function("alignment_probe", function_type, None);
+        let entry = context.append_basic_block(function, "entry");
+        generator.builder.position_at_end(entry);
+
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let source = context.struct_type(&[pointer.into()], false);
+        let declared = context.struct_type(&[context.i64_type().into()], false);
+        let error = generator
+            .align_struct_return(source.const_zero(), declared)
+            .expect_err("a pointer handle must not be coerced into an integer field");
+
+        match error {
+            CompileError::LlvmError(message) => {
+                assert!(message.contains("incompatible layouts"), "{message}");
+            }
+            other => panic!("expected a hard layout error, got {other:?}"),
+        }
     }
 }

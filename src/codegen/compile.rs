@@ -1455,6 +1455,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             implicit_single: false,
         }));
 
+        // Actor values are opaque runtime handles (i8*), while `type_llvm`
+        // stores each actor's separate state-field struct for allocation and
+        // GEP access. Seed every actor name before resolving any user type so
+        // forward references in records, tuples, and function signatures use
+        // the runtime handle ABI instead of the state layout or i64 fallback.
+        Self::process_items(&file.items, &mut |item| {
+            if let Item::Actor(actor) = item {
+                self.actor_names.insert(actor.name.clone());
+                self.actor_defs.insert(actor.name.clone(), actor.clone());
+            }
+            Ok(())
+        })?;
+
         // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
         // interpreter and cache the results so `Expr::Comptime` blocks and
         // `comptime func name()` calls can fold to constants at codegen time.

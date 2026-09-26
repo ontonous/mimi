@@ -5242,14 +5242,110 @@ impl<'ctx> CodeGenerator<'ctx> {
             .and_then(|f| f.get_type().get_return_type())
     }
 
+    /// Whether a surface value shape contains an actor runtime handle. This
+    /// deliberately does not classify arbitrary named records as actor types:
+    /// their legacy tuple lowering remains governed by `mimi_type_to_llvm`.
+    fn contains_actor_runtime_value(&self, ty: &crate::ast::Type) -> bool {
+        use crate::ast::Type;
+        match ty.unlocated() {
+            Type::Name(name, args) => {
+                self.actor_names.contains(name)
+                    || args
+                        .iter()
+                        .any(|arg| self.contains_actor_runtime_value(arg))
+            }
+            Type::Tuple(elements) => elements
+                .iter()
+                .any(|element| self.contains_actor_runtime_value(element)),
+            Type::Option(inner) | Type::Ref(_, inner) | Type::RefMut(_, inner) => {
+                self.contains_actor_runtime_value(inner)
+            }
+            Type::Result(ok, err) => {
+                self.contains_actor_runtime_value(ok) || self.contains_actor_runtime_value(err)
+            }
+            Type::Array(inner, _) | Type::Slice(inner) | Type::Newtype(_, inner) => {
+                self.contains_actor_runtime_value(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// Product-field lowering that preserves the historical bare-name ABI for
+    /// non-actor fields while substituting the opaque pointer ABI only where
+    /// an actor runtime value is present. Nested tuples recurse through the
+    /// same narrow rule; Option/Result already have actor-aware lowering in
+    /// `llvm_type_for`.
+    fn tuple_field_type_for_actor_values(
+        &self,
+        ty: &crate::ast::Type,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        use crate::ast::Type;
+        match ty.unlocated() {
+            Type::Name(name, args) if args.is_empty() && self.actor_names.contains(name) => Some(
+                BasicTypeEnum::PointerType(self.context.ptr_type(inkwell::AddressSpace::default())),
+            ),
+            Type::Tuple(elements) => {
+                let fields = elements
+                    .iter()
+                    .map(|element| {
+                        let field = self.tuple_field_type_for_actor_values(element)?;
+                        Some(crate::codegen::abi::layout::widen_product_field(
+                            self.context,
+                            field,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(BasicTypeEnum::StructType(
+                    self.context.struct_type(&fields, false),
+                ))
+            }
+            Type::Option(_) | Type::Result(_, _) if self.contains_actor_runtime_value(ty) => {
+                self.llvm_type_for(ty)
+            }
+            Type::Name(name, args)
+                if matches!(name.as_str(), "Option" | "Result")
+                    && self.contains_actor_runtime_value(ty) =>
+            {
+                self.llvm_type_for(ty)
+            }
+            _ => crate::codegen::types::mimi_type_to_llvm(self.context, ty),
+        }
+    }
+
     pub(super) fn llvm_type_for(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         use crate::ast::Type;
         match ty.unlocated() {
             Type::Name(name, args) if args.is_empty() => {
+                if self.actor_names.contains(name) {
+                    // `type_llvm[actor]` intentionally remains the actor's
+                    // state-field struct. Runtime values returned by spawn or
+                    // passed between Mimi functions are opaque handles.
+                    return Some(BasicTypeEnum::PointerType(
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                    ));
+                }
                 if let Some(llvm) = self.type_llvm.get(name) {
                     return Some(*llvm);
                 }
                 crate::codegen::types::mimi_type_to_llvm(self.context, ty)
+            }
+            Type::Tuple(elements) => {
+                // Preserve legacy field lowering except where an actor value
+                // needs its opaque runtime pointer ABI. This keeps existing
+                // Flow-state and nominal fallback layouts stable while making
+                // `(i64, Actor, Actor)` agree with the tuple literal `{i64,
+                // ptr, ptr}` emitted by the body compiler.
+                let mut fields = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let element = self.tuple_field_type_for_actor_values(element)?;
+                    fields.push(crate::codegen::abi::layout::widen_product_field(
+                        self.context,
+                        element,
+                    ));
+                }
+                Some(BasicTypeEnum::StructType(
+                    self.context.struct_type(&fields, false),
+                ))
             }
             // Option/Result of named records must use type_llvm for the payload
             // slot — mimi_type_to_llvm maps unknown names to i64.
