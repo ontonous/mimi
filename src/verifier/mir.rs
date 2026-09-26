@@ -3467,6 +3467,7 @@ fn eval_instruction(
             result,
             source,
             mutable,
+            ..
         } => {
             let result_ty = function
                 .values

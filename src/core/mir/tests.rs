@@ -5731,6 +5731,9 @@ fn ownership_events_are_part_of_the_canonical_function_contract() {
         source: Some("token".into()),
         target: Some("consumed".into()),
         point: NodeId("node:consume".into()),
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     assert!(
         function.validate().is_ok(),
@@ -5751,6 +5754,9 @@ fn ownership_event_without_source_is_rejected_for_consuming_kinds() {
         source: None,
         target: None,
         point: NodeId("node:drop".into()),
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     let errors = function
         .validate()
@@ -5770,6 +5776,9 @@ fn ownership_event_value_must_be_declared_by_the_function() {
         source: Some("token".into()),
         target: None,
         point: NodeId("node:read".into()),
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     let errors = function
         .validate()
@@ -5791,6 +5800,9 @@ fn ownership_return_event_must_match_a_mir_return_value() {
         source: Some("result".into()),
         target: None,
         point: NodeId("node:return".into()),
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     assert!(validate_ownership_event_receipts(&function).is_empty());
 }
@@ -5805,12 +5817,298 @@ fn ownership_move_event_without_a_mir_transfer_is_rejected() {
         source: Some("arg".into()),
         target: Some("consumed".into()),
         point: NodeId("node:move".into()),
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     let errors = validate_ownership_event_receipts(&function);
     assert!(errors.iter().any(|error| {
         error
             .message
             .contains("move event value 'v.arg' has no matching canonical MIR transfer boundary")
+    }));
+}
+
+#[test]
+fn checker_loan_start_is_bound_to_mir_and_end_receipt_by_identity() {
+    let (canonical, owner, function) = synthetic_loan_receipt_fixture();
+    let rebuilt = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner.clone(), function.clone())]),
+        canonical.type_catalog().clone(),
+    )
+    .expect("paired checker loan receipts should validate");
+    let function = rebuilt.functions().get(&owner).expect("rebuilt MIR");
+    let borrow = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Borrow {
+                loan,
+                mutable,
+                checker_resource,
+                checker_source,
+                ..
+            } => Some((loan, mutable, checker_resource, checker_source)),
+            _ => None,
+        })
+        .expect("MIR borrow operation");
+    let starts = function
+        .ownership
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].loan.as_ref(), Some(borrow.0));
+    assert_eq!(
+        starts[0].kind == MirOwnershipEventKind::BorrowMut,
+        *borrow.1
+    );
+    assert_eq!(borrow.2.as_deref(), Some(starts[0].resource.as_str()));
+    assert_eq!(borrow.3.as_deref(), starts[0].source.as_deref());
+    assert!(starts[0].checker_block.is_some());
+
+    let ends = function
+        .ownership
+        .events
+        .iter()
+        .filter(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ends.len(),
+        1,
+        "the fixture carries one synthetic end receipt"
+    );
+    assert!(ends
+        .iter()
+        .all(|event| event.loan.as_ref() == starts[0].loan.as_ref()));
+    assert!(ends.iter().all(|event| event.checker_block.is_some()));
+    assert!(function.canonical_text().contains(&format!(
+        "loan={} checker_block=",
+        starts[0].loan.as_ref().expect("loan id").0
+    )));
+}
+
+fn synthetic_loan_receipt_fixture() -> (crate::core::mir::reference::MirProgram, NodeId, MirFunction)
+{
+    let checked = checked_program("func main(value: i64) -> i64 { *(&value) }");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("single-expression borrow MIR");
+    let owner = NodeId("function:main".into());
+    let function = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let start = function
+        .ownership
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+            )
+        })
+        .cloned()
+        .expect("checker borrow-start receipt");
+    // End actions are synthesized here to exercise identity pairing. Their
+    // point/block/edge are test data, so this test makes no claim about
+    // Checker-CFG to MIR-CFG path or timing equivalence.
+    let mut end = start;
+    end.kind = MirOwnershipEventKind::BorrowEnd;
+    end.point = NodeId("synthetic/end-point".into());
+    end.checker_block = Some(NodeId("synthetic/end-block".into()));
+    end.checker_edge = Some(NodeId("synthetic/end-edge".into()));
+    let mut function = function;
+    function.ownership.events.push(end);
+    (canonical, owner, function)
+}
+
+#[test]
+fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers() {
+    let (canonical, owner, original) = synthetic_loan_receipt_fixture();
+    let rebuild = |function| {
+        crate::core::mir::reference::MirProgram::with_type_catalog(
+            BTreeMap::from([(owner.clone(), function)]),
+            canonical.type_catalog().clone(),
+        )
+    };
+
+    let mut missing_start = original.clone();
+    missing_start.ownership.events.retain(|event| {
+        !matches!(
+            event.kind,
+            MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+        )
+    });
+    let errors = rebuild(missing_start).expect_err("MIR borrow needs a checker-owned start");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("has no checker borrow-start receipt")
+    }));
+
+    let mut wrong_kind = original.clone();
+    let start = wrong_kind
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowShared)
+        .expect("shared borrow receipt");
+    start.kind = MirOwnershipEventKind::BorrowMut;
+    let errors = rebuild(wrong_kind).expect_err("checker mutability must match the MIR op");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
+    }));
+
+    let mut missing_local_value = original.clone();
+    let start = missing_local_value
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowShared)
+        .expect("shared borrow receipt");
+    start.value = None;
+    let errors = rebuild(missing_local_value)
+        .expect_err("a local checker resource must retain its source MIR value");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
+    }));
+
+    let mut mismatched_local_resource = original.clone();
+    let start = mismatched_local_resource
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowShared)
+        .expect("shared borrow receipt");
+    start.resource = "forged/node/local".into();
+    let errors = rebuild(mismatched_local_resource)
+        .expect_err("local resource and stable value identity must agree");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
+    }));
+
+    let mut mismatched_source_place = original.clone();
+    let start = mismatched_source_place
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowShared)
+        .expect("shared borrow receipt");
+    start.source = Some("forged.source.place".into());
+    let errors = rebuild(mismatched_source_place)
+        .expect_err("checker place source must match its canonical Borrow boundary");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
+    }));
+
+    let mut jointly_forged_identity = original.clone();
+    let forged_loan = NodeId("forged/loan-id".into());
+    for event in &mut jointly_forged_identity.ownership.events {
+        if matches!(
+            event.kind,
+            MirOwnershipEventKind::BorrowShared
+                | MirOwnershipEventKind::BorrowMut
+                | MirOwnershipEventKind::BorrowEnd
+        ) {
+            event.loan = Some(forged_loan.clone());
+        }
+    }
+    for instruction in jointly_forged_identity
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        if let MirInstructionKind::Borrow { loan, .. } = &mut instruction.kind {
+            *loan = forged_loan.clone();
+        }
+    }
+    let errors = rebuild(jointly_forged_identity.clone())
+        .expect_err("matching forged receipts cannot replace the checker identity rule");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("loan identity is not derived from its resolved point")
+    }));
+    let operation_errors = super::validate_ownership_event_receipts(&jointly_forged_identity);
+    assert!(operation_errors.iter().any(|error| {
+        error
+            .message
+            .contains("canonical MIR Borrow loan identity is not derived")
+    }));
+
+    let mut unknown_loan = original.clone();
+    let end = unknown_loan
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .expect("borrow-end receipt");
+    end.loan = Some(NodeId("forged/loan".into()));
+    let errors = rebuild(unknown_loan).expect_err("borrow end cannot invent a loan");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("names unknown loan 'forged/loan'")));
+
+    let mut wrong_source = original.clone();
+    let end = wrong_source
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .expect("borrow-end receipt");
+    end.source = Some("unrelated.place".into());
+    let errors = rebuild(wrong_source).expect_err("borrow end source must preserve loan place");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("disagrees with its checker borrow start")));
+
+    let mut duplicate_end = original.clone();
+    let end = duplicate_end
+        .ownership
+        .events
+        .iter()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .expect("borrow-end receipt")
+        .clone();
+    duplicate_end.ownership.events.push(end);
+    let errors = rebuild(duplicate_end).expect_err("duplicate edge receipt must fail closed");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("duplicate checker borrow-end receipt")));
+
+    let mut drifted_operation = original;
+    let borrow = drifted_operation
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::Borrow { loan, .. } => Some(loan),
+            _ => None,
+        })
+        .expect("MIR borrow operation");
+    *borrow = NodeId("forged/operation-loan".into());
+    let errors = rebuild(drifted_operation).expect_err("borrow operation loan identity must match");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
     }));
 }
 
@@ -5988,6 +6286,9 @@ fn flow_session_effect_receipt_cannot_be_attached_to_silent_local_transition() {
         source: source_event.source,
         target: source_event.target,
         point: source_event.point,
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     let errors = validate_transfer_event_boundaries(&forged, canonical.transitions());
     assert!(errors.iter().any(|error| {
@@ -6210,6 +6511,9 @@ func main() -> i32 {
         source: Some("value".into()),
         target: None,
         point: call_point,
+        loan: None,
+        checker_block: None,
+        checker_edge: None,
     });
     let errors =
         crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(

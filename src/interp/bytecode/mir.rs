@@ -1260,6 +1260,7 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 source,
                 mutable,
+                ..
             } => self.emit_borrow(result, source, *mutable),
             MirInstructionKind::EndBorrow { borrow } => self.emit_end_borrow(borrow),
             MirInstructionKind::Project {
@@ -5385,7 +5386,7 @@ mod tests {
     use crate::core::mir::types::{
         MirDropGluePlan, MirGlueKind, MirLayout, MirOwnership, MirTypeKind,
     };
-    use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
+    use crate::core::mir::{MirInstructionKind, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::instr::{CanonicalFfiScalarType, FunctionProto};
     use crate::interp::bytecode::BytecodeVM;
@@ -12418,7 +12419,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ownership_events_without_runtime_glue() {
+    fn rejects_borrow_event_without_checker_loan_identity() {
         let source = "func main() -> i32 { 42 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
@@ -12426,33 +12427,32 @@ mod tests {
         let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         let owner = crate::core::NodeId("function:main".into());
         let mut function = mir.functions().get(&owner).cloned().expect("main");
-        let value = function
-            .values
-            .keys()
-            .find(|value| {
-                value
-                    .to_string()
-                    .starts_with("expr:function:main/node:expr.literal")
-            })
-            .cloned()
-            .unwrap_or_else(|| function.values.keys().next().cloned().expect("value"));
-        function.ownership.events.push(MirOwnershipEvent {
-            kind: MirOwnershipEventKind::BorrowMut,
-            resource: "synthetic/resource".into(),
-            value: Some(value.clone()),
-            source: Some("x".into()),
-            target: None,
-            point: crate::core::NodeId("synthetic/point".into()),
-        });
-        let patched = crate::core::mir::reference::MirProgram::with_type_catalog(
+        let value = function.values.keys().next().cloned().expect("value");
+        function
+            .ownership
+            .events
+            .push(crate::core::mir::MirOwnershipEvent {
+                kind: MirOwnershipEventKind::BorrowMut,
+                resource: "synthetic/resource".into(),
+                value: Some(value),
+                source: Some("value".into()),
+                target: None,
+                point: crate::core::NodeId("synthetic/point".into()),
+                loan: None,
+                checker_block: None,
+                checker_edge: None,
+            });
+        let errors = MirProgram::with_type_catalog(
             BTreeMap::from([(owner, function)]),
             mir.type_catalog().clone(),
         )
-        .expect("patched MIR remains structurally valid");
-        let errors = compile_mir_program(&patched).expect_err("glue must be explicit");
-        assert!(errors
-            .iter()
-            .any(|error| error.message.contains("borrow_mut")));
+        .expect_err("borrow receipts need a checker loan identity before bytecode admission");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("has no stable loan identity")),
+            "{errors:#?}"
+        );
     }
 
     #[test]

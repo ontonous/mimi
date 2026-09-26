@@ -862,6 +862,7 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 source,
                 mutable,
+                ..
             } => {
                 self.validate_value(function, result, "borrow result");
                 self.validate_value(function, source, "borrow source");

@@ -1342,6 +1342,7 @@ impl MirProgram {
                             result,
                             source,
                             mutable,
+                            ..
                         } => {
                             let (Some(result_value), Some(source_value)) =
                                 (function.values.get(result), function.values.get(source))

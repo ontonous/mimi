@@ -1297,6 +1297,14 @@ pub enum MirInstructionKind {
         value: MirValueId,
     },
     Borrow {
+        /// Checker-stable identity of the loan started by this operation.
+        loan: NodeId,
+        /// Resolved expression identity that starts the loan.
+        point: NodeId,
+        /// Checker place identity copied from the matching borrow-start action.
+        checker_resource: Option<String>,
+        /// Checker place display copied from the matching borrow-start action.
+        checker_source: Option<String>,
         result: MirValueId,
         source: MirValueId,
         mutable: bool,
@@ -2399,6 +2407,13 @@ pub struct MirOwnershipEvent {
     pub source: Option<String>,
     pub target: Option<String>,
     pub point: NodeId,
+    /// Checker-stable identity shared by a borrow start and its end receipts.
+    pub loan: Option<NodeId>,
+    /// Original checker CFG location, retained as identity metadata. This is
+    /// not a MIR block mapping and does not by itself prove path or timing.
+    pub checker_block: Option<NodeId>,
+    /// Original checker CFG edge for edge-specific loan ends.
+    pub checker_edge: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2436,6 +2451,78 @@ impl MirOwnershipSummary {
                     message: format!("{} event has no source place", event.kind.as_str()),
                 });
             }
+            let borrow_event = matches!(
+                event.kind,
+                MirOwnershipEventKind::BorrowShared
+                    | MirOwnershipEventKind::BorrowMut
+                    | MirOwnershipEventKind::BorrowEnd
+            );
+            if borrow_event {
+                if event
+                    .loan
+                    .as_ref()
+                    .is_none_or(|loan| loan.0.trim().is_empty())
+                {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event has no stable loan identity",
+                            event.kind.as_str()
+                        ),
+                    });
+                }
+                if event
+                    .checker_block
+                    .as_ref()
+                    .is_none_or(|block| block.0.trim().is_empty())
+                {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event has no checker CFG block identity",
+                            event.kind.as_str()
+                        ),
+                    });
+                }
+            } else if event.loan.is_some()
+                || event.checker_block.is_some()
+                || event.checker_edge.is_some()
+            {
+                errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: "non-borrow event carries checker loan metadata".into(),
+                });
+            }
+            if matches!(
+                event.kind,
+                MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+            ) {
+                if event.source.is_none() || event.checker_edge.is_some() {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: "borrow start requires a source place and cannot name a CFG edge"
+                            .into(),
+                    });
+                }
+                if event
+                    .loan
+                    .as_ref()
+                    .is_some_and(|loan| loan.0 != format!("{}/loan", event.point.0))
+                {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message:
+                            "borrow-start loan identity is not derived from its resolved point"
+                                .into(),
+                    });
+                }
+            }
+            if matches!(event.kind, MirOwnershipEventKind::BorrowEnd) && event.target.is_some() {
+                errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: "borrow end cannot name a target place".into(),
+                });
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -2454,15 +2541,30 @@ impl MirOwnershipSummary {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "_".into());
+            let loan_metadata = event.loan.as_ref().map_or_else(String::new, |loan| {
+                format!(
+                    " loan={} checker_block={} checker_edge={}",
+                    loan.0,
+                    event
+                        .checker_block
+                        .as_ref()
+                        .map_or("_", |block| block.0.as_str()),
+                    event
+                        .checker_edge
+                        .as_ref()
+                        .map_or("_", |edge| edge.0.as_str())
+                )
+            });
             let _ = writeln!(
                 output,
-                "    ownership[{index}] {} resource={} value={} source={} target={} point={}",
+                "    ownership[{index}] {} resource={} value={} source={} target={} point={}{}",
                 event.kind.as_str(),
                 event.resource,
                 value,
                 source,
                 target,
-                event.point.0
+                event.point.0,
+                loan_metadata
             );
         }
         output
@@ -3509,17 +3611,21 @@ pub(crate) fn validate_move_owned_result_return_merge(
 }
 
 /// Check that checker-projected ownership events have a corresponding
-/// canonical MIR transfer boundary.  The checker remains the source of
-/// ownership facts; this pass only proves that a consumer-visible value
-/// identity is not orphaned from the MIR instruction/terminator that carries
-/// the event.  Events without a local value (for example synthetic session
-/// resources) retain their existing structural validation only.
+/// canonical MIR transfer boundary. The checker remains the source of
+/// ownership facts. Borrow starts are paired by their stable loan, point,
+/// mutability, checker resource, and source place; local resources also bind
+/// to the exact MIR value and explicit Clone/Copy ancestry. Borrow-end
+/// receipts are identity-paired, but this pass does not prove Checker-CFG to
+/// MIR-CFG path/timing equivalence or loan-end completeness.
 pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<MirValidationError> {
     let mut moves = BTreeSet::new();
     let mut drops = BTreeSet::new();
     let mut returns = BTreeSet::new();
     let mut transfers = BTreeSet::new();
-    let mut borrows = BTreeSet::new();
+    let mut borrow_boundaries =
+        BTreeMap::<NodeId, (MirValueId, bool, NodeId, Option<String>, Option<String>)>::new();
+    let mut duplicate_borrow_boundaries = BTreeSet::<NodeId>::new();
+    let mut invalid_borrow_boundary_ids = BTreeSet::<(NodeId, NodeId)>::new();
     // A checker borrow action names the stable local resource, while the
     // lowered Borrow instruction normally consumes the explicit Clone/Copy
     // value produced for the source expression.  Keep this bridge explicit:
@@ -3615,8 +3721,33 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                         transfers.insert(endpoint.clone());
                     }
                 }
-                MirInstructionKind::Borrow { source, .. } => {
-                    borrows.insert(source.clone());
+                MirInstructionKind::Borrow {
+                    loan,
+                    point,
+                    checker_resource,
+                    checker_source,
+                    source,
+                    mutable,
+                    ..
+                } => {
+                    if loan.0 != format!("{}/loan", point.0) {
+                        invalid_borrow_boundary_ids.insert((loan.clone(), point.clone()));
+                    }
+                    if borrow_boundaries
+                        .insert(
+                            loan.clone(),
+                            (
+                                source.clone(),
+                                *mutable,
+                                point.clone(),
+                                checker_resource.clone(),
+                                checker_source.clone(),
+                            ),
+                        )
+                        .is_some()
+                    {
+                        duplicate_borrow_boundaries.insert(loan.clone());
+                    }
                 }
                 MirInstructionKind::Clone { result, source }
                 | MirInstructionKind::Copy { result, source } => {
@@ -3633,23 +3764,6 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
         }
     }
 
-    // Close the explicit Clone/Copy aliases so a borrow receipt can match
-    // either the expression value or the stable local it was derived from.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let current = borrows.iter().cloned().collect::<Vec<_>>();
-        for borrowed in current {
-            let Some(sources) = non_consuming_edges.get(&borrowed) else {
-                continue;
-            };
-            for source in sources {
-                if borrows.insert(source.clone()) {
-                    changed = true;
-                }
-            }
-        }
-    }
     let mut changed = true;
     while changed {
         changed = false;
@@ -3713,7 +3827,119 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
     }
 
     let mut errors = Vec::new();
+    for loan in duplicate_borrow_boundaries {
+        errors.push(MirValidationError {
+            subject: format!("loan[{}]", loan.0),
+            message: "loan identity starts more than one canonical MIR Borrow operation".into(),
+        });
+    }
+    for (loan, point) in invalid_borrow_boundary_ids {
+        errors.push(MirValidationError {
+            subject: format!("loan[{}]", loan.0),
+            message: format!(
+                "canonical MIR Borrow loan identity is not derived from resolved point '{}'",
+                point.0
+            ),
+        });
+    }
+
+    // Retain the exact explicit Clone/Copy ancestry for each borrow boundary.
+    // This allows a checker local resource to bind to the source value for
+    // this loan, without accepting an unrelated value that merely appears in
+    // some other Borrow operation.
+    let mut borrow_boundary_aliases = BTreeMap::<NodeId, BTreeSet<MirValueId>>::new();
+    for (loan, (source, _, _, _, _)) in &borrow_boundaries {
+        let aliases = borrow_boundary_aliases.entry(loan.clone()).or_default();
+        aliases.insert(source.clone());
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let current = aliases.iter().cloned().collect::<Vec<_>>();
+            for value in current {
+                if let Some(sources) = non_consuming_edges.get(&value) {
+                    for alias in sources {
+                        changed |= aliases.insert(alias.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut borrow_starts = BTreeMap::<NodeId, &MirOwnershipEvent>::new();
+    let mut borrow_end_sites = BTreeSet::<(NodeId, NodeId, NodeId, Option<NodeId>)>::new();
     for (index, event) in function.ownership.events.iter().enumerate() {
+        if matches!(
+            event.kind,
+            MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+        ) {
+            if let Some(loan) = &event.loan {
+                if borrow_starts.insert(loan.clone(), event).is_some() {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "loan '{}' has more than one checker borrow start",
+                            loan.0
+                        ),
+                    });
+                }
+                let expected_mutable = event.kind == MirOwnershipEventKind::BorrowMut;
+                let local_value_matches = match (&event.value, event.resource.ends_with("/local")) {
+                    (Some(value), true) => {
+                        value.as_str() == format!("local:{}", event.resource)
+                            && borrow_boundary_aliases
+                                .get(loan)
+                                .is_some_and(|aliases| aliases.contains(value))
+                    }
+                    (None, false) => true,
+                    _ => false,
+                };
+                let boundary_matches = borrow_boundaries.get(loan).is_some_and(
+                    |(_, mutable, point, checker_resource, checker_source)| {
+                        *mutable == expected_mutable
+                            && event.point == *point
+                            && checker_resource.as_deref() == Some(event.resource.as_str())
+                            && checker_source.as_deref() == event.source.as_deref()
+                            && event
+                                .loan
+                                .as_ref()
+                                .is_some_and(|loan| loan.0 == format!("{}/loan", point.0))
+                            && local_value_matches
+                    },
+                );
+                if !boundary_matches {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event loan '{}' has no matching canonical MIR Borrow operation",
+                            event.kind.as_str(),
+                            loan.0
+                        ),
+                    });
+                }
+            }
+            continue;
+        }
+        if event.kind == MirOwnershipEventKind::BorrowEnd {
+            let Some(loan) = &event.loan else { continue };
+            let location = (
+                loan.clone(),
+                event
+                    .checker_block
+                    .clone()
+                    .unwrap_or_else(|| NodeId(String::new())),
+                event.point.clone(),
+                event.checker_edge.clone(),
+            );
+            if !borrow_end_sites.insert(location) {
+                errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: format!(
+                        "loan '{}' has a duplicate checker borrow-end receipt",
+                        loan.0
+                    ),
+                });
+            }
+            continue;
+        }
         let Some(value) = &event.value else { continue };
         let matched = match event.kind {
             MirOwnershipEventKind::Move => moves.contains(value),
@@ -3722,16 +3948,9 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
             MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild => {
                 transfers.contains(value)
             }
-            MirOwnershipEventKind::BorrowShared => borrows.contains(value),
-            // A mutable-borrow event is a checker ownership receipt, not a
-            // second runtime transfer boundary.  Its executable proof lives
-            // on the canonical Borrow instruction/TypeDesc edge.  Keep the
-            // event admissible here so an adapter can reject a forged
-            // ownership-only event at the point where runtime borrow glue is
-            // required; otherwise the structural gate masks that consumer
-            // contract before bytecode/native admission is exercised.
-            MirOwnershipEventKind::BorrowMut => true,
-            MirOwnershipEventKind::BorrowEnd => true,
+            MirOwnershipEventKind::BorrowShared
+            | MirOwnershipEventKind::BorrowMut
+            | MirOwnershipEventKind::BorrowEnd => unreachable!("borrow events handled above"),
             MirOwnershipEventKind::Read
             | MirOwnershipEventKind::Write
             | MirOwnershipEventKind::Introduce => true,
@@ -3744,6 +3963,45 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                     event.kind.as_str(),
                     value
                 ),
+            });
+        }
+    }
+    for (index, event) in function.ownership.events.iter().enumerate() {
+        if event.kind != MirOwnershipEventKind::BorrowEnd {
+            continue;
+        }
+        if let Some(loan) = &event.loan {
+            match borrow_starts.get(loan) {
+                None => errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: format!("borrow-end event names unknown loan '{}'", loan.0),
+                }),
+                Some(start)
+                    if event.resource != start.resource
+                        || event.value != start.value
+                        || event
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| Some(source) != start.source.as_ref()) =>
+                {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "borrow-end receipt for loan '{}' disagrees with its checker borrow start",
+                            loan.0
+                        ),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    for loan in borrow_boundaries.keys() {
+        if !borrow_starts.contains_key(loan) {
+            errors.push(MirValidationError {
+                subject: format!("loan[{}]", loan.0),
+                message: "canonical MIR Borrow operation has no checker borrow-start receipt"
+                    .into(),
             });
         }
     }
@@ -4517,12 +4775,20 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         MirInstructionKind::Clone { result, source } => format!("clone {result} <- {source}"),
         MirInstructionKind::Drop { value } => format!("drop {value}"),
         MirInstructionKind::Borrow {
+            loan,
+            point,
+            checker_resource,
+            checker_source,
             result,
             source,
             mutable,
         } => format!(
-            "borrow{} {result} <- {source}",
-            if *mutable { "_mut" } else { "" }
+            "borrow{} loan={} point={} checker_resource={} checker_source={} {result} <- {source}",
+            if *mutable { "_mut" } else { "" },
+            loan.0,
+            point.0,
+            checker_resource.as_deref().unwrap_or("_"),
+            checker_source.as_deref().unwrap_or("_")
         ),
         MirInstructionKind::EndBorrow { borrow } => format!("end_borrow {borrow}"),
         MirInstructionKind::Project {

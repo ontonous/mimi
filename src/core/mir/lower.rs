@@ -87,7 +87,7 @@ impl MirLoweringError {
 /// receipt-bearing `MoveProjectDrop`, while all other partial moves and
 /// projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, None, None, None, &BTreeMap::new())
+    lower_body_impl(body, None, None, None, &BTreeMap::new(), None)
 }
 
 /// Lower a body with the checker-derived TypeDesc catalog available.  The
@@ -97,7 +97,7 @@ pub fn lower_body_with_type_catalog(
     body: &ResolvedBody,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, Some(type_catalog), None, None, &BTreeMap::new())
+    lower_body_impl(body, Some(type_catalog), None, None, &BTreeMap::new(), None)
 }
 
 /// Terminator successor blocks, mirroring the structural validator's
@@ -167,6 +167,7 @@ fn lower_body_impl(
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
     nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+    resource_analysis: Option<&ResourceAnalysis>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     // A captured callable needs an explicit environment parameter, a
     // checker-owned environment layout, and ownership/lifetime rules for the
@@ -200,6 +201,7 @@ fn lower_body_impl(
         body,
         type_catalog,
         call_parameter_permissions,
+        resource_analysis,
         values: BTreeMap::new(),
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
@@ -314,7 +316,14 @@ fn lower_body_impl(
 pub fn lower_callable(
     callable: &crate::core::ResolvedCallable,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    let mut function = lower_body(&callable.body)?;
+    let mut function = lower_body_impl(
+        &callable.body,
+        None,
+        None,
+        None,
+        &BTreeMap::new(),
+        Some(&callable.resources),
+    )?;
     function.parameter_permissions = Some(
         callable
             .signature
@@ -391,6 +400,7 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_an
         call_parameter_permissions,
         transition_result,
         nested_callable_declarations,
+        Some(&callable.resources),
     )?;
     function.parameter_permissions = Some(
         callable
@@ -7113,6 +7123,16 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                 source: action.source.as_ref().map(|place| place.display()),
                 target: action.target.as_ref().map(|place| place.display()),
                 point: action.location.point.clone(),
+                loan: action.loan.as_ref().map(|loan| loan.0.clone()),
+                checker_block: action
+                    .loan
+                    .as_ref()
+                    .map(|_| action.location.block.0.clone()),
+                checker_edge: action
+                    .loan
+                    .as_ref()
+                    .and(action.location.edge.as_ref())
+                    .map(|edge| edge.0.clone()),
             })
             .collect(),
     }
@@ -7134,6 +7154,7 @@ struct Lowerer<'a> {
     body: &'a ResolvedBody,
     type_catalog: Option<&'a MirTypeCatalog>,
     call_parameter_permissions: Option<&'a BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    resource_analysis: Option<&'a ResourceAnalysis>,
     transition_result: Option<crate::core::ResolvedTypeId>,
     approved_nested_callables: BTreeMap<NodeId, NodeId>,
     values: BTreeMap<MirValueId, MirValue>,
@@ -7151,6 +7172,61 @@ impl<'a> Lowerer<'a> {
             node_id: node_id.clone(),
             message: message.into(),
         });
+    }
+
+    fn checker_borrow_metadata(
+        &mut self,
+        point: &NodeId,
+        loan: &NodeId,
+        mutable: bool,
+    ) -> (Option<String>, Option<String>) {
+        let Some(analysis) = self.resource_analysis else {
+            return (None, None);
+        };
+        let kind = if mutable {
+            CanonicalActionKind::BorrowMut
+        } else {
+            CanonicalActionKind::BorrowShared
+        };
+        let matches = analysis
+            .actions
+            .iter()
+            .filter(|action| {
+                action.kind == kind
+                    && action.location.point == *point
+                    && action
+                        .loan
+                        .as_ref()
+                        .is_some_and(|action_loan| action_loan.0 == *loan)
+            })
+            .map(|action| {
+                (
+                    action.resource.0 .0.clone(),
+                    action.source.as_ref().map(|source| source.display()),
+                )
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [(resource, Some(source))] => (Some(resource.clone()), Some(source.clone())),
+            [] => {
+                self.error(
+                    point,
+                    "checker loan identity has no unique borrow-start action",
+                );
+                (None, None)
+            }
+            [(_, None)] => {
+                self.error(point, "checker borrow-start action has no source place");
+                (None, None)
+            }
+            _ => {
+                self.error(
+                    point,
+                    "checker loan identity has duplicate borrow-start actions",
+                );
+                (None, None)
+            }
+        }
     }
 
     fn session_call_contract(
@@ -8275,13 +8351,21 @@ impl<'a> Lowerer<'a> {
                     ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable
                 ) {
                     let operand = self.lower_expr(operand);
+                    let mutable = matches!(op, ResolvedUnaryOp::BorrowMutable);
+                    let loan = NodeId(format!("{}/loan", expression.node_id.0));
+                    let (checker_resource, checker_source) =
+                        self.checker_borrow_metadata(&expression.node_id, &loan, mutable);
                     self.emit(
                         &expression.node_id,
                         "borrow",
                         MirInstructionKind::Borrow {
+                            loan,
+                            point: expression.node_id.clone(),
+                            checker_resource,
+                            checker_source,
                             result: result.clone(),
                             source: operand,
-                            mutable: matches!(op, ResolvedUnaryOp::BorrowMutable),
+                            mutable,
                         },
                     );
                 } else {

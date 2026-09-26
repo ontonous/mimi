@@ -844,6 +844,7 @@ impl<'a> CapabilityGate<'a> {
                 result,
                 source,
                 mutable,
+                ..
             } => {
                 let (Some(source_ty), Some(result_ty)) =
                     (value_type(function, source), value_type(function, result))

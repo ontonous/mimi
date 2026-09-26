@@ -833,6 +833,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 source,
                 mutable,
+                ..
             } => {
                 let value = self.emit_borrow(result, source, *mutable, subject)?;
                 self.values.insert(result.clone(), value);
