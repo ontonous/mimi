@@ -549,6 +549,41 @@ fn direct_native_entry_routes_nested_scalar_ffi_through_mir_without_legacy_acces
 }
 
 #[test]
+fn direct_native_entry_rejects_nested_unit_result_without_legacy_access() {
+    let source = r#"
+        extern "C" { func notify(value: i32); }
+        func main() {
+            func helper(value: i32) { notify(value) }
+            let done = helper(1)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_ffi,
+        "the declaration remains a scalar FFI candidate"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "nested_unit_result_rejected");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("direct native entry must reject a nested Unit value");
+    assert!(
+        !errors.is_empty(),
+        "the unsupported MIR ABI must be explicit"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct native rejection must not retry the legacy body"
+    );
+}
+
+#[test]
 fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
     // R6-1052 restatement: the coverage scan is a checker-side type
     // heuristic, so a shape construction cannot lower (a nested-block assign
