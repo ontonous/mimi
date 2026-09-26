@@ -307,12 +307,12 @@ Built-in concurrency primitives (always available): `Mutex<T>`, `AtomicI32`/`Ato
 | Command | Description |
 |---------|-------------|
 | `mimi check <path>` | Type-check with full error reporting |
-| `mimi run <path>` | Run in the Bytecode VM with optional `--verify-contracts`, `--profile`, `--watch`, and `--mir` |
+| `mimi run <path>` | Run in the Bytecode VM with `--verify-contracts`, `--profile`, `--watch`, and experimental `--mir` (fails closed). FFI contracts are checked by default; `--verify-ffi` enables them explicitly and `--skip-verify-ffi` disables them. |
 | `mimi test <path>` | Run zero-argument `test_*` functions in one source file with `--filter` and `--verbose` |
-| `mimi build <path>` | Compile to native binary (LLVM). `--emit-ir`, `--shared`, `--target`, `--verify-contracts`, `--verify-ffi`, repeatable `--link-search` / `--link-lib` |
+| `mimi build <path>` | Compile to native binary (LLVM); experimental `--mir` fails closed on unsupported shapes. Also supports `--emit-ir`, `--shared`, `--target`, `--verify-contracts`, `--verify-ffi`, and repeatable `--link-search` / `--link-lib`. |
 | `mimi fmt <files>` | Format code (`--check` for CI) |
 | `mimi lint <files>` | Static analysis (`--fail-on-warnings`) |
-| `mimi verify <path>` | Z3 formal verification |
+| `mimi verify <path>` | Z3 formal verification; experimental `--mir` selects the Canonical MIR verifier and fails closed on unsupported shapes |
 | `mimi mir <path>` | Lower to canonical MIR and print the deterministic form (`--receipt` for the route manifest, `--all` to include imported modules) |
 | `mimi disasm <file>` | Disassemble to bytecode (debugging) |
 | `mimi lsp` | Start LSP server (stdin/stdout) |
