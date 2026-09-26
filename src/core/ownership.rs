@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::span::Span;
 
 use super::cfg::{BasicBlockId, CallableCfg, EdgeId};
-use super::{NodeId, Origin};
+use super::{NodeId, Origin, ResolvedLocalId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalId(pub NodeId);
@@ -182,8 +182,43 @@ pub struct ResourceAnalysis {
     pub owner: NodeId,
     pub actions: Vec<CanonicalResourceAction>,
     pub loans: Vec<Loan>,
+    /// Checker-owned lifecycle facts for the closed local Map-root slice.
+    /// These facts are separate from ordinary Place/Loan events: a Map root
+    /// is an opaque runtime handle whose persistent `map_set` result and
+    /// `map_size` borrow cannot be reconstructed from a surface call name by
+    /// MIR consumers.
+    pub(crate) map_root_actions: Vec<MapRootAction>,
     pub in_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
     pub out_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
+}
+
+/// Closed checker observation of one Map-root lifecycle operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MapRootActionKind {
+    New,
+    Set,
+    Size,
+    Drop,
+}
+
+/// Checker-owned root identity and operation point for Map lifecycle work.
+/// `root` is the result root for `New`/`Set`, and the observed/consumed root
+/// for `Size`/`Drop`. `source` is present only for a persistent `Set` update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapRootAction {
+    pub(crate) kind: MapRootActionKind,
+    pub(crate) point: NodeId,
+    /// Local that owns the root at this point. For `New`/`Set` this is the
+    /// result binding; for `Size`/`Drop` this is the observed/consumed root.
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    /// Static UTF-8 key for `Set`; the first native MapRoot profile only
+    /// admits literals without embedded NUL because the current runtime
+    /// entry point accepts a NUL-terminated key.
+    pub(crate) key: Option<String>,
+    /// Previous local consumed by persistent `Set`.
+    pub(crate) source_local: Option<ResolvedLocalId>,
+    pub(crate) source: Option<ResourceId>,
 }
 
 impl CanonicalActionKind {

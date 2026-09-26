@@ -1,15 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::core::ir::{
     MatchArm, Permission, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr,
-    ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLocal, ResolvedPattern,
-    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedSignature, ResolvedStmt,
-    ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
+    ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLiteral, ResolvedLocal,
+    ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedSignature,
+    ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
-    LoanKind, LocalId, NodeId, Place, PlaceProjection, ResolvedBody, ResolvedLocalId, ResolvedType,
-    ResolvedTypeId, ResolvedTypeTable, ResourceAnalysis, ResourceId,
+    LoanKind, LocalId, MapRootAction, MapRootActionKind, NodeId, Place, PlaceProjection,
+    ResolvedBody, ResolvedLocalId, ResolvedType, ResolvedTypeId, ResolvedTypeTable,
+    ResourceAnalysis, ResourceId,
 };
 use crate::diagnostic::Diagnostic;
 
@@ -84,6 +85,19 @@ struct ActionEmitter<'a> {
     /// 0.36.46: 当前是否位于绑定初始化器访问中——定向提取仅对 let-绑定面开
     /// （调用实参 `sink(xs[0])` / 其他位置保持 fail-closed E0304）。
     in_bind_initializer: bool,
+    /// Checker-owned Map root lifecycle facts projected into MIR. These are
+    /// intentionally narrower than generic linear-resource actions: they
+    /// bind a persistent Map update or a borrowed size observation to one
+    /// exact call and root resource.
+    map_root_actions: Vec<MapRootAction>,
+    /// Surface `Record` values become internal Map roots only when this
+    /// checker pass proves a closed local lifecycle. This leaves legacy
+    /// dynamic Record/JSON uses on their existing type contract.
+    map_root_locals: BTreeSet<ResolvedLocalId>,
+    live_map_root_locals: BTreeSet<ResolvedLocalId>,
+    permitted_map_root_loads: HashSet<NodeId>,
+    map_root_profile_invalid: bool,
+    direct_map_root_binding: Option<(NodeId, ResolvedLocalId)>,
 }
 
 impl<'a> ActionEmitter<'a> {
@@ -128,6 +142,12 @@ impl<'a> ActionEmitter<'a> {
             extracted_containers: BTreeSet::new(),
             directional_extraction_base: None,
             in_bind_initializer: false,
+            map_root_actions: Vec::new(),
+            map_root_locals: BTreeSet::new(),
+            live_map_root_locals: BTreeSet::new(),
+            permitted_map_root_loads: HashSet::new(),
+            map_root_profile_invalid: false,
+            direct_map_root_binding: None,
         }
     }
 
@@ -154,16 +174,182 @@ impl<'a> ActionEmitter<'a> {
                 })
                 .flat_map(|(_, resources)| resources.iter().cloned())
                 .collect();
-            analyze_canonical(
+            // The initial MIR Map slice is straight-line and local. If any
+            // root escapes, remains live at exit, or crosses control flow,
+            // withhold the receipt so no MIR/default route can infer it from
+            // Record shape alone. The legacy dynamic Record path remains
+            // available for those existing programs.
+            if self.cfg.blocks.len() != 1
+                || !self.cfg.edges.is_empty()
+                || self.map_root_profile_invalid
+                || !self.live_map_root_locals.is_empty()
+                || !self.permitted_map_root_loads.is_empty()
+                || !self
+                    .map_root_actions
+                    .iter()
+                    .any(|action| action.kind == MapRootActionKind::New)
+            {
+                self.map_root_actions.clear();
+            }
+            let map_root_actions = std::mem::take(&mut self.map_root_actions);
+            let mut analysis = analyze_canonical(
                 self.cfg,
                 self.actions,
                 self.loans,
                 &BTreeMap::new(),
                 &droppable,
-            )
+            )?;
+            analysis.map_root_actions = map_root_actions;
+            Ok(analysis)
         } else {
             Err(self.errors)
         }
+    }
+
+    fn record_map_new_binding(
+        &mut self,
+        initializer: &ResolvedExpr,
+        target: Option<&ResolvedLocalId>,
+    ) {
+        let (Some(target), ResolvedExprKind::Call(call)) = (target, &initializer.kind) else {
+            return;
+        };
+        if !matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_new")
+            || !call.arguments.is_empty()
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|local| local.ty == initializer.ty)
+            || !matches!(
+                self.types.get(&initializer.ty),
+                Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+            )
+        {
+            return;
+        }
+        if !self.map_root_locals.insert(target.clone())
+            || !self.live_map_root_locals.insert(target.clone())
+        {
+            self.map_root_profile_invalid = true;
+            return;
+        }
+        self.map_root_actions.push(MapRootAction {
+            kind: MapRootActionKind::New,
+            point: initializer.node_id.clone(),
+            local: target.clone(),
+            root: self.resource_for_local(target),
+            key: None,
+            source_local: None,
+            source: None,
+        });
+    }
+
+    fn prepare_map_root_call(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        let builtin = match &call.callee {
+            ResolvedCallee::Builtin(builtin) => builtin.as_str(),
+            _ => "",
+        };
+        if builtin == "map_size" && call.arguments.len() == 1 {
+            let argument = &call.arguments[0].value;
+            let ResolvedExprKind::Load(place) = &argument.kind else {
+                return;
+            };
+            if place.projections.is_empty()
+                && self.live_map_root_locals.contains(&place.base)
+                && matches!(
+                    self.types.get(&expression.ty),
+                    Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+                )
+            {
+                self.permitted_map_root_loads
+                    .insert(argument.node_id.clone());
+                let local = place.base.clone();
+                self.map_root_actions.push(MapRootAction {
+                    kind: MapRootActionKind::Size,
+                    point: expression.node_id.clone(),
+                    local: local.clone(),
+                    root: self.resource_for_local(&local),
+                    key: None,
+                    source_local: None,
+                    source: None,
+                });
+            } else if self.map_root_locals.contains(&place.base) {
+                self.map_root_profile_invalid = true;
+            }
+            return;
+        }
+
+        if builtin != "map_set" {
+            return;
+        }
+
+        let Some((initializer, target)) = self.direct_map_root_binding.clone() else {
+            return;
+        };
+        if initializer != expression.node_id || call.arguments.len() != 3 {
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let ResolvedExprKind::Load(place) = &source.kind else {
+            return;
+        };
+        let ResolvedExprKind::Literal(ResolvedLiteral::String(key)) = &call.arguments[1].value.kind
+        else {
+            if self.map_root_locals.contains(&place.base) {
+                self.map_root_profile_invalid = true;
+            }
+            return;
+        };
+        if key.contains('\0') {
+            self.map_root_profile_invalid = true;
+            return;
+        }
+        if !place.projections.is_empty()
+            || !self.live_map_root_locals.contains(&place.base)
+            || self.map_root_locals.contains(&target)
+            || !self
+                .body
+                .locals
+                .get(&target)
+                .is_some_and(|local| local.ty == expression.ty)
+            || !matches!(
+                self.types.get(&source.ty),
+                Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+            )
+            || !matches!(
+                self.types.get(&call.arguments[1].value.ty),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+            )
+            || !matches!(
+                self.types.get(&call.arguments[2].value.ty),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+            )
+            || !matches!(
+                self.types.get(&expression.ty),
+                Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+            )
+        {
+            if self.map_root_locals.contains(&place.base) {
+                self.map_root_profile_invalid = true;
+            }
+            return;
+        }
+
+        self.permitted_map_root_loads.insert(source.node_id.clone());
+        let source_local = place.base.clone();
+        self.live_map_root_locals.remove(&source_local);
+        self.map_root_locals.insert(target.clone());
+        self.live_map_root_locals.insert(target.clone());
+        self.map_root_actions.push(MapRootAction {
+            kind: MapRootActionKind::Set,
+            point: expression.node_id.clone(),
+            local: target.clone(),
+            root: self.resource_for_local(&target),
+            key: Some(key.clone()),
+            source_local: Some(source_local.clone()),
+            source: Some(self.resource_for_local(&source_local)),
+        });
     }
 
     /// v0.34.8 (SD-1 tail): check whether a resolved type is a flow state.
@@ -626,9 +812,19 @@ impl<'a> ActionEmitter<'a> {
                 if let Some(initializer) = initializer {
                     let reference = self.single_binding(pattern);
                     self.last_visit_rejected = false;
+                    let direct_map_root_binding = reference.as_ref().and_then(|local| {
+                        matches!(&initializer.kind, ResolvedExprKind::Call(_))
+                            .then(|| (initializer.node_id.clone(), local.clone()))
+                    });
+                    let previous_map_root_binding = std::mem::replace(
+                        &mut self.direct_map_root_binding,
+                        direct_map_root_binding,
+                    );
+                    self.record_map_new_binding(initializer, reference.as_ref());
                     self.in_bind_initializer = true;
                     self.visit_expr(initializer, reference.as_ref());
                     self.in_bind_initializer = false;
+                    self.direct_map_root_binding = previous_map_root_binding;
                     // 0.36.46: 定向头提取 `let c = xs[0]`——c 认领一个元素义务
                     //（fresh Introduce），容器保留余部义务（既有 fact 不动；
                     // 后续 drop(xs) = 释放余部；不触 xs → 返回门禁 E0256）。
@@ -873,6 +1069,11 @@ impl<'a> ActionEmitter<'a> {
                 }
             }
             ResolvedStmtKind::Assign { target, value, .. } => {
+                if self.map_root_locals.contains(&target.base) {
+                    // Rebinding or mutating a root place has no receipt in
+                    // this first local profile.
+                    self.map_root_profile_invalid = true;
+                }
                 self.visit_expr(value, None);
                 if self.place_is_linear(target) {
                     // Audit 2026-08-05 (wave-2, C-2): assigning a branch
@@ -1189,6 +1390,25 @@ impl<'a> ActionEmitter<'a> {
                 self.visit_block(body, false);
             }
             ResolvedStmtKind::Drop(places) => {
+                for place in places {
+                    if place.projections.is_empty()
+                        && self.map_root_locals.contains(&place.base)
+                        && self.live_map_root_locals.remove(&place.base)
+                    {
+                        let local = place.base.clone();
+                        self.map_root_actions.push(MapRootAction {
+                            kind: MapRootActionKind::Drop,
+                            point: statement.node_id.clone(),
+                            local: local.clone(),
+                            root: self.resource_for_local(&local),
+                            key: None,
+                            source_local: None,
+                            source: None,
+                        });
+                    } else if self.map_root_locals.contains(&place.base) {
+                        self.map_root_profile_invalid = true;
+                    }
+                }
                 // 0.36.43: `drop(v[0])` — the Drop arm carries resolved PLACES
                 // (no expression visit), so the M9 reject never ran for it.
                 // Dropping one element releases it and leaks every unextracted
@@ -1341,6 +1561,15 @@ impl<'a> ActionEmitter<'a> {
         expression: &ResolvedExpr,
         borrow_reference: Option<&ResolvedLocalId>,
     ) {
+        if let ResolvedExprKind::Load(place) = &expression.kind {
+            if self.map_root_locals.contains(&place.base)
+                && !self.permitted_map_root_loads.remove(&expression.node_id)
+            {
+                // Aliases, unsupported operations, aggregate escape, and
+                // use-after-update/drop withhold the MIR lifecycle receipt.
+                self.map_root_profile_invalid = true;
+            }
+        }
         self.reject_index_read_extraction(expression);
         match &expression.kind {
             ResolvedExprKind::Unary {
@@ -1413,6 +1642,7 @@ impl<'a> ActionEmitter<'a> {
                 }
             }
             ResolvedExprKind::Call(call) => {
+                self.prepare_map_root_call(expression, call);
                 for argument in &call.arguments {
                     self.visit_expr(&argument.value, None);
                 }
@@ -1593,6 +1823,13 @@ impl<'a> ActionEmitter<'a> {
                 }
             }
             ResolvedExprKind::Lambda(lambda) => {
+                if lambda
+                    .captures
+                    .iter()
+                    .any(|capture| self.map_root_locals.contains(capture))
+                {
+                    self.map_root_profile_invalid = true;
+                }
                 let captures = lambda
                     .captures
                     .iter()
@@ -3105,6 +3342,212 @@ func main() -> i32 { 0 }
                 && error.message
                     == "linear resource 'token' must be consumed before this return path"
         }));
+    }
+
+    #[test]
+    fn map_root_checker_receipts_bind_new_set_size_and_drop_to_one_root_chain() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let first = map_new()
+    let updated = map_set(first, "answer", 42)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("closed Map-root lifecycle");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(
+            analysis.map_root_actions[0].root,
+            analysis.map_root_actions[1].source.clone().unwrap()
+        );
+        assert_eq!(
+            analysis.map_root_actions[1].root,
+            analysis.map_root_actions[2].root
+        );
+        assert_eq!(
+            analysis.map_root_actions[2].root,
+            analysis.map_root_actions[3].root
+        );
+        assert_eq!(
+            analysis.map_root_actions[0].local,
+            analysis.map_root_actions[1].source_local.clone().unwrap()
+        );
+        assert_eq!(analysis.map_root_actions[1].key.as_deref(), Some("answer"));
+        assert_eq!(
+            analysis.map_root_actions[1].local,
+            analysis.map_root_actions[2].local
+        );
+        assert_eq!(
+            analysis.map_root_actions[2].local,
+            analysis.map_root_actions[3].local
+        );
+    }
+
+    #[test]
+    fn map_root_checker_withholds_receipt_for_missing_drop_and_alias_copy() {
+        let missing_drop = parse(
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    map_size(map)
+}
+"#,
+        );
+        let program = crate::core::check_program(&missing_drop)
+            .expect("legacy Record semantics remain available");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        assert!(analysis.map_root_actions.is_empty());
+
+        let alias_copy = parse(
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let alias = map
+    drop(alias)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&alias_copy)
+            .expect("legacy Record aliases remain available");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        assert!(analysis.map_root_actions.is_empty());
+    }
+
+    #[test]
+    fn map_root_checker_withholds_receipt_for_unreceipted_operations_and_stale_reads() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let value = map_get(map, "answer")
+    drop(map)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("legacy Map API remains available");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        assert!(analysis.map_root_actions.is_empty());
+
+        for source in [
+            r#"
+func main() -> i32 {
+    let old = map_new()
+    let updated = map_set(old, "answer", 42)
+    let stale_size = map_size(old)
+    drop(updated)
+    stale_size
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    drop(map)
+    map_size(map)
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let pair = (map, 0)
+    drop(map)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let size_of_map = fn() -> i32 { map_size(map) }
+    drop(map)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let updated = map_set(map, "answer", "not-i32")
+    drop(updated)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let key = "answer"
+    let updated = map_set(map, key, 42)
+    drop(updated)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    let updated = map_set(map, "before\0after", 42)
+    drop(updated)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    map_set(map, "answer", 42)
+    drop(map)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    if true {
+        let n = map_size(map)
+    } else {
+    }
+    drop(map)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let map = map_new()
+    drop(map)
+    drop(map)
+    0
+}
+"#,
+        ] {
+            let file = parse(source);
+            let program = crate::core::check_program(&file)
+                .expect("legacy Record behavior remains available");
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("Map-root resource analysis");
+            assert!(analysis.map_root_actions.is_empty());
+        }
     }
 
     #[test]

@@ -300,6 +300,7 @@ pub(super) fn analyze_canonical(
         owner: cfg.owner.clone(),
         actions,
         loans,
+        map_root_actions: Vec::new(),
         in_states: in_flow
             .into_iter()
             .map(|(block, state)| (block, state.resources))

@@ -955,6 +955,7 @@ fn ownership_summary_flags_maybe_consumed_branch_merge() {
         owner: crate::core::NodeId("function:synthetic".into()),
         actions: Vec::new(),
         loans: Vec::new(),
+        map_root_actions: Vec::new(),
         in_states: std::collections::BTreeMap::new(),
         out_states: std::collections::BTreeMap::new(),
     };
