@@ -2623,6 +2623,17 @@ fn e2e_valgrind_explicit_map_clone_destroy_releases_tables() {
     )
     .expect("explicit Map clone/destroy lifecycle must run under Memcheck");
 
+    if std::env::var_os("MIMI_MAP_ANY_VALGRIND_TRACE").is_some() {
+        eprintln!(
+            "No-Map control Memcheck details (including possible-loss allocation stacks):\n{}",
+            control.stderr
+        );
+        eprintln!(
+            "Explicit Map clone/destroy Memcheck details (including possible-loss allocation stacks):\n{}",
+            maps.stderr
+        );
+    }
+
     assert_eq!(
         control.exit_code,
         Some(0),
