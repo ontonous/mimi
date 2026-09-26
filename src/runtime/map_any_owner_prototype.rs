@@ -1018,6 +1018,126 @@ mod tests {
     }
 
     #[test]
+    fn owned_map_update_remove_state_sequence_preserves_typed_snapshots_and_releases_once() {
+        let probe = DropProbe::default();
+        let owners = Arc::new(AnyOwnerTable::with_capacity(16));
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        assert_eq!(empty.get_owned("key"), Ok(None));
+        assert_eq!(owners.live_count(), Ok(0));
+
+        let zero_seed = owners
+            .allocate(DescriptorId::I64, AnyValue::I64(0))
+            .expect("zero-valued seed fits");
+        let zero_map = empty
+            .set_transactional("key", zero_seed, DescriptorId::I64, SetFailpoint::None)
+            .expect("absent key accepts a typed zero value");
+        drop(empty);
+        owners
+            .release(zero_seed)
+            .expect("caller releases zero seed");
+
+        let old_root = zero_map.clone();
+        let zero_get = zero_map
+            .get_owned("key")
+            .expect("zero lookup succeeds")
+            .expect("key is present");
+        let zero_values = zero_map.values_owned().expect("zero snapshot succeeds");
+        assert_eq!(zero_values.len(), 1);
+        assert_eq!(owners.read_i64(zero_get, DescriptorId::I64), Ok(0));
+        assert_eq!(owners.read_i64(zero_values[0], DescriptorId::I64), Ok(0));
+        assert_eq!(
+            owners.read_string(zero_get, DescriptorId::STRING),
+            Err(OwnerError::DescriptorMismatch)
+        );
+
+        let string_seed = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("replacement", probe.clone())),
+            )
+            .expect("replacement string fits");
+        let string_map = zero_map
+            .set_transactional("key", string_seed, DescriptorId::STRING, SetFailpoint::None)
+            .expect("overwrite publishes a sibling root");
+        owners
+            .release(string_seed)
+            .expect("caller releases replacement seed");
+
+        assert_eq!(zero_map.get_owned("missing"), Ok(None));
+        assert_eq!(
+            owners.read_i64(zero_map.root.entries["key"], DescriptorId::I64),
+            Ok(0)
+        );
+        assert_eq!(
+            owners.read_i64(old_root.root.entries["key"], DescriptorId::I64),
+            Ok(0)
+        );
+        assert_eq!(
+            owners.read_string(string_map.root.entries["key"], DescriptorId::STRING),
+            Ok("replacement".into())
+        );
+        assert_eq!(probe.count(), 0);
+
+        let string_get = string_map
+            .get_owned("key")
+            .expect("replacement lookup succeeds")
+            .expect("replacement key is present");
+        let string_values = string_map
+            .values_owned()
+            .expect("replacement values snapshot succeeds");
+        assert_eq!(string_values.len(), 1);
+        let removed = string_map
+            .remove_snapshot("key")
+            .expect("remove publishes an empty sibling root");
+        assert_eq!(removed.get_owned("key"), Ok(None));
+        assert_eq!(
+            owners.read_string(string_get, DescriptorId::STRING),
+            Ok("replacement".into())
+        );
+        assert_eq!(
+            owners.read_string(string_values[0], DescriptorId::STRING),
+            Ok("replacement".into())
+        );
+        assert_eq!(
+            owners.read_i64(string_get, DescriptorId::I64),
+            Err(OwnerError::DescriptorMismatch)
+        );
+
+        owners.release(zero_get).expect("release zero get token");
+        assert_eq!(
+            owners.read_i64(zero_get, DescriptorId::I64),
+            Err(OwnerError::StaleHandle)
+        );
+        owners
+            .release(string_get)
+            .expect("release string get token");
+        assert_eq!(
+            owners.read_string(string_get, DescriptorId::STRING),
+            Err(OwnerError::StaleHandle)
+        );
+
+        drop(zero_map);
+        drop(old_root);
+        assert_eq!(owners.read_i64(zero_values[0], DescriptorId::I64), Ok(0));
+        drop(string_map);
+        drop(removed);
+        assert_eq!(
+            owners.read_string(string_values[0], DescriptorId::STRING),
+            Ok("replacement".into())
+        );
+        assert_eq!(probe.count(), 0);
+
+        owners
+            .release(zero_values[0])
+            .expect("release zero values snapshot");
+        owners
+            .release(string_values[0])
+            .expect("release replacement values snapshot");
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(probe.count(), 1);
+    }
+
+    #[test]
     fn owned_map_duplicate_payload_tokens_survive_remove_snapshots_and_drop_once() {
         let probe = DropProbe::default();
         let owners = Arc::new(AnyOwnerTable::with_capacity(8));
