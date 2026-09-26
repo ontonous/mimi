@@ -1,5 +1,6 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::error::{CompileError, MimiResult};
 
@@ -1406,7 +1407,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
-        self.compile_file_inner(file, None)
+        self.compile_file_inner(
+            Arc::new(File {
+                sources: file.sources.clone(),
+                imports: file.imports.clone(),
+                items: file.items.clone(),
+                implicit_single: false,
+            }),
+            None,
+        )
     }
 
     /// Compile with per-function resolved dispatch (S12). The resolved subset
@@ -1435,25 +1444,23 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn compile_file_inner(
         &mut self,
-        file: &File,
+        file_arc: Arc<File>,
         resolved_ctx: Option<(
             &crate::core::CheckedProgram,
             Option<&std::collections::BTreeSet<crate::core::NodeId>>,
         )>,
     ) -> MimiResult<()> {
+        let file = file_arc.as_ref();
         // Register built-in Record types used by builtins
         self.register_builtin_record_types()?;
 
-        // v0.28.21 — Hold an owned copy of the file so `Expr::Comptime`
-        // block folds can construct a fresh interpreter later, after
-        // the original `&File` borrow has ended. The clone is shallow
-        // w.r.t. String interning but acceptable at this scope.
-        self.comptime_file = Some(std::rc::Rc::new(crate::ast::File {
-            sources: file.sources.clone(),
-            imports: file.imports.clone(),
-            items: file.items.clone(),
-            implicit_single: false,
-        }));
+        // Keep the checked program's immutable AST snapshot alive for comptime
+        // consumers without deep-cloning every item a second time. The Arc is
+        // intentionally shared only through the tagged codegen legacy owner.
+        // Codegen's historical comptime view normalized `implicit_single` to
+        // false; preserve that exact view at each bytecode evaluation boundary
+        // instead of mutating the shared checker snapshot.
+        self.comptime_file = Some(Arc::clone(&file_arc));
 
         // Actor values are opaque runtime handles (i8*), while `type_llvm`
         // stores each actor's separate state-field struct for allocation and
@@ -2329,7 +2336,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 sources: file_ref.sources.clone(),
                 items: Vec::new(),
                 imports: Vec::new(),
-                implicit_single: file_ref.implicit_single,
+                implicit_single: false,
             };
             for item in &file_ref.items {
                 match item {

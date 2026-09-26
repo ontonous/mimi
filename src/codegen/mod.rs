@@ -357,7 +357,7 @@ pub struct CodeGenerator<'ctx> {
     /// v0.28.21 — Optional reference to the file currently being compiled.
     /// Held so `Expr::Comptime` block paths can construct a fresh
     /// interpreter per fold without re-borrowing the original argument.
-    comptime_file: Option<std::rc::Rc<crate::ast::File>>,
+    comptime_file: Option<std::sync::Arc<crate::ast::File>>,
     trait_defs: HashMap<String, crate::ast::TraitDef>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
     /// Generic type arguments for each type that has trait impls.

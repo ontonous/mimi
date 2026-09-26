@@ -247,7 +247,9 @@ pub fn verify_checked(
         // the Z3 encoding is defined over AST Expr nodes, not ResolvedExpr.
         // The resolved_ir_hash is embedded in ProofArtifact by the flow verifier.
         flow::flow_verify_file_with_hashes(
-            program.legacy_body_file(crate::core::LegacyBodyConsumer::FlowVerifierCompatibility),
+            program
+                .legacy_body_file(crate::core::LegacyBodyConsumer::FlowVerifierCompatibility)
+                .as_ref(),
             source_hash,
             resolved_ir_hash,
         )
@@ -497,7 +499,9 @@ fn verify_ffi_checked_with_source_hash(
             .filter(|(name, _)| called_contract_names.contains(name))
             .collect::<std::collections::HashMap<_, _>>();
         flow::flow_verify_ffi_call_sites_with_externs_or_mock(
-            program.legacy_body_file(crate::core::LegacyBodyConsumer::FfiVerifierCompatibility),
+            program
+                .legacy_body_file(crate::core::LegacyBodyConsumer::FfiVerifierCompatibility)
+                .as_ref(),
             &contract_externs,
         )
     } else {
@@ -634,7 +638,9 @@ pub fn verify_checked_dual(
     let resolved_results = primary.verify_checked(program);
     // Secondary engine: flow/VIR (encodes surface AST bodies).
     let flow_results = flow::flow_verify_file_with_hashes(
-        program.legacy_body_file(crate::core::LegacyBodyConsumer::DualVerifierCompatibility),
+        program
+            .legacy_body_file(crate::core::LegacyBodyConsumer::DualVerifierCompatibility)
+            .as_ref(),
         source_hash,
         resolved_ir_hash,
     )?;

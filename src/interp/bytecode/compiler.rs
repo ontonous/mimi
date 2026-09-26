@@ -6540,6 +6540,24 @@ pub fn eval_comptime_block_bytecode(
     block: &Block,
     comptime_values: &HashMap<String, crate::interp::Value>,
 ) -> Result<crate::interp::Value, String> {
+    eval_comptime_block_bytecode_with_implicit_single(
+        file,
+        block,
+        comptime_values,
+        file.implicit_single,
+    )
+}
+
+/// Evaluate a comptime block while preserving a caller-specific progressive
+/// Typestate flag on the synthetic bytecode input. Codegen uses `false` here
+/// to retain the historical normalized comptime view while sharing the
+/// checker's immutable source File through an `Arc`.
+pub(crate) fn eval_comptime_block_bytecode_with_implicit_single(
+    file: &File,
+    block: &Block,
+    comptime_values: &HashMap<String, crate::interp::Value>,
+    implicit_single: bool,
+) -> Result<crate::interp::Value, String> {
     use crate::ast::{AstNodeMeta, AstOrigin};
     use crate::span::Span;
 
@@ -6548,7 +6566,12 @@ pub fn eval_comptime_block_bytecode(
     let resolved_block = resolve_quote_interpolations(block);
 
     // Build a synthetic file: original items + a wrapper function.
-    let mut synth = file.clone();
+    let mut synth = File {
+        sources: file.sources.clone(),
+        imports: file.imports.clone(),
+        items: file.items.clone(),
+        implicit_single,
+    };
     // Unique wrapper name: nested evaluations (ast_eval inside a comptime
     // fold) reuse the caller's file, which may already contain a
     // `__comptime_eval` wrapper. A duplicate name would make
@@ -6607,7 +6630,7 @@ pub fn eval_comptime_block_bytecode(
                 sources: file.sources.clone(),
                 imports: Vec::new(),
                 items: Vec::new(),
-                implicit_single: file.implicit_single,
+                implicit_single,
             };
             for item in &file.items {
                 match item {
@@ -6660,8 +6683,22 @@ pub fn eval_expr_bytecode(
     expr: &Expr,
     comptime_values: &HashMap<String, crate::interp::Value>,
 ) -> Result<crate::interp::Value, String> {
+    eval_expr_bytecode_with_implicit_single(file, expr, comptime_values, file.implicit_single)
+}
+
+pub(crate) fn eval_expr_bytecode_with_implicit_single(
+    file: &File,
+    expr: &Expr,
+    comptime_values: &HashMap<String, crate::interp::Value>,
+    implicit_single: bool,
+) -> Result<crate::interp::Value, String> {
     let block: Block = vec![Stmt::Expr(expr.clone()).into()];
-    eval_comptime_block_bytecode(file, &block, comptime_values)
+    eval_comptime_block_bytecode_with_implicit_single(
+        file,
+        &block,
+        comptime_values,
+        implicit_single,
+    )
 }
 
 /// Convert a runtime Value back to a const Expr for injection as a top-level constant.

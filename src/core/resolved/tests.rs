@@ -116,7 +116,8 @@ fn resolved_lowering_reads_source_provenance_from_checker_registry() {
     // The checker-owned registry is retained independently from the legacy
     // surface File. Poisoning the legacy copy must not affect Resolved/MIR
     // lowering's stable NodeId construction.
-    program.legacy_file.sources = crate::span::SourceRegistry::default();
+    std::sync::Arc::make_mut(&mut program.legacy_file).sources =
+        crate::span::SourceRegistry::default();
 
     let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("MIR lowering uses CheckedProgram source provenance");
@@ -160,7 +161,9 @@ fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
 fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
     let file = parse("func main() -> i32 { 42 }");
     let mut program = crate::core::check_program(&file).expect("check");
-    program.legacy_file.items.clear();
+    std::sync::Arc::make_mut(&mut program.legacy_file)
+        .items
+        .clear();
     assert!(program.legacy_file.items.is_empty());
 
     CheckedProgram::reset_test_legacy_body_access();
@@ -182,7 +185,9 @@ fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
 fn checked_directory_constructor_does_not_access_legacy_body() {
     let mut program =
         crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
-    program.legacy_file.items.clear();
+    std::sync::Arc::make_mut(&mut program.legacy_file)
+        .items
+        .clear();
     CheckedProgram::reset_test_legacy_body_access();
     let _interpreter = crate::interp::Interpreter::from_checked(&program);
     assert!(CheckedProgram::test_legacy_body_access().is_empty());

@@ -1778,12 +1778,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         };
-        let result = crate::interp::bytecode::compiler::eval_comptime_block_bytecode(
-            file_rc.as_ref(),
-            block,
-            &self.comptime_values,
-        )
-        .map_err(|e| CompileError::Generic(format!("comptime block fold failed: {}", e)))?;
+        let result =
+            crate::interp::bytecode::compiler::eval_comptime_block_bytecode_with_implicit_single(
+                file_rc.as_ref(),
+                block,
+                &self.comptime_values,
+                false,
+            )
+            .map_err(|e| CompileError::Generic(format!("comptime block fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)
     }
 
@@ -1902,19 +1904,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         // Use bytecode VM to evaluate the quote! block (0.33 Phase F).
-        let result = crate::interp::bytecode::compiler::eval_comptime_block_bytecode(
-            file_rc.as_ref(),
-            block,
-            &self.comptime_values,
-        )
-        .map_err(|e| {
-            CompileError::Generic(format!(
-                "quote! block fold failed: {} \
+        let result =
+            crate::interp::bytecode::compiler::eval_comptime_block_bytecode_with_implicit_single(
+                file_rc.as_ref(),
+                block,
+                &self.comptime_values,
+                false,
+            )
+            .map_err(|e| {
+                CompileError::Generic(format!(
+                    "quote! block fold failed: {} \
                  (if all variables are comptime-known, refactor to \
                   `comptime {{ ... }}` so the value can be folded directly)",
-                e
-            ))
-        })?;
+                    e
+                ))
+            })?;
         self.value_to_llvm_const(&result)
     }
 
@@ -1937,10 +1941,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         // Use bytecode VM to evaluate the $() interpolation (0.33 Phase F).
-        let result = crate::interp::bytecode::compiler::eval_expr_bytecode(
+        let result = crate::interp::bytecode::compiler::eval_expr_bytecode_with_implicit_single(
             file_rc.as_ref(),
             inner,
             &self.comptime_values,
+            false,
         )
         .map_err(|e| CompileError::Generic(format!("$() interpolation fold failed: {}", e)))?;
         self.value_to_llvm_const(&result)

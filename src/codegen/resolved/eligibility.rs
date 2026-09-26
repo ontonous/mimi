@@ -584,6 +584,13 @@ fn require_resolved_native_callable_with_source(
     entry_source: Option<crate::span::SourceId>,
     verify_contracts: bool,
 ) -> Result<(), UnsupportedResolvedNode> {
+    if tail_comptime_calls_comptime_function(program, &callable.body.root) {
+        return Err(UnsupportedResolvedNode::new(
+            &callable.owner,
+            &callable.body.root.node_id,
+            "tail comptime call to comptime function requires compatibility folding",
+        ));
+    }
     // 0.34.41 (AF-4 前置 2①): contracts enter the resolved slice.
     // 第一档: verify_contracts=false (default) admits them via erasure — the
     // Contract arm is a no-op, exactly matching legacy's default erasure.
@@ -614,6 +621,32 @@ fn require_resolved_native_callable_with_source(
         entry_source,
         &callable.body.locals,
     )
+}
+
+/// A direct-return comptime block that calls an omitted `comptime func` needs
+/// the compatibility codegen's constant-fold setup. The resolved emitter
+/// supports comptime blocks generally, but this precise tail shape otherwise
+/// tries to emit a runtime call to a comptime function that has no native body.
+fn tail_comptime_calls_comptime_function(program: &CheckedProgram, root: &ResolvedBlock) -> bool {
+    let Some(tail) = root.result.as_deref() else {
+        return false;
+    };
+    let ResolvedExprKind::Comptime(block) = &tail.kind else {
+        return false;
+    };
+    let Some(result) = block.result.as_deref() else {
+        return false;
+    };
+    let ResolvedExprKind::Call(call) = &result.kind else {
+        return false;
+    };
+    let ResolvedCallee::Function(callee) = &call.callee else {
+        return false;
+    };
+    program
+        .functions()
+        .get(callee)
+        .is_some_and(|function| function.is_comptime)
 }
 
 fn require_scalar_type(

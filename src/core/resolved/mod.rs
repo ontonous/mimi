@@ -7,6 +7,7 @@ use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// The only callers that may still access the retained surface body file.
 ///
@@ -696,7 +697,7 @@ pub struct CheckedProgram {
     /// This field is removed together with the final raw-AST consumer; that
     /// migration is tracked in 0.31.8–0.31.16 (Flow core phase), NOT v0.31.5
     /// — see CHANGELOG v0.31.6 and `devdocs/v0.31/01-foundation.md:27`.
-    legacy_file: File,
+    legacy_file: Arc<File>,
     /// Whether the checked source was assembled from one or more imports.
     /// This is a typed route fact used by migration gates; consumers must not
     /// inspect `legacy_file` merely to rediscover module composition.
@@ -1343,7 +1344,7 @@ impl CheckedProgram {
             return Err(errors);
         }
         Ok(Self {
-            legacy_file: legacy_file_clone,
+            legacy_file: Arc::new(legacy_file_clone),
             has_imports: !file.imports.is_empty(),
             source_registry: file.sources.clone(),
             items,
@@ -1425,10 +1426,10 @@ impl CheckedProgram {
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow().clone())
     }
 
-    pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> &File {
+    pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> Arc<File> {
         #[cfg(test)]
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(_consumer));
-        &self.legacy_file
+        Arc::clone(&self.legacy_file)
     }
 
     /// Whether this checked program contains imported modules.  Migration

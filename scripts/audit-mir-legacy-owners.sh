@@ -373,20 +373,20 @@ direct_legacy_file_reads_are_owner_only() {
     obsolete_metadata_reads="$(printf '%s\n' "$reads" | rg \
         'src/core/resolved/mod\.rs:[0-9]+: *let ids = NodeIdBuilder::new\(&program\.legacy_file\.sources\);' || true)"
     owner_accessor_reads="$(printf '%s\n' "$reads" | rg \
-        'src/core/resolved/mod\.rs:[0-9]+: *&self\.legacy_file$' || true)"
+        'src/core/resolved/mod\.rs:[0-9]+: *Arc::clone\(&self\.legacy_file\)$' || true)"
     accessor_context="$(sed -n \
         '/pub(crate) fn legacy_body_file(/,/pub(crate) fn has_imports(/p' \
         "$ROOT_DIR/src/core/resolved/mod.rs")"
     if [ -n "$obsolete_metadata_reads" ] ||
         [ "$(printf '%s\n' "$owner_accessor_reads" | rg -c . || true)" -ne 1 ] ||
-        [ "$(printf '%s\n' "$accessor_context" | rg -F -c '&self.legacy_file' || true)" -ne 1 ]; then
+        [ "$(printf '%s\n' "$accessor_context" | rg -F -c 'Arc::clone(&self.legacy_file)' || true)" -ne 1 ]; then
         printf 'owner_audit_error=legacy_file_whitelist_shape_changed\n' >&2
         audit_failed=1
         return
     fi
 
     unapproved="$(printf '%s\n' "$reads" | rg -v \
-        'src/core/resolved/mod\.rs:[0-9]+: *&self\.legacy_file$' || true)"
+        'src/core/resolved/mod\.rs:[0-9]+: *Arc::clone\(&self\.legacy_file\)$' || true)"
     if [ -n "$unapproved" ]; then
         printf 'owner_audit_error=unowned_direct_legacy_file_access\n%s\n' \
             "$unapproved" >&2

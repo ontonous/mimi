@@ -336,6 +336,62 @@ fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
 }
 
 #[test]
+fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
+    let source = r#"
+        comptime func forty_two() -> i32 { 42 }
+        func main() -> i32 { comptime { forty_two() } }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    assert!(file.implicit_single);
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "shared_progressive_comptime");
+    codegen
+        .compile_checked(&program)
+        .expect("direct codegen should route comptime functions through compatibility setup");
+    let codegen_file = codegen
+        .comptime_file
+        .as_ref()
+        .expect("legacy codegen should retain its comptime input");
+
+    let checker_file =
+        program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder);
+    assert!(checker_file.implicit_single);
+    assert!(
+        std::sync::Arc::ptr_eq(codegen_file, &checker_file),
+        "Codegen should share the immutable checked AST allocation"
+    );
+    assert!(
+        codegen
+            .module
+            .get_function("main")
+            .is_some_and(|function| function.count_basic_blocks() > 0),
+        "progressive main should still be emitted"
+    );
+    assert!(
+        codegen
+            .module
+            .print_to_string()
+            .to_string()
+            .contains("ret i32 42"),
+        "comptime fold should keep its codegen-normalized evaluation context"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![
+            crate::core::LegacyBodyConsumer::CodegenLegacyRemainder,
+            crate::core::LegacyBodyConsumer::CodegenLegacyRemainder,
+        ],
+        "the test's pointer comparison may only cross the same tagged owner"
+    );
+}
+
+#[test]
 fn compile_checked_routes_scalar_generic_identity_without_legacy_access() {
     let source = r#"
         func identity<T>(value: T) -> T { value }
