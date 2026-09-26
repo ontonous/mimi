@@ -125,6 +125,11 @@ fn is_admissible_nested_target(
     let Some(owner_tail) = target.owner.0.strip_prefix(&prefix) else {
         return false;
     };
+    // Unit is admitted as an extern result ABI, but this receipt also
+    // certifies a local MIR call result. The native emitter represents Unit
+    // as LLVM void and has no BasicValue to bind; this scope receipt does not
+    // yet prove that every Unit call result is unused. Keep the whole helper
+    // result shape closed until that no-value use proof is part of the receipt.
     if owner_tail.is_empty()
         || owner_tail.contains('/')
         || target.owner != target.signature.owner
@@ -136,7 +141,7 @@ fn is_admissible_nested_target(
         || target.signature.parameters.iter().any(|parameter| {
             parameter.has_default || !is_checker_scalar(program, &parameter.ty, false)
         })
-        || !is_checker_scalar(program, &target.signature.result, true)
+        || !is_checker_scalar(program, &target.signature.result, false)
         || !program
             .call_sites()
             .values()
@@ -355,9 +360,12 @@ pub(crate) fn validate_nested_callable_scope_receipts(
                 ));
             }
         }
-        if !is_canonical_scalar(type_catalog, &receipt.result_type, true) {
+        // Validate this independently from checker plan construction so a
+        // forged Unit-result scope receipt cannot bypass the native no-value
+        // boundary described in `is_admissible_nested_target`.
+        if !is_canonical_scalar(type_catalog, &receipt.result_type, false) {
             errors.push(format!(
-                "nested callable '{}' has a non-scalar result TypeDesc '{}'",
+                "nested callable '{}' result TypeDesc '{}' is outside the native nested-call value ABI",
                 receipt.callee.0,
                 receipt.result_type.as_str()
             ));
@@ -662,6 +670,135 @@ mod tests {
             .is_empty());
         let error = MirProgram::from_checked_program(&program)
             .expect_err("a pure nested helper does not gain general MIR admission");
+        assert!(
+            format!("{error}").contains("outside the canonical root-scope MIR slice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_nested_helpers_cover_each_closed_scalar_ffi_signature() {
+        let cases = [
+            ("i32", "i32", "i32", "i32", "1"),
+            ("i64", "i64", "i64", "i64", "2 as i64"),
+            ("bool", "bool", "bool", "bool", "true"),
+            ("f32", "f32", "f32", "f32", "3.0 as f32"),
+            ("f64", "f64", "f64", "f64", "4.0 as f64"),
+            ("unit", "i32", "unit", "i32", "5"),
+        ];
+        let mut source = String::from("extern \"C\" {\n");
+        for (name, parameter, extern_result, _, _) in cases {
+            if extern_result == "unit" {
+                source.push_str(&format!(
+                    "    func ffi_nested_{name}(value: {parameter});\n"
+                ));
+            } else {
+                source.push_str(&format!(
+                    "    func ffi_nested_{name}(value: {parameter}) -> {extern_result};\n"
+                ));
+            }
+        }
+        source.push_str("}\nfunc main() -> i32 {\n");
+        for (name, parameter, extern_result, helper_result, argument) in cases {
+            if extern_result == "unit" {
+                source.push_str(&format!("    func helper_{name}(value: {parameter}) -> {helper_result} {{\n        ffi_nested_{name}(value)\n        value\n    }}\n"));
+            } else {
+                source.push_str(&format!(
+                    "    func helper_{name}(value: {parameter}) -> {helper_result} {{ ffi_nested_{name}(value) }}\n"
+                ));
+            }
+            source.push_str(&format!(
+                "    let result_{name} = helper_{name}({argument})\n"
+            ));
+        }
+        source.push_str("    result_i32\n}\n");
+
+        let program = checked(&source);
+        let mir = MirProgram::from_checked_program(&program)
+            .expect("all declared scalar ABI shapes should admit nested scope receipts");
+        assert_eq!(mir.nested_callable_scopes().len(), cases.len());
+        assert_eq!(mir.ffi_calls().len(), cases.len());
+
+        for (name, parameter, extern_result, helper_result, _) in cases {
+            let receipt = mir
+                .nested_callable_scopes()
+                .values()
+                .find(|receipt| {
+                    receipt
+                        .callee
+                        .0
+                        .contains(&format!("/function:helper_{name}:"))
+                })
+                .expect("checker scope receipt for generated scalar signature");
+            assert_eq!(receipt.parameter_types.len(), 1, "{name}");
+            assert_eq!(receipt.call_instructions.len(), 1, "{name}");
+            assert_eq!(
+                mir.type_catalog()
+                    .get(&receipt.parameter_types[0])
+                    .expect("parameter TypeDesc")
+                    .abi
+                    .canonical_text(),
+                parameter,
+                "{name} parameter ABI"
+            );
+            assert_eq!(
+                mir.type_catalog()
+                    .get(&receipt.result_type)
+                    .expect("result TypeDesc")
+                    .abi
+                    .canonical_text(),
+                helper_result,
+                "{name} helper result ABI"
+            );
+            let ffi = mir
+                .ffi_calls()
+                .values()
+                .find(|call| call.caller == receipt.callee)
+                .expect("checker-owned nested FFI receipt");
+            assert_eq!(
+                mir.type_catalog()
+                    .get(&ffi.result_type)
+                    .expect("extern result TypeDesc")
+                    .abi
+                    .canonical_text(),
+                extern_result,
+                "{name} extern result ABI"
+            );
+        }
+
+        let bytecode = crate::interp::bytecode::mir::compile_mir_program(&mir)
+            .expect("AST-free bytecode must preserve every generated scalar descriptor");
+        assert!(bytecode.ast.is_none());
+        assert_eq!(bytecode.canonical_ffi.len(), cases.len());
+        assert_eq!(bytecode.canonical_ffi_bindings.len(), cases.len());
+
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "nested_ffi_abi_matrix");
+        codegen
+            .compile_mir_native(&mir)
+            .expect("native MIR must lower every generated scalar helper signature");
+        codegen
+            .module
+            .verify()
+            .expect("generated scalar nested FFI module should be valid LLVM");
+    }
+
+    #[test]
+    fn unit_result_nested_helper_stays_outside_the_native_receipt_slice() {
+        let program = checked(
+            r#"
+                extern "C" { func notify(value: i32); }
+                func main() {
+                    func helper(value: i32) { notify(value) }
+                    let done = helper(1)
+                }
+            "#,
+        );
+        assert!(checked_nested_callable_scope_plan(&program, None)
+            .declarations
+            .is_empty());
+        let error = MirProgram::from_checked_program(&program)
+            .expect_err("unit-valued nested helper binding has no native value ABI");
         assert!(
             format!("{error}").contains("outside the canonical root-scope MIR slice"),
             "{error}"

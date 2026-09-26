@@ -2053,6 +2053,30 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_nested_unit_result_helper_rejects_without_legacy_fallback() {
+        let source = r#"
+            extern "C" { func notify(value: i32); }
+            func main() {
+                func helper(value: i32) { notify(value) }
+                let done = helper(1)
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "the nested unit-result extern call remains within FFI candidate classification"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("unsupported unit-valued nested binding must fail before compatibility");
+        };
+        assert!(
+            reason.contains("outside the canonical root-scope MIR slice"),
+            "{reason}"
+        );
+        assert!(!reason.contains("legacy"), "{reason}");
+    }
+
+    #[test]
     fn scalar_ffi_nested_recursive_call_graph_is_rejected_without_legacy() {
         let source = r#"
             extern "C" { func llabs(value: i64) -> i64; }
