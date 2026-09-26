@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
-    Arc,
+    Arc, Weak,
 };
 
 static NEXT_ANY_OWNER_TABLE_ID: AtomicU64 = AtomicU64::new(1);
@@ -165,11 +165,22 @@ struct AnyHandle {
     descriptor: DescriptorId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MapRootId {
+    table_id: u64,
+    slot: u32,
+    generation: u32,
+}
+
+type MapRootRetireObserver = Arc<dyn Fn(MapRootId) + Send + Sync>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum OwnerError {
     InvalidHandle,
+    InvalidRoot,
     WrongTable,
     StaleHandle,
+    StaleRoot,
     UnknownDescriptor,
     StaleDescriptor,
     DescriptorMismatch,
@@ -195,6 +206,18 @@ struct OwnerState {
     known_descriptor_slots: std::collections::BTreeSet<u32>,
     current_descriptors: BTreeMap<u32, Arc<DescriptorVersion>>,
     slots: Vec<OwnerSlot>,
+    free: Vec<u32>,
+    max_slots: usize,
+}
+
+struct MapRootSlot {
+    generation: u32,
+    root: Option<Weak<OwnedMapRoot>>,
+    retired: bool,
+}
+
+struct MapRootState {
+    slots: Vec<MapRootSlot>,
     free: Vec<u32>,
     max_slots: usize,
 }
@@ -369,6 +392,7 @@ impl OwnerState {
 struct AnyOwnerTable {
     table_id: u64,
     state: std::sync::Mutex<OwnerState>,
+    map_roots: std::sync::Mutex<MapRootState>,
 }
 
 impl AnyOwnerTable {
@@ -400,7 +424,148 @@ impl AnyOwnerTable {
                 free: Vec::new(),
                 max_slots: max_slots.min(u32::MAX as usize),
             }),
+            map_roots: std::sync::Mutex::new(MapRootState {
+                slots: Vec::new(),
+                free: Vec::new(),
+                max_slots: 1024,
+            }),
         }
+    }
+
+    fn create_map_root(
+        self: &Arc<Self>,
+        entries: BTreeMap<Arc<str>, AnyHandle>,
+    ) -> Result<Arc<OwnedMapRoot>, OwnerError> {
+        self.create_map_root_inner(entries, None)
+    }
+
+    #[cfg(test)]
+    fn create_map_root_with_retire_observer_for_test(
+        self: &Arc<Self>,
+        entries: BTreeMap<Arc<str>, AnyHandle>,
+        observer: MapRootRetireObserver,
+    ) -> Result<Arc<OwnedMapRoot>, OwnerError> {
+        self.create_map_root_inner(entries, Some(observer))
+    }
+
+    fn create_map_root_inner(
+        self: &Arc<Self>,
+        entries: BTreeMap<Arc<str>, AnyHandle>,
+        retire_observer: Option<MapRootRetireObserver>,
+    ) -> Result<Arc<OwnedMapRoot>, OwnerError> {
+        for handle in entries.values() {
+            self.validate_handle(*handle)?;
+        }
+        let mut roots = self.map_roots.lock().map_err(|_| OwnerError::Poisoned)?;
+        let index = if let Some(index) = roots.free.pop() {
+            let index = index as usize;
+            if index >= roots.slots.len() {
+                return Err(OwnerError::Capacity);
+            }
+            index
+        } else {
+            if roots.slots.len() >= roots.max_slots {
+                return Err(OwnerError::Capacity);
+            }
+            let index = roots.slots.len();
+            roots.slots.push(MapRootSlot {
+                generation: 1,
+                root: None,
+                retired: false,
+            });
+            index
+        };
+        let (generation, unavailable) = {
+            let slot = &roots.slots[index];
+            (slot.generation, slot.retired || slot.root.is_some())
+        };
+        if unavailable {
+            roots.slots[index].retired = true;
+            roots
+                .free
+                .retain(|free_index| *free_index as usize != index);
+            return Err(OwnerError::Capacity);
+        }
+        let identity = MapRootId {
+            table_id: self.table_id,
+            slot: index as u32,
+            generation,
+        };
+        let root = Arc::new(OwnedMapRoot {
+            identity,
+            owners: self.clone(),
+            entries,
+            retire_observer,
+        });
+        roots.slots[index].root = Some(Arc::downgrade(&root));
+        Ok(root)
+    }
+
+    fn resolve_map_root(&self, identity: MapRootId) -> Result<Arc<OwnedMapRoot>, OwnerError> {
+        if identity.table_id != self.table_id {
+            return Err(OwnerError::WrongTable);
+        }
+        let roots = self.map_roots.lock().map_err(|_| OwnerError::Poisoned)?;
+        let slot = roots
+            .slots
+            .get(identity.slot as usize)
+            .ok_or(OwnerError::InvalidRoot)?;
+        if slot.generation != identity.generation {
+            return Err(OwnerError::StaleRoot);
+        }
+        let root = slot
+            .root
+            .as_ref()
+            .ok_or(OwnerError::StaleRoot)?
+            .upgrade()
+            .ok_or(OwnerError::StaleRoot)?;
+        if root.identity != identity {
+            return Err(OwnerError::StaleRoot);
+        }
+        Ok(root)
+    }
+
+    fn live_map_root_count(&self) -> Result<usize, OwnerError> {
+        let roots = self.map_roots.lock().map_err(|_| OwnerError::Poisoned)?;
+        Ok(roots
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.root
+                    .as_ref()
+                    .is_some_and(|root| root.strong_count() > 0)
+            })
+            .count())
+    }
+
+    fn retire_map_root(&self, identity: MapRootId) {
+        if identity.table_id != self.table_id {
+            return;
+        }
+        let retired_weak = {
+            let mut roots = self
+                .map_roots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(slot) = roots.slots.get_mut(identity.slot as usize) else {
+                return;
+            };
+            if slot.generation != identity.generation || slot.root.is_none() {
+                return;
+            }
+            let weak = slot.root.take();
+            let reusable = !slot.retired;
+            if let Some(next_generation) = slot.generation.checked_add(1) {
+                slot.generation = next_generation;
+                if reusable {
+                    roots.free.push(identity.slot);
+                }
+            } else {
+                slot.retired = true;
+            }
+            weak
+        };
+        drop(retired_weak);
     }
 
     fn allocate(&self, descriptor: DescriptorId, value: AnyValue) -> Result<AnyHandle, OwnerError> {
@@ -687,15 +852,48 @@ impl Drop for StagedOwnerTokens {
 }
 
 struct OwnedMapRoot {
+    identity: MapRootId,
     owners: Arc<AnyOwnerTable>,
     entries: BTreeMap<Arc<str>, AnyHandle>,
+    retire_observer: Option<MapRootRetireObserver>,
 }
 
 impl Drop for OwnedMapRoot {
     fn drop(&mut self) {
+        self.owners.retire_map_root(self.identity);
+        if let Some(observer) = &self.retire_observer {
+            observer(self.identity);
+        }
         for handle in self.entries.values() {
             let _ = self.owners.release(*handle);
         }
+    }
+}
+
+#[derive(Clone)]
+struct OwnedMapKeysSnapshot {
+    root: Arc<OwnedMapRoot>,
+    keys: Vec<Arc<str>>,
+}
+
+impl OwnedMapKeysSnapshot {
+    fn identity(&self) -> MapRootId {
+        self.root.identity
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    fn get_owned(&self, key: &str) -> Result<Option<AnyHandle>, OwnerError> {
+        let root = self.root.owners.resolve_map_root(self.root.identity)?;
+        if !Arc::ptr_eq(&root, &self.root) {
+            return Err(OwnerError::StaleRoot);
+        }
+        root.entries
+            .get(key)
+            .map(|handle| root.owners.retain(*handle))
+            .transpose()
     }
 }
 
@@ -710,10 +908,9 @@ struct OwnedPrototypeMap {
 impl OwnedPrototypeMap {
     fn empty(owners: Arc<AnyOwnerTable>) -> Self {
         Self {
-            root: Arc::new(OwnedMapRoot {
-                owners,
-                entries: BTreeMap::new(),
-            }),
+            root: owners
+                .create_map_root(BTreeMap::new())
+                .expect("fresh owner table can register its empty Map root"),
         }
     }
 
@@ -731,8 +928,27 @@ impl OwnedPrototypeMap {
             }
             owners.validate_handle(*handle)?;
         }
-        Ok(Self {
-            root: Arc::new(OwnedMapRoot { owners, entries }),
+        let root = owners.create_map_root(entries)?;
+        Ok(Self { root })
+    }
+
+    fn root_identity(&self) -> MapRootId {
+        self.root.identity
+    }
+
+    fn resolve_root(&self, identity: MapRootId) -> Result<Arc<OwnedMapRoot>, OwnerError> {
+        let root = self.root.owners.resolve_map_root(identity)?;
+        if !Arc::ptr_eq(&root, &self.root) {
+            return Err(OwnerError::StaleRoot);
+        }
+        Ok(root)
+    }
+
+    fn keys_snapshot(&self) -> Result<OwnedMapKeysSnapshot, OwnerError> {
+        let root = self.resolve_root(self.root_identity())?;
+        Ok(OwnedMapKeysSnapshot {
+            keys: root.entries.keys().cloned().collect(),
+            root,
         })
     }
 
@@ -743,24 +959,25 @@ impl OwnedPrototypeMap {
         expected: DescriptorId,
         failpoint: SetFailpoint,
     ) -> Result<Self, OwnerError> {
-        let incoming = self.root.owners.clone_value(input)?;
+        let root = self.resolve_root(self.root_identity())?;
+        let incoming = root.owners.clone_value(input)?;
         if input.descriptor != expected || incoming.descriptor.identity != expected {
             return Err(OwnerError::DescriptorMismatch);
         }
 
-        let mut staged = StagedOwnerTokens::new(self.root.owners.clone());
-        let input_owner = self.root.owners.retain(input)?;
+        let mut staged = StagedOwnerTokens::new(root.owners.clone());
+        let input_owner = root.owners.retain(input)?;
         staged.add(input_owner);
         if failpoint == SetFailpoint::AfterInputRetain {
             return Err(OwnerError::InjectedCommitFailure);
         }
 
         let mut entries = BTreeMap::new();
-        for (old_key, old_handle) in &self.root.entries {
+        for (old_key, old_handle) in &root.entries {
             if old_key.as_ref() == key {
                 continue;
             }
-            let retained = self.root.owners.retain(*old_handle)?;
+            let retained = root.owners.retain(*old_handle)?;
             staged.add(retained);
             entries.insert(old_key.clone(), retained);
         }
@@ -773,62 +990,58 @@ impl OwnedPrototypeMap {
             return Err(OwnerError::InjectedCommitFailure);
         }
 
-        let result = Self {
-            root: Arc::new(OwnedMapRoot {
-                owners: self.root.owners.clone(),
-                entries,
-            }),
-        };
+        let next_root = root.owners.create_map_root(entries)?;
         staged.commit();
-        Ok(result)
+        Ok(Self { root: next_root })
     }
 
     fn get_owned(&self, key: &str) -> Result<Option<AnyHandle>, OwnerError> {
-        self.root
-            .entries
+        let root = self.resolve_root(self.root_identity())?;
+        root.entries
             .get(key)
-            .map(|handle| self.root.owners.retain(*handle))
+            .map(|handle| root.owners.retain(*handle))
             .transpose()
     }
 
     fn values_owned(&self) -> Result<Vec<AnyHandle>, OwnerError> {
-        self.root
-            .owners
-            .retain_many(&self.root.entries.values().copied().collect::<Vec<_>>())
+        let root = self.resolve_root(self.root_identity())?;
+        root.owners
+            .retain_many(&root.entries.values().copied().collect::<Vec<_>>())
     }
 
     fn remove_snapshot(&self, key: &str) -> Result<Self, OwnerError> {
-        let retained = self
-            .root
+        let root = self.resolve_root(self.root_identity())?;
+        let retained = root
             .entries
             .iter()
             .filter(|(old_key, _)| old_key.as_ref() != key)
             .map(|(old_key, handle)| (old_key.clone(), *handle))
             .collect::<Vec<_>>();
-        let new_handles = self.root.owners.retain_many(
+        let new_handles = root.owners.retain_many(
             &retained
                 .iter()
                 .map(|(_, handle)| *handle)
                 .collect::<Vec<_>>(),
         )?;
-        let entries = retained
+        let entries: BTreeMap<Arc<str>, AnyHandle> = retained
             .into_iter()
             .zip(new_handles)
             .map(|((key, _), handle)| (key, handle))
             .collect();
-        Ok(Self {
-            root: Arc::new(OwnedMapRoot {
-                owners: self.root.owners.clone(),
-                entries,
-            }),
-        })
+        let mut staged = StagedOwnerTokens::new(root.owners.clone());
+        for handle in entries.values() {
+            staged.add(*handle);
+        }
+        let next_root = root.owners.create_map_root(entries)?;
+        staged.commit();
+        Ok(Self { root: next_root })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnyHandle, AnyOwnerTable, AnyStringOwner, AnyValue, DescriptorId, DropProbe,
+        AnyHandle, AnyOwnerTable, AnyStringOwner, AnyValue, DescriptorId, DropProbe, MapRootId,
         OwnedAggregate, OwnedPrototypeMap, OwnerError, PrototypeMap, SetFailpoint, ValueShape,
     };
     use std::collections::BTreeMap;
@@ -1031,6 +1244,335 @@ mod tests {
             .expect("release second table token");
         assert_eq!(first_table.live_count(), Ok(0));
         assert_eq!(second_table.live_count(), Ok(0));
+    }
+
+    #[test]
+    fn map_root_identity_is_versioned_scoped_and_key_snapshot_bound() {
+        let string_probe = DropProbe::default();
+        let owners = Arc::new(AnyOwnerTable::with_capacity(12));
+        let other_owners = Arc::new(AnyOwnerTable::with_capacity(2));
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        let empty_id = empty.root_identity();
+        let other_empty = OwnedPrototypeMap::empty(other_owners.clone());
+        let other_id = other_empty.root_identity();
+        assert_eq!(empty_id.slot, other_id.slot);
+        assert_eq!(empty_id.generation, other_id.generation);
+        assert_ne!(empty_id.table_id, other_id.table_id);
+        assert_eq!(
+            owners.resolve_map_root(other_id).map(|_| ()),
+            Err(OwnerError::WrongTable)
+        );
+
+        let zero_seed = owners
+            .allocate(DescriptorId::I64, AnyValue::I64(0))
+            .expect("zero seed fits");
+        let map_a = empty
+            .set_transactional("k", zero_seed, DescriptorId::I64, SetFailpoint::None)
+            .expect("Map A contains typed zero");
+        owners.release(zero_seed).expect("release zero seed");
+        let id_a = map_a.root_identity();
+        assert_ne!(id_a, empty_id);
+        let clone_a = map_a.clone();
+        assert_eq!(clone_a.root_identity(), id_a);
+        let keys_a = map_a.keys_snapshot().expect("snapshot captures root A");
+        assert_eq!(keys_a.identity(), id_a);
+        assert_eq!(keys_a.keys(), vec!["k".to_string()]);
+        let get_a = keys_a
+            .get_owned("k")
+            .expect("snapshot lookup uses root A")
+            .expect("root A contains k");
+        let values_a = map_a.values_owned().expect("retain root A values");
+        assert_eq!(values_a.len(), 1);
+
+        let string_seed = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("new", string_probe.clone())),
+            )
+            .expect("replacement seed fits");
+        let map_b = map_a
+            .set_transactional("k", string_seed, DescriptorId::STRING, SetFailpoint::None)
+            .expect("overwrite publishes root B");
+        owners.release(string_seed).expect("release string seed");
+        let id_b = map_b.root_identity();
+        assert_eq!(
+            map_a.resolve_root(id_b).map(|_| ()),
+            Err(OwnerError::StaleRoot),
+            "a valid root from the same owner table cannot be substituted for this Map"
+        );
+        let keys_b = map_b.keys_snapshot().expect("snapshot captures root B");
+        let get_b = keys_b
+            .get_owned("k")
+            .expect("snapshot lookup uses root B")
+            .expect("root B contains k");
+        let map_c = map_b.remove_snapshot("k").expect("remove publishes root C");
+        let id_c = map_c.root_identity();
+        assert_ne!(id_a, id_b);
+        assert_ne!(id_b, id_c);
+        assert_eq!(
+            owners.read_i64(get_a, DescriptorId::I64),
+            Ok(0),
+            "root A key snapshot remains tied to its old entry"
+        );
+        assert_eq!(
+            owners.read_string(get_b, DescriptorId::STRING),
+            Ok("new".into())
+        );
+        assert_eq!(map_c.get_owned("k"), Ok(None));
+        assert!(owners.resolve_map_root(id_a).is_ok());
+        assert!(owners.resolve_map_root(id_b).is_ok());
+        assert!(owners.resolve_map_root(id_c).is_ok());
+        assert_eq!(
+            owners
+                .resolve_map_root(MapRootId {
+                    generation: id_a.generation + 1,
+                    ..id_a
+                })
+                .map(|_| ()),
+            Err(OwnerError::StaleRoot)
+        );
+        assert_eq!(
+            owners
+                .resolve_map_root(MapRootId {
+                    slot: u32::MAX,
+                    ..id_a
+                })
+                .map(|_| ()),
+            Err(OwnerError::InvalidRoot)
+        );
+
+        drop(empty);
+        drop(map_a);
+        drop(clone_a);
+        assert!(owners.resolve_map_root(id_a).is_ok());
+        assert_eq!(
+            owners.read_i64(values_a[0], DescriptorId::I64),
+            Ok(0),
+            "independent value tokens outlive root A"
+        );
+        drop(keys_a);
+        assert_eq!(
+            owners.resolve_map_root(id_a).map(|_| ()),
+            Err(OwnerError::StaleRoot)
+        );
+        let map_d = OwnedPrototypeMap::empty(owners.clone());
+        let id_d = map_d.root_identity();
+        assert_eq!(id_d.slot, id_a.slot);
+        assert_eq!(id_d.generation, id_a.generation + 1);
+        assert_eq!(
+            owners.resolve_map_root(id_a).map(|_| ()),
+            Err(OwnerError::StaleRoot),
+            "slot reuse cannot revive the old root id"
+        );
+        assert_eq!(owners.live_map_root_count(), Ok(3));
+
+        owners.release(get_a).expect("release root A get snapshot");
+        owners
+            .release(values_a[0])
+            .expect("release root A values snapshot");
+        drop(map_b);
+        drop(keys_b);
+        drop(map_c);
+        drop(map_d);
+        drop(other_empty);
+        owners.release(get_b).expect("release root B get snapshot");
+        assert_eq!(string_probe.count(), 1);
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(owners.live_map_root_count(), Ok(0));
+    }
+
+    #[test]
+    fn map_root_generation_exhaustion_retires_without_wraparound() {
+        let owners = Arc::new(AnyOwnerTable::with_capacity(1));
+        {
+            let mut roots = owners.map_roots.lock().expect("root registry is healthy");
+            roots.max_slots = 1;
+            roots.slots.push(super::MapRootSlot {
+                generation: u32::MAX,
+                root: None,
+                retired: false,
+            });
+            roots.free.push(0);
+        }
+        let root = owners
+            .create_map_root(BTreeMap::new())
+            .expect("maximum-generation root registers");
+        let identity = root.identity;
+        assert!(owners.resolve_map_root(identity).is_ok());
+        drop(root);
+        assert_eq!(
+            owners.resolve_map_root(identity).map(|_| ()),
+            Err(OwnerError::StaleRoot)
+        );
+        assert_eq!(
+            owners.create_map_root(BTreeMap::new()).map(|_| ()),
+            Err(OwnerError::Capacity)
+        );
+    }
+
+    #[test]
+    fn map_root_retirement_invalidates_identity_before_releasing_entries() {
+        let owners = Arc::new(AnyOwnerTable::with_capacity(2));
+        let probe = DropProbe::default();
+        let entry = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("held by root", probe.clone())),
+            )
+            .expect("entry token fits");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer_owners = owners.clone();
+        let observer_results = observed.clone();
+        let root = owners
+            .create_map_root_with_retire_observer_for_test(
+                BTreeMap::from([(Arc::from("key"), entry)]),
+                Arc::new(move |identity| {
+                    let stale = observer_owners.resolve_map_root(identity).map(|_| ());
+                    let live_entries = observer_owners.live_count();
+                    observer_results
+                        .lock()
+                        .expect("observer results mutex is healthy")
+                        .push((stale, live_entries));
+                }),
+            )
+            .expect("root registers with test observer");
+        let identity = root.identity;
+        assert_eq!(owners.live_count(), Ok(1));
+        drop(root);
+
+        assert_eq!(
+            *observed.lock().expect("observer results mutex is healthy"),
+            vec![(Err(OwnerError::StaleRoot), Ok(1))],
+            "root identity is invalid before its entry owner is released"
+        );
+        assert_eq!(
+            owners.resolve_map_root(identity).map(|_| ()),
+            Err(OwnerError::StaleRoot)
+        );
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(probe.count(), 1);
+    }
+
+    #[test]
+    fn map_root_corrupt_free_list_entries_fail_closed_without_reusing_live_roots() {
+        let owners = Arc::new(AnyOwnerTable::with_capacity(1));
+        owners
+            .map_roots
+            .lock()
+            .expect("root registry is healthy")
+            .max_slots = 1;
+        let root = OwnedPrototypeMap::empty(owners.clone());
+        let identity = root.root_identity();
+
+        {
+            let mut roots = owners.map_roots.lock().expect("root registry is healthy");
+            roots.free.push(identity.slot);
+        }
+        assert_eq!(
+            owners.create_map_root(BTreeMap::new()).map(|_| ()),
+            Err(OwnerError::Capacity),
+            "an occupied slot in the free list must fail closed"
+        );
+        assert!(owners.resolve_map_root(identity).is_ok());
+        {
+            let roots = owners.map_roots.lock().expect("root registry is healthy");
+            assert!(roots.slots[identity.slot as usize].retired);
+            assert!(roots.free.is_empty());
+        }
+        drop(root);
+        assert_eq!(
+            owners.resolve_map_root(identity).map(|_| ()),
+            Err(OwnerError::StaleRoot)
+        );
+        assert_eq!(
+            owners.create_map_root(BTreeMap::new()).map(|_| ()),
+            Err(OwnerError::Capacity),
+            "a corrupt slot stays retired after the original root dies"
+        );
+
+        let other = Arc::new(AnyOwnerTable::with_capacity(2));
+        other
+            .map_roots
+            .lock()
+            .expect("second root registry is healthy")
+            .free
+            .push(u32::MAX);
+        assert_eq!(
+            other.create_map_root(BTreeMap::new()).map(|_| ()),
+            Err(OwnerError::Capacity),
+            "an out-of-range free-list index must fail closed rather than panic"
+        );
+        assert_eq!(
+            other
+                .create_map_root(BTreeMap::new())
+                .map(|root| root.identity.slot),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn map_root_capacity_failures_roll_back_set_and_remove_staging() {
+        let owners = Arc::new(AnyOwnerTable::with_capacity(8));
+        owners
+            .map_roots
+            .lock()
+            .expect("root registry is healthy")
+            .max_slots = 2;
+        let empty = OwnedPrototypeMap::empty(owners.clone());
+        let first_seed = owners
+            .allocate(DescriptorId::I64, AnyValue::I64(1))
+            .expect("first value fits");
+        let first = empty
+            .set_transactional("a", first_seed, DescriptorId::I64, SetFailpoint::None)
+            .expect("first root fits");
+        drop(empty);
+        owners.release(first_seed).expect("release first seed");
+
+        let second_seed = owners
+            .allocate(DescriptorId::I64, AnyValue::I64(2))
+            .expect("second value fits");
+        let base = first
+            .set_transactional("b", second_seed, DescriptorId::I64, SetFailpoint::None)
+            .expect("second root reuses retired empty-root slot");
+        owners.release(second_seed).expect("release second seed");
+        assert_eq!(owners.live_map_root_count(), Ok(2));
+
+        let input = owners
+            .allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("staged", DropProbe::default())),
+            )
+            .expect("replacement value fits");
+        let identity = base.root_identity();
+        let owner_count = owners.live_count().expect("owner table is healthy");
+        assert_eq!(
+            base.set_transactional("a", input, DescriptorId::STRING, SetFailpoint::None)
+                .map(|_| ()),
+            Err(OwnerError::Capacity)
+        );
+        assert_eq!(
+            base.remove_snapshot("a").map(|_| ()),
+            Err(OwnerError::Capacity)
+        );
+        assert_eq!(owners.live_count(), Ok(owner_count));
+        assert_eq!(owners.live_map_root_count(), Ok(2));
+        assert!(owners.resolve_map_root(identity).is_ok());
+        assert_eq!(
+            owners.read_i64(base.root.entries["a"], DescriptorId::I64),
+            Ok(1)
+        );
+        assert_eq!(
+            owners.read_i64(base.root.entries["b"], DescriptorId::I64),
+            Ok(2)
+        );
+
+        owners
+            .release(input)
+            .expect("release external replacement token");
+        drop(base);
+        drop(first);
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(owners.live_map_root_count(), Ok(0));
     }
 
     #[test]
@@ -1695,6 +2237,8 @@ mod tests {
             )
             .expect("incoming value fits");
         let initial_owners = owners.live_count().expect("table is healthy");
+        let base_identity = base.root_identity();
+        let initial_roots = owners.live_map_root_count().expect("root table is healthy");
         for failpoint in [
             SetFailpoint::AfterInputRetain,
             SetFailpoint::AfterEntryRetains,
@@ -1706,6 +2250,8 @@ mod tests {
                 Err(OwnerError::InjectedCommitFailure)
             );
             assert_eq!(owners.live_count(), Ok(initial_owners));
+            assert_eq!(owners.live_map_root_count(), Ok(initial_roots));
+            assert!(owners.resolve_map_root(base_identity).is_ok());
             assert_eq!(
                 owners.read_i64(base.root.entries["key"], DescriptorId::I64),
                 Ok(7)
