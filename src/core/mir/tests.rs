@@ -5832,6 +5832,31 @@ fn ownership_move_event_without_a_mir_transfer_is_rejected() {
 #[test]
 fn checker_loan_start_is_bound_to_mir_and_end_receipt_by_identity() {
     let (canonical, owner, function) = synthetic_loan_receipt_fixture();
+    let checker_function = canonical.functions().get(&owner).expect("checker MIR");
+    let checker_start = checker_function
+        .ownership
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut
+            )
+        })
+        .expect("checker borrow-start receipt");
+    let checker_loan = checker_start.loan.as_ref().expect("checker loan id");
+    assert!(!checker_function
+        .ownership
+        .events
+        .iter()
+        .any(|event| event.kind == MirOwnershipEventKind::BorrowEnd));
+    assert!(checker_function
+        .ownership
+        .checker_loans
+        .get(checker_loan)
+        .expect("independent checker loan contract")
+        .ends
+        .is_empty());
     let rebuilt = crate::core::mir::reference::MirProgram::with_type_catalog(
         BTreeMap::from([(owner.clone(), function.clone())]),
         canonical.type_catalog().clone(),
@@ -5927,6 +5952,23 @@ fn synthetic_loan_receipt_fixture() -> (crate::core::mir::reference::MirProgram,
     end.checker_block = Some(NodeId("synthetic/end-block".into()));
     end.checker_edge = Some(NodeId("synthetic/end-edge".into()));
     let mut function = function;
+    let loan = end.loan.clone().expect("loan identity");
+    function
+        .ownership
+        .checker_loans
+        .get_mut(&loan)
+        .expect("independent checker loan contract")
+        .ends
+        .push(super::MirCheckerLoanEndSite {
+            location: super::MirCheckerLoanLocation {
+                block: end.checker_block.clone().expect("checker block"),
+                point: end.point.clone(),
+                edge: end.checker_edge.clone(),
+            },
+            resource: end.resource.clone(),
+            value: end.value.clone(),
+            source: end.source.clone(),
+        });
     function.ownership.events.push(end);
     (canonical, owner, function)
 }
@@ -5955,6 +5997,17 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
             .contains("has no checker borrow-start receipt")
     }));
 
+    let mut missing_all_ends = original.clone();
+    missing_all_ends
+        .ownership
+        .events
+        .retain(|event| event.kind != MirOwnershipEventKind::BorrowEnd);
+    let errors = rebuild(missing_all_ends)
+        .expect_err("all checker-owned end sites must be represented in the event stream");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+
     let mut wrong_kind = original.clone();
     let start = wrong_kind
         .ownership
@@ -5964,6 +6017,40 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
         .expect("shared borrow receipt");
     start.kind = MirOwnershipEventKind::BorrowMut;
     let errors = rebuild(wrong_kind).expect_err("checker mutability must match the MIR op");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("no matching canonical MIR Borrow operation")
+    }));
+
+    let mut jointly_forged_place = original.clone();
+    let start = jointly_forged_place
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowShared)
+        .expect("shared borrow receipt");
+    start.resource = "forged/nonlocal-resource".into();
+    start.value = None;
+    start.source = Some("forged.source.place".into());
+    for instruction in jointly_forged_place
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        if let MirInstructionKind::Borrow {
+            checker_resource,
+            checker_source,
+            ..
+        } = &mut instruction.kind
+        {
+            *checker_resource = Some("forged/nonlocal-resource".into());
+            *checker_source = Some("forged.source.place".into());
+        }
+    }
+    let errors = rebuild(jointly_forged_place).expect_err(
+        "coordinated place-string edits must disagree with the private Checker contract",
+    );
     assert!(errors.iter().any(|error| {
         error
             .message
@@ -6079,6 +6166,35 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
         .message
         .contains("disagrees with its checker borrow start")));
 
+    let mut missing_end_source = original.clone();
+    let end = missing_end_source
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .expect("borrow-end receipt");
+    end.source = None;
+    let errors = rebuild(missing_end_source)
+        .expect_err("end source omission must disagree with the checker-owned expected site");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+
+    let mut forged_end_location = original.clone();
+    let end = forged_end_location
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+        .expect("borrow-end receipt");
+    end.checker_block = Some(NodeId("forged/nonexistent-block".into()));
+    end.checker_edge = Some(NodeId("forged/nonexistent-edge".into()));
+    let errors = rebuild(forged_end_location)
+        .expect_err("end CFG location must match the independent checker contract");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+
     let mut duplicate_end = original.clone();
     let end = duplicate_end
         .ownership
@@ -6110,6 +6226,85 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
             .message
             .contains("no matching canonical MIR Borrow operation")
     }));
+}
+
+#[test]
+fn checker_generated_borrow_end_sites_are_bound_at_public_function_validation() {
+    let checked = checked_program(
+        r#"
+func read(value: i32) -> i32 {
+    println(*(&value))
+    value
+}
+func main() -> i32 { read(7) }
+"#,
+    );
+    let owner = NodeId("function:read".into());
+    let analysis = checked
+        .resource_analysis(&owner)
+        .expect("checker resource analysis");
+    let end_actions = analysis
+        .actions
+        .iter()
+        .filter(|action| action.kind == crate::core::CanonicalActionKind::BorrowEnd)
+        .collect::<Vec<_>>();
+    assert!(
+        !end_actions.is_empty(),
+        "fixture must exercise checker-generated BorrowEnd actions"
+    );
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("checker end sites lower to canonical MIR receipts");
+    let function = program.functions().get(&owner).expect("read MIR function");
+    assert_eq!(
+        function
+            .ownership
+            .events
+            .iter()
+            .filter(|event| event.kind == MirOwnershipEventKind::BorrowEnd)
+            .count(),
+        end_actions.len()
+    );
+    for action in &end_actions {
+        let loan = action.loan.as_ref().expect("checker end loan");
+        let expected = super::MirCheckerLoanEndSite {
+            location: super::MirCheckerLoanLocation {
+                block: action.location.block.0.clone(),
+                point: action.location.point.clone(),
+                edge: action.location.edge.as_ref().map(|edge| edge.0.clone()),
+            },
+            resource: action.resource.0 .0.clone(),
+            value: action.resource.0 .0.ends_with("/local").then(|| {
+                crate::core::mir::MirValueId::new(format!("local:{}", action.resource.0 .0))
+                    .expect("derived local value ID")
+            }),
+            source: action.source.as_ref().map(|place| place.display()),
+        };
+        assert!(function.ownership.checker_loans[&loan.0]
+            .ends
+            .contains(&expected));
+        assert!(function.ownership.events.iter().any(|event| {
+            event.kind == MirOwnershipEventKind::BorrowEnd
+                && event.loan.as_ref() == Some(&loan.0)
+                && event.checker_block.as_ref() == Some(&expected.location.block)
+                && event.point == expected.location.point
+                && event.checker_edge == expected.location.edge
+                && event.resource == expected.resource
+                && event.value == expected.value
+                && event.source == expected.source
+        }));
+    }
+
+    let mut missing_end = function.clone();
+    missing_end
+        .ownership
+        .events
+        .retain(|event| event.kind != MirOwnershipEventKind::BorrowEnd);
+    let errors = missing_end
+        .validate()
+        .expect_err("public per-function validation rejects omitted checker end sites");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("borrow-end receipts do not match the checker-owned loan contract")));
 }
 
 #[test]

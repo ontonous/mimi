@@ -558,7 +558,6 @@ impl MirProgram {
                 &transitions,
             ));
             errors.extend(validate_borrow_usage(function));
-            errors.extend(super::validate_ownership_event_receipts(function));
             errors.extend(super::validate_call_effect_receipts(
                 function,
                 &type_catalog,

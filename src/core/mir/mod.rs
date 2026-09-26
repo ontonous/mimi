@@ -14,7 +14,7 @@ use crate::core::ir::{
     NominalTypeId, ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedTypeId,
     ResolvedUnaryOp,
 };
-use crate::core::{NodeId, ResolvedPlace};
+use crate::core::{NodeId, Place, ResolvedPlace};
 
 /// Return whether an extern symbol is safe to carry through the canonical
 /// MIR/receipt text and the line-oriented CLI manifest.  The frontend only
@@ -2416,12 +2416,52 @@ pub struct MirOwnershipEvent {
     pub checker_edge: Option<NodeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MirCheckerLoanLocation {
+    block: NodeId,
+    point: NodeId,
+    edge: Option<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MirCheckerLoanEndSite {
+    location: MirCheckerLoanLocation,
+    resource: String,
+    value: Option<MirValueId>,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MirCheckerLoanContract {
+    loan: NodeId,
+    mutable: bool,
+    resource: String,
+    value: Option<MirValueId>,
+    place: Place,
+    start: MirCheckerLoanLocation,
+    ends: Vec<MirCheckerLoanEndSite>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Checker ownership facts projected into canonical MIR.
+///
+/// Borrow contracts are intentionally private and are produced only from the
+/// checker's `ResourceAnalysis`. Public MIR builders may attach ordinary
+/// ownership events, but a borrow instruction without this checker evidence
+/// fails `MirFunction::validate` closed.
 pub struct MirOwnershipSummary {
     pub events: Vec<MirOwnershipEvent>,
+    /// Independent projection of Checker `ResourceAnalysis.loans/actions`.
+    /// Kept private so consumers can validate that the public event stream
+    /// was not selectively deleted or rewritten after checker lowering.
+    checker_loans: BTreeMap<NodeId, MirCheckerLoanContract>,
 }
 
 impl MirOwnershipSummary {
+    /// Validate identities and required metadata within this summary.
+    ///
+    /// A containing [`MirFunction`] must also be validated to bind this
+    /// summary to MIR operations and the private checker loan contracts.
     pub fn validate(&self) -> Result<(), Vec<MirValidationError>> {
         let mut errors = Vec::new();
         for (index, event) in self.events.iter().enumerate() {
@@ -2524,6 +2564,52 @@ impl MirOwnershipSummary {
                 });
             }
         }
+        for (loan_id, contract) in &self.checker_loans {
+            let subject = format!("loan[{}]", loan_id.0);
+            if loan_id != &contract.loan {
+                errors.push(MirValidationError {
+                    subject: subject.clone(),
+                    message: "checker loan contract key disagrees with its loan identity".into(),
+                });
+            }
+            if contract.resource.trim().is_empty()
+                || contract.start.block.0.trim().is_empty()
+                || contract.start.point.0.trim().is_empty()
+                || contract.start.edge.is_some()
+                || contract.place.display().trim().is_empty()
+                || contract.loan.0 != format!("{}/loan", contract.start.point.0)
+            {
+                errors.push(MirValidationError {
+                    subject: subject.clone(),
+                    message: "checker loan contract has an invalid borrow-start location or place"
+                        .into(),
+                });
+            }
+            let mut end_sites = BTreeSet::new();
+            for end in &contract.ends {
+                if end.location.block.0.trim().is_empty()
+                    || end.location.point.0.trim().is_empty()
+                    || end.resource != contract.resource
+                    || end.value != contract.value
+                    || end
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source != &contract.place.display())
+                {
+                    errors.push(MirValidationError {
+                        subject: subject.clone(),
+                        message: "checker loan contract contains an invalid borrow-end site".into(),
+                    });
+                }
+                if !end_sites.insert(end.clone()) {
+                    errors.push(MirValidationError {
+                        subject: subject.clone(),
+                        message: "checker loan contract contains a duplicate borrow-end site"
+                            .into(),
+                    });
+                }
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -2567,6 +2653,51 @@ impl MirOwnershipSummary {
                 loan_metadata
             );
         }
+        for (loan_id, contract) in &self.checker_loans {
+            let source = contract.place.display();
+            let value = contract
+                .value
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "_".into());
+            let _ = writeln!(
+                output,
+                "    checker_loan {} mutable={} resource={} value={} source={} start={}:{}",
+                loan_id.0,
+                contract.mutable,
+                contract.resource,
+                value,
+                source,
+                contract.start.block.0,
+                contract.start.point.0
+            );
+            let mut end_sites = contract.ends.clone();
+            end_sites.sort();
+            for (index, end) in end_sites.iter().enumerate() {
+                let end_source = end.source.as_deref().unwrap_or("_");
+                let end_value = end
+                    .value
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "_".into());
+                let edge = end
+                    .location
+                    .edge
+                    .as_ref()
+                    .map_or("_", |edge| edge.0.as_str());
+                let _ = writeln!(
+                    output,
+                    "    checker_loan_end {}[{index}] resource={} value={} source={} at={}:{} edge={}",
+                    loan_id.0,
+                    end.resource,
+                    end_value,
+                    end_source,
+                    end.location.block.0,
+                    end.location.point.0,
+                    edge
+                );
+            }
+        }
         output
     }
 }
@@ -2607,15 +2738,22 @@ impl MirValidationError {
 }
 
 impl MirFunction {
-    /// Validate identities, graph shape, and SSA-like value dominance without
-    /// depending on a backend. Kind/effect/ownership checks belong to later
-    /// MIR passes, but a value may never be read from a non-dominating path.
+    /// Validate identities, graph shape, checker receipts, and SSA-like value
+    /// dominance without depending on a backend. A value may never be read
+    /// from a non-dominating path, and checker ownership receipts must bind to
+    /// the canonical operations in this function.
     pub fn validate(&self) -> Result<(), Vec<MirValidationError>> {
         let mut validator = MirValidator::new(self);
         validator.check_function_header();
         validator.check_blocks();
         validator.check_ownership();
-        validator.finish()
+        let mut errors = validator.finish().err().unwrap_or_default();
+        errors.extend(validate_ownership_event_receipts(self));
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Deterministic, human-readable form for golden tests and differential
@@ -3615,15 +3753,24 @@ pub(crate) fn validate_move_owned_result_return_merge(
 /// ownership facts. Borrow starts are paired by their stable loan, point,
 /// mutability, checker resource, and source place; local resources also bind
 /// to the exact MIR value and explicit Clone/Copy ancestry. Borrow-end
-/// receipts are identity-paired, but this pass does not prove Checker-CFG to
-/// MIR-CFG path/timing equivalence or loan-end completeness.
+/// receipts must exactly match the checker-owned end-site set. This pass does
+/// not prove Checker-CFG to MIR-CFG path/timing equivalence.
 pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<MirValidationError> {
     let mut moves = BTreeSet::new();
     let mut drops = BTreeSet::new();
     let mut returns = BTreeSet::new();
     let mut transfers = BTreeSet::new();
-    let mut borrow_boundaries =
-        BTreeMap::<NodeId, (MirValueId, bool, NodeId, Option<String>, Option<String>)>::new();
+    let mut borrow_boundaries = BTreeMap::<
+        NodeId,
+        (
+            MirInstructionId,
+            MirValueId,
+            bool,
+            NodeId,
+            Option<String>,
+            Option<String>,
+        ),
+    >::new();
     let mut duplicate_borrow_boundaries = BTreeSet::<NodeId>::new();
     let mut invalid_borrow_boundary_ids = BTreeSet::<(NodeId, NodeId)>::new();
     // A checker borrow action names the stable local resource, while the
@@ -3737,6 +3884,7 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                         .insert(
                             loan.clone(),
                             (
+                                instruction.id.clone(),
                                 source.clone(),
                                 *mutable,
                                 point.clone(),
@@ -3848,7 +3996,7 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
     // this loan, without accepting an unrelated value that merely appears in
     // some other Borrow operation.
     let mut borrow_boundary_aliases = BTreeMap::<NodeId, BTreeSet<MirValueId>>::new();
-    for (loan, (source, _, _, _, _)) in &borrow_boundaries {
+    for (loan, (_, source, _, _, _, _)) in &borrow_boundaries {
         let aliases = borrow_boundary_aliases.entry(loan.clone()).or_default();
         aliases.insert(source.clone());
         let mut changed = true;
@@ -3866,6 +4014,7 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
     }
     let mut borrow_starts = BTreeMap::<NodeId, &MirOwnershipEvent>::new();
     let mut borrow_end_sites = BTreeSet::<(NodeId, NodeId, NodeId, Option<NodeId>)>::new();
+    let mut actual_checker_loan_ends = BTreeMap::<NodeId, Vec<MirCheckerLoanEndSite>>::new();
     for (index, event) in function.ownership.events.iter().enumerate() {
         if matches!(
             event.kind,
@@ -3882,6 +4031,31 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                     });
                 }
                 let expected_mutable = event.kind == MirOwnershipEventKind::BorrowMut;
+                if let Some((instruction_id, _, mutable, _, _, _)) = borrow_boundaries.get(loan) {
+                    if *mutable != expected_mutable {
+                        errors.push(MirValidationError {
+                            subject: instruction_id.to_string(),
+                            message: format!(
+                                "canonical MIR {} Borrow mutability does not match the checker loan contract",
+                                if *mutable { "mutable" } else { "shared" }
+                            ),
+                        });
+                    }
+                }
+                let checker_contract_matches = function
+                    .ownership
+                    .checker_loans
+                    .get(loan)
+                    .is_some_and(|contract| {
+                        contract.loan == *loan
+                            && contract.mutable == expected_mutable
+                            && contract.resource == event.resource
+                            && contract.value == event.value
+                            && event.source.as_deref() == Some(contract.place.display().as_str())
+                            && contract.start.point == event.point
+                            && Some(&contract.start.block) == event.checker_block.as_ref()
+                            && contract.start.edge == event.checker_edge
+                    });
                 let local_value_matches = match (&event.value, event.resource.ends_with("/local")) {
                     (Some(value), true) => {
                         value.as_str() == format!("local:{}", event.resource)
@@ -3893,11 +4067,12 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                     _ => false,
                 };
                 let boundary_matches = borrow_boundaries.get(loan).is_some_and(
-                    |(_, mutable, point, checker_resource, checker_source)| {
+                    |(_, _, mutable, point, checker_resource, checker_source)| {
                         *mutable == expected_mutable
                             && event.point == *point
                             && checker_resource.as_deref() == Some(event.resource.as_str())
                             && checker_source.as_deref() == event.source.as_deref()
+                            && checker_contract_matches
                             && event
                                 .loan
                                 .as_ref()
@@ -3920,6 +4095,23 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
         }
         if event.kind == MirOwnershipEventKind::BorrowEnd {
             let Some(loan) = &event.loan else { continue };
+            let site = MirCheckerLoanEndSite {
+                location: MirCheckerLoanLocation {
+                    block: event
+                        .checker_block
+                        .clone()
+                        .unwrap_or_else(|| NodeId(String::new())),
+                    point: event.point.clone(),
+                    edge: event.checker_edge.clone(),
+                },
+                resource: event.resource.clone(),
+                value: event.value.clone(),
+                source: event.source.clone(),
+            };
+            actual_checker_loan_ends
+                .entry(loan.clone())
+                .or_default()
+                .push(site);
             let location = (
                 loan.clone(),
                 event
@@ -3979,10 +4171,13 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                 Some(start)
                     if event.resource != start.resource
                         || event.value != start.value
-                        || event
-                            .source
-                            .as_ref()
-                            .is_some_and(|source| Some(source) != start.source.as_ref()) =>
+                        || event.source.as_ref().is_some_and(|source| {
+                            function
+                                .ownership
+                                .checker_loans
+                                .get(loan)
+                                .is_none_or(|contract| source != &contract.place.display())
+                        }) =>
                 {
                     errors.push(MirValidationError {
                         subject: format!("ownership[{index}]"),
@@ -3994,6 +4189,38 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                 }
                 Some(_) => {}
             }
+        }
+    }
+    for (loan, contract) in &function.ownership.checker_loans {
+        if !borrow_boundaries.contains_key(loan) {
+            errors.push(MirValidationError {
+                subject: format!("loan[{}]", loan.0),
+                message: "checker loan contract has no canonical MIR Borrow operation".into(),
+            });
+        }
+        if !borrow_starts.contains_key(loan) {
+            errors.push(MirValidationError {
+                subject: format!("loan[{}]", loan.0),
+                message: "checker loan contract has no ownership start event".into(),
+            });
+        }
+        let mut expected = contract.ends.clone();
+        expected.sort();
+        let mut actual = actual_checker_loan_ends.remove(loan).unwrap_or_default();
+        actual.sort();
+        if actual != expected {
+            errors.push(MirValidationError {
+                subject: format!("loan[{}]", loan.0),
+                message: "borrow-end receipts do not match the checker-owned loan contract".into(),
+            });
+        }
+    }
+    for loan in actual_checker_loan_ends.keys() {
+        if !function.ownership.checker_loans.contains_key(loan) {
+            errors.push(MirValidationError {
+                subject: format!("loan[{}]", loan.0),
+                message: "borrow-end receipt has no checker-owned loan contract".into(),
+            });
         }
     }
     for loan in borrow_boundaries.keys() {

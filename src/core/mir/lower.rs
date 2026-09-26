@@ -19,14 +19,15 @@ use crate::core::ir::{
     ResolvedType, ResolvedUnaryOp,
 };
 use crate::core::{
-    CanonicalActionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBody, ResolvedLocalId,
-    ResourceAnalysis,
+    CanonicalActionKind, CheckedProgram, LoanKind, NodeId, PrimitiveType, ResolvedBody,
+    ResolvedLocalId, ResourceAnalysis,
 };
 
 use super::islands::is_owned_generic_record_update_callable;
 use super::types::MirTypeCatalog;
 use super::{
-    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
+    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirCheckerLoanContract,
+    MirCheckerLoanEndSite, MirCheckerLoanLocation, MirEdgeId, MirFunction,
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
     MirInstructionKind, MirListOperation, MirOwnershipEvent, MirOwnershipEventKind,
     MirOwnershipSummary, MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding,
@@ -295,7 +296,7 @@ fn lower_body_impl(
         values: lowerer.values,
         blocks,
         contracts: Vec::new(),
-        ownership: MirOwnershipSummary::default(),
+        ownership: resource_analysis.map(ownership_summary).unwrap_or_default(),
     };
     function.validate().map_err(|errors| {
         errors
@@ -7094,6 +7095,61 @@ fn is_concrete_callable(callable: &crate::core::ResolvedCallable) -> bool {
 }
 
 fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
+    let checker_loans = analysis
+        .loans
+        .iter()
+        .map(|loan| {
+            let expected_kind = match loan.kind {
+                LoanKind::Shared => CanonicalActionKind::BorrowShared,
+                LoanKind::Mutable => CanonicalActionKind::BorrowMut,
+            };
+            let starts = analysis
+                .actions
+                .iter()
+                .filter(|action| {
+                    action.loan.as_ref() == Some(&loan.id) && action.kind == expected_kind
+                })
+                .collect::<Vec<_>>();
+            let resource = starts
+                .first()
+                .map_or_else(String::new, |start| start.resource.0 .0.clone());
+            let value = mir_local_value_for_resource(&resource);
+            let ends = analysis
+                .actions
+                .iter()
+                .filter(|action| {
+                    action.loan.as_ref() == Some(&loan.id)
+                        && action.kind == CanonicalActionKind::BorrowEnd
+                })
+                .map(|action| MirCheckerLoanEndSite {
+                    location: MirCheckerLoanLocation {
+                        block: action.location.block.0.clone(),
+                        point: action.location.point.clone(),
+                        edge: action.location.edge.as_ref().map(|edge| edge.0.clone()),
+                    },
+                    resource: action.resource.0 .0.clone(),
+                    value: mir_local_value_for_resource(&action.resource.0 .0),
+                    source: action.source.as_ref().map(|place| place.display()),
+                })
+                .collect();
+            (
+                loan.id.0.clone(),
+                MirCheckerLoanContract {
+                    loan: loan.id.0.clone(),
+                    mutable: loan.kind == LoanKind::Mutable,
+                    resource,
+                    value,
+                    place: loan.place.clone(),
+                    start: MirCheckerLoanLocation {
+                        block: loan.start.block.0.clone(),
+                        point: loan.start.point.clone(),
+                        edge: loan.start.edge.as_ref().map(|edge| edge.0.clone()),
+                    },
+                    ends,
+                },
+            )
+        })
+        .collect();
     MirOwnershipSummary {
         events: analysis
             .actions
@@ -7113,13 +7169,7 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                     CanonicalActionKind::BorrowEnd => MirOwnershipEventKind::BorrowEnd,
                 },
                 resource: action.resource.0 .0.clone(),
-                value: action
-                    .resource
-                    .0
-                     .0
-                    .ends_with("/local")
-                    .then(|| MirValueId::new(format!("local:{}", action.resource.0 .0)))
-                    .and_then(Result::ok),
+                value: mir_local_value_for_resource(&action.resource.0 .0),
                 source: action.source.as_ref().map(|place| place.display()),
                 target: action.target.as_ref().map(|place| place.display()),
                 point: action.location.point.clone(),
@@ -7135,7 +7185,15 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                     .map(|edge| edge.0.clone()),
             })
             .collect(),
+        checker_loans,
     }
+}
+
+fn mir_local_value_for_resource(resource: &str) -> Option<MirValueId> {
+    resource
+        .ends_with("/local")
+        .then(|| MirValueId::new(format!("local:{resource}")))
+        .and_then(Result::ok)
 }
 
 struct BlockDraft {
