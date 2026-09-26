@@ -1959,6 +1959,34 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_nested_callable_materialization_failure_never_selects_legacy() {
+        let source = r#"
+            extern "C" { func llabs(value: i64) -> i64; }
+            func main() -> i64 {
+                func local_abs(value: i64) -> i64 { llabs(value) }
+                local_abs(-17 as i64)
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "the nested callable's extern call must cross scalar FFI admission"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("a recognized but unlowerable scalar FFI graph must fail closed");
+        };
+        assert!(
+            reason.contains(mimi::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE),
+            "the structured MIR lowering failure must retain its boundary code: {reason}"
+        );
+        assert!(
+            reason.contains("structured control flow is not lowered by MIR Phase 0"),
+            "the rejection must identify the actual nested-callable construction boundary: {reason}"
+        );
+        assert!(!reason.contains("legacy"), "{reason}");
+    }
+
+    #[test]
     fn source_scope_builder_preserves_typed_build_diagnostics_until_cli_boundary() {
         let source = r#"
             extern "C" { func foreign(value: f64) -> f64 requires: value > 0.0; }

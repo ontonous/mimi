@@ -5985,6 +5985,78 @@ fn canonical_scalar_ffi_cli_multi_callsite_mixed_verdict_matches_receipt_and_mir
 }
 
 #[test]
+fn canonical_scalar_ffi_nested_callable_rejects_all_default_cli_consumers_without_legacy() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_nested_callable_fail_closed_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create nested scalar FFI directory");
+    let source = dir.join("nested.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func llabs(value: i64) -> i64; }\nfunc main() -> i64 {\n    func local_abs(value: i64) -> i64 { llabs(value) }\n    local_abs(-17 as i64)\n}\n",
+    )
+    .expect("write nested scalar FFI source");
+
+    for (subcommand, explicit_mir) in [
+        ("run", false),
+        ("run", true),
+        ("build", false),
+        ("build", true),
+        ("verify", false),
+        ("verify", true),
+    ] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg(subcommand);
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let artifact = dir.join(format!("{subcommand}-{explicit_mir}.ll"));
+        if subcommand == "build" {
+            command
+                .arg("--emit-ir")
+                .arg(&source)
+                .arg("-o")
+                .arg(&artifact);
+        } else {
+            command.arg(&source);
+        }
+        let output = command.output().unwrap_or_else(|error| {
+            panic!("spawn {subcommand} explicit_mir={explicit_mir}: {error}")
+        });
+        assert!(
+            !output.status.success(),
+            "{subcommand} explicit_mir={explicit_mir} must reject the recognized but unlowerable graph"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{subcommand} explicit_mir={explicit_mir} emitted stdout on rejection"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("structured control flow is not lowered by MIR Phase 0"),
+            "{subcommand} explicit_mir={explicit_mir} lost the nested callable MIR boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{subcommand} explicit_mir={explicit_mir} fell back to legacy: {stderr}"
+        );
+        if subcommand == "build" {
+            assert!(
+                !artifact.exists(),
+                "failed build explicit_mir={explicit_mir} left an artifact"
+            );
+        }
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_build_verify_reports_only_failed_receipt() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_build_verify_multi_callsite_{}_{}",

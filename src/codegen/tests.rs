@@ -399,6 +399,41 @@ fn direct_native_entry_routes_f64_flow_source_receipt_through_canonical_mir() {
 }
 
 #[test]
+fn direct_native_entry_rejects_nested_scalar_ffi_without_legacy_access() {
+    let source = r#"
+        extern "C" { func llabs(value: i64) -> i64; }
+        func main() -> i64 {
+            func local_abs(value: i64) -> i64 { llabs(value) }
+            local_abs(-17 as i64)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_ffi,
+        "nested extern call is inside checker-owned scalar FFI admission"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "nested_scalar_ffi_fail_closed");
+    let error = codegen
+        .compile_checked(&program)
+        .expect_err("direct native entry must reject the unlowered nested declaration");
+    assert!(
+        format!("{error:?}").contains("structured control flow is not lowered by MIR Phase 0"),
+        "the direct API should preserve the real construction failure: {error:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "a rejected scalar FFI candidate must not touch the legacy body"
+    );
+}
+
+#[test]
 fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
     // R6-1052 restatement: the coverage scan is a checker-side type
     // heuristic, so a shape construction cannot lower (a nested-block assign
