@@ -174,6 +174,36 @@ impl<'a> ActionEmitter<'a> {
                 })
                 .flat_map(|(_, resources)| resources.iter().cloned())
                 .collect();
+            // Recursive resolved-tree visitation may append an outer call's
+            // candidate before a nested argument call. MIR executes the
+            // nested call first, so serialize this checker receipt in the
+            // single CFG block's point order instead of relying on visitor
+            // order. Missing source points withhold the whole candidate.
+            if self.cfg.blocks.len() == 1 {
+                if let Some(block) = self.cfg.blocks.values().next() {
+                    let point_order = block
+                        .points
+                        .iter()
+                        .enumerate()
+                        .map(|(index, point)| (point.source.node.clone(), index))
+                        .collect::<BTreeMap<_, _>>();
+                    self.map_root_actions.sort_by_key(|action| {
+                        point_order
+                            .get(&action.point)
+                            .copied()
+                            .unwrap_or(usize::MAX)
+                    });
+                    if self
+                        .map_root_actions
+                        .iter()
+                        .any(|action| !point_order.contains_key(&action.point))
+                    {
+                        self.map_root_profile_invalid = true;
+                    }
+                } else {
+                    self.map_root_profile_invalid = true;
+                }
+            }
             // The initial MIR Map slice is straight-line and local. If any
             // root escapes, remains live at exit, or crosses control flow,
             // withhold the receipt so no MIR/default route can infer it from
@@ -3399,6 +3429,56 @@ func main() -> i32 {
             analysis.map_root_actions[2].local,
             analysis.map_root_actions[3].local
         );
+    }
+
+    #[test]
+    fn map_root_checker_receipts_keep_interleaved_roots_and_utf8_keys_distinct() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let left = map_new()
+    let right = map_new()
+    let left_updated = map_set(left, "café🧪", 1 + 41)
+    let right_updated = map_set(right, "🗺️", map_size(left_updated))
+    let right_size = map_size(right_updated)
+    drop(left_updated)
+    drop(right_updated)
+    right_size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("closed Map-root lifecycles");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        let actions = &analysis.map_root_actions;
+        assert_eq!(
+            actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Size,
+                MapRootActionKind::Set,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+                MapRootActionKind::Drop,
+            ]
+        );
+
+        let left_root = &actions[0].root;
+        let right_root = &actions[1].root;
+        assert_ne!(left_root, right_root);
+        assert_eq!(actions[2].source.as_ref(), Some(left_root));
+        assert_eq!(actions[2].key.as_deref(), Some("café🧪"));
+        assert_eq!(actions[3].root, actions[2].root);
+        assert_eq!(actions[4].source.as_ref(), Some(right_root));
+        assert_eq!(actions[4].key.as_deref(), Some("🗺️"));
+        assert_eq!(actions[5].root, actions[4].root);
+        assert_eq!(actions[6].root, actions[2].root);
+        assert_eq!(actions[7].root, actions[4].root);
+        assert_eq!(actions[2].local, actions[3].local);
+        assert_eq!(actions[4].local, actions[5].local);
     }
 
     #[test]
