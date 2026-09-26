@@ -684,6 +684,7 @@ pub(crate) enum ResolvedEmissionFailureForTest {
     Recoverable,
     RecoverableInLoop,
     OwnershipE0723,
+    OwnershipE0723AndCleanupFailure,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -995,7 +996,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let expected_location = match failure {
             ResolvedEmissionFailureForTest::Recoverable
-            | ResolvedEmissionFailureForTest::OwnershipE0723 => root_block,
+            | ResolvedEmissionFailureForTest::OwnershipE0723
+            | ResolvedEmissionFailureForTest::OwnershipE0723AndCleanupFailure => root_block,
             ResolvedEmissionFailureForTest::RecoverableInLoop => !root_block && in_loop,
         };
         if !expected_location {
@@ -1003,6 +1005,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let (_, failure) = self.resolved_emission_failure_for_test.take()?;
         self.resolved_emission_failure_observed_partial_for_test = observed_partial;
+        if matches!(
+            failure,
+            ResolvedEmissionFailureForTest::OwnershipE0723AndCleanupFailure
+        ) {
+            // Exercise the otherwise unreachable branch where cleanup cannot
+            // restore its boundary at the same time an ownership rejection
+            // occurs. The production path must preserve E0723's no-retry
+            // classification even when it also reports the cleanup fault.
+            self.heap_boundaries.borrow_mut().pop();
+        }
         Some(match failure {
             ResolvedEmissionFailureForTest::Recoverable => crate::error::CompileError::Unsupported(
                 "test-injected resolved emitter failure after partial body".into(),
@@ -1012,7 +1024,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "test-injected resolved emitter failure inside loop body".into(),
                 )
             }
-            ResolvedEmissionFailureForTest::OwnershipE0723 => {
+            ResolvedEmissionFailureForTest::OwnershipE0723
+            | ResolvedEmissionFailureForTest::OwnershipE0723AndCleanupFailure => {
                 crate::error::CompileError::UnsupportedReturn(
                     "test-injected ownership failure after partial body".into(),
                 )

@@ -865,6 +865,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         match (emitted, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(emission), Err(cleanup)) if emission.code() == "E0723" => {
+                Err(CompileError::UnsupportedReturn(format!(
+                    "{emission}; resolved heap-scope cleanup also failed ({cleanup})"
+                )))
+            }
             (Err(emission), Err(cleanup)) => Err(CompileError::LlvmError(format!(
                 "resolved callable '{}' failed ({emission}) and heap-scope cleanup failed ({cleanup})",
                 callable.owner.0
@@ -15163,6 +15168,55 @@ func main() -> i32 { helper(40) }
             .module
             .verify()
             .expect("declaration-only module is valid");
+    }
+
+    #[test]
+    fn e0723_remains_no_retry_when_heap_scope_cleanup_also_fails() {
+        let program = checked(
+            r#"
+func helper(value: i32) -> i32 {
+    let incremented = value + 1
+    incremented + 1
+}
+func main() -> i32 { helper(40) }
+"#,
+        );
+        let helper = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "helper")
+            .expect("helper callable");
+        let eligible = std::collections::BTreeSet::from([helper.node_id.clone()]);
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_e0723_cleanup_failure_no_retry");
+        generator.inject_resolved_emission_failure_for_test(
+            helper.node_id.clone(),
+            crate::codegen::ResolvedEmissionFailureForTest::OwnershipE0723AndCleanupFailure,
+        );
+
+        let diagnostics = generator
+            .compile_resolved_subset(&program, &eligible)
+            .expect_err("cleanup failure must not mask E0723 or enter legacy retry");
+        assert!(generator.resolved_emission_failure_observed_partial_for_test());
+        assert_eq!(
+            diagnostics[0].code.as_deref(),
+            Some(crate::diagnostic::codes::E0723)
+        );
+        assert!(diagnostics[0].message.contains("cleanup also failed"));
+        assert!(generator.resolved_failed_functions().is_empty());
+        let helper_llvm = generator
+            .module
+            .get_function("helper")
+            .expect("helper declaration remains live");
+        assert_eq!(
+            helper_llvm.count_basic_blocks(),
+            0,
+            "fatal ownership rejection must clear the partial LLVM body"
+        );
+        generator
+            .module
+            .verify()
+            .expect("declaration-only module is valid after both errors");
     }
 
     #[test]
