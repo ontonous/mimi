@@ -2454,15 +2454,17 @@ fn e2e_valgrind_resolved_map_values_reports_l3_possible_loss() {
     }
     // This fixture leaves its Map handles and tagged Any owner alive until
     // process exit. Their table/key and tagged-payload/provenance allocations
-    // can therefore appear in Memcheck's "possibly lost" class. The paired
-    // explicit-destroy test isolates Map table/key release; this probe keeps
-    // the Any and process-lifetime remainder visible. It fails on invalid
-    // accesses and definite/indirect leaks. Do not suppress possible loss.
+    // can therefore appear in Memcheck's "possibly lost" class. Show every
+    // leak kind so an opt-in trace also attributes the still-reachable runtime
+    // roots. The paired explicit-destroy test isolates Map table/key release;
+    // this probe keeps the Any and process-lifetime remainder visible. It
+    // fails on invalid accesses and definite/indirect leaks. Do not suppress
+    // possible loss.
     let map_valgrind_args = vec![
         "--tool=memcheck".into(),
         "--error-exitcode=1".into(),
         "--leak-check=full".into(),
-        "--show-leak-kinds=definite,possible".into(),
+        "--show-leak-kinds=all".into(),
         "--errors-for-leak-kinds=definite,indirect".into(),
     ];
     let observation = checked_codegen_compile_and_observe_valgrind_with_args(
