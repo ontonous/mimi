@@ -9906,6 +9906,49 @@ mod tests {
     }
 
     #[test]
+    fn scalar_generic_identity_island_rejects_forged_out_of_range_i32_literal() {
+        let source =
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mut program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        crate::core::mir::validate_scalar_generic_identity_island(&program)
+            .expect("valid scalar identity shape");
+
+        let main = program
+            .functions
+            .get_mut(&NodeId("function:main".into()))
+            .expect("main function");
+        let constant = main
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const {
+                        literal: crate::core::ir::ResolvedLiteral::Int(_),
+                        ..
+                    }
+                )
+            })
+            .expect("i32 argument constant");
+        let MirInstructionKind::Const {
+            literal: crate::core::ir::ResolvedLiteral::Int(value),
+            ..
+        } = &mut constant.kind
+        else {
+            unreachable!("filtered as integer constant")
+        };
+        *value = i64::from(i32::MAX) + 1;
+        assert!(
+            crate::core::mir::validate_scalar_generic_identity_island(&program).is_err(),
+            "a forged MIR literal outside i32 range must not carry this profile"
+        );
+    }
+
+    #[test]
     fn concrete_scalar_generic_record_projection_is_canonical_and_borrowed() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_record_projection.mimi");

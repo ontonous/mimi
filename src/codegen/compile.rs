@@ -641,6 +641,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         format!("scalar FFI canonical MIR {stage:?} failed: {message}"),
                     ),
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("generic scalar identity canonical MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("generic scalar identity canonical MIR coverage failed: {message}"),
+                    ),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (
@@ -1069,6 +1083,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let canonical = &route.program;
         let scalar_ffi_candidate =
             route.admission.scalar_ffi && route.materialized_scalar_ffi_candidate;
+        let scalar_generic_identity_i32_candidate =
+            route.admission.scalar_generic_identity_i32_complete()
+                && route.materialized_scalar_generic_identity_i32_candidate;
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
@@ -1081,6 +1098,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
         let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
         if !scalar_ffi_candidate
+            && !scalar_generic_identity_i32_candidate
             && !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
@@ -1103,6 +1121,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // a flat record from accidentally widening the collection envelope.
         let island = if scalar_ffi_candidate {
             "scalar FFI island"
+        } else if scalar_generic_identity_i32_candidate {
+            crate::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
         } else if flow_failure_retry_candidate {
             "recoverable Flow failure island"
         } else if scalar_collection_candidate {
@@ -1137,6 +1157,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 {
                     return Ok(None);
                 }
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if scalar_generic_identity_i32_candidate {
+            if let Err(errors) =
+                crate::core::mir::validate_scalar_generic_identity_island(canonical)
+            {
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

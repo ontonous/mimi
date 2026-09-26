@@ -264,7 +264,7 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     let source = r#"
         func identity<T>(value: T) -> T { value }
-        func main() -> i32 { identity(42) }
+        func main() -> i64 { identity(42) }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -277,7 +277,7 @@ fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     let mut codegen = CodeGenerator::new(&context, "legacy_generic_owner");
     codegen
         .compile_checked(&program)
-        .expect("legacy generic body should remain compilable");
+        .expect("out-of-profile generic body should remain compilable");
     assert!(
         codegen.module.get_function("main").is_some(),
         "generic compatibility path must still emit main"
@@ -285,6 +285,35 @@ fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     assert_eq!(
         crate::core::CheckedProgram::test_legacy_body_access(),
         vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
+fn compile_checked_routes_scalar_generic_identity_without_legacy_access() {
+    let source = r#"
+        func identity<T>(value: T) -> T { value }
+        func main() -> i32 { identity(42) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "canonical_generic_identity");
+    codegen
+        .compile_checked(&program)
+        .expect("bounded scalar generic identity must use the canonical MIR route");
+    assert!(
+        codegen.module.get_function("main").is_some(),
+        "canonical generic identity route must emit main"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "the admitted generic identity must not access a legacy body"
     );
 }
 

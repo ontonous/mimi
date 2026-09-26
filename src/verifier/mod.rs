@@ -655,8 +655,9 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 19] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 20] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
+        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32,
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
@@ -700,6 +701,15 @@ fn verify_closed_mir_profile(
     };
     match profile {
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi => {}
+        crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32 => {
+            crate::core::mir::validate_scalar_generic_identity_island(&canonical).map_err(
+                |errors| {
+                    format!(
+                        "MIR-CAPABILITY-001: canonical verifier rejected the generic scalar identity island: {errors:?}"
+                    )
+                },
+            )?;
+        }
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection => {
             crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
                 format!(

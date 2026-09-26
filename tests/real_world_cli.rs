@@ -25023,6 +25023,118 @@ fn canonical_mir_scalar_switch_runs_on_direct_entries() {
     );
 }
 
+#[test]
+fn canonical_generic_scalar_identity_uses_default_and_explicit_mir_cli_routes() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_generic_scalar_identity_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create generic scalar identity CLI directory");
+    let source = dir.join("identity.mimi");
+    fs::write(
+        &source,
+        "func pass<T>(value: T) -> T { value }\nfunc main() -> i32 { pass(41) }\n",
+    )
+    .expect("write generic scalar identity source");
+
+    for explicit_mir in [false, true] {
+        let label = if explicit_mir {
+            "explicit MIR"
+        } else {
+            "default"
+        };
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn generic identity {label} run: {error}"));
+        assert_eq!(
+            run.status.code(),
+            Some(41),
+            "generic identity {label} run must return the i32 result; stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.stdout.is_empty());
+        assert!(
+            !String::from_utf8_lossy(&run.stderr).contains("canonical route disposition: legacy"),
+            "generic identity {label} run must not select legacy: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let native_binary = dir.join(if explicit_mir {
+            "identity-mir"
+        } else {
+            "identity-default"
+        });
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("-o")
+            .arg(&native_binary)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn generic identity {label} build: {error}"));
+        assert!(
+            build.status.success(),
+            "generic identity {label} build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy"),
+            "generic identity {label} build must not select legacy: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native = Command::new(&native_binary)
+            .output()
+            .unwrap_or_else(|error| panic!("run native generic identity {label}: {error}"));
+        assert_eq!(native.status.code(), Some(41));
+        assert!(native.stdout.is_empty());
+        assert!(native.stderr.is_empty());
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn generic identity {label} verifier: {error}"));
+        assert!(
+            verify.status.success(),
+            "generic identity {label} verifier failed: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&verify.stdout).contains("No contracts to verify"),
+            "no-contract identity verification must remain a no-obligation result: {}",
+            String::from_utf8_lossy(&verify.stdout)
+        );
+        assert!(!String::from_utf8_lossy(&verify.stderr)
+            .contains("canonical route disposition: legacy"));
+        fs::remove_file(native_binary).ok();
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
 // R6-1051 restatement of the R6-1050 boundary fixture: the Option<string>
 // assign-face program (unwrap in main, bool match in a helper, owned string
 // print) now compiles through the canonical native backend end-to-end and

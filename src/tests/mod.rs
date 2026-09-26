@@ -61,6 +61,7 @@ pub(crate) mod canonical_assign;
 pub(crate) mod canonical_float_bind;
 pub(crate) mod canonical_float_print;
 pub(crate) mod canonical_flow_union;
+pub(crate) mod canonical_generic_identity;
 pub(crate) mod canonical_owned_string_call;
 pub(crate) mod canonical_plain_scalar_route;
 pub(crate) mod canonical_scalar_ffi;

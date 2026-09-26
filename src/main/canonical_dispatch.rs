@@ -191,6 +191,12 @@ pub(crate) fn select_default_route(
             Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
         };
     }
+    if admission.scalar_generic_identity_i32_complete() {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) => select_scalar_generic_identity_i32_route(route.program),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
     let collection_admission = admission.collection;
     let option_string_admission = admission.option_string;
     let option_nested_tuple_admission = admission.option_nested_tuple;
@@ -1589,6 +1595,55 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
             "scalar FFI MIR verifier returned an unsupported or inconclusive result: {results:?}"
         )),
         Err(error) => DefaultMirRoute::Rejected(format!("scalar FFI MIR verifier pass: {error}")),
+    }
+}
+
+/// Consumer preflight for the bounded scalar generic identity route. The
+/// materializer has already checked its exact one-instance whole-program
+/// envelope; this repeats the profile gate immediately before each consumer
+/// capability check so the selected graph remains hard-bound to the profile.
+fn select_scalar_generic_identity_i32_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::core::mir::validate_scalar_generic_identity_island(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "{} MIR island capability: {errors:?}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        ));
+    }
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "{} MIR verifier capability: {errors:?}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        ));
+    }
+    let receipt = program.route_receipt(mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "{} MIR bytecode capability: {errors:?}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "{} MIR native capability: {errors:?}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        ));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(program)
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "{} MIR verifier returned an unsupported or inconclusive result: {results:?}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "{} MIR verifier pass failed: {error}",
+            mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
+        )),
     }
 }
 

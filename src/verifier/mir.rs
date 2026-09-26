@@ -8368,6 +8368,34 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_false_contract_across_materialized_scalar_generic_identity() {
+        let source = r#"
+            func identity<T>(value: T) -> T { value }
+
+            func checked() -> i32 {
+                ensures: result == 42
+                identity(41)
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results = verify_program(
+            &program,
+            "generic-identity-false-contract-source-hash".into(),
+        )
+        .expect("false identity contract must be a verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("checked"))
+            .expect("generic identity contract result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
+    }
+
+    #[test]
     fn verifier_consumes_materialized_scalar_generic_list_len_call() {
         let source = r#"
             func list_len<T>(values: List<T>) -> i32 { len(values) }

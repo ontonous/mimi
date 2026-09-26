@@ -421,6 +421,7 @@ pub(crate) use contracts::{
 mod copy_option_island;
 mod copy_result_island;
 mod eligibility;
+mod identity_island;
 mod islands;
 pub mod lower;
 mod option_island;
@@ -452,6 +453,11 @@ pub use eligibility::{
     is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
     is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, is_scalar_ffi_candidate,
     scalar_ffi_boundary_reason,
+};
+pub use identity_island::{
+    classify_scalar_generic_identity_admission, contains_scalar_generic_identity_candidate,
+    validate_scalar_generic_identity_island, ScalarGenericIdentityAdmission,
+    SCALAR_GENERIC_IDENTITY_I32_ISLAND,
 };
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,

@@ -25,24 +25,26 @@ use super::{
     classify_generic_result_projection_fallback_admission,
     classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
     classify_option_nested_tuple_variant_admission, classify_option_string_variant_admission,
-    classify_scalar_collection_admission, classify_session_channel_admission,
-    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
-    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
-    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
+    classify_scalar_collection_admission, classify_scalar_generic_identity_admission,
+    classify_session_channel_admission, contains_copy_option_i32_variant_candidate,
+    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
+    contains_flat_copy_record_candidate, contains_flow_failure_retry_candidate,
+    contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
     contains_option_nested_tuple_variant_candidate, contains_option_string_variant_candidate,
     contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
-    contains_scalar_collection_operation_candidate, contains_session_channel_candidate,
-    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
-    scalar_ffi_boundary_reason, CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission,
-    FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
-    GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
-    GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
-    ManagedResultCallAdmission, OptionNestedTupleVariantAdmission, OptionStringVariantAdmission,
-    ScalarCollectionAdmission, SessionChannelAdmission,
+    contains_scalar_collection_operation_candidate, contains_scalar_generic_identity_candidate,
+    contains_session_channel_candidate, is_exact_s8_flow_transition,
+    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, scalar_ffi_boundary_reason,
+    CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
+    GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
+    GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
+    GenericVariantPredicateAdmission, ManagedResultCallAdmission,
+    OptionNestedTupleVariantAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
+    ScalarGenericIdentityAdmission, SessionChannelAdmission,
 };
 
 #[cfg(test)]
@@ -66,6 +68,7 @@ pub(crate) fn test_route_materialization_count() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalMirRouteProfile {
     ScalarFfi,
+    ScalarGenericIdentityI32,
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
@@ -90,6 +93,7 @@ impl CanonicalMirRouteProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ScalarFfi => "scalar-ffi-v1",
+            Self::ScalarGenericIdentityI32 => super::SCALAR_GENERIC_IDENTITY_I32_ISLAND,
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
@@ -125,6 +129,7 @@ impl CanonicalMirRouteProfile {
     pub const fn is_admitted(self, admission: CanonicalMirRouteAdmission) -> bool {
         match self {
             Self::ScalarFfi => admission.scalar_ffi,
+            Self::ScalarGenericIdentityI32 => admission.scalar_generic_identity_i32_complete(),
             Self::ScalarCollection => admission.collection_complete(),
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
@@ -155,6 +160,9 @@ impl CanonicalMirRouteProfile {
     pub const fn is_materialized(self, route: &CanonicalMirRouteMaterialization) -> bool {
         match self {
             Self::ScalarFfi => route.materialized_scalar_ffi_candidate,
+            Self::ScalarGenericIdentityI32 => {
+                route.materialized_scalar_generic_identity_i32_candidate
+            }
             Self::ScalarCollection => route.materialized_collection_candidate,
             Self::FlatCopyRecord => route.materialized_record_candidate,
             Self::S8FlowTransition => route.materialized_flow_candidate,
@@ -277,6 +285,7 @@ impl CanonicalMirRouteMaterializationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMirRouteAdmission {
     pub scalar_ffi: bool,
+    pub scalar_generic_identity_i32: ScalarGenericIdentityAdmission,
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
@@ -300,6 +309,7 @@ pub struct CanonicalMirRouteAdmission {
 impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
         self.scalar_ffi
+            || self.scalar_generic_identity_i32_complete()
             || !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
             || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
@@ -361,6 +371,13 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn collection_complete(self) -> bool {
         matches!(self.collection, ScalarCollectionAdmission::CompleteCoverage)
+    }
+
+    pub const fn scalar_generic_identity_i32_complete(self) -> bool {
+        matches!(
+            self.scalar_generic_identity_i32,
+            ScalarGenericIdentityAdmission::CompleteCoverage
+        )
     }
 
     pub const fn record_complete(self) -> bool {
@@ -476,6 +493,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub program: MirProgram,
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_scalar_ffi_candidate: bool,
+    pub materialized_scalar_generic_identity_i32_candidate: bool,
     pub materialized_collection_candidate: bool,
     /// R6-1052: whether the receipt came from a migrated collection
     /// operation (List/Set op face) rather than the plain-scalar stdout
@@ -508,6 +526,7 @@ pub fn classify_canonical_mir_route_admission(
 ) -> CanonicalMirRouteAdmission {
     CanonicalMirRouteAdmission {
         scalar_ffi: super::is_scalar_ffi_candidate(program),
+        scalar_generic_identity_i32: classify_scalar_generic_identity_admission(program),
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
@@ -582,6 +601,7 @@ pub fn materialize_canonical_mir_route(
     // observes the same prelude-free graph as the CLI dispatch wrapper.
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
     if admission.scalar_ffi
+        || admission.scalar_generic_identity_i32_complete()
         || admission.session_complete()
         || admission.record_complete()
         || admission.collection_complete()
@@ -620,6 +640,26 @@ pub fn materialize_canonical_mir_route(
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "scalar FFI admission did not materialize a canonical FFI receipt".into(),
         });
+    }
+    let materialized_scalar_generic_identity_i32_candidate =
+        contains_scalar_generic_identity_candidate(&canonical);
+    if admission.scalar_generic_identity_i32_complete()
+        && !materialized_scalar_generic_identity_i32_candidate
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete generic scalar identity admission did not materialize a ScalarIdentity instance".into(),
+        });
+    }
+    if admission.scalar_generic_identity_i32_complete() {
+        super::validate_scalar_generic_identity_island(&canonical).map_err(|errors| {
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: format!("generic scalar identity whole-program validator rejected the graph: {errors:?}"),
+            }
+        })?;
     }
     let materialized_collection_operation_candidate =
         contains_scalar_collection_operation_candidate(&canonical);
@@ -887,6 +927,7 @@ pub fn materialize_canonical_mir_route(
         program: canonical,
         admission,
         materialized_scalar_ffi_candidate,
+        materialized_scalar_generic_identity_i32_candidate,
         materialized_collection_candidate,
         materialized_collection_operation_candidate,
         materialized_record_candidate,
@@ -917,6 +958,12 @@ fn match_complete_or_compatibility(
     if admission.scalar_ffi {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarFfi,
+            stage,
+            message,
+        }
+    } else if admission.scalar_generic_identity_i32_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
             stage,
             message,
         }
@@ -1055,6 +1102,37 @@ mod tests {
             .parse_file()
             .expect("parse");
         crate::core::check_program(&file).expect("typecheck")
+    }
+
+    #[test]
+    fn scalar_generic_identity_admission_is_exact_and_materializes_a_closed_route() {
+        let program =
+            checked("func pass<T>(value: T) -> T { value }\nfunc main() -> i32 { pass(41) }");
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.scalar_generic_identity_i32,
+            ScalarGenericIdentityAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("exact scalar generic identity route must materialize");
+        assert!(CanonicalMirRouteProfile::ScalarGenericIdentityI32.is_admitted(admission));
+        assert!(CanonicalMirRouteProfile::ScalarGenericIdentityI32.is_materialized(&route));
+        crate::core::mir::validate_scalar_generic_identity_island(&route.program)
+            .expect("materialized scalar generic identity route must validate");
+
+        for source in [
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> bool { pass(true) }",
+            "func pass<T>(value: T) -> T { value }\nfunc helper() -> i32 { 0 }\nfunc main() -> i32 { pass(41) }",
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i32 { pass(pass(41)) }",
+            "func pass<T>(value: T) -> T { value }\nfunc main() -> i32 { requires: true; pass(41) }",
+        ] {
+            let program = checked(source);
+            assert_eq!(
+                classify_scalar_generic_identity_admission(&program),
+                ScalarGenericIdentityAdmission::OutsideProfile,
+                "unsupported source shape must remain outside the exact identity profile: {source}"
+            );
+        }
     }
 
     #[test]
@@ -1260,6 +1338,7 @@ mod tests {
     fn compatibility_materialization_error_preserves_candidate_admission() {
         let admission = CanonicalMirRouteAdmission {
             scalar_ffi: false,
+            scalar_generic_identity_i32: ScalarGenericIdentityAdmission::OutsideProfile,
             collection: ScalarCollectionAdmission::MixedCoverage,
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,
@@ -1831,6 +1910,7 @@ mod tests {
             .expect("scalar collection route must materialize");
         let admission = route.admission;
         let profiles = [
+            CanonicalMirRouteProfile::ScalarGenericIdentityI32,
             CanonicalMirRouteProfile::ScalarCollection,
             CanonicalMirRouteProfile::FlatCopyRecord,
             CanonicalMirRouteProfile::S8FlowTransition,
