@@ -1343,6 +1343,10 @@ else
         printf 'owner_audit_error=closed_scalar_cli_evidence_missing_mir_matrix\n' >&2
         audit_failed=1
     elif ! sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" \
+        "$ROOT_DIR/tests/real_world_cli.rs" | rg -F 'func relay(value: i64) -> i64 { value }' >/dev/null; then
+        printf 'owner_audit_error=closed_scalar_cli_evidence_missing_pure_nested_helper\n' >&2
+        audit_failed=1
+    elif ! sed -n "/^[[:space:]]*fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts(/,/^[[:space:]]*#\[test\]/p" \
         "$ROOT_DIR/tests/real_world_cli.rs" | rg 'assert!\(!.*contains\("canonical route disposition: legacy"\)\)' >/dev/null; then
         printf 'owner_audit_error=closed_scalar_cli_evidence_missing_legacy_route_assertion\n' >&2
         audit_failed=1
@@ -1360,6 +1364,7 @@ else
         else
             emit_closed_scalar_marker 'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
             emit_closed_scalar_marker 'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
+            emit_closed_scalar_marker 'closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call'
         fi
     fi
 fi
@@ -1370,6 +1375,7 @@ expected_closed_scalar_marker_sequence=(
     'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts'
     'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
     'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
+    'closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call'
 )
 if [ "${closed_scalar_marker_sequence[*]}" != "${expected_closed_scalar_marker_sequence[*]}" ]; then
     printf 'owner_audit_error=closed_scalar_evidence_marker_sequence_drift\n' >&2
@@ -1443,6 +1449,10 @@ require_codegen_legacy_body_class_tripwire \
     trait-impl-specialization \
     compile_checked_keeps_trait_impl_specialization_on_legacy_owner \
     'Data__Computable__compute'
+require_codegen_legacy_body_class_tripwire \
+    nested-function-body \
+    compile_checked_keeps_captured_nested_helper_on_legacy_owner \
+    'nested_increment'
 require_codegen_legacy_body_class_tripwire \
     export-wrapper \
     compile_checked_keeps_export_wrapper_body_on_legacy_owner \

@@ -11099,6 +11099,137 @@ func main() -> i32 {
 
 #[cfg(unix)]
 #[test]
+fn scalar_ffi_profile_pure_nested_helper_matches_same_mir_consumers() {
+    use std::cell::RefCell;
+
+    struct Oracle(RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "labs" || receipt.abi != "C" {
+                return Err(format!("unexpected foreign receipt {receipt:?}"));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected labs arguments {arguments:?}"));
+            };
+            self.0.borrow_mut().push(*value);
+            value
+                .checked_abs()
+                .map(MirRuntimeValue::Int)
+                .ok_or_else(|| "labs input is outside this test oracle domain".into())
+        }
+    }
+
+    const PURE_HELPER_LABS_C: &str =
+        "#include <stdint.h>\nint64_t labs(int64_t value) { return value < 0 ? -value : value; }\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, PURE_HELPER_LABS_C);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let source = r#"
+extern "C" { func labs(value: i64) -> i64; }
+func main() -> i64 {
+    func increment(value: i64) -> i64 { value + 1 as i64 }
+    println(increment(labs(-17 as i64)))
+    increment(labs(-25 as i64))
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("check scalar FFI graph with an ordinary nested helper");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize the same graph's FFI and nested-call receipts");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    assert_eq!(mir.nested_callable_scopes().len(), 1);
+    let scope = mir
+        .nested_callable_scopes()
+        .values()
+        .next()
+        .expect("checker-owned nested scope receipt");
+    assert_eq!(scope.parent.0, "function:main");
+    assert_eq!(scope.call_instructions.len(), 2);
+    assert!(mir
+        .ffi_calls()
+        .values()
+        .all(|ffi| ffi.caller != scope.callee));
+    assert!(!mir.canonical_digest().is_empty());
+
+    let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-pure-nested-helper".into())
+        .expect("public MIR verification of the same graph");
+    assert!(
+        verification.iter().all(|result| matches!(
+            result.status,
+            crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+        )),
+        "{verification:?}"
+    );
+    crate::verifier::verify_ffi_mir(&mir)
+        .expect("scalar FFI contract verifier must consume the same validated MIR");
+
+    let oracle = Oracle(RefCell::new(Vec::new()));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution of the shared MIR graph");
+    assert_eq!(reference.value, MirRuntimeValue::Int(26));
+    assert_eq!(reference.output, "18\n");
+    assert_eq!(*oracle.0.borrow(), [-17, -25]);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let bytecode = compile_mir_program(&mir).expect("AST-free bytecode from the same MIR");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    assert_eq!(bytecode.canonical_ffi.len(), 2);
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 2);
+    assert!(bytecode
+        .canonical_ffi
+        .iter()
+        .all(|descriptor| descriptor.caller == "function:main"));
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(26));
+    assert_eq!(vm.stdout(), "18\n");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_pure_nested");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native emitter consumes the same MIR graph");
+    generator
+        .module
+        .verify()
+        .expect("valid LLVM from the shared MIR graph");
+    let config = super::E2EConfig {
+        extra_c_src: Some(PURE_HELPER_LABS_C.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("native execution of the shared MIR graph");
+    assert_eq!(native.exit_code, Some(26));
+    assert_eq!(native.stdout, "18\n");
+    assert_eq!(native.stderr, "");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let direct_context = inkwell::context::Context::create();
+    let mut direct =
+        crate::codegen::CodeGenerator::new(&direct_context, "scalar_ffi_nested_direct");
+    direct
+        .compile_checked(&checked)
+        .expect("direct checked API must use the canonical scalar FFI route");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let direct_native = super::link_and_observe_module(&direct, &config, counter + 1)
+        .expect("direct checked API native execution");
+    assert_eq!(direct_native.exit_code, Some(26));
+    assert_eq!(direct_native.stdout, "18\n");
+    assert_eq!(direct_native.stderr, "");
+}
+
+#[cfg(unix)]
+#[test]
 fn scalar_ffi_nested_root_helper_preserves_failure_and_call_order() {
     use std::cell::{Cell, RefCell};
 

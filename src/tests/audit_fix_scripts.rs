@@ -286,9 +286,11 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_evidence=",
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]",
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
+        "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call",
         "codegen_legacy_body_class_tripwire=dynamic-trait test=compile_checked_keeps_dynamic_protocol_method_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=flow-transition test=compile_checked_keeps_flow_transition_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=trait-impl-specialization test=compile_checked_keeps_trait_impl_specialization_on_legacy_owner markers=Data__Computable__compute",
+        "codegen_legacy_body_class_tripwire=nested-function-body test=compile_checked_keeps_captured_nested_helper_on_legacy_owner markers=nested_increment",
         "codegen_legacy_body_class_tripwire=export-wrapper test=compile_checked_keeps_export_wrapper_body_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=actor-method test=compile_checked_keeps_actor_method_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=map-any-borrowed test=compile_checked_keeps_map_any_borrowed_access_on_legacy_owner markers=map_get,values",
@@ -1051,6 +1053,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
             "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
             "compile_checked_routes_exact_s8_flow_through_canonical_mir",
             "compile_checked_keeps_trait_impl_specialization_on_legacy_owner",
+            "compile_checked_keeps_captured_nested_helper_on_legacy_owner",
             "compatibility_verifier_access_is_explicitly_tagged",
             "ffi_checked_preserves_legacy_for_unmigrated_string_contract",
         ] {
@@ -1438,7 +1441,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     let cli_fixture = temp_root.join("fake_scalar_cli.rs");
     std::fs::write(
         &cli_fixture,
-        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\n",
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    func relay(value: i64) -> i64 { value }\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\n",
     )
     .expect("write CLI fixture missing ABI symbol");
     let missing_abi = std::process::Command::new("bash")
@@ -1460,7 +1463,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     );
     std::fs::write(
         &cli_fixture,
-        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\nfn forged_abi_outside_cli_test() { let _ = \"mir_ffi_store\"; }\n",
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    func relay(value: i64) -> i64 { value }\n    assert!(!run_stderr.contains(\"canonical route disposition: legacy\"));\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\"];\n}\n#[test]\nfn forged_abi_outside_cli_test() { let _ = \"mir_ffi_store\"; }\n",
     )
     .expect("write CLI fixture with forged ABI symbol outside test");
     let forged_abi = std::process::Command::new("bash")
@@ -1482,7 +1485,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     );
     std::fs::write(
         &cli_fixture,
-        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\", \"mir_ffi_store\"];\n}\n#[test]\n",
+        "fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {\n    for contracts in [true, false] {}\n    for explicit_mir in [false, true] {}\n    func relay(value: i64) -> i64 { value }\n    let _ = [\"mir_ffi_i32\", \"mir_ffi_i64\", \"mir_ffi_bool\", \"mir_ffi_f64\", \"mir_ffi_store\"];\n}\n#[test]\n",
     )
     .expect("write CLI fixture missing route assertion");
     let missing_route = std::process::Command::new("bash")
@@ -1534,6 +1537,7 @@ fn legacy_owner_scalar_evidence_markers_have_stable_order() {
         "closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts".to_owned(),
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]".to_owned(),
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent".to_owned(),
+        "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call".to_owned(),
     ];
     assert_eq!(
         markers(&first),

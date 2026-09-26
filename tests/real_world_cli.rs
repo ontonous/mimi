@@ -1837,6 +1837,16 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
     );
     for contracts in [true, false] {
         let mut source = include_str!("fixtures/mir_scalar_ffi_abi.mimi").to_owned();
+        source = source.replace(
+            "func main() -> i64 {",
+            "func main() -> i64 {\n    func relay(value: i64) -> i64 { value }",
+        );
+        source = source.replace(
+            "println(mir_ffi_i64(4294967296 as i64))",
+            "println(relay(mir_ffi_i64(4294967296 as i64)))",
+        );
+        assert!(source.contains("func relay(value: i64) -> i64 { value }"));
+        assert!(source.contains("println(relay(mir_ffi_i64(4294967296 as i64)))"));
         if !contracts {
             for requires in [
                 " requires: x != 0",
@@ -1968,6 +1978,77 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
                 .contains("canonical route disposition: legacy"));
         }
     }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn canonical_scalar_ffi_nested_helper_overflow_cli_fails_closed() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_nested_overflow_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create nested overflow CLI directory");
+    let source = dir.join("nested-overflow.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func labs(value: i64) -> i64 requires: value < 0; }\n\
+         func main() -> i64 {\n\
+             func increment(value: i64) -> i64 { value + 1 as i64 }\n\
+             println(5 as i64)\n\
+             increment(labs(-17 as i64))\n\
+         }\n",
+    )
+    .expect("write nested overflow CLI source");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn nested overflow default run");
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn nested overflow default verify");
+    let binary = dir.join("nested-overflow");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn nested overflow default build");
+
+    for (label, output) in [("run", run), ("verify", verify), ("build", build)] {
+        assert!(
+            !output.status.success(),
+            "{label} must reject the overflow graph"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label} must not execute the println"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E0802"), "{label}: {stderr}");
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{label} must not use legacy fallback: {stderr}"
+        );
+    }
+    assert!(
+        !binary.exists(),
+        "failed build must leave no output artifact"
+    );
     fs::remove_dir_all(dir).ok();
 }
 

@@ -2053,6 +2053,68 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ffi_profile_admits_pure_root_scope_helper_from_default_route() {
+        let source = r#"
+            extern "C" { func llabs(value: i64) -> i64; }
+            func main() -> i64 {
+                func increment(value: i64) -> i64 { value + 1 as i64 }
+                increment(llabs(-17 as i64))
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "the called scalar C ABI site must establish the closed graph profile"
+        );
+        let DefaultMirRoute::Canonical(route) = select_default_route(&checked, &file) else {
+            panic!("a pure root-scope scalar helper in a scalar FFI graph must be canonical");
+        };
+        assert_eq!(route.ffi_calls().len(), 1);
+        assert_eq!(route.nested_callable_scopes().len(), 1);
+        let scope = route
+            .nested_callable_scopes()
+            .values()
+            .next()
+            .expect("checker scope receipt");
+        assert!(route
+            .ffi_calls()
+            .values()
+            .all(|ffi| ffi.caller != scope.callee));
+        assert_eq!(scope.parent.0, "function:main");
+        assert_eq!(scope.call_instructions.len(), 1);
+        assert_eq!(
+            route.canonical_digest(),
+            route.route_receipt("scalar-ffi-v1").mir_digest
+        );
+    }
+
+    #[test]
+    fn scalar_ffi_nested_helper_overflow_rejects_default_route_without_fallback() {
+        let source = r#"
+            extern "C" { func labs(value: i64) -> i64 requires: value < 0; }
+            func main() -> i64 {
+                func increment(value: i64) -> i64 { value + 1 as i64 }
+                increment(labs(-17 as i64))
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+        let mir = mimi::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect("overflowing nested helper still lowers to validated MIR");
+        let verifier_error = mimi::verifier::verify_ffi_mir(&mir)
+            .expect_err("the contract verifier must expose the reachable checked overflow");
+        assert!(
+            verifier_error.contains("reachable trap 'E0802'"),
+            "{verifier_error}"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("a reachable overflow in the nested helper must fail closed");
+        };
+        assert!(reason.contains("reachable trap 'E0802'"), "{reason}");
+        assert!(!reason.contains("legacy"), "{reason}");
+    }
+
+    #[test]
     fn scalar_ffi_nested_unit_result_helper_rejects_without_legacy_fallback() {
         let source = r#"
             extern "C" { func notify(value: i32); }

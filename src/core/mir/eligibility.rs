@@ -4,6 +4,8 @@
 //! They intentionally inspect only checker-owned facts; a backend must not
 //! rediscover a migrated shape from the retained surface AST.
 
+use std::collections::HashSet;
+
 use crate::ast::Type;
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
@@ -14,6 +16,7 @@ use crate::core::{
     CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResolvedPattern, ResolvedStmt,
     TransitionId,
 };
+use crate::span::SourceId;
 
 fn is_scalar_ffi_decl_type(program: &CheckedProgram, ty: &Type, result: bool) -> bool {
     let primitive = match ty.unlocated() {
@@ -42,9 +45,27 @@ fn is_scalar_ffi_decl_type(program: &CheckedProgram, ty: &Type, result: bool) ->
 /// scalar graph failing construction or a consumer gate must never return to
 /// those compatibility consumers.
 pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
+    is_scalar_ffi_candidate_excluding_sources(program, None)
+}
+
+/// Checker-side scalar FFI eligibility for a source-filtered MIR graph.
+/// Call sites owned by excluded source functions cannot authorize another
+/// retained function's nested declarations.
+pub(crate) fn is_scalar_ffi_candidate_excluding_sources(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+) -> bool {
     let mut found = false;
     for site in program.call_sites_sorted() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
+        }
+        let owner = NodeId(site.owner.clone());
+        if excluded_sources.is_some_and(|excluded| {
+            program.callable(&owner).is_some_and(|callable| {
+                excluded.contains(&callable.body.root.origin.user_span().source_id)
+            })
+        }) {
             continue;
         }
         let Ok(Some(declaration)) = program.extern_func_signature_for_call(&site.callee, site.argc)

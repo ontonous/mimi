@@ -2,8 +2,9 @@
 //! MIR slice. A nested declaration is compile-time scope metadata: MIR omits
 //! its runtime instruction only when the checked owner identity is an
 //! immediate child of a top-level user function, the helper has no closure
-//! environment/default/generic ABI, directly owns a scalar extern call, and
-//! every materialized use is a direct call from that declaring function.
+//! environment/default/generic ABI, the graph carries a validated scalar FFI
+//! receipt (owned by the helper or another function), and every materialized
+//! use is a direct call from that declaring function.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -72,6 +73,11 @@ pub(crate) fn checked_nested_callable_scope_plan(
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> CheckedNestedCallableScopePlan {
     let mut plan = CheckedNestedCallableScopePlan::default();
+    // Nested declarations are admitted only as part of the closed scalar FFI
+    // profile. A pure helper may be used by that graph, but must not broaden
+    // the general MIR construction boundary on its own.
+    let scalar_ffi_profile =
+        super::eligibility::is_scalar_ffi_candidate_excluding_sources(program, excluded_sources);
     for (parent_owner, parent) in program.callables() {
         if !is_top_level_function_owner(parent_owner)
             || source_is_excluded(parent, excluded_sources)
@@ -85,7 +91,13 @@ pub(crate) fn checked_nested_callable_scope_plan(
             let Some(target) = program.callable(callee) else {
                 continue;
             };
-            if !is_admissible_nested_target(program, parent_owner, target, excluded_sources) {
+            if !is_admissible_nested_target(
+                program,
+                parent_owner,
+                target,
+                scalar_ffi_profile,
+                excluded_sources,
+            ) {
                 continue;
             }
             if !plan.declarations.contains_key(callee) {
@@ -119,6 +131,7 @@ fn is_admissible_nested_target(
     program: &CheckedProgram,
     parent: &NodeId,
     target: &crate::core::ResolvedCallable,
+    scalar_ffi_profile: bool,
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> bool {
     let prefix = format!("{}/function:", parent.0);
@@ -142,10 +155,11 @@ fn is_admissible_nested_target(
             parameter.has_default || !is_checker_scalar(program, &parameter.ty, false)
         })
         || !is_checker_scalar(program, &target.signature.result, false)
-        || !program
+        || (!program
             .call_sites()
             .values()
             .any(|site| site.owner == target.owner.0 && site.kind == ResolvedCallKind::Extern)
+            && !scalar_ffi_profile)
         || target
             .body
             .root
@@ -325,12 +339,12 @@ pub(crate) fn validate_nested_callable_scope_receipts(
             ));
             continue;
         };
-        if !ffi_calls
+        let target_has_ffi_receipt = ffi_calls
             .values()
-            .any(|ffi_call| ffi_call.caller == receipt.callee)
-        {
+            .any(|ffi_call| ffi_call.caller == receipt.callee);
+        if !target_has_ffi_receipt && ffi_calls.is_empty() {
             errors.push(format!(
-                "nested callable '{}' has no validated direct scalar FFI receipt",
+                "nested callable '{}' has no validated scalar FFI receipt in itself or the MIR program",
                 receipt.callee.0
             ));
         }
@@ -534,6 +548,45 @@ mod tests {
         crate::core::check_program(&file).expect("nested callable checked IR")
     }
 
+    fn checked_split_sources(
+        primary: &str,
+        secondary: &str,
+    ) -> (CheckedProgram, SourceId, SourceId) {
+        let mut registry = crate::span::SourceRegistry::default();
+        let primary_id = registry
+            .register(crate::span::SourceRecord::new(
+                crate::span::SourceKey::memory("mir-nested-test", "primary", primary)
+                    .expect("primary source key"),
+                crate::span::SourceTextOrigin::Memory,
+            ))
+            .expect("register primary source");
+        let secondary_id = registry
+            .register(crate::span::SourceRecord::new(
+                crate::span::SourceKey::memory("mir-nested-test", "secondary", secondary)
+                    .expect("secondary source key"),
+                crate::span::SourceTextOrigin::Memory,
+            ))
+            .expect("register secondary source");
+        let parse = |source: &str, source_id| {
+            let tokens = crate::lexer::Lexer::new(source)
+                .tokenize()
+                .expect("split nested callable tokens");
+            crate::parser::Parser::new_with_source_context(
+                tokens,
+                crate::span::SourceContext::registered(source_id, registry.clone())
+                    .expect("registered source context"),
+            )
+            .parse_file()
+            .expect("split nested callable syntax")
+        };
+        let mut combined = parse(primary, primary_id);
+        let extra = parse(secondary, secondary_id);
+        combined.items.extend(extra.items);
+        combined.imports.extend(extra.imports);
+        let program = crate::core::check_program(&combined).expect("split-source checked IR");
+        (program, primary_id, secondary_id)
+    }
+
     #[test]
     fn root_scalar_helper_gets_a_scope_receipt_and_shadow_uses_exact_owner() {
         let program = checked(
@@ -673,6 +726,157 @@ mod tests {
         assert!(
             format!("{error}").contains("outside the canonical root-scope MIR slice"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn excluded_ffi_callers_cannot_authorize_retained_nested_helpers() {
+        let (program, _primary_source, ffi_source) = checked_split_sources(
+            r#"
+                func main() -> i64 {
+                    func increment(value: i64) -> i64 { value + 1 as i64 }
+                    increment(41 as i64)
+                }
+            "#,
+            r#"
+                extern "C" { func labs(value: i64) -> i64; }
+                func ffi_owner(value: i64) -> i64 { labs(value) }
+            "#,
+        );
+        assert!(super::super::is_scalar_ffi_candidate(&program));
+        assert_eq!(
+            checked_nested_callable_scope_plan(&program, None)
+                .declarations
+                .len(),
+            1
+        );
+        let ffi_owner = NodeId("function:ffi_owner".into());
+        let actual_ffi_source = program
+            .callable(&ffi_owner)
+            .expect("FFI caller")
+            .body
+            .root
+            .origin
+            .user_span()
+            .source_id;
+        assert_eq!(actual_ffi_source, ffi_source);
+        let excluded = HashSet::from([ffi_source]);
+        assert!(
+            !super::super::eligibility::is_scalar_ffi_candidate_excluding_sources(
+                &program,
+                Some(&excluded)
+            )
+        );
+        assert!(
+            checked_nested_callable_scope_plan(&program, Some(&excluded))
+                .declarations
+                .is_empty()
+        );
+        let error = MirProgram::from_checked_program_excluding_sources(&program, &excluded)
+            .expect_err("an excluded callsite cannot authorize the retained helper");
+        assert!(
+            format!("{error}").contains("outside the canonical root-scope MIR slice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn scalar_ffi_profile_receipt_admits_pure_root_scalar_helper() {
+        let program = checked(
+            r#"
+                extern "C" { func labs(value: i64) -> i64; }
+                func main() -> i64 {
+                    func increment(value: i64) -> i64 { value + 1 as i64 }
+                    increment(labs(-41 as i64))
+                }
+            "#,
+        );
+        assert!(super::super::is_scalar_ffi_candidate(&program));
+        let plan = checked_nested_callable_scope_plan(&program, None);
+        assert_eq!(plan.declarations.len(), 1);
+        let mir = MirProgram::from_checked_program(&program)
+            .expect("a checked scalar FFI call may scope a pure scalar helper");
+        assert_eq!(mir.ffi_calls().len(), 1);
+        let receipt = mir
+            .nested_callable_scopes()
+            .values()
+            .next()
+            .expect("nested scope receipt");
+        assert!(mir
+            .ffi_calls()
+            .values()
+            .all(|ffi| ffi.caller != receipt.callee));
+
+        let errors = validate_nested_callable_scope_receipts(
+            mir.functions(),
+            mir.type_catalog(),
+            mir.transitions(),
+            &BTreeMap::new(),
+            mir.nested_callable_scopes(),
+        );
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("no validated scalar FFI receipt in itself or the MIR program")
+            }),
+            "a nested scope cannot be validated without an FFI receipt in the graph: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn forged_pure_nested_scope_receipt_cannot_create_a_non_ffi_mir_graph() {
+        let program = checked(
+            r#"
+                func main() -> i64 {
+                    func increment(value: i64) -> i64 { value + 1 as i64 }
+                    increment(41 as i64)
+                }
+            "#,
+        );
+        assert!(!super::super::is_scalar_ffi_candidate(&program));
+        let parent = NodeId("function:main".into());
+        let declaration = program
+            .callable(&parent)
+            .expect("main callable")
+            .body
+            .root
+            .statements
+            .iter()
+            .find_map(|statement| match &statement.kind {
+                ResolvedStmtKind::NestedCallable(callee) => {
+                    Some((callee.clone(), statement.node_id.clone()))
+                }
+                _ => None,
+            })
+            .expect("pure nested declaration");
+        let mut plan = CheckedNestedCallableScopePlan::default();
+        plan.by_parent
+            .entry(parent.clone())
+            .or_default()
+            .insert(declaration.0.clone(), declaration.1.clone());
+        plan.declarations
+            .insert(declaration.0.clone(), (parent, declaration.1));
+        let type_catalog =
+            MirTypeCatalog::from_checked_program(&program).expect("pure helper type catalog");
+        let functions = super::super::lower::lower_program_with_type_catalog_and_nested(
+            &program,
+            &type_catalog,
+            &plan.by_parent,
+        )
+        .expect("construct the forged nested graph for validator coverage");
+        let receipts = materialize_nested_callable_scope_receipts(&plan, &functions)
+            .expect("enumerate the forged helper call edge");
+        let errors = validate_nested_callable_scope_receipts(
+            &functions,
+            &type_catalog,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &receipts,
+        );
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("no validated scalar FFI receipt in itself or the MIR program")
+            }),
+            "a forged receipt cannot authorize a non-FFI graph: {errors:?}"
         );
     }
 
