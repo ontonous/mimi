@@ -728,6 +728,46 @@ fn compile_checked_keeps_flow_transition_on_legacy_owner() {
 }
 
 #[test]
+fn compile_checked_keeps_trait_impl_specialization_on_legacy_owner() {
+    let source = r#"
+        trait Computable {
+            func compute() -> i32
+        }
+
+        type Data {
+            value: i32
+        }
+
+        impl Computable for Data {
+            func compute() -> i32 { 11 }
+        }
+
+        func choose<T>(left: T, right: T) -> T { left }
+        func main() -> i32 { choose(7, 9) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "trait_impl_legacy_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("trait implementation compatibility path must remain compilable");
+    assert!(codegen
+        .module
+        .get_function("Data__Computable__compute")
+        .is_some());
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
 fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
     let source = r#"
         extern "C" func owner_tripwire_export(value: i32) -> i32 {

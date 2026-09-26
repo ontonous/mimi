@@ -288,6 +288,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "codegen_legacy_body_class_tripwire=dynamic-trait test=compile_checked_keeps_dynamic_protocol_method_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=flow-transition test=compile_checked_keeps_flow_transition_on_legacy_owner",
+        "codegen_legacy_body_class_tripwire=trait-impl-specialization test=compile_checked_keeps_trait_impl_specialization_on_legacy_owner markers=Data__Computable__compute",
         "codegen_legacy_body_class_tripwire=export-wrapper test=compile_checked_keeps_export_wrapper_body_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=actor-method test=compile_checked_keeps_actor_method_on_legacy_owner",
         "codegen_legacy_body_class_tripwire=map-any-borrowed test=compile_checked_keeps_map_any_borrowed_access_on_legacy_owner markers=map_get,values",
@@ -1049,6 +1050,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
         for test_name in [
             "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
             "compile_checked_routes_exact_s8_flow_through_canonical_mir",
+            "compile_checked_keeps_trait_impl_specialization_on_legacy_owner",
             "compatibility_verifier_access_is_explicitly_tagged",
             "ffi_checked_preserves_legacy_for_unmigrated_string_contract",
         ] {

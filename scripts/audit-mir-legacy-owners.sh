@@ -1440,6 +1440,10 @@ require_codegen_legacy_body_class_tripwire \
     compile_checked_keeps_flow_transition_on_legacy_owner \
     'Counter__inc__from_Zero'
 require_codegen_legacy_body_class_tripwire \
+    trait-impl-specialization \
+    compile_checked_keeps_trait_impl_specialization_on_legacy_owner \
+    'Data__Computable__compute'
+require_codegen_legacy_body_class_tripwire \
     export-wrapper \
     compile_checked_keeps_export_wrapper_body_on_legacy_owner \
     'owner_tripwire_export__mimi_export_body'
