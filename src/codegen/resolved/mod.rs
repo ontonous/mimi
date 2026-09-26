@@ -492,6 +492,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // that would re-emit broken IR that aliases freed heap. Escalate
                     // it as a hard error instead of falling back.
                     if e.code() == "E0723" {
+                        let symbol = function.qualified_name.clone();
+                        if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
+                            self.clear_partial_body(llvm_fn);
+                        }
                         return Err(e);
                     }
                     // Function failed to emit through resolved path.
@@ -849,7 +853,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // free-after-ret shape left dangling instructions that the
         // per-function verify() rejected, silently demoting functions to
         // legacy).
+        let loop_stack_depth = self.loop_stack.len();
         self.generator.begin_function_heap_scope();
+        let emitted = self.emit_callable_body(callable, function);
+        // Loop emitters push before recursively emitting a body and pop only
+        // on success. A recoverable body error therefore needs the same
+        // function-boundary cleanup as heap bookkeeping, while preserving any
+        // enclosing loop context owned by a caller.
+        self.loop_stack.truncate(loop_stack_depth);
+        let cleanup = self.generator.end_function_heap_scope();
+        match (emitted, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(emission), Err(cleanup)) => Err(CompileError::LlvmError(format!(
+                "resolved callable '{}' failed ({emission}) and heap-scope cleanup failed ({cleanup})",
+                callable.owner.0
+            ))),
+        }
+    }
+
+    fn emit_callable_body(
+        &mut self,
+        callable: &crate::core::ResolvedCallable,
+        function: inkwell::values::FunctionValue<'ctx>,
+    ) -> Result<(), CompileError> {
         let mut frame = ResolvedFrame {
             owner: callable.owner.clone(),
             locals: BTreeMap::new(),
@@ -870,10 +897,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let value = self.emit_block(&callable.body, &callable.body.root, &mut frame)?;
         if self.current_block_terminated() {
             // An early Return statement already emitted its path-specific
-            // heap flush BEFORE the ret (emit_statement Return arm). Only
-            // the bookkeeping needs balancing here; emitting anything after
-            // the terminator would dangle.
-            self.generator.end_function_heap_scope()?;
+            // heap flush BEFORE the ret (emit_statement Return arm). The
+            // outer wrapper balances bookkeeping after this body returns;
+            // emitting anything after the terminator would dangle.
             return Ok(());
         }
         // 0.36.15 L1: fallthrough exit — deferred blocks run LIFO before the
@@ -1467,8 +1493,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         let mut last = None;
+        #[cfg(test)]
+        let mut first_statement = true;
         for statement in &block.statements {
             last = self.emit_statement(body, statement, frame)?;
+            #[cfg(test)]
+            {
+                if first_statement {
+                    let root_block = block.node_id == body.root.node_id;
+                    let in_loop = !self.loop_stack.is_empty();
+                    let observed_partial = self
+                        .generator
+                        .builder
+                        .get_insert_block()
+                        .is_some_and(|current| current.get_first_instruction().is_some());
+                    if let Some(error) = self.generator.take_resolved_emission_failure_for_test(
+                        &body.owner,
+                        root_block,
+                        in_loop,
+                        observed_partial,
+                    ) {
+                        return Err(error);
+                    }
+                }
+                first_statement = false;
+            }
             if self.current_block_terminated() {
                 return Ok(last);
             }
@@ -14851,6 +14900,269 @@ func main() -> i32 { add(40, 2) }
         assert!(ir.contains("define i32 @add(i32"), "{ir}");
         assert!(ir.contains("define i32 @main(i32"), "{ir}");
         assert!(ir.contains("call i32 @add"), "{ir}");
+    }
+
+    #[test]
+    fn partial_non_core_resolved_emission_retries_cleanly_through_legacy() {
+        let program = checked(
+            r#"
+func compatibility_only<T>(value: T) -> T { value }
+func helper(value: i32) -> i32 {
+    let incremented = value + 1
+    return incremented + 1
+}
+func main() -> i32 { return helper(40) }
+"#,
+        );
+        assert!(
+            !supports_resolved_native(&program),
+            "the generic compatibility body keeps the program on per-function dispatch"
+        );
+        let helper = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "helper")
+            .expect("helper callable");
+        let eligible = resolved_eligible_functions(&program, false)
+            .expect("helper and main have eligible resolved bodies");
+        assert!(eligible.contains(&helper.node_id));
+
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_legacy_retry");
+        generator.inject_resolved_emission_failure_for_test(
+            helper.node_id.clone(),
+            crate::codegen::ResolvedEmissionFailureForTest::Recoverable,
+        );
+        generator
+            .compile_checked(&program)
+            .expect("the legacy retry recompiles the test-failed non-core body");
+
+        assert!(generator.resolved_emission_failure_observed_partial_for_test());
+        assert!(generator
+            .resolved_failed_functions()
+            .contains(&helper.qualified_name));
+        let helper_llvm = generator
+            .module
+            .get_function("helper")
+            .expect("helper declaration remains live across the retry");
+        assert!(
+            helper_llvm.count_basic_blocks() > 0,
+            "legacy retry must install a body after the injected partial resolved body is cleared"
+        );
+        generator
+            .module
+            .verify()
+            .expect("recovered module is valid LLVM");
+        assert!(
+            generator.heap_boundaries.borrow().is_empty(),
+            "failed resolved emission must not leak a function heap boundary into legacy retry"
+        );
+        assert_eq!(
+            generator.heap_allocs.borrow().len(),
+            1,
+            "failed resolved emission restores the caller's heap scope depth"
+        );
+        assert!(
+            generator.heap_claim_scopes.borrow().is_empty(),
+            "failed resolved emission restores the caller's heap claim scopes"
+        );
+    }
+
+    #[test]
+    fn loop_body_failure_restores_loop_context_before_next_callable() {
+        let program = checked(
+            r#"
+func broken_loop(value: i32) -> i32 {
+    let mut i = 0
+    while i < value {
+        i = i + 1
+    }
+    i
+}
+func later_loop(value: i32) -> i32 {
+    let mut i = 0
+    while i < value {
+        if i == 0 { break }
+        i = i + 1
+    }
+    i
+}
+func main() -> i32 { later_loop(broken_loop(1)) }
+"#,
+        );
+        let broken = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "broken_loop")
+            .expect("broken loop callable");
+        let later = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "later_loop")
+            .expect("later loop callable");
+        let eligible =
+            std::collections::BTreeSet::from([broken.node_id.clone(), later.node_id.clone()]);
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_loop_context_cleanup");
+        generator.inject_resolved_emission_failure_for_test(
+            broken.node_id.clone(),
+            crate::codegen::ResolvedEmissionFailureForTest::RecoverableInLoop,
+        );
+        {
+            let mut emitter = NativeResolvedEmitter {
+                program: &program,
+                generator: &mut generator,
+                loop_stack: Vec::new(),
+                place_inputs: BTreeMap::new(),
+                defer_scopes: Vec::new(),
+                comp_scopes: Vec::new(),
+                pending_generic_instances: Vec::new(),
+            };
+            emitter
+                .compile_subset(&eligible)
+                .expect("a non-core loop-body failure remains recoverable");
+            assert!(emitter
+                .generator
+                .resolved_emission_failure_observed_partial_for_test());
+            assert!(
+                emitter.loop_stack.is_empty(),
+                "a failed callable must not leave its loop context for later functions"
+            );
+        }
+        assert!(generator
+            .resolved_failed_functions()
+            .contains(&broken.qualified_name));
+        let later_llvm = generator
+            .module
+            .get_function(&later.qualified_name)
+            .expect("later loop declaration remains live");
+        assert!(
+            later_llvm.count_basic_blocks() > 0,
+            "later eligible callable must still be emitted"
+        );
+        generator
+            .module
+            .verify()
+            .expect("loop recovery must leave verifier-valid LLVM");
+    }
+
+    #[test]
+    fn resolved_fallthrough_balances_function_heap_scope() {
+        let program = checked(
+            r#"
+func helper(value: i32) -> i32 { value + 1 }
+func main() -> i32 { helper(41) }
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_fallthrough_scope");
+        generator
+            .compile_resolved_native(&program)
+            .expect("implicit fallthrough bodies compile through resolved native");
+        generator.module.verify().expect("valid LLVM");
+        assert!(generator.heap_boundaries.borrow().is_empty());
+        assert_eq!(generator.heap_allocs.borrow().len(), 1);
+        assert!(generator.heap_claim_scopes.borrow().is_empty());
+    }
+
+    #[test]
+    fn core_resolved_emission_failure_is_hard_error_after_partial_body_cleanup() {
+        let program = checked(
+            r#"
+func consume(token: SystemToken) -> i64 {
+    let staged = 1
+    token_id(token)
+}
+func main() -> i64 {
+    let token = make_token()
+    consume(token)
+}
+"#,
+        );
+        let core = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "consume")
+            .expect("linear core callable");
+        let eligible = std::collections::BTreeSet::from([core.node_id.clone()]);
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_core_hard_error");
+        generator.inject_resolved_emission_failure_for_test(
+            core.node_id.clone(),
+            crate::codegen::ResolvedEmissionFailureForTest::Recoverable,
+        );
+
+        let diagnostics = generator
+            .compile_resolved_subset(&program, &eligible)
+            .expect_err("a linear core callable cannot fall back to the legacy emitter");
+        assert!(generator.resolved_emission_failure_observed_partial_for_test());
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("hard-error for core callee")));
+        assert!(generator
+            .resolved_failed_functions()
+            .contains(&core.qualified_name));
+        let core_llvm = generator
+            .module
+            .get_function(&core.qualified_name)
+            .expect("core callable declaration remains live");
+        assert_eq!(
+            core_llvm.count_basic_blocks(),
+            0,
+            "core hard-error returns only after clearing the partial body"
+        );
+        generator
+            .module
+            .verify()
+            .expect("declaration-only module is valid");
+    }
+
+    #[test]
+    fn e0723_resolved_emission_failure_clears_partial_body_without_legacy_retry() {
+        let program = checked(
+            r#"
+func helper(value: i32) -> i32 {
+    let incremented = value + 1
+    incremented + 1
+}
+func main() -> i32 { helper(40) }
+"#,
+        );
+        let helper = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "helper")
+            .expect("helper callable");
+        let eligible = std::collections::BTreeSet::from([helper.node_id.clone()]);
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_e0723_no_retry");
+        generator.inject_resolved_emission_failure_for_test(
+            helper.node_id.clone(),
+            crate::codegen::ResolvedEmissionFailureForTest::OwnershipE0723,
+        );
+
+        let diagnostics = generator
+            .compile_resolved_subset(&program, &eligible)
+            .expect_err("E0723 must not downgrade to legacy");
+        assert!(generator.resolved_emission_failure_observed_partial_for_test());
+        assert_eq!(
+            diagnostics[0].code.as_deref(),
+            Some(crate::diagnostic::codes::E0723)
+        );
+        assert!(generator.resolved_failed_functions().is_empty());
+        let helper_llvm = generator
+            .module
+            .get_function("helper")
+            .expect("helper declaration remains live");
+        assert_eq!(
+            helper_llvm.count_basic_blocks(),
+            0,
+            "E0723 rejection must not leave partial LLVM IR behind"
+        );
+        generator
+            .module
+            .verify()
+            .expect("declaration-only module is valid");
     }
 
     #[test]

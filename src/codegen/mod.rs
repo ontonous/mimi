@@ -660,6 +660,13 @@ pub struct CodeGenerator<'ctx> {
     /// incorrectly skip them. Track them here so the legacy emitter knows to
     /// recompile even when `count_basic_blocks() != 0`.
     resolved_failed_functions: std::collections::HashSet<String>,
+    /// Test-only fault injection for proving that a partially emitted body is
+    /// cleared before legacy retry. This never exists in production builds.
+    #[cfg(test)]
+    resolved_emission_failure_for_test:
+        Option<(crate::core::NodeId, ResolvedEmissionFailureForTest)>,
+    #[cfg(test)]
+    resolved_emission_failure_observed_partial_for_test: bool,
     /// Canonical MIR identity already emitted into this LLVM module. A native
     /// generator is a single-program consumer: replaying an equivalent route
     /// receipt is idempotent, while a different MIR graph fails closed before
@@ -669,6 +676,14 @@ pub struct CodeGenerator<'ctx> {
     /// is consumer provenance and may change on an idempotent replay, while
     /// every canonical MIR/ABI/FFI/ownership field must remain identical.
     mir_native_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResolvedEmissionFailureForTest {
+    Recoverable,
+    RecoverableInLoop,
+    OwnershipE0723,
 }
 
 type VarEntry<'ctx> = (inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>);
@@ -919,6 +934,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             fault_self_entry: None,
             current_persistent_fields: Vec::new(),
             resolved_failed_functions: std::collections::HashSet::new(),
+            #[cfg(test)]
+            resolved_emission_failure_for_test: None,
+            #[cfg(test)]
+            resolved_emission_failure_observed_partial_for_test: false,
             mir_native_compiled_digest: None,
             mir_native_route_receipt: None,
         }
@@ -947,6 +966,63 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// still inspect this to prove a core Flow program stayed resolved.
     pub fn resolved_failed_functions(&self) -> &std::collections::HashSet<String> {
         &self.resolved_failed_functions
+    }
+
+    /// Arm a deterministic failure after the first statement of one resolved
+    /// callable. Tests use this to exercise cleanup/retry after real LLVM
+    /// instructions have already been emitted, without changing release code.
+    #[cfg(test)]
+    pub(crate) fn inject_resolved_emission_failure_for_test(
+        &mut self,
+        owner: crate::core::NodeId,
+        failure: ResolvedEmissionFailureForTest,
+    ) {
+        self.resolved_emission_failure_for_test = Some((owner, failure));
+        self.resolved_emission_failure_observed_partial_for_test = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_resolved_emission_failure_for_test(
+        &mut self,
+        owner: &crate::core::NodeId,
+        root_block: bool,
+        in_loop: bool,
+        observed_partial: bool,
+    ) -> Option<crate::error::CompileError> {
+        let (target, failure) = self.resolved_emission_failure_for_test.as_ref()?;
+        if target != owner {
+            return None;
+        }
+        let expected_location = match failure {
+            ResolvedEmissionFailureForTest::Recoverable
+            | ResolvedEmissionFailureForTest::OwnershipE0723 => root_block,
+            ResolvedEmissionFailureForTest::RecoverableInLoop => !root_block && in_loop,
+        };
+        if !expected_location {
+            return None;
+        }
+        let (_, failure) = self.resolved_emission_failure_for_test.take()?;
+        self.resolved_emission_failure_observed_partial_for_test = observed_partial;
+        Some(match failure {
+            ResolvedEmissionFailureForTest::Recoverable => crate::error::CompileError::Unsupported(
+                "test-injected resolved emitter failure after partial body".into(),
+            ),
+            ResolvedEmissionFailureForTest::RecoverableInLoop => {
+                crate::error::CompileError::Unsupported(
+                    "test-injected resolved emitter failure inside loop body".into(),
+                )
+            }
+            ResolvedEmissionFailureForTest::OwnershipE0723 => {
+                crate::error::CompileError::UnsupportedReturn(
+                    "test-injected ownership failure after partial body".into(),
+                )
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_emission_failure_observed_partial_for_test(&self) -> bool {
+        self.resolved_emission_failure_observed_partial_for_test
     }
 
     /// Enable or disable the A2 value-glue path for this generator instance.
