@@ -5168,6 +5168,10 @@ impl<'a> FunctionEmitter<'a> {
                 "drop register type '{}' requires an explicit SessionCall",
                 ty.as_str()
             )),
+            MirGlueKind::MapRoot => self.error(format!(
+                "drop register type '{}' requires a dedicated MapRoot operation",
+                ty.as_str()
+            )),
             MirGlueKind::Unsupported => self.error(format!(
                 "drop register type '{}' has no canonical drop glue",
                 ty.as_str()

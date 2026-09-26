@@ -24,6 +24,14 @@ impl ResolvedTypeId {
         let right = stable_hash(canonical.as_bytes(), 0x8422_2325_cbf2_9ce4);
         Self(format!("rt:{left:016x}{right:016x}"))
     }
+
+    /// Stable identity for a checker-authorized synthetic semantic type that
+    /// has no source-level `ResolvedType` representation.
+    pub(crate) fn synthetic(canonical: &str) -> Self {
+        Self::from_canonical(&format!(
+            "{RESOLVED_TYPE_SCHEMA_VERSION}:synthetic:{canonical}"
+        ))
+    }
 }
 
 /// Qualified identity of a nominal type declaration.

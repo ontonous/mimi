@@ -16,7 +16,14 @@ use crate::core::ir::{
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-14";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-15";
+
+/// Synthetic TypeDesc identity for the opaque persistent Map root. It is
+/// materialized only when Checker resource analysis contains a Map-root New
+/// receipt; the source-level `Record` identity remains unchanged.
+pub(crate) fn map_root_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:MapRoot:v1")
+}
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -681,6 +688,9 @@ pub enum MirGlueKind {
     OwnedString,
     List,
     Set,
+    /// Move/drop ownership glue for a checker-authorized persistent Map root.
+    /// Generic Clone intentionally remains unsupported.
+    MapRoot,
     Aggregate,
     /// Transfer-only SessionChan endpoint glue. A session endpoint has no
     /// generic Clone/Drop operation; its only legal ownership boundary is an
@@ -697,6 +707,7 @@ impl MirGlueKind {
             Self::OwnedString => "owned_string",
             Self::List => "list",
             Self::Set => "set",
+            Self::MapRoot => "map_root",
             Self::Aggregate => "aggregate",
             Self::Session => "session",
             Self::Unsupported => "unsupported",
@@ -824,6 +835,13 @@ impl MirGlueContract {
                 drop: MirGlueKind::Set,
             };
         }
+        if matches!(kind, MirTypeKind::MapRoot) && ownership == MirOwnership::Move {
+            return Self {
+                move_out: MirGlueKind::MapRoot,
+                clone: MirGlueKind::Unsupported,
+                drop: MirGlueKind::MapRoot,
+            };
+        }
         Self {
             move_out: MirGlueKind::Unsupported,
             clone: MirGlueKind::Unsupported,
@@ -937,6 +955,9 @@ pub enum MirTypeKind {
     /// A parameterized, move-owned Set whose element is a concrete Copy
     /// scalar in the currently materialized production island.
     Set,
+    /// Synthetic opaque root identity admitted only by Checker Map-root
+    /// lifecycle receipts. It is distinct from source `Record` and `Set`.
+    MapRoot,
     FlowStateSet,
     Reference {
         mutable: bool,
@@ -978,6 +999,7 @@ impl MirTypeKind {
             Self::Nominal => "nominal".into(),
             Self::List => "list".into(),
             Self::Set => "set".into(),
+            Self::MapRoot => "map_root".into(),
             Self::FlowStateSet => "flow_state_set".into(),
             Self::Reference { mutable } => format!("reference mutable={mutable}"),
             Self::Option => "option".into(),
@@ -1100,6 +1122,8 @@ pub enum MirLayout {
     Set {
         element: ResolvedTypeId,
     },
+    /// Opaque persistent Map root admitted by Checker lifecycle receipts.
+    MapRoot,
     Opaque,
 }
 
@@ -1177,6 +1201,7 @@ impl MirLayout {
             ),
             Self::List { element } => format!("list element={}", element.as_str()),
             Self::Set { element } => format!("set element={}", element.as_str()),
+            Self::MapRoot => "map_root".into(),
             Self::Opaque => "opaque".into(),
         }
     }
@@ -2871,6 +2896,38 @@ impl MirTypeCatalog {
                 descriptor.needs_clone_glue = descriptor.ownership.needs_clone();
                 descriptor.glue = MirGlueContract::for_type(&descriptor.kind, descriptor.ownership);
             }
+        }
+        // Materialize this private root only when Checker has actually
+        // authorized a Map-root lifecycle. The synthetic type is never
+        // inferred from an ordinary `Record` or from source type syntax.
+        let has_map_root_candidate = program.resource_analyses().values().any(|analysis| {
+            analysis
+                .map_root_actions
+                .iter()
+                .any(|action| action.kind == crate::core::MapRootActionKind::New)
+        });
+        if has_map_root_candidate {
+            let id = map_root_type_id();
+            catalog.entries.insert(
+                id.clone(),
+                MirTypeDesc {
+                    id,
+                    kind: MirTypeKind::MapRoot,
+                    layout: MirLayout::MapRoot,
+                    session_protocol: None,
+                    ownership: MirOwnership::Move,
+                    abi: MirAbiClass::OpaqueHandle,
+                    needs_drop_glue: true,
+                    needs_clone_glue: false,
+                    glue: MirGlueContract {
+                        move_out: MirGlueKind::MapRoot,
+                        clone: MirGlueKind::Unsupported,
+                        drop: MirGlueKind::MapRoot,
+                    },
+                    drop_plan: None,
+                    variant_drop_plan: None,
+                },
+            );
         }
         // Record ownership/layout facts are attached above from the checker.
         // Re-run product materialization now so a tuple or record containing a
@@ -5033,6 +5090,9 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.kind == MirTypeKind::MapRoot {
+            return self.validate_map_root_glue(ty, operation);
+        }
         let supported = match operation {
             MirGlueOperation::MoveOut => descriptor.glue.supports_move_out(),
             MirGlueOperation::Clone => descriptor.glue.supports_clone(),
@@ -5066,6 +5126,51 @@ impl MirTypeCatalog {
             self.validate_set_glue(ty, operation)?;
         }
         Ok(())
+    }
+
+    /// Validate the checker-authorized synthetic persistent Map-root
+    /// descriptor. Roots are opaque handles with move/drop support and no
+    /// generic Clone operation; only a dedicated future Map operation may
+    /// implement persistent update semantics.
+    fn validate_map_root_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "MapRoot type '{}' is absent from MIR type catalog",
+                ty.as_str()
+            )
+        })?;
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::MapRoot,
+            clone: MirGlueKind::Unsupported,
+            drop: MirGlueKind::MapRoot,
+        };
+        if descriptor.kind != MirTypeKind::MapRoot
+            || descriptor.layout != MirLayout::MapRoot
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || !descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue != expected
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' MapRoot TypeDesc has an inconsistent ABI/ownership/glue contract",
+                ty.as_str()
+            ));
+        }
+        match operation {
+            MirGlueOperation::MoveOut | MirGlueOperation::Drop => Ok(()),
+            MirGlueOperation::Clone => Err(format!(
+                "type '{}' MapRoot has no generic Clone glue",
+                ty.as_str()
+            )),
+        }
     }
 
     /// Validate the transfer-only SessionChan endpoint ABI. SessionChan is
@@ -11765,6 +11870,77 @@ mod tests {
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable, SessionResidualId};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
+
+    #[test]
+    fn checked_map_root_type_desc_is_synthetic_and_checker_authorized() {
+        let source = r#"
+            type Point { x: i32 }
+            func main() -> i32 {
+                let point = Point { x: 7 }
+                let root = map_new()
+                let updated = map_set(root, "point", point.x)
+                let size = map_size(updated)
+                drop(updated)
+                size
+            }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check Map-root fixture");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let root = catalog
+            .get(&super::map_root_type_id())
+            .expect("checker-authorized MapRoot descriptor");
+        assert_eq!(root.kind, MirTypeKind::MapRoot);
+        assert_eq!(root.abi, MirAbiClass::OpaqueHandle);
+        assert_eq!(root.layout, MirLayout::MapRoot);
+        assert_eq!(root.ownership, MirOwnership::Move);
+        assert_eq!(root.glue.move_out, MirGlueKind::MapRoot);
+        assert_eq!(root.glue.clone, MirGlueKind::Unsupported);
+        assert_eq!(root.glue.drop, MirGlueKind::MapRoot);
+        assert!(root.needs_drop_glue);
+        assert!(!root.needs_clone_glue);
+        assert!(catalog
+            .validate_glue(&root.id, super::MirGlueOperation::MoveOut)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&root.id, super::MirGlueOperation::Drop)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&root.id, super::MirGlueOperation::Clone)
+            .is_err());
+        assert!(catalog
+            .canonical_text()
+            .contains("kind=map_root layout=map_root"));
+        assert!(catalog
+            .abi_canonical_text()
+            .contains("abi=opaque_handle glue=move_out=map_root clone=unsupported drop=map_root"));
+
+        let point = catalog
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind == MirTypeKind::Nominal
+                    && matches!(descriptor.layout, MirLayout::Record { .. }))
+                .then(|| (id.clone(), descriptor))
+            })
+            .expect("ordinary Point remains a Record TypeDesc");
+        assert_ne!(point.0, root.id);
+        assert_eq!(point.1.kind, MirTypeKind::Nominal);
+    }
+
+    #[test]
+    fn checked_catalog_without_map_root_receipt_has_no_synthetic_type() {
+        let source = "func main() -> i32 { 42 }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        assert!(catalog.get(&super::map_root_type_id()).is_none());
+    }
 
     #[test]
     fn materializes_scalar_abi_and_copy_ownership() {
