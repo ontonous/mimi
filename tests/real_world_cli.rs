@@ -6066,6 +6066,85 @@ fn canonical_scalar_ffi_nested_root_helper_routes_all_cli_consumers_without_lega
 }
 
 #[test]
+fn canonical_scalar_ffi_nested_unit_result_fails_closed_across_cli_consumers() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_nested_unit_rejected_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create nested Unit-result FFI directory");
+    let source = dir.join("nested_unit.mimi");
+    fs::write(
+        &source,
+        "extern \"C\" { func notify(value: i32) requires: value > 0 ensures: true; }\nfunc main() {\n    func helper(value: i32) { notify(value) }\n    println(7)\n    let done = helper(1)\n}\n",
+    )
+    .expect("write nested Unit-result FFI source");
+
+    for (subcommand, explicit_mir) in [
+        ("run", false),
+        ("run", true),
+        ("build", false),
+        ("build", true),
+        ("verify", false),
+        ("verify", true),
+    ] {
+        let output_path = dir.join(format!("{subcommand}-{explicit_mir}"));
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg(subcommand)
+            .env("MIMI_VERBOSE", "1");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        if subcommand == "build" {
+            command
+                .arg("--emit-ir")
+                .arg(&source)
+                .arg("-o")
+                .arg(&output_path);
+        } else {
+            command.arg(&source);
+        }
+        let output = command.output().unwrap_or_else(|error| {
+            panic!("spawn {subcommand} explicit_mir={explicit_mir}: {error}")
+        });
+        assert!(
+            !output.status.success(),
+            "{subcommand} explicit_mir={explicit_mir} must reject the unsupported nested Unit result: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{subcommand} explicit_mir={explicit_mir} must not execute or emit an artifact: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{subcommand} explicit_mir={explicit_mir} must not fall back: {stderr}"
+        );
+        assert!(
+            stderr.contains("canonical root-scope MIR slice")
+                || stderr.contains("canonical MIR ScalarFfi route"),
+            "{subcommand} explicit_mir={explicit_mir} lost the fail-closed route diagnostic: {stderr}"
+        );
+        if subcommand == "build" {
+            assert!(
+                !output_path.exists(),
+                "build explicit_mir={explicit_mir} must not leave an artifact"
+            );
+        }
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_build_verify_reports_only_failed_receipt() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_build_verify_multi_callsite_{}_{}",
