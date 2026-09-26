@@ -7,9 +7,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
+
+static NEXT_ANY_OWNER_TABLE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Default)]
 struct DropProbe(Arc<AtomicUsize>);
@@ -90,23 +92,22 @@ impl AnyValue {
             Self::I64(_) | Self::String(_) => None,
         }
     }
-
-    fn descriptor(&self) -> DescriptorId {
-        match self {
-            Self::I64(_) => DescriptorId::I64,
-            Self::String(_) => DescriptorId::STRING,
-            Self::Aggregate(_) => DescriptorId::AGGREGATE,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct DescriptorId(u32);
+struct DescriptorId {
+    slot: u32,
+    generation: u32,
+}
 
 impl DescriptorId {
-    const I64: Self = Self(1);
-    const STRING: Self = Self(2);
-    const AGGREGATE: Self = Self(3);
+    const I64: Self = Self::new(1, 1);
+    const STRING: Self = Self::new(2, 1);
+    const AGGREGATE: Self = Self::new(3, 1);
+
+    const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,8 +127,39 @@ impl AnyValue {
     }
 }
 
+struct DescriptorVersion {
+    identity: DescriptorId,
+    shape: ValueShape,
+    drop_glue: Arc<dyn Fn(AnyValue) + Send + Sync>,
+    drop_value_probe: DropProbe,
+    drop_probe: DropProbe,
+}
+
+impl Drop for DescriptorVersion {
+    fn drop(&mut self) {
+        self.drop_probe.record_drop();
+    }
+}
+
+fn descriptor_version(identity: DescriptorId, shape: ValueShape) -> Arc<DescriptorVersion> {
+    let drop_value_probe = DropProbe::default();
+    let callback_probe = drop_value_probe.clone();
+    Arc::new(DescriptorVersion {
+        identity,
+        shape,
+        drop_glue: Arc::new(move |value| {
+            debug_assert_eq!(value.shape(), shape);
+            callback_probe.record_drop();
+            drop(value);
+        }),
+        drop_value_probe,
+        drop_probe: DropProbe::default(),
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AnyHandle {
+    table_id: u64,
     slot: u32,
     generation: u32,
     descriptor: DescriptorId,
@@ -136,9 +168,12 @@ struct AnyHandle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum OwnerError {
     InvalidHandle,
+    WrongTable,
     StaleHandle,
     UnknownDescriptor,
+    StaleDescriptor,
     DescriptorMismatch,
+    DuplicateOwnerToken,
     Capacity,
     Poisoned,
     InjectedCommitFailure,
@@ -146,7 +181,7 @@ enum OwnerError {
 
 #[derive(Clone)]
 struct TypedAny {
-    descriptor: DescriptorId,
+    descriptor: Arc<DescriptorVersion>,
     value: AnyValue,
 }
 
@@ -157,18 +192,28 @@ struct OwnerSlot {
 }
 
 struct OwnerState {
-    descriptors: BTreeMap<DescriptorId, ValueShape>,
+    known_descriptor_slots: std::collections::BTreeSet<u32>,
+    current_descriptors: BTreeMap<u32, Arc<DescriptorVersion>>,
     slots: Vec<OwnerSlot>,
     free: Vec<u32>,
     max_slots: usize,
 }
 
+impl Drop for OwnerState {
+    fn drop(&mut self) {
+        for slot in &mut self.slots {
+            if let Some(TypedAny { descriptor, value }) = slot.value.take() {
+                (descriptor.drop_glue)(value);
+            }
+        }
+    }
+}
+
 impl OwnerState {
-    fn validate(&self, handle: AnyHandle) -> Result<&TypedAny, OwnerError> {
-        let expected_shape = self
-            .descriptors
-            .get(&handle.descriptor)
-            .ok_or(OwnerError::UnknownDescriptor)?;
+    fn validate(&self, table_id: u64, handle: AnyHandle) -> Result<&TypedAny, OwnerError> {
+        if handle.table_id != table_id {
+            return Err(OwnerError::WrongTable);
+        }
         let slot = self
             .slots
             .get(handle.slot as usize)
@@ -177,19 +222,75 @@ impl OwnerState {
             return Err(OwnerError::StaleHandle);
         }
         let value = slot.value.as_ref().expect("checked live owner slot");
-        if value.descriptor != handle.descriptor || value.value.shape() != *expected_shape {
+        if value.descriptor.identity != handle.descriptor {
+            return if self
+                .known_descriptor_slots
+                .contains(&handle.descriptor.slot)
+            {
+                Err(OwnerError::DescriptorMismatch)
+            } else {
+                Err(OwnerError::UnknownDescriptor)
+            };
+        }
+        if value.value.shape() != value.descriptor.shape {
             return Err(OwnerError::DescriptorMismatch);
         }
         Ok(value)
     }
 
-    fn allocate_many(&mut self, values: &mut Vec<TypedAny>) -> Result<Vec<AnyHandle>, OwnerError> {
+    fn current_descriptor(
+        &self,
+        identity: DescriptorId,
+    ) -> Result<Arc<DescriptorVersion>, OwnerError> {
+        let Some(current) = self.current_descriptors.get(&identity.slot) else {
+            return Err(OwnerError::UnknownDescriptor);
+        };
+        if current.identity != identity {
+            return if identity.generation < current.identity.generation {
+                Err(OwnerError::StaleDescriptor)
+            } else {
+                Err(OwnerError::UnknownDescriptor)
+            };
+        }
+        Ok(current.clone())
+    }
+
+    fn replace_descriptor(
+        &mut self,
+        current: DescriptorId,
+        shape: ValueShape,
+    ) -> Result<(DescriptorId, Arc<DescriptorVersion>), OwnerError> {
+        let Some(current_version) = self.current_descriptors.get(&current.slot) else {
+            return Err(OwnerError::UnknownDescriptor);
+        };
+        if current_version.identity != current {
+            return if current.generation < current_version.identity.generation {
+                Err(OwnerError::StaleDescriptor)
+            } else {
+                Err(OwnerError::UnknownDescriptor)
+            };
+        }
+        let generation = current
+            .generation
+            .checked_add(1)
+            .ok_or(OwnerError::Capacity)?;
+        let identity = DescriptorId::new(current.slot, generation);
+        let version = descriptor_version(identity, shape);
+        self.known_descriptor_slots.insert(current.slot);
+        let previous = self
+            .current_descriptors
+            .insert(current.slot, version)
+            .expect("current descriptor was validated");
+        Ok((identity, previous))
+    }
+
+    fn allocate_many(
+        &mut self,
+        table_id: u64,
+        values: &mut Vec<TypedAny>,
+    ) -> Result<Vec<AnyHandle>, OwnerError> {
         for value in values.iter() {
-            let expected_shape = self
-                .descriptors
-                .get(&value.descriptor)
-                .ok_or(OwnerError::UnknownDescriptor)?;
-            if value.value.shape() != *expected_shape {
+            if value.value.shape() != value.descriptor.shape {
                 return Err(OwnerError::DescriptorMismatch);
             }
         }
@@ -245,13 +346,15 @@ impl OwnerState {
             let slot = &mut self.slots[slot_index as usize];
             slot.value = Some(value);
             handles.push(AnyHandle {
+                table_id,
                 slot: slot_index,
                 generation: slot.generation,
                 descriptor: slot
                     .value
                     .as_ref()
                     .expect("new owner slot is populated")
-                    .descriptor,
+                    .descriptor
+                    .identity,
             });
         }
         Ok(handles)
@@ -264,19 +367,35 @@ impl OwnerState {
 /// its generation, while retaining a value allocates a new token. This is not
 /// the production `ValueHandle` registry or a C ABI implementation.
 struct AnyOwnerTable {
+    table_id: u64,
     state: std::sync::Mutex<OwnerState>,
 }
 
 impl AnyOwnerTable {
     fn with_capacity(max_slots: usize) -> Self {
-        let descriptors = BTreeMap::from([
+        let table_id = NEXT_ANY_OWNER_TABLE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("Any owner table identity space exhausted");
+        let definitions = [
             (DescriptorId::I64, ValueShape::I64),
             (DescriptorId::STRING, ValueShape::String),
             (DescriptorId::AGGREGATE, ValueShape::Aggregate),
-        ]);
+        ];
+        let current_descriptors = definitions
+            .iter()
+            .map(|(identity, shape)| (identity.slot, descriptor_version(*identity, *shape)))
+            .collect();
+        let known_descriptor_slots = definitions
+            .iter()
+            .map(|(identity, _)| identity.slot)
+            .collect();
         Self {
+            table_id,
             state: std::sync::Mutex::new(OwnerState {
-                descriptors,
+                known_descriptor_slots,
+                current_descriptors,
                 slots: Vec::new(),
                 free: Vec::new(),
                 max_slots: max_slots.min(u32::MAX as usize),
@@ -285,28 +404,79 @@ impl AnyOwnerTable {
     }
 
     fn allocate(&self, descriptor: DescriptorId, value: AnyValue) -> Result<AnyHandle, OwnerError> {
-        self.allocate_many(vec![TypedAny { descriptor, value }])
-            .map(|mut handles| handles.pop().expect("single value yields one owner token"))
+        let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
+        let version = state.current_descriptor(descriptor)?;
+        let mut values = vec![TypedAny {
+            descriptor: version,
+            value,
+        }];
+        let result = state.allocate_many(self.table_id, &mut values);
+        drop(state);
+        drop(values);
+        result.map(|mut handles| handles.pop().expect("single value yields one owner token"))
     }
 
     fn allocate_many(&self, values: Vec<TypedAny>) -> Result<Vec<AnyHandle>, OwnerError> {
         let mut values = values;
         let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        let result = state.allocate_many(&mut values);
+        let result = state.allocate_many(self.table_id, &mut values);
         drop(state);
         drop(values);
         result
     }
 
+    fn replace_descriptor_for_test_only(
+        &self,
+        current: DescriptorId,
+        shape: ValueShape,
+    ) -> Result<DescriptorId, OwnerError> {
+        let (identity, previous) = {
+            let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
+            state.replace_descriptor(current, shape)?
+        };
+        drop(previous);
+        Ok(identity)
+    }
+
+    fn descriptor_drop_probe_for_test_only(
+        &self,
+        handle: AnyHandle,
+    ) -> Result<DropProbe, OwnerError> {
+        let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
+        Ok(state
+            .validate(self.table_id, handle)?
+            .descriptor
+            .drop_probe
+            .clone())
+    }
+
+    #[cfg(test)]
+    fn descriptor_value_drop_probe_for_test_only(
+        &self,
+        handle: AnyHandle,
+    ) -> Result<DropProbe, OwnerError> {
+        let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
+        Ok(state
+            .validate(self.table_id, handle)?
+            .descriptor
+            .drop_value_probe
+            .clone())
+    }
+
+    fn validate_handle(&self, handle: AnyHandle) -> Result<(), OwnerError> {
+        let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
+        state.validate(self.table_id, handle).map(|_| ())
+    }
+
     fn clone_value(&self, handle: AnyHandle) -> Result<TypedAny, OwnerError> {
         let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        Ok(state.validate(handle)?.clone())
+        Ok(state.validate(self.table_id, handle)?.clone())
     }
 
     fn read_i64(&self, handle: AnyHandle, expected: DescriptorId) -> Result<i64, OwnerError> {
         let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        let value = state.validate(handle)?;
-        if expected != DescriptorId::I64 || value.descriptor != expected {
+        let value = state.validate(self.table_id, handle)?;
+        if value.descriptor.identity != expected || value.descriptor.shape != ValueShape::I64 {
             return Err(OwnerError::DescriptorMismatch);
         }
         value.value.as_i64().ok_or(OwnerError::DescriptorMismatch)
@@ -314,8 +484,8 @@ impl AnyOwnerTable {
 
     fn read_string(&self, handle: AnyHandle, expected: DescriptorId) -> Result<String, OwnerError> {
         let state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        let value = state.validate(handle)?;
-        if expected != DescriptorId::STRING || value.descriptor != expected {
+        let value = state.validate(self.table_id, handle)?;
+        if value.descriptor.identity != expected || value.descriptor.shape != ValueShape::String {
             return Err(OwnerError::DescriptorMismatch);
         }
         value
@@ -327,9 +497,9 @@ impl AnyOwnerTable {
 
     fn retain(&self, handle: AnyHandle) -> Result<AnyHandle, OwnerError> {
         let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        let value = state.validate(handle)?.clone();
+        let value = state.validate(self.table_id, handle)?.clone();
         let mut values = vec![value];
-        let result = state.allocate_many(&mut values);
+        let result = state.allocate_many(self.table_id, &mut values);
         drop(state);
         drop(values);
         result.map(|mut handles| handles.pop().expect("one retained value yields one token"))
@@ -338,18 +508,18 @@ impl AnyOwnerTable {
     fn retain_many(&self, handles: &[AnyHandle]) -> Result<Vec<AnyHandle>, OwnerError> {
         let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
         for handle in handles {
-            state.validate(*handle)?;
+            state.validate(self.table_id, *handle)?;
         }
         let mut values = handles
             .iter()
             .map(|handle| {
                 state
-                    .validate(*handle)
+                    .validate(self.table_id, *handle)
                     .expect("prevalidated owner token")
                     .clone()
             })
             .collect();
-        let result = state.allocate_many(&mut values);
+        let result = state.allocate_many(self.table_id, &mut values);
         drop(state);
         drop(values);
         result
@@ -358,7 +528,7 @@ impl AnyOwnerTable {
     fn release(&self, handle: AnyHandle) -> Result<(), OwnerError> {
         let released = {
             let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-            state.validate(handle)?;
+            state.validate(self.table_id, handle)?;
             let index = handle.slot as usize;
             let released = state.slots[index]
                 .value
@@ -374,9 +544,11 @@ impl AnyOwnerTable {
             }
             released
         };
-        // Dropping a value may release nested owners; never run that work under
-        // the table lock.
-        drop(released);
+        // Descriptor glue may release nested owners; never run it under the
+        // table lock, and always dispatch through the pinned version.
+        let TypedAny { descriptor, value } = released;
+        (descriptor.drop_glue)(value);
+        drop(descriptor);
         Ok(())
     }
 
@@ -396,7 +568,7 @@ impl AnyOwnerTable {
         generation: u32,
     ) -> Result<AnyHandle, OwnerError> {
         let mut state = self.state.lock().map_err(|_| OwnerError::Poisoned)?;
-        state.validate(handle)?;
+        state.validate(self.table_id, handle)?;
         state.slots[handle.slot as usize].generation = generation;
         Ok(AnyHandle {
             generation,
@@ -546,14 +718,22 @@ impl OwnedPrototypeMap {
     }
 
     /// Test fixture constructor that transfers the supplied owner tokens into
-    /// the new root; callers must stop using those tokens after this call.
+    /// the new root. It validates the whole set before transfer, so failure
+    /// leaves every token with the caller.
     fn from_owned_tokens(
         owners: Arc<AnyOwnerTable>,
         entries: BTreeMap<Arc<str>, AnyHandle>,
-    ) -> Self {
-        Self {
-            root: Arc::new(OwnedMapRoot { owners, entries }),
+    ) -> Result<Self, OwnerError> {
+        let mut transferred = std::collections::BTreeSet::new();
+        for handle in entries.values() {
+            if !transferred.insert((handle.table_id, handle.slot, handle.generation)) {
+                return Err(OwnerError::DuplicateOwnerToken);
+            }
+            owners.validate_handle(*handle)?;
         }
+        Ok(Self {
+            root: Arc::new(OwnedMapRoot { owners, entries }),
+        })
     }
 
     fn set_transactional(
@@ -564,7 +744,7 @@ impl OwnedPrototypeMap {
         failpoint: SetFailpoint,
     ) -> Result<Self, OwnerError> {
         let incoming = self.root.owners.clone_value(input)?;
-        if input.descriptor != expected || incoming.descriptor != expected {
+        if input.descriptor != expected || incoming.descriptor.identity != expected {
             return Err(OwnerError::DescriptorMismatch);
         }
 
@@ -649,7 +829,7 @@ impl OwnedPrototypeMap {
 mod tests {
     use super::{
         AnyHandle, AnyOwnerTable, AnyStringOwner, AnyValue, DescriptorId, DropProbe,
-        OwnedAggregate, OwnedPrototypeMap, OwnerError, PrototypeMap, SetFailpoint,
+        OwnedAggregate, OwnedPrototypeMap, OwnerError, PrototypeMap, SetFailpoint, ValueShape,
     };
     use std::collections::BTreeMap;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -785,6 +965,7 @@ mod tests {
             .allocate(DescriptorId::I64, AnyValue::I64(7))
             .expect("first token fits");
         let invalid = AnyHandle {
+            table_id: owners.table_id,
             slot: u32::MAX,
             generation: 1,
             descriptor: DescriptorId::I64,
@@ -818,6 +999,228 @@ mod tests {
         );
         assert_eq!(owners.release(first), Err(OwnerError::StaleHandle));
         assert_eq!(owners.read_i64(reused, DescriptorId::I64), Ok(9));
+    }
+
+    #[test]
+    fn owner_tokens_are_scoped_to_their_table_namespace() {
+        let first_table = AnyOwnerTable::with_capacity(2);
+        let second_table = AnyOwnerTable::with_capacity(2);
+        let first = first_table
+            .allocate(DescriptorId::I64, AnyValue::I64(7))
+            .expect("first table token fits");
+        let second = second_table
+            .allocate(DescriptorId::I64, AnyValue::I64(9))
+            .expect("second table token fits at the same slot coordinates");
+
+        assert_eq!(first.slot, second.slot);
+        assert_eq!(first.generation, second.generation);
+        assert_ne!(first.table_id, second.table_id);
+        assert_eq!(
+            second_table.read_i64(first, DescriptorId::I64),
+            Err(OwnerError::WrongTable)
+        );
+        assert_eq!(second_table.release(first), Err(OwnerError::WrongTable));
+        assert_eq!(first_table.read_i64(first, DescriptorId::I64), Ok(7));
+        assert_eq!(second_table.read_i64(second, DescriptorId::I64), Ok(9));
+
+        first_table
+            .release(first)
+            .expect("release first table token");
+        second_table
+            .release(second)
+            .expect("release second table token");
+        assert_eq!(first_table.live_count(), Ok(0));
+        assert_eq!(second_table.live_count(), Ok(0));
+    }
+
+    #[test]
+    fn owned_map_rejects_foreign_table_tokens_without_consuming_them() {
+        let source_owners = Arc::new(AnyOwnerTable::with_capacity(2));
+        let destination_owners = Arc::new(AnyOwnerTable::with_capacity(2));
+        let source_token = source_owners
+            .allocate(DescriptorId::I64, AnyValue::I64(17))
+            .expect("source token fits");
+
+        assert_eq!(
+            OwnedPrototypeMap::from_owned_tokens(
+                destination_owners.clone(),
+                BTreeMap::from([(Arc::from("foreign"), source_token)]),
+            )
+            .map(|_| ()),
+            Err(OwnerError::WrongTable)
+        );
+        assert_eq!(
+            OwnedPrototypeMap::from_owned_tokens(
+                source_owners.clone(),
+                BTreeMap::from([
+                    (Arc::from("first"), source_token),
+                    (Arc::from("duplicate"), source_token),
+                ]),
+            )
+            .map(|_| ()),
+            Err(OwnerError::DuplicateOwnerToken)
+        );
+        assert_eq!(source_owners.live_count(), Ok(1));
+        assert_eq!(destination_owners.live_count(), Ok(0));
+        assert_eq!(
+            source_owners.read_i64(source_token, DescriptorId::I64),
+            Ok(17)
+        );
+        source_owners
+            .release(source_token)
+            .expect("failed construction leaves source token with caller");
+    }
+
+    #[test]
+    fn descriptor_replacement_keeps_old_owners_pinned_and_rejects_stale_ingress() {
+        let string_probe = DropProbe::default();
+        let aggregate_probe = DropProbe::default();
+        let owners = AnyOwnerTable::with_capacity(4);
+        let old_descriptor = DescriptorId::STRING;
+        let old_owner = owners
+            .allocate(
+                old_descriptor,
+                AnyValue::String(AnyStringOwner::new("old layout", string_probe.clone())),
+            )
+            .expect("old descriptor accepts a String owner");
+        let old_descriptor_drop = owners
+            .descriptor_drop_probe_for_test_only(old_owner)
+            .expect("live owner exposes its pinned descriptor lifetime probe");
+        let old_drop_glue_probe = owners
+            .descriptor_value_drop_probe_for_test_only(old_owner)
+            .expect("live owner exposes its pinned value drop glue probe");
+
+        let new_descriptor = owners
+            .replace_descriptor_for_test_only(old_descriptor, ValueShape::Aggregate)
+            .expect("descriptor update publishes a new immutable generation");
+        assert_eq!(new_descriptor.slot, old_descriptor.slot);
+        assert_eq!(new_descriptor.generation, old_descriptor.generation + 1);
+        assert_eq!(old_descriptor_drop.count(), 0);
+        assert_eq!(
+            owners.read_string(old_owner, old_descriptor),
+            Ok("old layout".into())
+        );
+        let retained_old_owner = owners
+            .retain(old_owner)
+            .expect("retaining an extant retired version pins its descriptor");
+
+        let rejected_probe = DropProbe::default();
+        assert_eq!(
+            owners.allocate(
+                old_descriptor,
+                AnyValue::String(AnyStringOwner::new("stale ingress", rejected_probe.clone())),
+            ),
+            Err(OwnerError::StaleDescriptor)
+        );
+        assert_eq!(rejected_probe.count(), 1);
+
+        let forged_new_version = AnyHandle {
+            descriptor: new_descriptor,
+            ..old_owner
+        };
+        assert_eq!(
+            owners.clone_value(forged_new_version).map(|_| ()),
+            Err(OwnerError::DescriptorMismatch)
+        );
+        assert_eq!(
+            owners.release(forged_new_version),
+            Err(OwnerError::DescriptorMismatch)
+        );
+        assert_eq!(
+            owners.read_string(old_owner, old_descriptor),
+            Ok("old layout".into())
+        );
+
+        let aggregate = owners
+            .allocate(
+                new_descriptor,
+                AnyValue::Aggregate(Arc::new(OwnedAggregate {
+                    fields: vec![AnyValue::String(AnyStringOwner::new(
+                        "new layout",
+                        aggregate_probe.clone(),
+                    ))],
+                    drop_probe: aggregate_probe.clone(),
+                })),
+            )
+            .expect("new descriptor accepts only its new aggregate shape");
+        let new_descriptor_drop = owners
+            .descriptor_drop_probe_for_test_only(aggregate)
+            .expect("new owner exposes its descriptor lifetime probe");
+        let new_drop_glue_probe = owners
+            .descriptor_value_drop_probe_for_test_only(aggregate)
+            .expect("new owner exposes its descriptor-specific drop glue probe");
+        let cloned_aggregate = owners
+            .clone_value(aggregate)
+            .expect("new aggregate owner validates");
+        assert_eq!(cloned_aggregate.descriptor.identity, new_descriptor);
+        assert_eq!(cloned_aggregate.descriptor.shape, ValueShape::Aggregate);
+        drop(cloned_aggregate);
+
+        owners
+            .release(old_owner)
+            .expect("retired descriptor still releases its old layout");
+        assert_eq!(string_probe.count(), 0);
+        assert_eq!(old_descriptor_drop.count(), 0);
+        assert_eq!(old_drop_glue_probe.count(), 1);
+        owners
+            .release(retained_old_owner)
+            .expect("last old-version owner runs its pinned destructor");
+        assert_eq!(string_probe.count(), 1);
+        assert_eq!(old_descriptor_drop.count(), 1);
+        assert_eq!(old_drop_glue_probe.count(), 2);
+        owners
+            .release(aggregate)
+            .expect("release new descriptor owner");
+        assert_eq!(aggregate_probe.count(), 2);
+        assert_eq!(new_drop_glue_probe.count(), 1);
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(new_descriptor_drop.count(), 0);
+        drop(owners);
+        assert_eq!(new_descriptor_drop.count(), 1);
+    }
+
+    #[test]
+    fn descriptor_generation_exhaustion_keeps_current_version_usable() {
+        let owners = AnyOwnerTable::with_capacity(2);
+        let exhausted = DescriptorId::new(DescriptorId::STRING.slot, u32::MAX);
+        let retired = {
+            let mut state = owners.state.lock().expect("owner table lock is healthy");
+            let current = state
+                .current_descriptors
+                .get_mut(&DescriptorId::STRING.slot)
+                .expect("String descriptor is registered");
+            std::mem::replace(
+                current,
+                super::descriptor_version(exhausted, ValueShape::String),
+            )
+        };
+        drop(retired);
+
+        assert_eq!(
+            owners.replace_descriptor_for_test_only(exhausted, ValueShape::Aggregate),
+            Err(OwnerError::Capacity)
+        );
+        let current = owners
+            .allocate(
+                exhausted,
+                AnyValue::String(AnyStringOwner::new("still current", DropProbe::default())),
+            )
+            .expect("failed replacement leaves the maximum generation current");
+        assert_eq!(
+            owners.read_string(current, exhausted),
+            Ok("still current".into())
+        );
+        owners
+            .release(current)
+            .expect("release maximum generation owner");
+        assert_eq!(owners.live_count(), Ok(0));
+        assert_eq!(
+            owners.allocate(
+                DescriptorId::STRING,
+                AnyValue::String(AnyStringOwner::new("stale", DropProbe::default())),
+            ),
+            Err(OwnerError::StaleDescriptor)
+        );
     }
 
     #[test]
@@ -865,7 +1268,7 @@ mod tests {
             ..string
         };
         let forged_unknown_descriptor = AnyHandle {
-            descriptor: DescriptorId(99),
+            descriptor: DescriptorId::new(99, 1),
             ..string
         };
 
@@ -936,6 +1339,12 @@ mod tests {
                 AnyValue::String(AnyStringOwner::new("poisoned", probe.clone())),
             )
             .expect("owner token fits");
+        let drop_glue_probe = owners
+            .descriptor_value_drop_probe_for_test_only(handle)
+            .expect("live owner exposes descriptor drop glue probe");
+        let descriptor_lifetime_probe = owners
+            .descriptor_drop_probe_for_test_only(handle)
+            .expect("live owner exposes descriptor lifetime probe");
 
         assert!(catch_unwind(AssertUnwindSafe(|| owners.poison_for_test())).is_err());
         assert!(matches!(
@@ -949,6 +1358,8 @@ mod tests {
 
         drop(owners);
         assert_eq!(probe.count(), 1);
+        assert_eq!(drop_glue_probe.count(), 1);
+        assert_eq!(descriptor_lifetime_probe.count(), 1);
     }
 
     #[test]
@@ -1376,7 +1787,8 @@ mod tests {
         let map = OwnedPrototypeMap::from_owned_tokens(
             owners.clone(),
             BTreeMap::from([(Arc::from("a"), first), (Arc::from("b"), second)]),
-        );
+        )
+        .expect("all supplied owners belong to this table");
 
         assert_eq!(map.values_owned(), Err(OwnerError::Capacity));
         assert_eq!(owners.live_count(), Ok(2));
