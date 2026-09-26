@@ -499,7 +499,7 @@ fn direct_native_entry_routes_f64_flow_source_receipt_through_canonical_mir() {
 }
 
 #[test]
-fn direct_native_entry_rejects_nested_scalar_ffi_without_legacy_access() {
+fn direct_native_entry_routes_nested_scalar_ffi_through_mir_without_legacy_access() {
     let source = r#"
         extern "C" { func llabs(value: i64) -> i64; }
         func main() -> i64 {
@@ -519,17 +519,32 @@ fn direct_native_entry_rejects_nested_scalar_ffi_without_legacy_access() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "nested_scalar_ffi_fail_closed");
-    let error = codegen
+    let mut codegen = CodeGenerator::new(&context, "nested_scalar_ffi_receipted");
+    codegen
         .compile_checked(&program)
-        .expect_err("direct native entry must reject the unlowered nested declaration");
+        .expect("direct native entry must use the receipted nested helper MIR");
     assert!(
-        format!("{error:?}").contains("structured control flow is not lowered by MIR Phase 0"),
-        "the direct API should preserve the real construction failure: {error:?}"
+        codegen.module.get_function("main").is_some(),
+        "direct native entry must emit the program entry point"
     );
     assert!(
+        codegen.module.get_function("llabs").is_some(),
+        "direct native entry must retain the checker-bound extern symbol"
+    );
+    assert!(
+        codegen.module.get_functions().any(|function| function
+            .get_name()
+            .to_string_lossy()
+            .contains("main/function:local_abs:")),
+        "direct native entry must emit the identity-bound nested owner"
+    );
+    codegen
+        .module
+        .verify()
+        .expect("valid nested scalar FFI module");
+    assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "a rejected scalar FFI candidate must not touch the legacy body"
+        "a nested scalar FFI route must not touch the legacy body"
     );
 }
 

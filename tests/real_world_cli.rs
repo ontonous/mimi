@@ -5985,7 +5985,7 @@ fn canonical_scalar_ffi_cli_multi_callsite_mixed_verdict_matches_receipt_and_mir
 }
 
 #[test]
-fn canonical_scalar_ffi_nested_callable_rejects_all_default_cli_consumers_without_legacy() {
+fn canonical_scalar_ffi_nested_root_helper_routes_all_cli_consumers_without_legacy() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_nested_callable_fail_closed_{}_{}",
         std::process::id(),
@@ -5998,7 +5998,7 @@ fn canonical_scalar_ffi_nested_callable_rejects_all_default_cli_consumers_withou
     let source = dir.join("nested.mimi");
     fs::write(
         &source,
-        "extern \"C\" { func llabs(value: i64) -> i64; }\nfunc main() -> i64 {\n    func local_abs(value: i64) -> i64 { llabs(value) }\n    local_abs(-17 as i64)\n}\n",
+        "extern \"C\" { func llabs(value: i64) -> i64; }\nfunc main() -> i32 {\n    func local_abs(value: i64) -> i64 { llabs(value) }\n    println(local_abs(-17 as i64))\n    println(local_abs(-25 as i64))\n    0\n}\n",
     )
     .expect("write nested scalar FFI source");
 
@@ -6011,17 +6011,15 @@ fn canonical_scalar_ffi_nested_callable_rejects_all_default_cli_consumers_withou
         ("verify", true),
     ] {
         let mut command = Command::new(mimi_bin());
-        command.current_dir(project_root()).arg(subcommand);
+        command
+            .current_dir(project_root())
+            .arg(subcommand)
+            .env("MIMI_VERBOSE", "1");
         if explicit_mir {
             command.arg("--mir");
         }
-        let artifact = dir.join(format!("{subcommand}-{explicit_mir}.ll"));
         if subcommand == "build" {
-            command
-                .arg("--emit-ir")
-                .arg(&source)
-                .arg("-o")
-                .arg(&artifact);
+            command.arg("--emit-ir").arg(&source);
         } else {
             command.arg(&source);
         }
@@ -6029,26 +6027,37 @@ fn canonical_scalar_ffi_nested_callable_rejects_all_default_cli_consumers_withou
             panic!("spawn {subcommand} explicit_mir={explicit_mir}: {error}")
         });
         assert!(
-            !output.status.success(),
-            "{subcommand} explicit_mir={explicit_mir} must reject the recognized but unlowerable graph"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{subcommand} explicit_mir={explicit_mir} emitted stdout on rejection"
+            output.status.success(),
+            "{subcommand} explicit_mir={explicit_mir} must use the receipted canonical helper route: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("structured control flow is not lowered by MIR Phase 0"),
-            "{subcommand} explicit_mir={explicit_mir} lost the nested callable MIR boundary: {stderr}"
-        );
-        assert!(
             !stderr.contains("canonical route disposition: legacy"),
-            "{subcommand} explicit_mir={explicit_mir} fell back to legacy: {stderr}"
+            "{subcommand} explicit_mir={explicit_mir} entered legacy: {stderr}"
         );
-        if subcommand == "build" {
+        if subcommand == "run" {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "17\n25\n",
+                "{subcommand} explicit_mir={explicit_mir} must execute both nested scalar FFI calls"
+            );
+        } else if subcommand == "build" {
+            let ir = String::from_utf8_lossy(&output.stdout);
             assert!(
-                !artifact.exists(),
-                "failed build explicit_mir={explicit_mir} left an artifact"
+                ir.contains("llabs"),
+                "native MIR must retain the FFI symbol: {ir}"
+            );
+            assert!(
+                ir.contains("@\"main/function:local_abs:"),
+                "native MIR must emit the identity-bound helper: {ir}"
+            );
+        } else {
+            let report = format!("{}{}", String::from_utf8_lossy(&output.stdout), stderr);
+            assert!(report.contains("No contracts to verify"), "{report}");
+            assert!(
+                !report.contains("17\n25\n"),
+                "verification must not execute the program: {report}"
             );
         }
     }
@@ -25065,7 +25074,9 @@ fn canonical_mir_nested_shadow_callable_keeps_legacy_and_direct_cli_fails_closed
             "{surface}: {stderr}"
         );
         assert!(
-            stderr.contains("structured control flow is not lowered by MIR Phase 0"),
+            stderr.contains(
+                "nested callable declaration is outside the canonical root-scope MIR slice"
+            ),
             "{surface} must identify the nested declaration boundary: {stderr}"
         );
         assert!(

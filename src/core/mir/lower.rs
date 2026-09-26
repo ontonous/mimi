@@ -87,7 +87,7 @@ impl MirLoweringError {
 /// receipt-bearing `MoveProjectDrop`, while all other partial moves and
 /// projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, None, None, None)
+    lower_body_impl(body, None, None, None, &BTreeMap::new())
 }
 
 /// Lower a body with the checker-derived TypeDesc catalog available.  The
@@ -97,7 +97,7 @@ pub fn lower_body_with_type_catalog(
     body: &ResolvedBody,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, Some(type_catalog), None, None)
+    lower_body_impl(body, Some(type_catalog), None, None, &BTreeMap::new())
 }
 
 /// Terminator successor blocks, mirroring the structural validator's
@@ -166,6 +166,7 @@ fn lower_body_impl(
     type_catalog: Option<&MirTypeCatalog>,
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     // A captured callable needs an explicit environment parameter, a
     // checker-owned environment layout, and ownership/lifetime rules for the
@@ -206,6 +207,7 @@ fn lower_body_impl(
         fallback_value,
         loops: Vec::new(),
         transition_result,
+        approved_nested_callables: nested_callable_declarations.clone(),
         errors: Vec::new(),
     };
     lowerer.blocks.insert(
@@ -225,6 +227,12 @@ fn lower_body_impl(
     }
 
     lowerer.lower_root(&body.root);
+    if !lowerer.approved_nested_callables.is_empty() {
+        lowerer.error(
+            &body.owner,
+            "nested callable scope receipt names a declaration absent from the callable root",
+        );
+    }
     if !lowerer.current_is_terminated() && lowerer.errors.is_empty() {
         if let Some(result) = body.root.result.as_deref() {
             let value = lowerer.lower_transition_return_expr(result);
@@ -361,11 +369,28 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition(
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        transition_result,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body_impl(
         &callable.body,
         Some(type_catalog),
         call_parameter_permissions,
         transition_result,
+        nested_callable_declarations,
     )?;
     function.parameter_permissions = Some(
         callable
@@ -454,6 +479,18 @@ pub fn lower_program_with_type_catalog(
     program: &CheckedProgram,
     type_catalog: &MirTypeCatalog,
 ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
+    lower_program_with_type_catalog_and_nested(program, type_catalog, &BTreeMap::new())
+}
+
+/// Lower checker callables while admitting only the root-scope nested
+/// declaration identities prevalidated by the canonical MIR constructor.
+/// The plain public helper above deliberately supplies an empty receipt table
+/// and therefore remains fail-closed for nested declarations.
+pub(crate) fn lower_program_with_type_catalog_and_nested(
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    nested_callable_declarations: &BTreeMap<NodeId, BTreeMap<NodeId, NodeId>>,
+) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
     let call_parameter_permissions = program
         .resolved_signatures()
         .values()
@@ -466,6 +503,7 @@ pub fn lower_program_with_type_catalog(
         .collect::<BTreeMap<_, _>>();
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
+    let empty_nested = BTreeMap::new();
     for (owner, callable) in program.callables() {
         // Do not lower a polymorphic template as if it were a concrete
         // function. A concrete instance table is a separate MIR contract;
@@ -480,11 +518,14 @@ pub fn lower_program_with_type_catalog(
         // the transition's interned signature — the checked callable's own
         // signature result is a unit placeholder for those transitions.
         let transition_result = transition_lowering_result(program, owner, callable);
-        match lower_callable_with_type_catalog_and_permissions_for_transition(
+        match lower_callable_with_type_catalog_and_permissions_for_transition_and_nested(
             callable,
             type_catalog,
             Some(&call_parameter_permissions),
             transition_result,
+            nested_callable_declarations
+                .get(owner)
+                .unwrap_or(&empty_nested),
         ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -7094,6 +7135,7 @@ struct Lowerer<'a> {
     type_catalog: Option<&'a MirTypeCatalog>,
     call_parameter_permissions: Option<&'a BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     transition_result: Option<crate::core::ResolvedTypeId>,
+    approved_nested_callables: BTreeMap<NodeId, NodeId>,
     values: BTreeMap<MirValueId, MirValue>,
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
@@ -7942,6 +7984,19 @@ impl<'a> Lowerer<'a> {
                 }
                 ResolvedStmtKind::Continue => {
                     self.lower_continue(&statement.node_id);
+                }
+                ResolvedStmtKind::NestedCallable(target) => {
+                    match self.approved_nested_callables.remove(target) {
+                        Some(declaration) if declaration == statement.node_id => {}
+                        Some(_) => self.error(
+                            &statement.node_id,
+                            "nested callable declaration disagrees with its root-scope receipt",
+                        ),
+                        None => self.error(
+                            &statement.node_id,
+                            "nested callable declaration is outside the canonical root-scope MIR slice",
+                        ),
+                    }
                 }
                 ResolvedStmtKind::Drop(places) => {
                     for (index, place) in places.iter().enumerate() {

@@ -612,6 +612,7 @@ fn canonical_mir_text(program: &MirProgram) -> String {
         text.push_str(&transition.canonical_text());
     }
     text.push_str(&canonical_ffi_text(program));
+    text.push_str(&super::nested_callable::canonical_nested_callable_scope_text(program));
     for function in program.functions().values() {
         text.push_str(&function.canonical_text());
     }

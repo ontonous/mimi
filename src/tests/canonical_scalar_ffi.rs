@@ -10944,6 +10944,288 @@ func main() -> i64 { println(labs(-41 as i64)); 0 }
 
 #[cfg(unix)]
 #[test]
+fn scalar_ffi_nested_root_helper_uses_scope_receipt_for_same_mir_consumers() {
+    use std::cell::RefCell;
+
+    struct Oracle(RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for Oracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "labs" || receipt.abi != "C" {
+                return Err(format!("unexpected foreign receipt {receipt:?}"));
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected labs arguments {arguments:?}"));
+            };
+            self.0.borrow_mut().push(*value);
+            value
+                .checked_abs()
+                .map(MirRuntimeValue::Int)
+                .ok_or_else(|| "labs input is outside this test oracle domain".into())
+        }
+    }
+
+    const NESTED_LABS_C: &str =
+        "#include <stdint.h>\nint64_t labs(int64_t value) { return value < 0 ? -value : value; }\n";
+    let mut guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, NESTED_LABS_C);
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let source = r#"
+extern "C" { func labs(value: i64) -> i64; }
+func local_abs(value: i64) -> i64 { 999 as i64 }
+func main() -> i32 {
+    func local_abs(value: i64) -> i64 { labs(value) }
+    println(local_abs(-17 as i64))
+    println(local_abs(-25 as i64))
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("check root-scope nested scalar FFI helper");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize checker-receipted nested helper MIR");
+    assert_eq!(mir.ffi_calls().len(), 1);
+    assert_eq!(mir.nested_callable_scopes().len(), 1);
+    let scope = mir
+        .nested_callable_scopes()
+        .values()
+        .next()
+        .expect("root declaration receipt");
+    assert_eq!(scope.parent.0, "function:main");
+    assert_eq!(scope.call_instructions.len(), 2);
+    assert!(scope
+        .callee
+        .0
+        .starts_with("function:main/function:local_abs:"));
+    assert_ne!(mir.canonical_digest(), {
+        let mut without_scope = mir.clone();
+        without_scope.clear_nested_callable_scopes_for_test_only();
+        without_scope.canonical_digest()
+    });
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "nested-scalar-ffi".into()),
+        crate::verifier::verify_checked_dual(&checked, "nested-scalar-ffi".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("checker verifier must consume the nested helper MIR");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(RefCell::new(Vec::new()));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference executes the identity-bound nested helper");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "17\n25\n");
+    assert_eq!(*oracle.0.borrow(), [-17, -25]);
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free nested helper bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(bytecode.extern_names.is_empty());
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+    let descriptor = &bytecode.canonical_ffi[0];
+    assert_eq!(descriptor.caller, scope.callee.0);
+    assert_eq!(descriptor.symbol, "labs");
+    assert_eq!(descriptor.abi, "C");
+    assert_eq!(descriptor.arguments, vec![CanonicalFfiScalarType::I64]);
+    assert_eq!(descriptor.result, CanonicalFfiScalarType::I64);
+    assert_eq!(bytecode.canonical_ffi_bindings.len(), 1);
+    assert_eq!(bytecode.canonical_ffi_bindings[0].descriptor, *descriptor);
+    assert!(bytecode.canonical_ffi_route_receipt.is_some());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value().expect("bytecode nested FFI execution"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "17\n25\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_nested_ffi_scope");
+    generator
+        .compile_mir_native(&mir)
+        .expect("same MIR native nested helper emission");
+    generator
+        .module
+        .verify()
+        .expect("valid nested-helper LLVM module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(NESTED_LABS_C.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("native nested helper execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "17\n25\n");
+    assert_eq!(native.stderr, "");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let direct_context = inkwell::context::Context::create();
+    let mut direct = crate::codegen::CodeGenerator::new(&direct_context, "nested_ffi_direct_api");
+    direct
+        .compile_checked(&checked)
+        .expect("direct checked API must use the nested helper MIR route");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let direct_native = super::link_and_observe_module(
+        &direct,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("direct API nested helper execution");
+    assert_eq!(direct_native.exit_code, Some(0));
+    assert_eq!(direct_native.stdout, "17\n25\n");
+    assert_eq!(direct_native.stderr, "");
+}
+
+#[cfg(unix)]
+#[test]
+fn scalar_ffi_nested_root_helper_preserves_failure_and_call_order() {
+    use std::cell::{Cell, RefCell};
+
+    struct OrderedOracle {
+        sequence: Cell<i64>,
+        calls: RefCell<Vec<String>>,
+    }
+    impl MirReferenceFfiResolver for OrderedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err(format!("unexpected nested FFI arguments {arguments:?}"));
+            };
+            self.calls.borrow_mut().push(receipt.symbol.clone());
+            match receipt.symbol.as_str() {
+                "mir_nested_scope_touch" => {
+                    self.sequence.set(self.sequence.get() + 1);
+                    Ok(MirRuntimeValue::Int(*value))
+                }
+                "mir_nested_scope_bad" => Ok(MirRuntimeValue::Int(*value + self.sequence.get())),
+                symbol => Err(format!("unexpected nested FFI symbol {symbol}")),
+            }
+        }
+    }
+
+    const ORDERED_FAILURE_C: &str = r#"
+#include <stdint.h>
+static int64_t sequence = 0;
+int64_t mir_nested_scope_touch(int64_t value) { ++sequence; return value; }
+int64_t mir_nested_scope_bad(int64_t value) { return value + sequence; }
+"#;
+    let mut guard = super::FfiEnvGuard::lock();
+    std::env::remove_var("MIMI_FFI_LIB");
+    let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let fixture = library_fixture(counter, ORDERED_FAILURE_C);
+    let config = super::E2EConfig {
+        extra_c_src: Some(ORDERED_FAILURE_C.into()),
+        ..Default::default()
+    };
+    guard.set_path(&fixture.dir.join("ffi.so"));
+    let source = r#"
+extern "C" {
+    func mir_nested_scope_touch(value: i64) -> i64;
+    func mir_nested_scope_bad(value: i64) -> i64 ensures: result == value;
+}
+func main() -> i64 {
+    func fail_after_touch(value: i64) -> i64 {
+        let touched = mir_nested_scope_touch(value)
+        mir_nested_scope_bad(touched)
+    }
+    println(5 as i64)
+    fail_after_touch(41 as i64)
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("check nested scalar FFI failure graph");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize nested scalar FFI failure MIR");
+    assert_eq!(mir.nested_callable_scopes().len(), 1);
+    assert_eq!(mir.ffi_calls().len(), 2);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verifier = crate::verifier::verify_ffi_checked(&checked)
+        .expect("verify nested FFI postcondition through canonical MIR");
+    assert!(
+        verifier
+            .iter()
+            .any(|result| result.status == crate::verifier::VerifStatus::Disproven),
+        "the unconstrained foreign result must fail its postcondition: {verifier:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = OrderedOracle {
+        sequence: Cell::new(0),
+        calls: RefCell::new(Vec::new()),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must stop at the failing nested extern ensures");
+    assert!(
+        error.message.contains("FFI postcondition failed"),
+        "{error}"
+    );
+    assert_eq!(reference.captured_output(), "5\n");
+    assert_eq!(
+        oracle.calls.borrow().as_slice(),
+        &[
+            "mir_nested_scope_touch".to_string(),
+            "mir_nested_scope_bad".to_string()
+        ]
+    );
+
+    let mut vm =
+        BytecodeVM::new(compile_mir_program(&mir).expect("AST-free nested failure bytecode"));
+    let error = vm
+        .run_value()
+        .expect_err("bytecode must preserve nested FFI postcondition failure");
+    assert_eq!(error.code(), "E0808");
+    assert!(error.to_string().contains("FFI postcondition failed"));
+    assert_eq!(vm.stdout(), "5\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "nested_ffi_failure_order");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native nested failure emission");
+    generator
+        .module
+        .verify()
+        .expect("valid nested failure LLVM module");
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("native nested FFI failure execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "5\n");
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
+}
+
+#[cfg(unix)]
+#[test]
 fn scalar_ffi_default_libc_zero_argument_matches_reference_bytecode_and_native() {
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {

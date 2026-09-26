@@ -213,6 +213,7 @@ pub struct MirProgram {
     instances: BTreeMap<MirInstanceId, MirInstance>,
     transitions: BTreeMap<NodeId, MirTransitionContract>,
     ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
+    nested_callable_scopes: BTreeMap<NodeId, super::MirNestedCallableScopeReceipt>,
 }
 
 impl MirProgram {
@@ -224,8 +225,13 @@ impl MirProgram {
     ) -> Result<Self, MirProgramBuildError> {
         let type_catalog =
             MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
-        let mut functions = super::lower::lower_program_with_type_catalog(program, &type_catalog)
-            .map_err(MirProgramBuildError::Lowering)?;
+        let nested_plan = super::nested_callable::checked_nested_callable_scope_plan(program, None);
+        let mut functions = super::lower::lower_program_with_type_catalog_and_nested(
+            program,
+            &type_catalog,
+            &nested_plan.by_parent,
+        )
+        .map_err(MirProgramBuildError::Lowering)?;
         let instances = super::lower::materialize_concrete_generic_instances(
             program,
             &type_catalog,
@@ -237,12 +243,29 @@ impl MirProgram {
         attach_flow_effect_receipts(&mut functions, &transitions, &type_catalog);
         let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
-        Self::with_type_catalog_and_instances_and_transitions_and_ffi(
+        let nested_callable_scopes =
+            super::nested_callable::materialize_nested_callable_scope_receipts(
+                &nested_plan,
+                &functions,
+            )
+            .map_err(|errors| {
+                MirProgramBuildError::Validation(
+                    errors
+                        .into_iter()
+                        .map(|message| super::MirValidationError {
+                            subject: "nested-callable-scope".into(),
+                            message,
+                        })
+                        .collect(),
+                )
+            })?;
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi_and_nested(
             functions,
             type_catalog,
             instances,
             transitions,
             ffi_calls,
+            nested_callable_scopes,
         )
         .map_err(MirProgramBuildError::Validation)
     }
@@ -270,6 +293,10 @@ impl MirProgram {
                     .map(|parameter| (parameter.id.0.clone(), parameter.permission))
             })
             .collect::<BTreeMap<_, _>>();
+        let nested_plan = super::nested_callable::checked_nested_callable_scope_plan(
+            program,
+            Some(excluded_sources),
+        );
         let mut functions = BTreeMap::new();
         let mut lowering_errors = Vec::new();
         for (owner, callable) in program.callables() {
@@ -287,11 +314,12 @@ impl MirProgram {
             }
             let transition_result =
                 super::lower::transition_lowering_result(program, owner, callable);
-            match super::lower::lower_callable_with_type_catalog_and_permissions_for_transition(
+            match super::lower::lower_callable_with_type_catalog_and_permissions_for_transition_and_nested(
                 callable,
                 &type_catalog,
                 Some(&call_parameter_permissions),
                 transition_result,
+                nested_plan.by_parent.get(owner).unwrap_or(&BTreeMap::new()),
             ) {
                 Ok(function) => {
                     functions.insert(owner.clone(), function);
@@ -315,12 +343,29 @@ impl MirProgram {
         attach_flow_effect_receipts(&mut functions, &transitions, &type_catalog);
         let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
-        Self::with_type_catalog_and_instances_and_transitions_and_ffi(
+        let nested_callable_scopes =
+            super::nested_callable::materialize_nested_callable_scope_receipts(
+                &nested_plan,
+                &functions,
+            )
+            .map_err(|errors| {
+                MirProgramBuildError::Validation(
+                    errors
+                        .into_iter()
+                        .map(|message| super::MirValidationError {
+                            subject: "nested-callable-scope".into(),
+                            message,
+                        })
+                        .collect(),
+                )
+            })?;
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi_and_nested(
             functions,
             type_catalog,
             instances,
             transitions,
             ffi_calls,
+            nested_callable_scopes,
         )
         .map_err(MirProgramBuildError::Validation)
     }
@@ -345,6 +390,7 @@ impl MirProgram {
                 instances: BTreeMap::new(),
                 transitions: BTreeMap::new(),
                 ffi_calls: BTreeMap::new(),
+                nested_callable_scopes: BTreeMap::new(),
             })
         } else {
             Err(errors)
@@ -392,6 +438,24 @@ impl MirProgram {
         instances: BTreeMap<MirInstanceId, MirInstance>,
         transitions: BTreeMap<NodeId, MirTransitionContract>,
         ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
+    ) -> Result<Self, Vec<super::MirValidationError>> {
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi_and_nested(
+            functions,
+            type_catalog,
+            instances,
+            transitions,
+            ffi_calls,
+            BTreeMap::new(),
+        )
+    }
+
+    fn with_type_catalog_and_instances_and_transitions_and_ffi_and_nested(
+        functions: BTreeMap<NodeId, MirFunction>,
+        type_catalog: MirTypeCatalog,
+        instances: BTreeMap<MirInstanceId, MirInstance>,
+        transitions: BTreeMap<NodeId, MirTransitionContract>,
+        ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
+        nested_callable_scopes: BTreeMap<NodeId, super::MirNestedCallableScopeReceipt>,
     ) -> Result<Self, Vec<super::MirValidationError>> {
         let mut errors = Vec::new();
         errors.extend(validate_instance_table(
@@ -1455,12 +1519,29 @@ impl MirProgram {
             ));
         }
         if errors.is_empty() {
+            errors.extend(
+                super::nested_callable::validate_nested_callable_scope_receipts(
+                    &functions,
+                    &type_catalog,
+                    &transitions,
+                    &ffi_calls,
+                    &nested_callable_scopes,
+                )
+                .into_iter()
+                .map(|message| super::MirValidationError {
+                    subject: "nested-callable-scope".into(),
+                    message,
+                }),
+            );
+        }
+        if errors.is_empty() {
             Ok(Self {
                 functions,
                 type_catalog,
                 instances,
                 transitions,
                 ffi_calls,
+                nested_callable_scopes,
             })
         } else {
             Err(errors)
@@ -1491,6 +1572,12 @@ impl MirProgram {
 
     pub fn ffi_calls(&self) -> &BTreeMap<MirInstructionId, super::MirFfiCallContract> {
         &self.ffi_calls
+    }
+
+    pub fn nested_callable_scopes(
+        &self,
+    ) -> &BTreeMap<NodeId, super::MirNestedCallableScopeReceipt> {
+        &self.nested_callable_scopes
     }
 
     /// Return checker-owned FFI receipts in canonical source order.
@@ -1526,6 +1613,11 @@ impl MirProgram {
         ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
     ) {
         self.ffi_calls = ffi_calls;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_nested_callable_scopes_for_test_only(&mut self) {
+        self.nested_callable_scopes.clear();
     }
 
     /// Replace one validated function body in a test-owned MIR fixture while

@@ -2018,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_ffi_nested_callable_materialization_failure_never_selects_legacy() {
+    fn scalar_ffi_nested_root_helper_is_admitted_with_scope_receipt() {
         let source = r#"
             extern "C" { func llabs(value: i64) -> i64; }
             func main() -> i64 {
@@ -2031,17 +2031,48 @@ mod tests {
             mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
             "the nested callable's extern call must cross scalar FFI admission"
         );
-        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("a recognized but unlowerable scalar FFI graph must fail closed");
+        let DefaultMirRoute::Canonical(route) = select_default_route(&checked, &file) else {
+            panic!("a checker-receipted root-scope helper must enter the canonical route");
         };
-        assert!(
-            reason.contains(mimi::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE),
-            "the structured MIR lowering failure must retain its boundary code: {reason}"
+        assert_eq!(route.nested_callable_scopes().len(), 1);
+        let scope = route
+            .nested_callable_scopes()
+            .values()
+            .next()
+            .expect("checker scope receipt");
+        assert_eq!(scope.parent.0, "function:main");
+        assert_eq!(scope.call_instructions.len(), 1);
+        assert_eq!(
+            scope.schema,
+            mimi::core::mir::MIR_NESTED_CALLABLE_SCOPE_SCHEMA
         );
-        assert!(
-            reason.contains("structured control flow is not lowered by MIR Phase 0"),
-            "the rejection must identify the actual nested-callable construction boundary: {reason}"
+        assert_eq!(
+            route.canonical_digest(),
+            route.route_receipt("scalar-ffi-v1").mir_digest
         );
+    }
+
+    #[test]
+    fn scalar_ffi_nested_recursive_call_graph_is_rejected_without_legacy() {
+        let source = r#"
+            extern "C" { func llabs(value: i64) -> i64; }
+            func main() -> i32 {
+                func helper(value: i64) -> i64 { llabs(main() as i64) }
+                println(helper(1 as i64))
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "the recursive nested helper must be recognized as the scalar FFI profile"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!(
+                "recursive nested scalar FFI graph must fail closed without compatibility routing"
+            );
+        };
+        assert!(reason.contains("recursive MIR call graph"), "{reason}");
         assert!(!reason.contains("legacy"), "{reason}");
     }
 

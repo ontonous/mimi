@@ -424,6 +424,7 @@ mod eligibility;
 mod identity_island;
 mod islands;
 pub mod lower;
+mod nested_callable;
 mod option_island;
 mod option_nested_tuple_island;
 mod receipt;
@@ -494,6 +495,7 @@ pub use islands::{
     GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND, GENERIC_RESULT_PROJECTION_ISLAND,
     GENERIC_VARIANT_PREDICATE_ISLAND, MANAGED_RESULT_CALL_ISLAND, SCALAR_COLLECTION_ISLAND,
 };
+pub use nested_callable::{MirNestedCallableScopeReceipt, MIR_NESTED_CALLABLE_SCOPE_SCHEMA};
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
     validate_option_string_variant_island, OptionStringVariantAdmission,
