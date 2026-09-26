@@ -2447,7 +2447,7 @@ fn e2e_valgrind_nested_callable_string_list_rebinding_uses_local_heap_scope() {
 
 #[test]
 #[ignore = "requires Valgrind"]
-fn e2e_valgrind_resolved_map_values_mixed_handles_are_released() {
+fn e2e_valgrind_resolved_map_values_reports_l3_possible_loss() {
     if !can_link() || !can_valgrind() {
         eprintln!("SKIP: linker or Valgrind not available");
         return;
