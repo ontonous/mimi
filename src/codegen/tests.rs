@@ -295,6 +295,7 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
     crate::core::mir::validate_scalar_collection_island(&canonical)
         .expect("complete scalar collection island");
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s12_scalar_collection_route");
     codegen
@@ -305,6 +306,10 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
         .get_function("main")
         .is_some_and(|function| function.count_basic_blocks() > 0));
     assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "exact scalar collection direct native entry must not access retained legacy bodies"
+    );
 }
 
 #[test]
