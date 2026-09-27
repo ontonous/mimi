@@ -8909,6 +8909,7 @@ func main() -> i64 {
 
         struct LabsOracle(RefCell<Vec<i64>>);
         impl MirReferenceFfiResolver for LabsOracle {
+            crate::mir_test_total_ffi_resolver!();
             fn call(
                 &self,
                 receipt: &crate::core::mir::MirFfiCallContract,

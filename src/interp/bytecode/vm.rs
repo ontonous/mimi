@@ -381,6 +381,14 @@ impl BytecodeVM {
         self.canonical_ffi_runtime.set_library_path(path);
     }
 
+    pub(crate) fn inherit_canonical_ffi_binding_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<super::mir_ffi::CanonicalMirFfiBindingSnapshot>,
+    ) {
+        self.canonical_ffi_runtime
+            .inherit_binding_snapshot(snapshot);
+    }
+
     /// Remove the VM-local Canonical FFI library binding and return to the
     /// process environment/system-libc lookup contract.
     pub fn clear_canonical_ffi_library_path(&mut self) {
@@ -7345,7 +7353,7 @@ impl BytecodeVM {
         let stdout = self.stdout_buf();
         let verify_contracts = self.verify_contracts;
         let verify_ffi = self.canonical_ffi_runtime.verify_contracts;
-        let ffi_library_path = self.canonical_ffi_runtime.library_path_for_child();
+        let ffi_binding_snapshot = self.canonical_ffi_runtime.binding_snapshot_for_child();
         std::thread::Builder::new()
             .name(format!("mimi-spawn-{}", func))
             .spawn(move || {
@@ -7361,8 +7369,8 @@ impl BytecodeVM {
                 // parent explicitly chose `set_verify_ffi(false)`.
                 vm.verify_contracts = verify_contracts;
                 vm.set_verify_ffi(verify_ffi);
-                if let Some(path) = ffi_library_path {
-                    vm.set_canonical_ffi_library_path(path);
+                if let Some(snapshot) = ffi_binding_snapshot {
+                    vm.inherit_canonical_ffi_binding_snapshot(snapshot);
                 }
                 let result = vm.call_function(func, &args);
                 let _ = tx.send(result);
@@ -7534,14 +7542,14 @@ impl BytecodeVM {
             })
         });
         let bc_prog = self.program.clone();
-        let handle = ActorHandle::new_bytecode(
+        let handle = ActorHandle::new_bytecode_with_binding_snapshot(
             instance,
             program,
             bc_prog,
             self.stdout_buf(),
             self.verify_contracts,
             self.canonical_ffi_runtime.verify_contracts,
-            self.canonical_ffi_runtime.library_path_for_child(),
+            self.canonical_ffi_runtime.binding_snapshot_for_child(),
         );
         self.spawn_count += 1;
         Ok(Value::Actor(handle))

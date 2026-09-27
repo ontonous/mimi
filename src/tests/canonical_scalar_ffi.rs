@@ -407,6 +407,7 @@ func main() -> i64 {
 struct Oracle(Cell<i64>);
 
 impl MirReferenceFfiResolver for Oracle {
+    crate::mir_test_total_ffi_resolver!();
     fn call(
         &self,
         receipt: &MirFfiCallContract,
@@ -651,6 +652,7 @@ fn scalar_ffi_mixed_width_argument_conversion_matches_three_consumers() {
 
     struct MixedWidthOracle;
     impl MirReferenceFfiResolver for MixedWidthOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -762,6 +764,7 @@ fn scalar_ffi_f32_reference_bytecode_native_chain_matches() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for F32ChainOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -856,6 +859,7 @@ fn scalar_ffi_f32_special_values_match_three_consumers() {
 
     struct F32SpecialOracle;
     impl MirReferenceFfiResolver for F32SpecialOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -950,6 +954,7 @@ fn scalar_ffi_f32_extreme_values_match_three_consumers() {
 
     struct F32ExtremeOracle;
     impl MirReferenceFfiResolver for F32ExtremeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1052,6 +1057,7 @@ fn scalar_ffi_f32_reference_rejects_noncanonical_host_result() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for NonCanonicalF32Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1113,6 +1119,7 @@ func main() -> i64 {
     }
 
     impl MirReferenceFfiResolver for FailingThenRecoveringF32Host {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1516,6 +1523,7 @@ fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
 
     struct DirectF32LiteralOracle;
     impl MirReferenceFfiResolver for DirectF32LiteralOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1611,6 +1619,7 @@ fn scalar_ffi_f32_narrowing_values_match_three_consumers() {
 
     struct F32NarrowingOracle;
     impl MirReferenceFfiResolver for F32NarrowingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1767,6 +1776,7 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
 
     struct ResultConversionOracle;
     impl MirReferenceFfiResolver for ResultConversionOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -1939,6 +1949,7 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
 
     struct IntegerNarrowResultOracle;
     impl MirReferenceFfiResolver for IntegerNarrowResultOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2081,6 +2092,7 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
 
     struct OutOfRangeResultOracle;
     impl MirReferenceFfiResolver for OutOfRangeResultOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2233,6 +2245,7 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
 
     struct NonFiniteResultOracle;
     impl MirReferenceFfiResolver for NonFiniteResultOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2384,6 +2397,7 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
 
     struct PrefixThenNonFiniteOracle(Cell<i64>);
     impl MirReferenceFfiResolver for PrefixThenNonFiniteOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2565,6 +2579,7 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
 
     struct FloatNarrowResultOracle;
     impl MirReferenceFfiResolver for FloatNarrowResultOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2722,6 +2737,7 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
 
     struct MixedConversionOracle;
     impl MirReferenceFfiResolver for MixedConversionOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2932,6 +2948,7 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
 
     struct FloatNarrowRangeOracle(Cell<i64>);
     impl MirReferenceFfiResolver for FloatNarrowRangeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -3106,6 +3123,7 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
 
     struct RequiresSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for RequiresSequenceOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -3241,6 +3259,7 @@ func main() -> i64 {
 
     struct PrefixOracle(RefCell<Vec<String>>);
     impl MirReferenceFfiResolver for PrefixOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -3398,6 +3417,7 @@ func main() -> i64 {
 
     struct PrefixOracle(RefCell<Vec<String>>);
     impl MirReferenceFfiResolver for PrefixOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -4087,6 +4107,7 @@ fn scalar_ffi_manifest_preflight_rejects_unreachable_late_symbol_before_effects(
 fn scalar_ffi_missing_library_fails_before_prefix_and_recovers() {
     struct MissingLibraryOracle;
     impl MirReferenceFfiResolver for MissingLibraryOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -4358,6 +4379,7 @@ func main() -> i64 {
 "#;
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -4489,6 +4511,7 @@ func main() -> i64 {
 "#;
     struct RebindOracle;
     impl MirReferenceFfiResolver for RebindOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -4612,6 +4635,7 @@ func main() -> i64 {
 "#;
     struct RebindOracle;
     impl MirReferenceFfiResolver for RebindOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -4794,6 +4818,7 @@ func main() -> i64 {
         call_count: Cell<i64>,
     }
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -6009,6 +6034,103 @@ func main() -> i64 { 0 }
     assert_eq!(recovered_vm.stdout(), "");
     assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
     assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 2);
+}
+
+#[test]
+fn scalar_ffi_nested_spawn_inherits_preflighted_environment_binding() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let child_binding = library_fixture(
+        counter + 1,
+        r#"
+#include <stdint.h>
+int64_t mir_ffi_preflight_snapshot_value(void) { return 22; }
+"#,
+    );
+    let child_binding_path = child_binding.dir.join("ffi.so");
+    let escaped_child_path = child_binding_path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let parent_binding_source = format!(
+        r#"
+#include <stdint.h>
+#include <stdlib.h>
+int32_t mir_ffi_preflight_change_env(void) {{
+    return setenv("MIMI_FFI_LIB", "{escaped_child_path}", 1);
+}}
+int64_t mir_ffi_preflight_snapshot_value(void) {{ return 11; }}
+"#
+    );
+    let parent_binding = library_fixture(counter, &parent_binding_source);
+    guard.set_path(&parent_binding.dir.join("ffi.so"));
+
+    let source = r#"
+extern "C" {
+    func mir_ffi_preflight_change_env() -> i32;
+    func mir_ffi_preflight_snapshot_value() -> i64;
+}
+func leaf() -> i64 { mir_ffi_preflight_snapshot_value() }
+func main() -> i64 {
+    mir_ffi_preflight_change_env()
+    let spare_a = 101
+    let spare_b = 102
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("environment binding snapshot fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("environment binding snapshot fixture MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("environment binding snapshot fixture bytecode");
+    assert!(bytecode.ast.is_none());
+    let bytecode_mut = std::sync::Arc::make_mut(&mut bytecode);
+    let leaf = bytecode_mut
+        .functions
+        .iter()
+        .position(|function| function.name == "function:leaf")
+        .expect("canonical child function") as u32;
+    let main = bytecode_mut
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical main function");
+    let main_proto = &mut bytecode_mut.functions[main];
+    assert!(matches!(
+        main_proto.code.pop(),
+        Some(crate::interp::bytecode::instr::Op::Ret { .. })
+    ));
+    assert!(main_proto.register_count >= 2);
+    let child = main_proto.register_count - 2;
+    let child_result = main_proto.register_count - 1;
+    main_proto.emit(crate::interp::bytecode::instr::Op::Spawn {
+        rd: child,
+        func: leaf,
+        args_base: child,
+        argc: 0,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Await {
+        rd: child_result,
+        ra: child,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: child_result });
+
+    let mut vm = BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("child VM must use the parent's preflighted symbol handle"),
+        Value::Int(11)
+    );
+    assert_eq!(
+        std::env::var("MIMI_FFI_LIB").as_deref(),
+        Ok(child_binding_path.to_str().expect("UTF-8 test path")),
+        "parent host call must have changed the process environment"
+    );
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 }
 
 #[cfg(unix)]
@@ -10952,6 +11074,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
 fn scalar_ffi_default_libc_fallback_matches_reference_bytecode_and_native() {
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11080,6 +11203,7 @@ fn scalar_ffi_nested_root_helper_uses_scope_receipt_for_same_mir_consumers() {
 
     struct Oracle(RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11235,6 +11359,7 @@ fn scalar_ffi_profile_pure_nested_helper_matches_same_mir_consumers() {
 
     struct Oracle(RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11369,6 +11494,7 @@ fn scalar_ffi_nested_root_helper_preserves_failure_and_call_order() {
         calls: RefCell<Vec<String>>,
     }
     impl MirReferenceFfiResolver for OrderedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11491,6 +11617,7 @@ func main() -> i64 {
 fn scalar_ffi_default_libc_zero_argument_matches_reference_bytecode_and_native() {
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11593,6 +11720,7 @@ func main() -> i64 { println(sched_yield()); 0 }
 fn scalar_ffi_default_libc_multiple_symbols_reuse_one_handle_across_consumers() {
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11735,6 +11863,7 @@ fn scalar_ffi_imported_default_libc_module_preserves_receipts_and_binding() {
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -11913,6 +12042,7 @@ fn scalar_ffi_imported_default_libc_contract_preserves_verifier_and_consumers() 
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -12147,6 +12277,7 @@ fn scalar_ffi_reference_applies_integer_to_float_argument_conversion() {
 
     struct FloatOracle;
     impl MirReferenceFfiResolver for FloatOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -12300,6 +12431,7 @@ func main() -> i64 {
 
     struct AliasFloatOracle;
     impl MirReferenceFfiResolver for AliasFloatOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -12425,6 +12557,7 @@ fn scalar_ffi_transparent_aliases_cover_every_scalar_endpoint_across_consumers()
 
     struct ScalarAliasOracle;
     impl MirReferenceFfiResolver for ScalarAliasOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -12662,6 +12795,7 @@ pub func call_imported_alias(value: i64) -> i64 {
 
     struct ImportedAliasOracle;
     impl MirReferenceFfiResolver for ImportedAliasOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -13171,6 +13305,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
 
     struct ImportedAliasSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for ImportedAliasSequenceOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14182,6 +14317,7 @@ func main() -> i64 {
 fn scalar_ffi_ensures_division_by_zero_traps_after_foreign_call() {
     struct CountingOracle(Cell<u32>);
     impl MirReferenceFfiResolver for CountingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14286,6 +14422,7 @@ func main() -> i64 {
 fn scalar_ffi_ensures_checked_arithmetic_overflow_parity() {
     struct CountingOracle(Cell<u32>);
     impl MirReferenceFfiResolver for CountingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14472,6 +14609,7 @@ func main() -> i64 {{
 fn scalar_ffi_ensures_remainder_sign_and_short_circuit_parity() {
     struct IdentityOracle(Cell<u32>);
     impl MirReferenceFfiResolver for IdentityOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14625,6 +14763,7 @@ func main() -> i64 {{
 fn scalar_ffi_ensures_multi_argument_negative_divisor_keeps_result_identity() {
     struct PairOracle(Cell<u32>);
     impl MirReferenceFfiResolver for PairOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14743,6 +14882,7 @@ func main() -> i64 {
 fn scalar_ffi_ensures_mixed_i32_i64_abi_preserves_width_and_result_identity() {
     struct MixedOracle;
     impl MirReferenceFfiResolver for MixedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14858,6 +14998,7 @@ func main() -> i32 {
 fn scalar_ffi_mixed_width_min_value_and_zero_short_circuit_stay_defined() {
     struct MixedBoundaryOracle;
     impl MirReferenceFfiResolver for MixedBoundaryOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -14975,6 +15116,7 @@ func main() -> i32 {
 fn scalar_ffi_mixed_width_checked_arithmetic_uses_i64_slot_and_short_circuits() {
     struct WidthArithmeticOracle;
     impl MirReferenceFfiResolver for WidthArithmeticOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -16359,6 +16501,7 @@ func main() -> i64 { receipt_guard(1 as i64) }
 
     struct AcceptAnyFfiResolver;
     impl crate::core::mir::reference::MirReferenceFfiResolver for AcceptAnyFfiResolver {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _: &crate::core::mir::MirFfiCallContract,
@@ -16818,6 +16961,7 @@ func main() -> i64 {
 
     struct NestedOracle;
     impl MirReferenceFfiResolver for NestedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -16917,6 +17061,7 @@ func main() -> i64 {
 
     struct NestedRecoveryOracle;
     impl MirReferenceFfiResolver for NestedRecoveryOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -17037,6 +17182,7 @@ func main() -> i64 {
 
     struct NestedRequiresOracle;
     impl MirReferenceFfiResolver for NestedRequiresOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -17181,6 +17327,7 @@ func main() -> i64 {
         call_count: Cell<i64>,
     }
     impl MirReferenceFfiResolver for NestedEnsuresOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -17330,6 +17477,7 @@ func main() -> i64 {
         call_count: Cell<i64>,
     }
     impl MirReferenceFfiResolver for WrappedEnsuresOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18117,6 +18265,7 @@ fn scalar_ffi_multiple_duplicate_imports_have_deterministic_diagnostic_order() {
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18232,6 +18381,7 @@ func main() -> i64 {
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18332,6 +18482,7 @@ func main() -> i64 {
     }
 
     impl MirReferenceFfiResolver for FailingThenRecoveringHost {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18440,6 +18591,7 @@ void mir_ffi_unit_recover(int64_t value) {
         events: std::cell::RefCell<Vec<&'static str>>,
     }
     impl MirReferenceFfiResolver for UnitHost {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18612,6 +18764,7 @@ func narrow(value: i32) -> i32 {
     }
 
     impl MirReferenceFfiResolver for Host {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -18701,6 +18854,7 @@ fn scalar_ffi_traps_preserve_external_effect_prefix_across_three_consumers() {
     use std::cell::RefCell;
     struct TraceOracle(RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for TraceOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -19501,6 +19655,7 @@ fn scalar_ffi_materialization_rejects_unrepresented_no_panic_semantics() {
 fn scalar_ffi_seeded_composition_matrix_shares_one_mir_across_consumers() {
     struct GeneratedOracle;
     impl MirReferenceFfiResolver for GeneratedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -19648,6 +19803,7 @@ fn scalar_ffi_f32_seeded_composition_matrix_shares_one_mir_across_consumers() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for GeneratedF32Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -19850,6 +20006,7 @@ func main() -> i64 {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for ManifestF32Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -20011,6 +20168,7 @@ fn scalar_ffi_f32_seeded_receipt_forgery_matrix_rejects_before_host() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for GeneratedF32Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -20354,6 +20512,7 @@ fn scalar_ffi_seeded_cross_abi_default_verifier_matrix_preserves_receipts() {
 fn scalar_ffi_multi_argument_abi_shares_one_mir_across_consumers() {
     struct MultiArgumentOracle;
     impl MirReferenceFfiResolver for MultiArgumentOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -20483,6 +20642,7 @@ func main() -> i64 {
 fn scalar_ffi_multi_argument_ensures_failure_preserves_prefix_across_consumers() {
     struct BadPairOracle;
     impl MirReferenceFfiResolver for BadPairOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -20580,6 +20740,7 @@ func main() -> i64 {
 fn scalar_ffi_multi_argument_failure_repeats_across_entries_and_recovers() {
     struct BadPairOracle;
     impl MirReferenceFfiResolver for BadPairOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21107,6 +21268,7 @@ func main() -> i64 {
 
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21122,6 +21284,7 @@ func main() -> i64 {
     }
     struct GoodOracle;
     impl MirReferenceFfiResolver for GoodOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21322,6 +21485,7 @@ func main() -> i64 {
 
     struct OutOfRangeMixedOracle;
     impl MirReferenceFfiResolver for OutOfRangeMixedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21523,6 +21687,7 @@ func main() -> i64 {
 
     struct OutOfRangeOracle;
     impl MirReferenceFfiResolver for OutOfRangeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21540,6 +21705,7 @@ func main() -> i64 {
     }
     struct InRangeOracle;
     impl MirReferenceFfiResolver for InRangeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21573,6 +21739,7 @@ func main() -> i64 {
         calls: std::cell::Cell<usize>,
     }
     impl MirReferenceFfiResolver for ReentrantRangeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21820,6 +21987,7 @@ func main() -> i64 {
 
     struct MixedRangeOracle;
     impl MirReferenceFfiResolver for MixedRangeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -21841,6 +22009,7 @@ func main() -> i64 {
     }
     struct MixedRangeGoodOracle;
     impl MirReferenceFfiResolver for MixedRangeGoodOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -22270,6 +22439,7 @@ func main() -> i64 {
         calls: Cell<usize>,
     }
     impl MirReferenceFfiResolver for CountingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _receipt: &MirFfiCallContract,
@@ -22382,6 +22552,7 @@ func main() -> i64 {
         calls: Cell<usize>,
     }
     impl MirReferenceFfiResolver for CountingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _receipt: &MirFfiCallContract,
@@ -23155,6 +23326,7 @@ func main() -> i64 {
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -23619,6 +23791,7 @@ func main() -> i64 {
 
     struct MatrixOracle;
     impl MirReferenceFfiResolver for MatrixOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -24405,6 +24578,7 @@ fn scalar_ffi_i32_bool_f64_receipt_forgery_matrix_rejects_before_host() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for UncoveredAbiOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _receipt: &MirFfiCallContract,
@@ -24696,6 +24870,7 @@ fn scalar_ffi_mixed_abi_multi_receipt_graph_diffs_and_isolates_forgery() {
         calls: Cell<u32>,
     }
     impl MirReferenceFfiResolver for MixedAbiOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _receipt: &MirFfiCallContract,
@@ -24960,6 +25135,7 @@ func main() -> i64 {
         calls: Cell<usize>,
     }
     impl MirReferenceFfiResolver for CountingOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -25109,6 +25285,7 @@ void mir_ffi_unit_route(int64_t value) { (void)value; }
 
     struct UnitRouteOracle(Cell<u8>);
     impl MirReferenceFfiResolver for UnitRouteOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -25266,6 +25443,7 @@ func main() -> i64 {
 
     struct UnitArtifactOracle(Cell<usize>);
     impl MirReferenceFfiResolver for UnitArtifactOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -26106,6 +26284,7 @@ func main() -> i64 {
 
     struct UnitFalseOracle;
     impl MirReferenceFfiResolver for UnitFalseOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -26311,6 +26490,7 @@ func main() -> i64 {
 
     struct UnitReceiptOracle;
     impl MirReferenceFfiResolver for UnitReceiptOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -26503,6 +26683,7 @@ func main() -> i64 {
 
     struct UnitInterleavedOracle;
     impl MirReferenceFfiResolver for UnitInterleavedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -27101,6 +27282,7 @@ func main() -> i64 {
         events: std::cell::RefCell<Vec<&'static str>>,
     }
     impl MirReferenceFfiResolver for TraceOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -27420,6 +27602,7 @@ int64_t mir_route_direct_recover(int64_t value) { return value + 1; }
 
     struct DirectRecoveryOracle;
     impl MirReferenceFfiResolver for DirectRecoveryOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -27714,6 +27897,7 @@ int64_t mir_route_interleaved(int64_t value) { return value + 1; }
 
     struct InterleavedOracle;
     impl MirReferenceFfiResolver for InterleavedOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -28046,6 +28230,7 @@ func main() -> i64 {
 
     struct UnitSequenceOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for UnitSequenceOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -28247,6 +28432,7 @@ func main() -> i64 {
 
     struct UnitRequiresOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for UnitRequiresOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -28432,6 +28618,7 @@ func main() -> i64 {
 
     struct UnitModeSwitchOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for UnitModeSwitchOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -28611,6 +28798,7 @@ func main() -> i64 {
 
     struct BindingModeOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for BindingModeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -28814,6 +29002,7 @@ func main() -> i64 { 0 }
 
     struct ChildBindingModeOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for ChildBindingModeOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -29043,6 +29232,7 @@ func main() -> i64 { 0 }
 
     struct ChildMultiCallOracle(std::cell::RefCell<Vec<i64>>);
     impl MirReferenceFfiResolver for ChildMultiCallOracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -29568,6 +29758,7 @@ struct SweepOracle {
 }
 
 impl MirReferenceFfiResolver for SweepOracle {
+    crate::mir_test_total_ffi_resolver!();
     fn call(
         &self,
         receipt: &MirFfiCallContract,

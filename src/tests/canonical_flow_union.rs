@@ -387,6 +387,7 @@ int64_t mir_ffi_expect_f64(double x) { return x == 7.5 ? 42 : -1; }
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -530,6 +531,7 @@ int64_t mir_ffi_expect_scaled(double x) { return x == 2.0 ? 42 : -1; }
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -620,6 +622,7 @@ int64_t mir_ffi_probe_f64_bits(double x) {
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,
@@ -2610,6 +2613,7 @@ int64_t mir_probe(double x) { return x == -150.5 ? 42 : -1; }
 
     struct Oracle;
     impl MirReferenceFfiResolver for Oracle {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &MirFfiCallContract,

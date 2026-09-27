@@ -1098,6 +1098,53 @@ impl ActorHandle {
         verify_ffi: bool,
         ffi_library_path: Option<String>,
     ) -> Self {
+        Self::new_bytecode_inner(
+            instance,
+            program,
+            bytecode_prog,
+            stdout_buf,
+            verify_contracts,
+            verify_ffi,
+            ffi_library_path,
+            None,
+        )
+    }
+
+    pub(crate) fn new_bytecode_with_binding_snapshot(
+        instance: ActorInstance,
+        program: std::sync::Arc<crate::ast::File>,
+        bytecode_prog: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+        stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+        verify_contracts: bool,
+        verify_ffi: bool,
+        ffi_binding_snapshot: Option<
+            std::sync::Arc<crate::interp::bytecode::mir_ffi::CanonicalMirFfiBindingSnapshot>,
+        >,
+    ) -> Self {
+        Self::new_bytecode_inner(
+            instance,
+            program,
+            bytecode_prog,
+            stdout_buf,
+            verify_contracts,
+            verify_ffi,
+            None,
+            ffi_binding_snapshot,
+        )
+    }
+
+    fn new_bytecode_inner(
+        instance: ActorInstance,
+        program: std::sync::Arc<crate::ast::File>,
+        bytecode_prog: std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+        stdout_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+        verify_contracts: bool,
+        verify_ffi: bool,
+        ffi_library_path: Option<String>,
+        ffi_binding_snapshot: Option<
+            std::sync::Arc<crate::interp::bytecode::mir_ffi::CanonicalMirFfiBindingSnapshot>,
+        >,
+    ) -> Self {
         let id = ACTOR_HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let (mailbox_tx, mailbox_rx) = std::sync::mpsc::channel::<ActorMailboxMsg>();
         let inner = std::sync::Arc::new(std::sync::RwLock::new(instance));
@@ -1112,6 +1159,7 @@ impl ActorHandle {
         let worker_verify_contracts = verify_contracts;
         let worker_verify_ffi = verify_ffi;
         let worker_ffi_library_path = ffi_library_path;
+        let worker_ffi_binding_snapshot = ffi_binding_snapshot;
 
         let _ = std::thread::Builder::new()
             .name(format!("actor-{}", id))
@@ -1192,7 +1240,11 @@ impl ActorHandle {
                                 }
                                 vm.verify_contracts = worker_verify_contracts;
                                 vm.set_verify_ffi(worker_verify_ffi);
-                                if let Some(path) = worker_ffi_library_path.clone() {
+                                if let Some(snapshot) = &worker_ffi_binding_snapshot {
+                                    vm.inherit_canonical_ffi_binding_snapshot(
+                                        std::sync::Arc::clone(snapshot),
+                                    );
+                                } else if let Some(path) = worker_ffi_library_path.clone() {
                                     vm.set_canonical_ffi_library_path(path);
                                 }
                                 // Use wrap_ok for fails transitions so Op::Ret
@@ -1274,7 +1326,11 @@ impl ActorHandle {
                                 }
                                 vm.verify_contracts = worker_verify_contracts;
                                 vm.set_verify_ffi(worker_verify_ffi);
-                                if let Some(path) = worker_ffi_library_path.clone() {
+                                if let Some(snapshot) = &worker_ffi_binding_snapshot {
+                                    vm.inherit_canonical_ffi_binding_snapshot(
+                                        std::sync::Arc::clone(snapshot),
+                                    );
+                                } else if let Some(path) = worker_ffi_library_path.clone() {
                                     vm.set_canonical_ffi_library_path(path);
                                 }
                                 vm.call_function(func_idx, &args)

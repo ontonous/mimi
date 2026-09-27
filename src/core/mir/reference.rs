@@ -93,19 +93,34 @@ pub struct MirExecutionObservation {
 /// converted back to the MIR result type by the reference executor.
 pub trait MirReferenceFfiResolver {
     /// Preflight the complete checker-owned manifest before any MIR
-    /// instruction executes. Implementations that maintain a partial binding
-    /// table must reject every missing receipt here. The default treats the
-    /// injected resolver as a total binding for the supplied manifest; it
-    /// must not call foreign functions or evaluate their contracts.
-    fn preflight(&self, _receipts: &[super::MirFfiCallContract]) -> Result<(), String> {
-        Ok(())
-    }
+    /// instruction executes. Every implementation must explicitly establish
+    /// that it can bind every supplied receipt; a partial binding table must
+    /// reject any missing entry here. This is a required method so an
+    /// implementation of `call` alone cannot silently claim whole-manifest
+    /// coverage. It must not call foreign functions or evaluate contracts.
+    fn preflight(&self, receipts: &[super::MirFfiCallContract]) -> Result<(), String>;
 
     fn call(
         &self,
         receipt: &super::MirFfiCallContract,
         arguments: &[MirRuntimeValue],
     ) -> Result<MirRuntimeValue, String>;
+}
+
+/// Test-oracle shorthand for resolvers whose `call` implementation defines a
+/// total binding for every receipt in the fixture's MIR program. Partial
+/// resolvers must implement `preflight` directly and reject missing receipts.
+#[cfg(test)]
+#[macro_export]
+macro_rules! mir_test_total_ffi_resolver {
+    () => {
+        fn preflight(
+            &self,
+            _receipts: &[$crate::core::mir::MirFfiCallContract],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    };
 }
 
 /// Deterministic input queue for the canonical `session_recv` oracle.  The
@@ -14701,6 +14716,7 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
     }
 
     impl MirReferenceFfiResolver for CountingLabsReferenceResolver {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &crate::core::mir::MirFfiCallContract,
@@ -14720,6 +14736,7 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
     struct LabsReferenceResolver;
 
     impl MirReferenceFfiResolver for LabsReferenceResolver {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             receipt: &crate::core::mir::MirFfiCallContract,
@@ -14830,6 +14847,7 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
     struct FixedFfiResolver(MirRuntimeValue);
 
     impl MirReferenceFfiResolver for FixedFfiResolver {
+        crate::mir_test_total_ffi_resolver!();
         fn call(
             &self,
             _: &crate::core::mir::MirFfiCallContract,

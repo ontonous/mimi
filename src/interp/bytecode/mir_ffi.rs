@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use libffi::middle::{arg as ffi_arg, Cif, CodePtr, Type as FfiType};
 use libloading::Library;
@@ -87,13 +88,23 @@ const CANONICAL_SELECTOR_DIALECT: SelectorDialect = SelectorDialect {
 };
 
 /// AST-free dynamic library state owned by one bytecode VM.
+pub(crate) struct CanonicalMirFfiBindingSnapshot {
+    loaded_libs: Vec<(String, Arc<Library>)>,
+    preflight_symbols: BTreeMap<String, usize>,
+}
+
 pub(crate) struct CanonicalMirFfiRuntime {
-    loaded_libs: Vec<(String, Library)>,
+    loaded_libs: Vec<(String, Arc<Library>)>,
     /// Symbol-to-library selections proven for the complete bytecode
     /// manifest before a public entry starts. This pins each call to the
     /// library that was preflighted even if an earlier foreign call mutates
     /// process environment state.
     preflight_symbols: BTreeMap<String, usize>,
+    /// An inherited immutable binding set pins worker VMs to the exact
+    /// handles selected by their parent, including when selection came from
+    /// `MIMI_FFI_LIB` or system discovery rather than an explicit VM path.
+    inherited_binding_snapshot: Option<Arc<CanonicalMirFfiBindingSnapshot>>,
+    preflight_complete: bool,
     /// Optional VM-local host binding. When absent, the compatibility
     /// environment contract (`MIMI_FFI_LIB` or discoverable system libraries)
     /// remains the
@@ -108,10 +119,10 @@ pub(crate) struct CanonicalMirFfiRuntime {
 }
 
 impl SelectorLibraryCache for CanonicalMirFfiRuntime {
-    fn loaded_libs(&self) -> &Vec<(String, Library)> {
+    fn loaded_libs(&self) -> &Vec<(String, Arc<Library>)> {
         &self.loaded_libs
     }
-    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, Library)> {
+    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, Arc<Library>)> {
         &mut self.loaded_libs
     }
 }
@@ -121,6 +132,8 @@ impl CanonicalMirFfiRuntime {
         Self {
             loaded_libs: Vec::new(),
             preflight_symbols: BTreeMap::new(),
+            inherited_binding_snapshot: None,
+            preflight_complete: false,
             library_path: None,
             verify_contracts: true,
         }
@@ -128,19 +141,43 @@ impl CanonicalMirFfiRuntime {
 
     pub(crate) fn set_library_path(&mut self, path: impl Into<String>) {
         self.library_path = Some(path.into());
+        self.inherited_binding_snapshot = None;
         self.preflight_symbols.clear();
+        self.preflight_complete = false;
     }
 
     pub(crate) fn clear_library_path(&mut self) {
         self.library_path = None;
+        self.inherited_binding_snapshot = None;
         self.preflight_symbols.clear();
+        self.preflight_complete = false;
     }
 
-    /// Return the VM-local host binding so child workers can inherit the same
-    /// checker-approved library instead of falling back to process environment
-    /// discovery. The path is cloned because the child may outlive its parent.
-    pub(crate) fn library_path_for_child(&self) -> Option<String> {
-        self.library_path.clone()
+    /// Freeze the exact symbol-to-library selections for a child VM. The
+    /// shared `Arc<Library>` handles keep those same loaded objects alive even
+    /// if the parent is dropped or the process environment changes.
+    pub(crate) fn binding_snapshot_for_child(&self) -> Option<Arc<CanonicalMirFfiBindingSnapshot>> {
+        if let Some(snapshot) = &self.inherited_binding_snapshot {
+            return Some(Arc::clone(snapshot));
+        }
+        if !self.preflight_complete {
+            return None;
+        }
+        Some(Arc::new(CanonicalMirFfiBindingSnapshot {
+            loaded_libs: self.loaded_libs.clone(),
+            preflight_symbols: self.preflight_symbols.clone(),
+        }))
+    }
+
+    pub(crate) fn inherit_binding_snapshot(
+        &mut self,
+        snapshot: Arc<CanonicalMirFfiBindingSnapshot>,
+    ) {
+        self.library_path = None;
+        self.loaded_libs = snapshot.loaded_libs.clone();
+        self.preflight_symbols.clear();
+        self.inherited_binding_snapshot = Some(snapshot);
+        self.preflight_complete = false;
     }
 
     #[cfg(test)]
@@ -156,7 +193,9 @@ impl CanonicalMirFfiRuntime {
         descriptors: &[CanonicalFfiDescriptor],
     ) -> Result<(), crate::interp::InterpError> {
         self.preflight_symbols.clear();
+        self.preflight_complete = false;
         if descriptors.is_empty() {
+            self.preflight_complete = true;
             return Ok(());
         }
 
@@ -178,6 +217,38 @@ impl CanonicalMirFfiRuntime {
             if seen_symbols.insert(descriptor.symbol.clone()) {
                 symbols.push(descriptor.symbol.clone());
             }
+        }
+
+        if let Some(snapshot) = self.inherited_binding_snapshot.as_ref() {
+            let mut resolved = BTreeMap::new();
+            for symbol in symbols {
+                let index = snapshot
+                    .preflight_symbols
+                    .get(&symbol)
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::interp::InterpError::new(format!(
+                            "canonical MIR FFI inherited binding manifest has no preflighted symbol '{symbol}'"
+                        ))
+                    })?;
+                let (_, library) = snapshot.loaded_libs.get(index).ok_or_else(|| {
+                    crate::interp::InterpError::new(format!(
+                        "canonical MIR FFI inherited library index {index} for '{symbol}' is out of range"
+                    ))
+                })?;
+                // SAFETY: inherited snapshots are created only from a
+                // successfully preflighted parent runtime and retain the
+                // exact `Library` handle selected for this symbol.
+                unsafe { library.get::<*mut c_void>(symbol.as_bytes()) }.map_err(|error| {
+                    crate::interp::InterpError::new(format!(
+                        "canonical MIR FFI inherited binding for '{symbol}' is invalid: {error}"
+                    ))
+                })?;
+                resolved.insert(symbol, index);
+            }
+            self.preflight_symbols = resolved;
+            self.preflight_complete = true;
+            return Ok(());
         }
 
         let configured_path = match self.library_path.clone() {
@@ -205,6 +276,7 @@ impl CanonicalMirFfiRuntime {
             }
         }
         self.preflight_symbols = resolved;
+        self.preflight_complete = true;
         Ok(())
     }
 
@@ -1673,24 +1745,37 @@ mod tests {
     }
 
     #[test]
-    fn scalar_ffi_runtime_child_binding_snapshot_survives_parent_rebind() {
-        let mut runtime = CanonicalMirFfiRuntime::new();
-        assert_eq!(runtime.library_path_for_child(), None);
+    fn scalar_ffi_runtime_child_binding_snapshot_reuses_parent_library_handle() {
+        let mut guard = crate::tests::FfiEnvGuard::lock();
+        let libc = default_libc_candidates()
+            .into_iter()
+            .find(|candidate| is_discoverable_system_library_candidate(candidate))
+            .expect("a discoverable libc is required for the scalar FFI runtime test");
+        guard.set_path(std::path::Path::new(libc));
 
-        runtime.set_library_path("/tmp/mimi-ffi-parent-a.so");
-        let child_snapshot = runtime
-            .library_path_for_child()
-            .expect("a bound parent must provide a child snapshot");
-        runtime.set_library_path("/tmp/mimi-ffi-parent-b.so");
-        assert_eq!(child_snapshot, "/tmp/mimi-ffi-parent-a.so");
+        let labs = descriptor("labs", CanonicalFfiScalarType::I64);
+        let mut parent = CanonicalMirFfiRuntime::new();
+        parent
+            .preflight(std::slice::from_ref(&labs))
+            .expect("parent manifest preflight");
+        assert_eq!(parent.loaded_library_count_for_test(), 1);
+        let snapshot = parent
+            .binding_snapshot_for_child()
+            .expect("a preflighted parent must provide an immutable child snapshot");
+
+        let mut child = CanonicalMirFfiRuntime::new();
+        child.inherit_binding_snapshot(snapshot);
+        child
+            .preflight(std::slice::from_ref(&labs))
+            .expect("child reuses the parent's already selected library handle");
+        drop(parent);
         assert_eq!(
-            runtime.library_path_for_child().as_deref(),
-            Some("/tmp/mimi-ffi-parent-b.so")
+            child
+                .call(&labs, &[Value::Int(-41)])
+                .expect("child FFI call"),
+            Value::Int(41)
         );
-
-        runtime.clear_library_path();
-        assert_eq!(runtime.library_path_for_child(), None);
-        assert_eq!(child_snapshot, "/tmp/mimi-ffi-parent-a.so");
+        assert_eq!(child.loaded_library_count_for_test(), 1);
     }
 
     #[test]

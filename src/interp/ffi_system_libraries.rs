@@ -8,6 +8,8 @@
 //! binaries link libc and libm directly, so the MIR runtime must resolve the
 //! same symbols for identical programs.
 
+use std::sync::Arc;
+
 /// Candidate system libc paths for the `MIMI_FFI_LIB`-less default.
 /// Absolute multiarch paths first; loader sonames are appended by
 /// [`default_system_library_candidates`] as the final fallback.
@@ -153,8 +155,8 @@ pub(crate) struct SelectorDialect {
 /// runtime. The shared selector only grows the cache — it never shrinks,
 /// reorders, or evicts — so indices stay valid for the runtime's lifetime.
 pub(crate) trait SelectorLibraryCache {
-    fn loaded_libs(&self) -> &Vec<(String, libloading::Library)>;
-    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, libloading::Library)>;
+    fn loaded_libs(&self) -> &Vec<(String, Arc<libloading::Library>)>;
+    fn loaded_libs_mut(&mut self) -> &mut Vec<(String, Arc<libloading::Library>)>;
 }
 
 /// Why the shared selector returned without a selected index.
@@ -222,7 +224,7 @@ pub(crate) fn select_library_index(
                 }
             };
             let libs = cache.loaded_libs_mut();
-            libs.push((lib_path.clone(), library));
+            libs.push((lib_path.clone(), Arc::new(library)));
             libs.len() - 1
         };
         let Some((_, library)) = cache.loaded_libs().get(lib_idx) else {
@@ -250,13 +252,13 @@ pub(crate) fn select_library_index(
 mod tests {
     use super::*;
 
-    struct ProbeCache(Vec<(String, libloading::Library)>);
+    struct ProbeCache(Vec<(String, Arc<libloading::Library>)>);
 
     impl SelectorLibraryCache for ProbeCache {
-        fn loaded_libs(&self) -> &Vec<(String, libloading::Library)> {
+        fn loaded_libs(&self) -> &Vec<(String, Arc<libloading::Library>)> {
             &self.0
         }
-        fn loaded_libs_mut(&mut self) -> &mut Vec<(String, libloading::Library)> {
+        fn loaded_libs_mut(&mut self) -> &mut Vec<(String, Arc<libloading::Library>)> {
             &mut self.0
         }
     }
