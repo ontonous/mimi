@@ -30579,3 +30579,107 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
+
+#[test]
+fn scalar_ffi_record_and_s8_flow_intersections_fail_closed() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "flat-record",
+            r#"
+                type Point { x: i32, enabled: bool }
+                extern "C" { func scalar_probe(x: i32) -> i32; }
+                func main() -> i32 {
+                    let point = Point { x: scalar_probe(40), enabled: true }
+                    if point.enabled { point.x + 1 } else { 0 }
+                }
+            "#,
+        ),
+        (
+            "s8-flow",
+            r#"
+                extern "C" { func scalar_probe(x: i32) -> i32; }
+                flow Counter {
+                    state Zero { n: i32 }
+                    transition inc(Zero) -> Zero {
+                        return Zero { n: self.n + 1 }
+                    }
+                }
+                func main() -> i32 {
+                    let counter = Zero { n: scalar_probe(40) }
+                    let next = Counter::inc(counter)
+                    next.n
+                }
+            "#,
+        ),
+    ];
+
+    for (label, source) in CASES {
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .unwrap_or_else(|error| panic!("{label} checker: {error:?}"));
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(admission.scalar_ffi, "{label} scalar FFI admission");
+        match *label {
+            "flat-record" => assert_ne!(
+                admission.record,
+                crate::core::mir::FlatCopyRecordAdmission::OutsideProfile,
+                "{label} must be recognized as a Record intersection"
+            ),
+            "s8-flow" => assert_ne!(
+                admission.flow,
+                crate::core::mir::S8FlowAdmission::OutsideProfile,
+                "{label} must be recognized as a Flow intersection"
+            ),
+            _ => unreachable!("table label and admission assertion must stay paired"),
+        }
+
+        let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect_err("scalar FFI must not silently widen into another migrated island");
+        assert!(
+            error.to_string().contains("scalar FFI composition"),
+            "{label}: {error}"
+        );
+        assert!(matches!(
+            error,
+            crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
+                profile: crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
+                stage: crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let single = crate::verifier::verify_checked(&checked, format!("{label}-single"))
+            .expect_err("single verifier must reject the FFI composition");
+        assert!(
+            single.contains("scalar FFI composition"),
+            "{label}: {single}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
+            .expect_err("dual verifier must reject the FFI composition");
+        assert!(dual.contains("scalar FFI composition"), "{label}: {dual}");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let ffi = crate::verifier::verify_ffi_checked(&checked)
+            .expect_err("FFI verifier must reject the cross-island composition");
+        assert!(ffi.contains("scalar FFI composition"), "{label}: {ffi}");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, label);
+        let diagnostics = generator
+            .compile_checked(&checked)
+            .expect_err("direct native codegen must reject the FFI composition");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message.contains("scalar FFI composition") }),
+            "{label}: {diagnostics:?}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}

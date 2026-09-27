@@ -838,9 +838,29 @@ pub fn materialize_canonical_mir_route(
         });
     }
     if admission.scalar_ffi {
-        // Recognizing FFI must not widen an existing aggregate/collection
-        // island. Keep these intersection gates in the shared materializer,
-        // so CLI, direct native and public verifiers reject the same graph.
+        // A scalar FFI call does not opt the whole graph into every other
+        // migrated island. Keep these intersection gates in the shared
+        // materializer so CLI, direct native and public verifiers reject the
+        // same graph.
+        if admission.record != FlatCopyRecordAdmission::OutsideProfile
+            || materialized_record_candidate
+        {
+            return Err(CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::ScalarFfi,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: "scalar FFI composition contains a flat Copy-record candidate outside the closed FFI profile".into(),
+            });
+        }
+        if admission.flow != S8FlowAdmission::OutsideProfile
+            || materialized_flow_candidate
+            || !canonical.transitions().is_empty()
+        {
+            return Err(CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::ScalarFfi,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: "scalar FFI composition contains a Flow transition candidate outside the closed FFI profile".into(),
+            });
+        }
         type IslandGate = fn(&MirProgram) -> Result<(), Vec<String>>;
         let gates: &[(bool, IslandGate)] = &[
             (
