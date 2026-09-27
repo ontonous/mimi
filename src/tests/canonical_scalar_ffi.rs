@@ -6133,6 +6133,134 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 }
 
+#[test]
+fn scalar_ffi_actor_worker_inherits_preflighted_environment_binding() {
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let child_binding = library_fixture(
+        counter + 1,
+        r#"
+#include <stdint.h>
+int64_t mir_ffi_actor_preflight_snapshot_value(void) { return 22; }
+"#,
+    );
+    let child_binding_path = child_binding.dir.join("ffi.so");
+    let escaped_child_path = child_binding_path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let parent_binding_source = format!(
+        r#"
+#include <stdint.h>
+#include <stdlib.h>
+int32_t mir_ffi_actor_preflight_change_env(void) {{
+    return setenv("MIMI_FFI_LIB", "{escaped_child_path}", 1);
+}}
+int64_t mir_ffi_actor_preflight_snapshot_value(void) {{ return 11; }}
+"#
+    );
+    let parent_binding = library_fixture(counter, &parent_binding_source);
+    guard.set_path(&parent_binding.dir.join("ffi.so"));
+
+    let source = r#"
+extern "C" {
+    func mir_ffi_actor_preflight_change_env() -> i32;
+    func mir_ffi_actor_preflight_snapshot_value() -> i64 ensures: result == 11;
+}
+func worker(self: i64) -> i64 {
+    println(7)
+    mir_ffi_actor_preflight_snapshot_value()
+}
+func main() -> i64 {
+    println(5)
+    mir_ffi_actor_preflight_change_env()
+    let spare_a = 101
+    let spare_b = 102
+    0
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("actor environment binding snapshot fixture check");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("actor environment binding snapshot fixture MIR");
+    let mut bytecode =
+        compile_mir_program(&mir).expect("actor environment binding snapshot fixture bytecode");
+    assert!(bytecode.ast.is_none());
+
+    // Canonical MIR does not currently lower Actor declarations. Attach only
+    // the minimum runtime actor metadata to this AST-free MIR bytecode so the
+    // test reaches the production ActorSpawn -> ActorHandle worker route.
+    let actor_def = super::parse("actor SnapshotWorker {}")
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Actor(actor) => Some(actor),
+            _ => None,
+        })
+        .expect("test actor definition");
+    let bytecode_mut = std::sync::Arc::make_mut(&mut bytecode);
+    bytecode_mut
+        .actor_defs
+        .insert("SnapshotWorker".to_string(), actor_def);
+    let worker = bytecode_mut
+        .functions
+        .iter()
+        .position(|function| function.name == "function:worker")
+        .expect("canonical actor worker function") as u32;
+    bytecode_mut
+        .actor_method_funcs
+        .insert(("SnapshotWorker".to_string(), "call".to_string()), worker);
+
+    let main = bytecode_mut
+        .functions
+        .iter()
+        .position(|function| function.name == "function:main")
+        .expect("canonical main function");
+    let main_proto = &mut bytecode_mut.functions[main];
+    assert!(matches!(
+        main_proto.code.pop(),
+        Some(crate::interp::bytecode::instr::Op::Ret { .. })
+    ));
+    assert!(main_proto.register_count >= 2);
+    let actor_reg = main_proto.register_count - 2;
+    let result_reg = main_proto.register_count - 1;
+    let actor_name = main_proto.add_const(crate::interp::bytecode::instr::ConstValue::Str(
+        "SnapshotWorker".to_string(),
+    ));
+    let method_name = main_proto.add_const(crate::interp::bytecode::instr::ConstValue::Str(
+        "call".to_string(),
+    ));
+    main_proto.emit(crate::interp::bytecode::instr::Op::ActorSpawn {
+        rd: actor_reg,
+        actor: actor_name,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::DynMethodCall {
+        rd: result_reg,
+        method: method_name,
+        args_base: actor_reg,
+        argc: 1,
+    });
+    main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result_reg });
+
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.enable_stdout_capture();
+    let captured_stdout = vm.stdout_buf().expect("enabled stdout capture");
+    assert_eq!(
+        vm.run_value()
+            .expect("actor worker must use the parent's preflighted symbol handle"),
+        Value::Int(11)
+    );
+    assert_eq!(
+        std::env::var("MIMI_FFI_LIB").as_deref(),
+        Ok(child_binding_path.to_str().expect("UTF-8 test path")),
+        "parent host call must have changed the process environment"
+    );
+    assert_eq!(&*captured_stdout.lock().expect("captured stdout"), "5\n7\n");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn scalar_ffi_nested_spawn_merges_leaf_stdout_and_recovers_after_failure() {
