@@ -335,6 +335,36 @@ fn session_channel_default_route_is_admitted_and_assign_sibling_keeps_compatibil
     assert!(crate::core::mir::validate_session_channel_island(&route.program).is_ok());
     assert!(crate::verifier::validate_mir_capabilities(&route.program).is_ok());
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "session_channel_checked_api");
+    codegen
+        .compile_checked(&checked)
+        .expect("direct native API must compile the admitted session-channel route");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct session-channel native route must not access retained legacy bodies"
+    );
+
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect("direct checked verifier API must consume the admitted session MIR route");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct session-channel verifier route must not access retained legacy bodies"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::verifier::verify_checked_dual(&checked, source_hash)
+        .expect("direct dual verifier API must consume the admitted session MIR route");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct session-channel dual verifier route must not access retained legacy bodies"
+    );
+
     let assign_source = r#"
         session Proto = !i32 . ?i32 . end
 

@@ -43,9 +43,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
         // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
-        // and exact nested Option-tuple production islands have crossed the
-        // default route boundary. This direct native API is also an old
-        // production entry point, so an admitted graph must not continue into
+        // exact nested Option-tuple, and SessionChannel production islands
+        // have crossed the default route boundary. This public API is also an
+        // old production entry point, so an admitted graph must not continue into
         // the old AST body compiler merely
         // because a caller bypassed the CLI selector.  The helper performs
         // the same whole-program, all-consumer preflight as the selector and
@@ -612,6 +612,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.copy_option_bool_complete()
             || admission.copy_option_i64_complete()
             || admission.copy_result_i32_complete()
+            || admission.session_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()
             // R6-1048 parity: a complete flat Copy-record admission must see
@@ -1141,6 +1142,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
         let copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
         let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
+        let session_candidate =
+            route.admission.session_complete() && route.materialized_session_candidate;
         if !map_root_candidate
             && !scalar_ffi_candidate
             && !scalar_generic_identity_i32_candidate
@@ -1156,6 +1159,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !copy_option_i64_candidate
             && !copy_option_f64_candidate
             && !copy_result_i32_candidate
+            && !session_candidate
         {
             return Ok(None);
         }
@@ -1193,6 +1197,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "Copy Option<f64> variant island"
         } else if copy_result_i32_candidate {
             "Copy Result<i32, i32> variant island"
+        } else if session_candidate {
+            crate::core::mir::SESSION_CHANNEL_ISLAND
         } else {
             "S8 Flow transition island"
         };
@@ -1316,6 +1322,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Err(errors) =
                 crate::core::mir::validate_copy_result_i32_variant_island(canonical)
             {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if session_candidate {
+            if let Err(errors) = crate::core::mir::validate_session_channel_island(canonical) {
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

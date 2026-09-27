@@ -778,6 +778,7 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
     crate::codegen::mir::validate_mir_native(&canonical)
         .expect("flat Copy record native capability");
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s15_flat_copy_record_route");
     codegen
@@ -785,6 +786,10 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
         .expect("flat Copy record must use the canonical MIR native consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct flat Copy record native route must not access retained legacy bodies"
+    );
 }
 
 #[test]
@@ -1049,6 +1054,7 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
         crate::core::mir::OptionStringVariantAdmission::CompleteCoverage
     );
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s30_option_string_default_route");
     codegen
@@ -1056,6 +1062,81 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
         .expect("direct native entry must use the canonical Option<string> consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct Option<string> native route must not access retained legacy bodies"
+    );
+}
+
+#[test]
+fn compile_checked_routes_copy_option_and_result_profiles_without_legacy_access() {
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
+    const CASES: &[(&str, Profile)] = &[
+        (
+            include_str!("../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),
+            Profile::CopyOptionI32Variant,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_bool_unwrap.mimi"),
+            Profile::CopyOptionBoolVariant,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_i64_unwrap.mimi"),
+            Profile::CopyOptionI64Variant,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_f64_unwrap.mimi"),
+            Profile::CopyOptionF64Variant,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_result_i32_unwrap.mimi"),
+            Profile::CopyResultI32Variant,
+        ),
+    ];
+
+    for (source, profile) in CASES {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file)
+            .unwrap_or_else(|diags| panic!("check {}: {diags:?}", profile.as_str()));
+        let route = crate::core::mir::materialize_canonical_mir_route(&program, None)
+            .unwrap_or_else(|error| panic!("materialize {}: {error:?}", profile.as_str()));
+        assert!(
+            profile.is_admitted(route.admission),
+            "{} must have checker-owned complete admission",
+            profile.as_str()
+        );
+        assert!(
+            profile.is_materialized(&route),
+            "{} must have its canonical operation receipt",
+            profile.as_str()
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, profile.as_str());
+        codegen
+            .compile_checked(&program)
+            .unwrap_or_else(|error| panic!("compile_checked {}: {error:?}", profile.as_str()));
+        assert!(
+            codegen.module.get_function("main").is_some(),
+            "{} direct native API must emit main",
+            profile.as_str()
+        );
+        assert!(
+            codegen.resolved_failed_functions().is_empty(),
+            "{} direct native API must not defer a resolved failure",
+            profile.as_str()
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{} direct native API must not access retained legacy bodies",
+            profile.as_str()
+        );
+    }
 }
 
 #[test]

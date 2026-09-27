@@ -1072,7 +1072,12 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
     let program = crate::core::check_program(&file).expect("typecheck");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed Copy record verifier route must not access retained legacy bodies"
+    );
     let result = verify_result
         .iter()
         .find(|result| result.func_name.ends_with("advance"))
@@ -1086,7 +1091,12 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
         Some(ProofArtifact::ENGINE_MIR)
     );
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed Copy record dual verifier route must not access retained legacy bodies"
+    );
     let dual = dual_result
         .iter()
         .find(|result| result.func_name.ends_with("advance"))

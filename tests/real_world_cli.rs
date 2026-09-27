@@ -23495,6 +23495,60 @@ func main() -> i64 {
         "session program must not re-enter the compatibility route: {stderr}"
     );
 
+    let binary = dir.join("session_clean_default");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&clean)
+        .arg("-o")
+        .arg(&binary)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default session build");
+    let build_stderr = String::from_utf8_lossy(&build.stderr).to_string();
+    assert!(
+        build.status.success(),
+        "default session build must succeed: {build_stderr}"
+    );
+    assert!(
+        !build_stderr.contains("canonical route disposition: legacy"),
+        "default session build must not route through legacy: {build_stderr}"
+    );
+    let built_run = Command::new(&binary)
+        .output()
+        .expect("run default-built session binary");
+    assert!(
+        built_run.status.success(),
+        "default-built session binary must run successfully: {}",
+        String::from_utf8_lossy(&built_run.stderr)
+    );
+    assert_eq!(built_run.stdout, b"10\n11\n");
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&clean)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default session verify");
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout).to_string();
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr).to_string();
+    let verify_transcript = format!("{verify_stdout}{verify_stderr}");
+    assert!(
+        verify.status.success(),
+        "default session verify must succeed: {verify_transcript}"
+    );
+    assert!(
+        verify_transcript
+            .to_ascii_lowercase()
+            .contains("no contracts to verify"),
+        "the session verify CLI must state that this fixture has no contracts: {verify_transcript}"
+    );
+    assert!(
+        !verify_transcript.contains("canonical route disposition: legacy"),
+        "default session verify must not route through legacy: {verify_transcript}"
+    );
+
     let assign = dir.join("session_assign.mimi");
     fs::write(
         &assign,
@@ -23532,6 +23586,7 @@ func main() -> i64 {
         "mixed session coverage must keep the explicit compatibility route: {compat_stderr}"
     );
 
+    let _ = fs::remove_file(&binary);
     let _ = fs::remove_dir_all(&dir);
 }
 
