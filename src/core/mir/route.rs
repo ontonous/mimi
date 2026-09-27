@@ -203,11 +203,12 @@ impl CanonicalMirRouteProfile {
 
 /// Checker-owned admission for the opaque, local Map-root lifecycle.
 ///
-/// `IncompleteCoverage` is a recognized attempt whose exact Checker receipt
-/// was withheld (for example because it uses MapGet, a dynamic key, control
-/// flow, or lets a root escape). Such a candidate is a hard route boundary,
-/// not permission to reinterpret the same value through the legacy Record
-/// ABI.
+/// `IncompleteCoverage` means the Checker materialized at least one lifecycle
+/// action but the full program's `map_new()` call set does not match the
+/// receipted New actions. That is a partial route candidate, so consumers must
+/// fail closed instead of mixing canonical and legacy MapRoot representations.
+/// Ordinary Map/Any programs with no MapRoot lifecycle receipts remain outside
+/// this profile and keep their existing compatibility route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapRootAdmission {
     OutsideProfile,
@@ -617,28 +618,22 @@ pub fn classify_canonical_mir_route_admission(
 }
 
 fn classify_map_root_admission(program: &CheckedProgram) -> MapRootAdmission {
-    let candidates = program
-        .resource_analyses()
-        .values()
-        .filter(|analysis| {
-            analysis.map_root_profile_candidate
-                || !analysis.map_root_new_attempts.is_empty()
-                || !analysis.map_root_actions.is_empty()
-        })
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    let mut has_receipted_lifecycle = false;
+    let mut attempted_new_points = std::collections::BTreeSet::new();
+    let mut receipted_new_points = std::collections::BTreeSet::new();
+    for analysis in program.resource_analyses().values() {
+        attempted_new_points.extend(analysis.map_root_new_attempts.iter().cloned());
+        for action in &analysis.map_root_actions {
+            has_receipted_lifecycle = true;
+            if action.kind == crate::core::MapRootActionKind::New {
+                receipted_new_points.insert(action.point.clone());
+            }
+        }
+    }
+    if !has_receipted_lifecycle {
         return MapRootAdmission::OutsideProfile;
     }
-    if candidates.iter().all(|analysis| {
-        let receipted_new_points = analysis
-            .map_root_actions
-            .iter()
-            .filter(|action| action.kind == crate::core::MapRootActionKind::New)
-            .map(|action| action.point.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        !analysis.map_root_new_attempts.is_empty()
-            && analysis.map_root_new_attempts == receipted_new_points
-    }) {
+    if !attempted_new_points.is_empty() && attempted_new_points == receipted_new_points {
         MapRootAdmission::CompleteCoverage
     } else {
         MapRootAdmission::IncompleteCoverage

@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_rejects_withheld_checker_receipts_without_legacy() {
+    fn map_root_default_route_preserves_legacy_compatibility_outside_profile() {
         for source in [
             r#"
                 func main() -> i32 {
@@ -2095,32 +2095,49 @@ mod tests {
                     size
                 }
             "#,
-            r#"
-                func main() -> i32 {
-                    let root = map_new()
-                    let updated = map_set(root, "answer", 42)
-                    let size = map_size(updated)
-                    let temporary_size = map_size(map_new())
-                    drop(updated)
-                    size + temporary_size
-                }
-            "#,
         ] {
             let (checked, file) = checked(source);
             assert_eq!(
                 mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
-                mimi::core::mir::MapRootAdmission::IncompleteCoverage,
-                "source should retain an incomplete MapRoot candidate: {source}"
+                mimi::core::mir::MapRootAdmission::OutsideProfile,
+                "ordinary Map/Any compatibility form must stay outside MapRoot: {source}"
             );
-            let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-                panic!("withheld MapRoot receipt must fail closed: {source}");
-            };
             assert!(
-                reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
-                "{reason}"
+                matches!(
+                    select_default_route(&checked, &file),
+                    DefaultMirRoute::Legacy(_)
+                ),
+                "ordinary Map/Any compatibility form must keep its legacy route: {source}"
             );
-            assert!(!reason.contains("legacy"), "{reason}");
         }
+    }
+
+    #[test]
+    fn map_root_default_route_rejects_extra_temporary_root_without_legacy_retry() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "answer", 42)
+                let size = map_size(updated)
+                let temporary_size = map_size(map_new())
+                drop(updated)
+                size + temporary_size
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
+            mimi::core::mir::MapRootAdmission::IncompleteCoverage,
+            "an action-bearing lifecycle must not mask an unreceipted temporary root"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("partial MapRoot lifecycle must fail closed");
+        };
+        assert!(
+            reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+            "{reason}"
+        );
+        assert!(!reason.contains("legacy"), "{reason}");
     }
 
     #[test]

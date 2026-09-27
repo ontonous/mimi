@@ -956,7 +956,6 @@ fn ownership_summary_flags_maybe_consumed_branch_merge() {
         actions: Vec::new(),
         loans: Vec::new(),
         map_root_actions: Vec::new(),
-        map_root_profile_candidate: false,
         map_root_new_attempts: BTreeSet::new(),
         in_states: std::collections::BTreeMap::new(),
         out_states: std::collections::BTreeMap::new(),

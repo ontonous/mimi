@@ -90,9 +90,6 @@ struct ActionEmitter<'a> {
     /// bind a persistent Map update or a borrowed size observation to one
     /// exact call and root resource.
     map_root_actions: Vec<MapRootAction>,
-    /// Checker recognized an attempted MapRoot shape, even if its exact
-    /// operation receipts are later withheld.
-    map_root_profile_candidate: bool,
     /// Stable source points for every recognized MapRoot construction
     /// attempt, including non-local temporary constructions.
     map_root_new_attempts: BTreeSet<NodeId>,
@@ -149,7 +146,6 @@ impl<'a> ActionEmitter<'a> {
             directional_extraction_base: None,
             in_bind_initializer: false,
             map_root_actions: Vec::new(),
-            map_root_profile_candidate: false,
             map_root_new_attempts: BTreeSet::new(),
             map_root_locals: BTreeSet::new(),
             live_map_root_locals: BTreeSet::new(),
@@ -165,7 +161,6 @@ impl<'a> ActionEmitter<'a> {
         self.introduce_parameters();
         self.visit_block(&self.body.root, true);
         if self.errors.is_empty() {
-            let map_root_profile_candidate = self.map_root_profile_candidate;
             let map_root_new_attempts = self.map_root_new_attempts.clone();
             // 0.31.16: collect flow state resources as auto-droppable.
             // Flow states represent data that can be safely discarded at
@@ -240,7 +235,6 @@ impl<'a> ActionEmitter<'a> {
                 &droppable,
             )?;
             analysis.map_root_actions = map_root_actions;
-            analysis.map_root_profile_candidate = map_root_profile_candidate;
             analysis.map_root_new_attempts = map_root_new_attempts;
             Ok(analysis)
         } else {
@@ -1613,11 +1607,9 @@ impl<'a> ActionEmitter<'a> {
                 if matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_new")
                     && call.arguments.is_empty()
         ) {
-            // Keep every recognized MapRoot attempt visible, not only a direct
-            // `let root = map_new()` binding. Nested/temporary/escaped roots
-            // without the exact local lifecycle receipt must not silently
-            // return to the legacy Record ABI.
-            self.map_root_profile_candidate = true;
+            // Keep every construction visible, including nested/temporary
+            // calls. When any lifecycle action is receipted, admission checks
+            // the complete callable set so one valid root cannot mask another.
             self.map_root_new_attempts
                 .insert(expression.node_id.clone());
         }
@@ -3534,7 +3526,6 @@ func main() -> i32 {
         let analysis = program
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
-        assert!(analysis.map_root_profile_candidate);
         assert_eq!(analysis.map_root_new_attempts.len(), 1);
         assert!(analysis.map_root_actions.is_empty());
 
@@ -3551,7 +3542,6 @@ func main() -> i32 {
         let analysis = program
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
-        assert!(analysis.map_root_profile_candidate);
         assert_eq!(analysis.map_root_new_attempts.len(), 1);
         assert!(analysis.map_root_actions.is_empty());
 
@@ -3596,7 +3586,6 @@ func main() -> i32 {
         let analysis = program
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
-        assert!(analysis.map_root_profile_candidate);
         assert!(analysis.map_root_actions.is_empty());
     }
 
@@ -3616,7 +3605,6 @@ func main() -> i32 {
         let analysis = program
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
-        assert!(analysis.map_root_profile_candidate);
         assert!(analysis.map_root_actions.is_empty());
 
         for source in [

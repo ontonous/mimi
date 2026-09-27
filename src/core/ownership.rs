@@ -188,11 +188,6 @@ pub struct ResourceAnalysis {
     /// `map_size` borrow cannot be reconstructed from a surface call name by
     /// MIR consumers.
     pub(crate) map_root_actions: Vec<MapRootAction>,
-    /// Whether Checker recognized an attempted local Map-root lifecycle,
-    /// including shapes for which the exact action receipts were withheld.
-    /// Route admission uses this tripwire to reject unsupported MapRoot faces
-    /// instead of silently retrying them through the legacy Record path.
-    pub(crate) map_root_profile_candidate: bool,
     /// Every resolved zero-argument `map_new()` call observed in this
     /// callable. Route admission compares these stable node ids against the
     /// Checker New receipts so one complete lifecycle cannot mask an

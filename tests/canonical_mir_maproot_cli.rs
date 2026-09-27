@@ -24,7 +24,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn default_map_root_run_build_verify_and_unsupported_cli_boundary() {
+fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     let mimi = mimi_bin();
     let run_source = fixture("mir_map_root_default_run.mimi");
 
@@ -91,16 +91,22 @@ fn default_map_root_run_build_verify_and_unsupported_cli_boundary() {
     assert!(String::from_utf8_lossy(&verify.stderr)
         .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
 
-    let unsupported = Command::new(&mimi)
+    let legacy_map = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
         .arg("run")
-        .arg(fixture("mir_map_root_dynamic_key_rejected.mimi"))
+        .arg(fixture("mir_map_root_dynamic_key_legacy.mimi"))
         .output()
-        .expect("run unsupported MapRoot CLI fixture");
-    assert!(!unsupported.status.success());
-    let stderr = String::from_utf8_lossy(&unsupported.stderr);
-    assert!(stderr.contains("MIR-COVERAGE-001"), "{stderr}");
+        .expect("run legacy dynamic Map key CLI fixture");
     assert!(
-        !stderr.contains("canonical route disposition: legacy"),
+        legacy_map.status.success(),
+        "legacy Map/Any compatibility run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&legacy_map.stdout),
+        String::from_utf8_lossy(&legacy_map.stderr)
+    );
+    assert!(String::from_utf8_lossy(&legacy_map.stdout).is_empty());
+    let stderr = String::from_utf8_lossy(&legacy_map.stderr);
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
         "{stderr}"
     );
 }

@@ -354,7 +354,7 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
 }
 
 #[test]
-fn compile_checked_rejects_withheld_map_root_receipt_without_legacy_retry() {
+fn compile_checked_preserves_dynamic_map_key_outside_maproot_profile() {
     let source = r#"
         func main() -> i32 {
             let root = map_new()
@@ -369,19 +369,19 @@ fn compile_checked_rejects_withheld_map_root_receipt_without_legacy_retry() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "map_root_dynamic_key_rejected");
-    let errors = codegen
-        .compile_checked(&program)
-        .expect_err("a dynamic MapRoot key has no Checker receipt");
-    assert!(errors
-        .iter()
-        .any(|error| error.to_string().contains("MapRoot")));
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct MapRoot rejection must not enter the legacy body compiler"
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).map_root,
+        crate::core::mir::MapRootAdmission::OutsideProfile
     );
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "map_dynamic_key_legacy_compatibility");
+    codegen
+        .compile_checked(&program)
+        .expect("dynamic Map keys remain available outside the MapRoot profile");
+    codegen
+        .module
+        .verify()
+        .expect("valid dynamic Map key module");
 }
 
 #[test]
