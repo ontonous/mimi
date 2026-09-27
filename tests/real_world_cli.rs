@@ -14508,6 +14508,24 @@ fn canonical_flow_state_match_uses_default_mir_route_and_native_output() {
     assert_eq!(native.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&native.stdout), "2\n");
     assert!(native.stderr.is_empty());
+
+    // This accepted state-match fixture has no contract obligations. Its
+    // public CheckedProgram verifier route is pinned by a materialization
+    // counter and legacy-body tripwire in verifier/tests.rs; this CLI check
+    // protects the default no-obligation response surface.
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default state-match verifier");
+    assert!(
+        verify.status.success(),
+        "default state-match verify failed:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stderr),
+        String::from_utf8_lossy(&verify.stdout)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("No contracts to verify"));
 }
 
 #[test]
@@ -14667,6 +14685,31 @@ fn canonical_multifield_flow_source_receipt_uses_default_mir_route() {
     assert_eq!(native.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&native.stdout), "source\n");
     assert!(native.stderr.is_empty());
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("failed to spawn default multifield Flow verifier");
+    assert!(
+        verification.status.success(),
+        "default multifield Flow verify failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verification.stdout);
+    let verify_stderr = String::from_utf8_lossy(&verification.stderr);
+    assert!(
+        verify_stdout.contains("canonical MIR ensures contract proven"),
+        "{verify_stdout}"
+    );
+    assert!(verify_stdout.contains("1/1 verified"), "{verify_stdout}");
+    assert!(
+        verify_stderr.contains("canonical MIR verifier provenance: profile=verify-canonical-v1"),
+        "{verify_stderr}"
+    );
 }
 
 #[test]
@@ -15857,6 +15900,22 @@ fn default_silent_local_flow_transition_selects_one_canonical_route() {
         "default Flow transition native run failed:\n{}",
         String::from_utf8_lossy(&native.stderr)
     );
+
+    // Public CheckedProgram verifier tests separately pin the S8 MIR route
+    // materialization and legacy accessor counter for this no-contract shape.
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default S8 Flow verifier");
+    assert!(
+        verification.status.success(),
+        "default S8 Flow verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout).contains("No contracts to verify"));
 
     let verification = Command::new(mimi_bin())
         .current_dir(project_root())

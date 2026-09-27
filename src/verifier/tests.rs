@@ -1796,6 +1796,41 @@ fn public_checked_verifier_routes_recoverable_cross_state_flow_to_mir() {
 }
 
 #[test]
+fn public_checked_verifier_materializes_flow_state_match_before_no_contract_result() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/real_world/flow_state_match_fail_result_dual_backend.mimi");
+    let file = parse_memory_source(source, "mir-flow-state-match-no-contract").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(admission.flow_failure_retry);
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    for dual in [false, true] {
+        crate::core::mir::reset_test_route_materialization_count();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            crate::verifier::verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            crate::verifier::verify_checked(&checked, source_hash.clone())
+        }
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} Flow state-match verifier: {error}",
+                if dual { "dual" } else { "single" }
+            )
+        });
+        assert!(results.is_empty(), "fixture has no contracts: {results:?}");
+        assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{} Flow state-match verifier must not access a legacy body",
+            if dual { "dual" } else { "single" }
+        );
+    }
+}
+
+#[test]
 fn public_checked_verifier_reports_recoverable_cross_state_counterexample_from_mir() {
     require_z3!();
     let source = include_str!(
@@ -1836,7 +1871,8 @@ fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::reset_test_route_materialization_count();
-    let results = verify_checked(&program, source_hash).expect("public multifield MIR verify");
+    let results =
+        verify_checked(&program, source_hash.clone()).expect("public multifield MIR verify");
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let result = results
@@ -1850,6 +1886,24 @@ fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("canonical multifield Flow source receipt MIR");
     assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let dual_results = crate::verifier::verify_checked_dual(&program, source_hash)
+        .expect("public dual multifield MIR verify");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let dual_result = dual_results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("multifield Flow dual verifier result");
+    assert_eq!(dual_result.status, VerifStatus::Proven);
+    let dual_artifact = dual_result
+        .artifact
+        .as_ref()
+        .expect("dual MIR proof artifact");
+    assert_eq!(dual_artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(dual_artifact.mir_hash, canonical.canonical_digest());
 }
 
 #[test]
@@ -5293,12 +5347,20 @@ fn public_checked_verifier_routes_closed_s8_flow_to_mir() {
         mir_route.is_some(),
         "exact S8 must be owned by the MIR route"
     );
+    crate::core::mir::reset_test_route_materialization_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
     assert!(verify_result.is_empty());
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert!(mir_route.unwrap().is_empty());
 
+    crate::core::mir::reset_test_route_materialization_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
     assert!(dual_result.is_empty());
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
