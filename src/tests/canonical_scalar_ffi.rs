@@ -15854,6 +15854,10 @@ fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
             "bad,name",
             "FFI symbol contains whitespace or a manifest delimiter",
         ),
+        (
+            "mimi_mir_map_root_new",
+            "FFI symbol names a reserved Canonical MIR MapRoot runtime helper",
+        ),
     ] {
         let error = crate::core::mir::validate_ffi_symbol_manifest_safety(symbol)
             .expect_err("malformed symbol must be rejected");
@@ -15863,6 +15867,72 @@ fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
         crate::core::mir::validate_ffi_symbol_manifest_safety(symbol)
             .expect("identifier-shaped symbols must be accepted");
     }
+}
+
+#[test]
+fn scalar_ffi_reserved_map_root_runtime_symbol_fails_before_host_resolution() {
+    const RESERVED_SOURCE: &str = r#"
+extern "C" { func mimi_mir_map_root_new() -> i64; }
+func main() -> i64 { mimi_mir_map_root_new() }
+"#;
+    let reserved_checked = crate::core::check_program(&super::parse(RESERVED_SOURCE))
+        .expect("reserved runtime import remains a well-typed source declaration");
+    let lowering_error = MirProgram::from_checked_program(&reserved_checked)
+        .expect_err("source must not materialize an internal runtime FFI receipt");
+    assert!(
+        lowering_error
+            .to_string()
+            .contains("reserved Canonical MIR MapRoot runtime helper"),
+        "{lowering_error}"
+    );
+
+    const SOURCE: &str = r#"
+extern "C" { func foreign_handle() -> i64; }
+func main() -> i64 { foreign_handle() }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("ordinary scalar FFI source checks before receipt mutation");
+    let mut program = MirProgram::from_checked_program(&checked)
+        .expect("ordinary scalar FFI source lowers before receipt mutation");
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .values_mut()
+        .next()
+        .expect("one ordinary scalar FFI receipt")
+        .symbol = "mimi_mir_map_root_new".into();
+    program.replace_ffi_calls_for_test_only(receipts);
+
+    let reference_error = MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject reserved runtime names before host lookup");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("reserved Canonical MIR MapRoot runtime helper"),
+        "{reference_error}"
+    );
+
+    let bytecode_errors = compile_mir_program(&program)
+        .expect_err("bytecode must reject reserved runtime names before host lookup");
+    assert!(bytecode_errors.iter().any(|error| {
+        error
+            .message
+            .contains("reserved Canonical MIR MapRoot runtime helper")
+    }));
+
+    let native_errors = crate::codegen::mir::validate_mir_native(&program)
+        .expect_err("native admission must reject reserved runtime names before declaration");
+    assert!(native_errors.iter().any(|error| {
+        error
+            .message
+            .contains("reserved Canonical MIR MapRoot runtime helper")
+    }));
+
+    let capability_errors = crate::verifier::validate_mir_capabilities(&program)
+        .expect_err("the public capability gate must reject reserved runtime names");
+    assert!(capability_errors
+        .iter()
+        .any(|error| { error.contains("reserved Canonical MIR MapRoot runtime helper") }));
 }
 
 #[test]

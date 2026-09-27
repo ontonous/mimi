@@ -53,6 +53,7 @@ mod aggregate;
 mod calls;
 mod control_flow;
 mod ffi_contract;
+mod map_root;
 mod ownership;
 mod runtime_glue;
 mod scalar;
@@ -288,6 +289,70 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     ],
                     false,
                 ),
+                Some(Linkage::External),
+            );
+        }
+
+        let i8_ptr = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let i64 = self.generator.context.i64_type();
+        let i32 = self.generator.context.i32_type();
+        let void = self.generator.context.void_type();
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_map_root_new")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_new",
+                i64.fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_map_root_set")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_set",
+                i64.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::IntType(i32),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_map_root_size")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_size",
+                i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_map_root_drop")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_drop",
+                void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
                 Some(Linkage::External),
             );
         }
@@ -946,6 +1011,26 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     self.emit_set_op(result, *operation, set, argument.as_ref(), subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::MapRootNew { result } => {
+                let value = self.emit_map_root_new(result, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value = self.emit_map_root_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                let value = self.emit_map_root_size(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                self.emit_map_root_drop(root, subject)?;
+            }
             MirInstructionKind::Drop { value } => {
                 self.emit_drop(value, subject)?;
             }
@@ -1104,6 +1189,320 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    const MAP_ROOT_NATIVE_SOURCE: &str = r#"
+func map_size_for(value: i32) -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let updated = map_set(root, "answer", value)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+func checked_map_size(value: i32) -> i32 {
+    ensures: result == 1
+    map_size_for(value)
+}
+func wrong_map_size() -> i32 {
+    ensures: result == 1
+    let first = map_new()
+    let alpha = map_set(first, "alpha", 1)
+    let beta = map_set(alpha, "beta", 2)
+    let size = map_size(beta)
+    drop(beta)
+    size
+}
+func main() -> i32 {
+    ensures: result == 0
+    let first = map_new()
+    let inserted = map_set(first, "answer", 41)
+    let overwritten = map_set(inserted, "answer", 42)
+    let with_unicode = map_set(overwritten, "雪", 7)
+    let size = map_size(with_unicode)
+    println(size)
+    drop(with_unicode)
+    let checked = checked_map_size(73)
+    println(checked)
+    0
+}
+"#;
+
+    const MAP_ROOT_NATIVE_LIFECYCLE_SOURCE: &str = r#"
+extern "C" { func mimi_test_map_root_live_count() -> i64; }
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "reclaim-me", 17)
+    drop(updated)
+    println(mimi_test_map_root_live_count())
+    0
+}
+"#;
+
+    const MAP_ROOT_NATIVE_OVERFLOW_SOURCE: &str = r#"
+extern "C" { func mimi_test_map_root_size_from_len(len: i64) -> i32; }
+func main() -> i32 {
+    let size = mimi_test_map_root_size_from_len(2147483648)
+    println(size)
+    0
+}
+"#;
+
+    #[test]
+    fn receipt_backed_map_root_is_one_mir_across_reference_bytecode_native_and_verifier() {
+        let program = canonical_program(MAP_ROOT_NATIVE_SOURCE);
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("whole-program verifier admits the exact MapRoot profile");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native admission revalidates the MapRoot receipt profile");
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference MapRoot execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "2\n1\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free MapRoot bytecode compilation"),
+        );
+        assert!(matches!(
+            vm.run_value().expect("bytecode MapRoot execution"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "2\n1\n");
+
+        let verification = crate::verifier::verify_mir(&program, "map-root-native".into())
+            .expect("public MIR verifier consumes the same MapRoot program");
+        for name in ["main", "map_size_for", "checked_map_size"] {
+            let result = verification
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .expect("positive MapRoot contract result");
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{}: {}",
+                name,
+                result.message
+            );
+        }
+        let wrong = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("wrong_map_size"))
+            .expect("negative MapRoot contract result");
+        assert_eq!(wrong.status, crate::verifier::VerifStatus::Disproven);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_root");
+        generator
+            .compile_mir_native(&program)
+            .expect("receipt-backed MapRoot native lowering");
+        generator
+            .module
+            .verify()
+            .expect("native MapRoot module verifies");
+        for runtime in [
+            "mimi_mir_map_root_new",
+            "mimi_mir_map_root_set",
+            "mimi_mir_map_root_size",
+            "mimi_mir_map_root_drop",
+        ] {
+            assert!(
+                generator.module.get_function(runtime).is_some(),
+                "native MapRoot lowering must declare {runtime}"
+            );
+        }
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("same MIR native MapRoot process");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, "2\n1\n");
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production runtime link under Valgrind Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, "2\n1\n");
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(memcheck.stderr.contains("definitely lost: 0 bytes"));
+            assert!(memcheck.stderr.contains("indirectly lost: 0 bytes"));
+        }
+    }
+
+    #[test]
+    fn native_map_root_admission_rejects_forged_and_missing_receipts_before_llvm() {
+        let program = canonical_program(MAP_ROOT_NATIVE_SOURCE);
+        let owner = crate::core::NodeId("function:main".into());
+
+        let mut forged = program.clone();
+        let mut function = forged
+            .functions()
+            .get(&owner)
+            .expect("MapRoot main")
+            .clone();
+        assert!(function
+            .ownership
+            .forge_checker_map_root_set_key_for_test_only("forged".into()));
+        forged.replace_function_for_test_only(function);
+        let errors = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native admission must reject an altered private receipt");
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("MapRoot receipt/shape validation failed")
+        }));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_root_forged");
+        assert!(generator.compile_mir_native(&forged).is_err());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_map_root_new")
+            .is_none());
+
+        let mut missing = program.clone();
+        let mut function = missing
+            .functions()
+            .get(&owner)
+            .expect("MapRoot main")
+            .clone();
+        function
+            .ownership
+            .clear_checker_map_root_actions_for_test_only();
+        missing.replace_function_for_test_only(function);
+        let errors = crate::codegen::mir::validate_mir_native(&missing)
+            .expect_err("native admission must reject missing private receipts");
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("MapRoot receipt/shape validation failed")
+        }));
+
+        let mut out_of_range = program.clone();
+        let mut function = out_of_range
+            .functions()
+            .get(&owner)
+            .expect("MapRoot main")
+            .clone();
+        let set_value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MapRootSet { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("MapRoot Set scalar");
+        let constant = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const { result, .. } if result == &set_value
+                )
+            })
+            .expect("MapRoot Set scalar constant");
+        let MirInstructionKind::Const {
+            literal: crate::core::ir::ResolvedLiteral::Int(literal),
+            ..
+        } = &mut constant.kind
+        else {
+            panic!("MapRoot Set scalar must be an integer literal");
+        };
+        *literal = i64::from(i32::MAX) + 1;
+        out_of_range.replace_function_for_test_only(function);
+        let errors = crate::codegen::mir::validate_mir_native(&out_of_range)
+            .expect_err("native admission must reject an i32 literal outside its TypeDesc range");
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("does not match native TypeDesc ABI")
+        }));
+    }
+
+    #[test]
+    fn emitted_map_root_drop_reclaims_the_production_runtime_entry() {
+        let program = canonical_program(MAP_ROOT_NATIVE_LIFECYCLE_SOURCE);
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native MapRoot lifecycle probe is admitted");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_root_lifecycle");
+        generator
+            .compile_mir_native(&program)
+            .expect("receipt-backed MapRoot lifecycle lowering");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("production runtime link observes the emitted Drop");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(
+            native.stdout, "0\n",
+            "emitted Drop must remove the live root"
+        );
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production runtime MapRoot lifecycle under Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, "0\n");
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(memcheck.stderr.contains("definitely lost: 0 bytes"));
+            assert!(memcheck.stderr.contains("indirectly lost: 0 bytes"));
+        }
+    }
+
+    #[test]
+    fn native_map_root_checked_size_overflow_uses_the_e0802_abort_path() {
+        let program = canonical_program(MAP_ROOT_NATIVE_OVERFLOW_SOURCE);
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_root_size_overflow");
+        generator
+            .compile_mir_native(&program)
+            .expect("test-only checked-size runtime boundary compiles through scalar FFI");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("overflow child process links against the production runtime");
+        assert_ne!(
+            native.exit_code,
+            Some(0),
+            "overflow must abort the child process"
+        );
+        assert!(native.stderr.contains("E0802"), "{}", native.stderr);
+        assert!(native.stderr.contains("MapRoot.size result overflows i32"));
+        assert!(native.stdout.is_empty());
     }
 
     #[test]

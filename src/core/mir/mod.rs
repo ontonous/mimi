@@ -23,9 +23,16 @@ use crate::core::{NodeId, Place, ResolvedPlace};
 /// spelling would be ambiguous or unsafe at a consumer boundary.
 pub(crate) fn canonical_ffi_symbol_is_manifest_safe(symbol: &str) -> bool {
     !symbol.trim().is_empty()
+        && !is_reserved_canonical_mir_runtime_symbol(symbol)
         && !symbol.chars().any(|character| {
             character.is_control() || character.is_whitespace() || matches!(character, '=' | ',')
         })
+}
+
+fn is_reserved_canonical_mir_runtime_symbol(symbol: &str) -> bool {
+    // These entry points operate on Checker-owned opaque values. Source-level
+    // FFI imports must not bypass the private receipt and ownership chain.
+    symbol.starts_with("mimi_mir_map_root_")
 }
 
 /// Return the canonical diagnostic for a symbol that cannot safely cross the
@@ -38,6 +45,8 @@ pub(crate) fn validate_ffi_symbol_manifest_safety(symbol: &str) -> Result<(), St
     }
     let reason = if symbol.trim().is_empty() {
         "FFI symbol is empty"
+    } else if is_reserved_canonical_mir_runtime_symbol(symbol) {
+        "FFI symbol names a reserved Canonical MIR MapRoot runtime helper"
     } else if symbol.chars().any(char::is_control) {
         "FFI symbol contains a control character"
     } else {
@@ -2500,6 +2509,24 @@ impl MirOwnershipSummary {
     /// receipt validator is relevant without exposing the receipt contents.
     pub(crate) fn has_checker_map_root_actions(&self) -> bool {
         !self.checker_map_roots.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forge_checker_map_root_set_key_for_test_only(&mut self, key: String) -> bool {
+        let Some(receipt) = self
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
+        else {
+            return false;
+        };
+        receipt.key = Some(key);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_checker_map_root_actions_for_test_only(&mut self) {
+        self.checker_map_roots.clear();
     }
 
     /// Validate identities and required metadata within this summary.

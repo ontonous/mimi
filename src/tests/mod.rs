@@ -2316,6 +2316,17 @@ pub(crate) fn link_and_observe_canonical_mir(
     link_and_observe_module(codegen, &E2EConfig::default(), counter)
 }
 
+/// Execute canonical MIR native output with an explicit sanitizer/memory
+/// profile while preserving the same production runtime link as the default
+/// E2E helper.
+pub(crate) fn link_and_observe_canonical_mir_with_config(
+    codegen: &crate::codegen::CodeGenerator<'_>,
+    config: &E2EConfig,
+) -> Result<NativeRunObservation, String> {
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    link_and_observe_module(codegen, config, counter)
+}
+
 /// 0.34.30: Run source through checker + checked (resolved) codegen exactly as
 /// the `mimi build` CLI does (`compile_checked`), then execute natively. This
 /// catches the codegen path the legacy `compile_file` harness silently

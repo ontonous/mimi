@@ -12,6 +12,7 @@ mod handle;
 pub(crate) mod list_string;
 #[cfg(test)]
 mod map_any_owner_prototype;
+mod mir_map_root;
 pub mod profiler;
 pub use epoch::{
     mimi_flow_bump_epoch, mimi_flow_check_epoch, mimi_flow_drop, mimi_flow_epoch,
@@ -30,6 +31,9 @@ pub use list_string::{
     mimi_list_read_string, mimi_list_string_abi_version, mimi_str_box, mimi_str_box_copy,
     mimi_str_split_ll, mimi_str_unbox, LIST_STRING_ABI_CSTR, LIST_STRING_ABI_FAT,
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
+};
+pub use mir_map_root::{
+    mimi_mir_map_root_drop, mimi_mir_map_root_new, mimi_mir_map_root_set, mimi_mir_map_root_size,
 };
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:

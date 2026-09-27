@@ -657,6 +657,21 @@ pub(super) fn native_basic_type<'ctx>(
         }
         MirAbiClass::OpaqueHandle => match &desc.layout {
             MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+            MirLayout::MapRoot => {
+                catalog
+                    .validate_glue(ty, MirGlueOperation::MoveOut)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                catalog
+                    .validate_glue(ty, MirGlueOperation::Drop)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                if catalog.validate_glue(ty, MirGlueOperation::Clone).is_ok() {
+                    return Err(NativeMirError::new(
+                        ty.as_str(),
+                        "canonical MapRoot must not expose generic Clone glue",
+                    ));
+                }
+                Ok(context.i64_type().into())
+            }
             MirLayout::Handle if desc.glue.move_out == MirGlueKind::Session => {
                 catalog
                     .validate_session_channel(ty)

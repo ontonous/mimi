@@ -36,6 +36,22 @@ impl<'a> NativeMirValidator<'a> {
         {
             self.errors.push(NativeMirError::new("ffi", message));
         }
+        let has_map_root_type = self
+            .program
+            .type_catalog()
+            .iter()
+            .any(|(_, descriptor)| descriptor.kind == MirTypeKind::MapRoot);
+        let has_map_root_receipt = self
+            .program
+            .functions()
+            .values()
+            .any(|function| function.ownership.has_checker_map_root_actions());
+        if has_map_root_type != has_map_root_receipt {
+            self.errors.push(NativeMirError::new(
+                "MapRoot",
+                "MapRoot TypeDesc presence must match Checker-owned MapRoot action receipts",
+            ));
+        }
         for function in self.program.functions().values() {
             let symbol = match mir_symbol(&function.owner) {
                 Ok(symbol) => symbol,
@@ -62,6 +78,52 @@ impl<'a> NativeMirValidator<'a> {
 
     fn validate_function(&mut self, function: &MirFunction) {
         let catalog = self.program.type_catalog();
+        let has_map_root = function.result == crate::core::mir::types::map_root_type_id()
+            || function
+                .values
+                .values()
+                .any(|value| value.ty == crate::core::mir::types::map_root_type_id())
+            || function.ownership.has_checker_map_root_actions()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::MapRootNew { .. }
+                            | MirInstructionKind::MapRootSet { .. }
+                            | MirInstructionKind::MapRootSize { .. }
+                            | MirInstructionKind::MapRootDrop { .. }
+                    )
+                })
+            });
+        if has_map_root {
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.errors.push(NativeMirError::new(
+                        function.owner.0.clone(),
+                        format!("MapRoot receipt/shape validation failed: {error}"),
+                    ));
+                }
+            }
+            let root = crate::core::mir::types::map_root_type_id();
+            for operation in [
+                crate::core::mir::types::MirGlueOperation::MoveOut,
+                crate::core::mir::types::MirGlueOperation::Drop,
+            ] {
+                if let Err(message) = catalog.validate_glue(&root, operation) {
+                    self.errors
+                        .push(NativeMirError::new(function.owner.0.clone(), message));
+                }
+            }
+            if catalog
+                .validate_glue(&root, crate::core::mir::types::MirGlueOperation::Clone)
+                .is_ok()
+            {
+                self.errors.push(NativeMirError::new(
+                    function.owner.0.clone(),
+                    "canonical MapRoot must not expose generic Clone glue",
+                ));
+            }
+        }
         for parameter in &function.parameters {
             self.validate_value(function, parameter, "parameter");
             self.reject_reference_callable_boundary(function, parameter, "reference parameter");
@@ -178,6 +240,62 @@ impl<'a> NativeMirValidator<'a> {
         }
     }
 
+    fn validate_map_root_value(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == crate::core::mir::types::map_root_type_id())
+            && self
+                .program
+                .type_catalog()
+                .validate_glue(
+                    &crate::core::mir::types::map_root_type_id(),
+                    crate::core::mir::types::MirGlueOperation::MoveOut,
+                )
+                .is_ok();
+        if !valid {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("MapRoot {role} does not use the canonical MapRoot TypeDesc"),
+            ));
+        }
+    }
+
+    fn validate_map_root_i32(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let ty = function.values.get(value).map(|value| value.ty.clone());
+        let valid = ty.is_some_and(|ty| {
+            self.program
+                .type_catalog()
+                .get(&ty)
+                .is_some_and(|descriptor| {
+                    descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+                        && self
+                            .program
+                            .type_catalog()
+                            .validate_copy_scalar(&ty)
+                            .is_ok()
+                })
+        });
+        if !valid {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("MapRoot {role} is not the canonical i32 TypeDesc"),
+            ));
+        }
+    }
+
     fn validate_value(&mut self, function: &MirFunction, value: &MirValueId, subject: &str) {
         let Some(info) = function.values.get(value) else {
             self.errors.push(NativeMirError::new(
@@ -206,6 +324,7 @@ impl<'a> NativeMirValidator<'a> {
         let is_list = matches!(desc.layout, MirLayout::List { .. });
         let is_set = matches!(desc.layout, MirLayout::Set { .. });
         let is_session = desc.glue.move_out == MirGlueKind::Session;
+        let is_map_root = desc.kind == MirTypeKind::MapRoot || desc.layout == MirLayout::MapRoot;
         let is_reference = matches!(&desc.kind, MirTypeKind::Reference { mutable: false });
         let is_owned_string = matches!(
             &desc.kind,
@@ -218,7 +337,44 @@ impl<'a> NativeMirValidator<'a> {
         );
         let is_user_enum = matches!(desc.layout, MirLayout::Enum { .. });
         let is_unit = desc.is_canonical_ffi_unit();
-        let supported = if is_session {
+        let supported = if is_map_root {
+            let root = crate::core::mir::types::map_root_type_id();
+            if ty != &root {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "MapRoot TypeDesc does not use the canonical synthetic identity",
+                ));
+                false
+            } else {
+                let move_ok = self
+                    .program
+                    .type_catalog()
+                    .validate_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut);
+                let drop_ok = self
+                    .program
+                    .type_catalog()
+                    .validate_glue(ty, crate::core::mir::types::MirGlueOperation::Drop);
+                let clone_missing = self
+                    .program
+                    .type_catalog()
+                    .validate_glue(ty, crate::core::mir::types::MirGlueOperation::Clone)
+                    .is_err();
+                match (move_ok, drop_ok, clone_missing) {
+                    (Ok(()), Ok(()), true) => true,
+                    (Err(message), _, _) | (_, Err(message), _) => {
+                        self.errors.push(NativeMirError::new(subject, message));
+                        false
+                    }
+                    _ => {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "MapRoot TypeDesc exposes unsupported generic clone glue",
+                        ));
+                        false
+                    }
+                }
+            }
+        } else if is_session {
             match self.program.type_catalog().validate_session_channel(ty) {
                 Ok(()) => true,
                 Err(message) => {
@@ -409,7 +565,8 @@ impl<'a> NativeMirValidator<'a> {
                 ),
             ));
         }
-        if !is_list
+        if !is_map_root
+            && !is_list
             && !is_set
             && !is_reference
             && !is_owned_string
@@ -652,6 +809,36 @@ impl<'a> NativeMirValidator<'a> {
     ) {
         let catalog = self.program.type_catalog();
         match instruction {
+            MirInstructionKind::MapRootNew { result } => {
+                self.validate_value(function, result, "MapRoot New result");
+                self.validate_map_root_value(function, result, subject, "New result");
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_value(function, result, "MapRoot Set result");
+                self.validate_value(function, source, "MapRoot Set source");
+                self.validate_map_root_value(function, result, subject, "Set result");
+                self.validate_map_root_value(function, source, subject, "Set source");
+                if key.contains('\0') {
+                    self.errors
+                        .push(NativeMirError::new(subject, "MapRoot key contains NUL"));
+                }
+                self.validate_map_root_i32(function, value, subject, "Set value");
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                self.validate_value(function, result, "MapRoot Size result");
+                self.validate_value(function, root, "MapRoot Size root");
+                self.validate_map_root_value(function, root, subject, "Size root");
+                self.validate_map_root_i32(function, result, subject, "Size result");
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                self.validate_value(function, root, "MapRoot Drop operand");
+                self.validate_map_root_value(function, root, subject, "Drop operand");
+            }
             MirInstructionKind::Const { result, literal } => {
                 self.validate_value(function, result, "constant result");
                 let Some(desc) = function
