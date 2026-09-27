@@ -25094,11 +25094,16 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         .join("tests")
         .join("real_world")
         .join("actor_nested_func_capture.mimi");
-    let native = std::env::temp_dir().join(format!(
-        "mimi_nested_capture_mir_{}.out",
-        std::process::id()
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_nested_capture_mir_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
     ));
-    let _ = fs::remove_file(&native);
+    fs::create_dir_all(&dir).expect("create nested capture CLI directory");
+    let native = dir.join("default.out");
 
     let compatibility_run = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -25147,6 +25152,41 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         "the no-contract verification result must remain neutral: {verify_transcript}"
     );
 
+    let compatibility_build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&source)
+        .arg("-o")
+        .arg(&native)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default actor-capture compatibility build");
+    let build_stderr = String::from_utf8_lossy(&compatibility_build.stderr);
+    assert!(
+        compatibility_build.status.success(),
+        "default actor-capture compatibility build must succeed: {build_stderr}"
+    );
+    assert!(
+        build_stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "the default build must disclose its Actor compatibility route: {build_stderr}"
+    );
+    assert!(
+        native.exists(),
+        "default compatibility build must produce its executable"
+    );
+    let execution = Command::new(&native)
+        .output()
+        .expect("run default actor-capture compatibility executable");
+    assert!(
+        execution.status.success(),
+        "default actor-capture executable must succeed: {}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(execution.stdout, b"15\n");
+
+    let explicit_native = dir.join("explicit-mir.out");
     let mut mir = Command::new(mimi_bin());
     mir.current_dir(project_root()).arg("mir").arg(&source);
     let mut run = Command::new(mimi_bin());
@@ -25161,7 +25201,7 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         .arg(&source)
         .arg("--mir")
         .arg("-o")
-        .arg(&native);
+        .arg(&explicit_native);
 
     for (surface, output) in [
         ("mimi mir", mir.output().expect("spawn MIR inspection")),
@@ -25198,9 +25238,10 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         );
     }
     assert!(
-        !native.exists(),
+        !explicit_native.exists(),
         "failed MIR construction must not leave a native output artifact"
     );
+    fs::remove_dir_all(&dir).ok();
 }
 
 // R6-1137 L1/L2 tail pin: a capture-free nested callable can still be outside
