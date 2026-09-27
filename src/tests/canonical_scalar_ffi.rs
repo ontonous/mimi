@@ -9034,6 +9034,71 @@ func main() -> i64 {
     assert_eq!(fallback_vm.program().canonical_ffi, descriptor_snapshot);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn scalar_ffi_explicit_library_binding_unloads_after_last_vm_owner_drops() {
+    const SOURCE: &str = r#"
+extern "C" { func mir_ffi_rebindable(value: i64) -> i64; }
+func main() -> i64 {
+    println(mir_ffi_rebindable(1 as i64))
+    0
+}
+"#;
+
+    let _guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let marker_path = std::env::temp_dir().join(format!(
+        "mimi-canonical-ffi-dlclose-{}-{counter}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker_path);
+    let marker_literal = marker_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let c_source = format!(
+        r#"
+#include <stdint.h>
+#include <stdio.h>
+__attribute__((destructor)) static void record_library_close(void) {{
+    FILE *marker = fopen("{marker_literal}", "w");
+    if (marker != NULL) {{
+        fputs("closed\n", marker);
+        fclose(marker);
+    }}
+}}
+int64_t mir_ffi_rebindable(int64_t value) {{ return value + 11; }}
+"#
+    );
+    let fixture = library_fixture(counter, &c_source);
+    let library = fixture.dir.join("ffi.so");
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("explicit binding unload fixture typecheck");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("explicit binding unload fixture MIR");
+    let bytecode = compile_mir_program(&mir).expect("explicit binding unload bytecode");
+    assert!(bytecode.ast.is_none());
+
+    let mut vm = BytecodeVM::new(bytecode);
+    vm.set_canonical_ffi_library_path(library.to_string_lossy().into_owned());
+    assert_eq!(
+        vm.run_value().expect("explicit binding VM run"),
+        Value::Int(0)
+    );
+    assert_eq!(vm.stdout(), "12\n");
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert!(
+        !marker_path.exists(),
+        "the shared library must remain loaded while its VM owns the binding"
+    );
+
+    drop(vm);
+    let marker = std::fs::read_to_string(&marker_path)
+        .expect("dropping the last VM binding owner must unload the shared library");
+    assert_eq!(marker, "closed\n");
+    std::fs::remove_file(&marker_path).expect("remove dynamic library close marker");
+}
+
 #[test]
 fn scalar_ffi_explicit_vm_binding_failures_do_not_pollute_cache() {
     const SOURCE: &str = r#"
