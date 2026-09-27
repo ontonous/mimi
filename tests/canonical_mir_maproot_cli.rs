@@ -110,3 +110,81 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         "{stderr}"
     );
 }
+
+#[test]
+fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
+    let mimi = mimi_bin();
+    let stem = format!(
+        "mimi-map-root-ffi-conflict-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("cli")
+    );
+    let source_path = std::env::temp_dir().join(format!("{stem}.mimi"));
+    let binary_path = std::env::temp_dir().join(format!("{stem}-built"));
+    std::fs::write(
+        &source_path,
+        r#"
+            extern "C" {
+                func scalar_probe(x: i32) -> i32
+                    requires: x >= 0
+                    ensures: result == x + 1;
+            }
+            func main() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "answer", scalar_probe(41 as i32))
+                let size = map_size(updated)
+                drop(updated)
+                size
+            }
+        "#,
+    )
+    .expect("write temporary MapRoot plus scalar FFI source");
+
+    let commands: [(&str, Vec<std::ffi::OsString>); 3] = [
+        (
+            "run",
+            vec!["run".into(), source_path.as_os_str().to_os_string()],
+        ),
+        (
+            "build",
+            vec![
+                "build".into(),
+                source_path.as_os_str().to_os_string(),
+                "--output".into(),
+                binary_path.as_os_str().to_os_string(),
+            ],
+        ),
+        (
+            "verify",
+            vec!["verify".into(), source_path.as_os_str().to_os_string()],
+        ),
+    ];
+    for (mode, args) in commands {
+        let output = Command::new(&mimi)
+            .args(args)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start mimi {mode}: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "mimi {mode} must reject the unsupported route, got stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "mimi {mode} executed source before rejection: {stdout:?}"
+        );
+        assert!(
+            stderr.contains("MapRoot profile cannot be combined"),
+            "mimi {mode} did not report the hard MIR route boundary: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "mimi {mode} silently selected the legacy fallback: {stderr}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&source_path);
+    let _ = std::fs::remove_file(&binary_path);
+}

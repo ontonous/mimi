@@ -868,6 +868,11 @@ fn materialize_closed_mir_island(
     island: crate::core::mir::CanonicalMirRouteProfile,
 ) -> Result<Option<crate::core::mir::reference::MirProgram>, String> {
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    // A complete MapRoot profile cannot coexist with a scalar FFI island.
+    // Resolve that shared-route conflict before the no-Z3 mock boundary too:
+    // otherwise `verify_ffi_checked` could skip MIR materialization and report
+    // a compatibility/mock result for a program the run/build route rejects.
+    let conflicting_map_root_ffi_profiles = admission.map_root_complete() && admission.scalar_ffi;
     if island == crate::core::mir::CanonicalMirRouteProfile::MapRoot
         && admission.map_root.is_candidate()
         && !admission.map_root_complete()
@@ -877,7 +882,7 @@ fn materialize_closed_mir_island(
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
-    if !is_z3_available() {
+    if !is_z3_available() && !conflicting_map_root_ffi_profiles {
         if island == crate::core::mir::CanonicalMirRouteProfile::MapRoot
             && admission.map_root_complete()
         {

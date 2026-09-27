@@ -30464,3 +30464,118 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     drop(guard);
 }
+
+#[test]
+fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "ffi-before-map-root",
+            r#"
+                let probe = scalar_probe(40 as i32)
+                let root = map_new()
+                let updated = map_set(root, "answer", probe)
+                let size = map_size(updated)
+                drop(updated)
+                size
+            "#,
+        ),
+        (
+            "ffi-as-static-key-map-value",
+            r#"
+                let root = map_new()
+                let updated = map_set(root, "answer", scalar_probe(40 as i32))
+                let size = map_size(updated)
+                drop(updated)
+                size
+            "#,
+        ),
+        (
+            "ffi-before-map-root-drop",
+            r#"
+                let root = map_new()
+                let updated = map_set(root, "answer", 42)
+                let size = map_size(updated)
+                let probe = scalar_probe(size)
+                drop(updated)
+                probe
+            "#,
+        ),
+    ];
+
+    for (label, main_body) in CASES {
+        let source = format!(
+            r#"
+                extern "C" {{
+                    func scalar_probe(x: i32) -> i32
+                        requires: x >= 0
+                        ensures: result == x + 1;
+                }}
+                func main() -> i32 {{ {main_body} }}
+            "#
+        );
+        let checked = crate::core::check_program(&super::parse_prod(&source))
+            .unwrap_or_else(|error| panic!("{label} check: {error:?}"));
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.map_root,
+            crate::core::mir::MapRootAdmission::CompleteCoverage,
+            "{label} must be a complete checker-receipted MapRoot lifecycle"
+        );
+        assert!(admission.scalar_ffi, "{label} must carry a scalar FFI call");
+
+        match crate::core::mir::materialize_canonical_mir_route(&checked, None) {
+            Err(crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
+                profile: crate::core::mir::CanonicalMirRouteProfile::MapRoot,
+                stage: crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                message,
+            }) => assert!(
+                message.contains("MapRoot profile cannot be combined"),
+                "{label}: {message}"
+            ),
+            other => panic!("{label} must hard-reject the profile composition: {other:?}"),
+        }
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::verifier::verify_checked(&checked, format!("{label}-single"))
+            .expect_err("single verifier must reject unsupported profile composition");
+        assert!(
+            error.contains("MapRoot profile cannot be combined"),
+            "{label}: {error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
+            .expect_err("dual verifier must reject unsupported profile composition");
+        assert!(
+            error.contains("MapRoot profile cannot be combined"),
+            "{label}: {error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::verifier::verify_ffi_checked(&checked)
+            .expect_err("FFI verifier must reject unsupported profile composition");
+        assert!(
+            error.contains("MapRoot profile cannot be combined"),
+            "{label}: {error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "map_root_ffi_conflict");
+        let diagnostics = generator
+            .compile_checked(&checked)
+            .expect_err("direct native API must reject unsupported profile composition");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("MapRoot profile cannot be combined")
+            }),
+            "{label}: {diagnostics:?}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
