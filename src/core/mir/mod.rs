@@ -2495,6 +2495,13 @@ pub struct MirOwnershipSummary {
 }
 
 impl MirOwnershipSummary {
+    /// Whether this function carries the private Checker MapRoot action
+    /// ledger. Consumers may use this bit to decide whether the dedicated
+    /// receipt validator is relevant without exposing the receipt contents.
+    pub(crate) fn has_checker_map_root_actions(&self) -> bool {
+        !self.checker_map_roots.is_empty()
+    }
+
     /// Validate identities and required metadata within this summary.
     ///
     /// A containing [`MirFunction`] must also be validated to bind this

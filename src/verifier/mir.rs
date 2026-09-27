@@ -60,6 +60,12 @@ enum SymbolicValue {
         elements: Z3Set,
         size: Int,
     },
+    /// A Checker-receipted canonical MapRoot. Its only admitted observation
+    /// is `MapRootSize`, so the verifier retains the finite set of literal
+    /// keys and intentionally abstracts away each i32 payload.
+    MapRoot {
+        keys: BTreeSet<String>,
+    },
     /// A scalar canonical List is represented by its length in the verifier.
     /// Set-to-list does not expose HashSet iteration order as a proof
     /// obligation; the runtime order is fixed by the MIR contract.
@@ -622,6 +628,7 @@ fn verify_function(
     session: &mut SolverSession,
 ) -> Result<(VerifStatus, String, usize, Option<TrustedSubsetDomain>), String> {
     let catalog = program.type_catalog();
+    validate_map_root_verifier_boundary(function, catalog)?;
     let mut requires = Vec::new();
     let mut ensures = Vec::new();
     for contract in &function.contracts {
@@ -767,6 +774,106 @@ fn verify_function(
             None,
         ))
     }
+}
+
+/// Recheck the private receipt and exact opaque-handle ABI at every verifier
+/// entry that can symbolically execute a MapRoot-bearing body. MapRoot is
+/// never initialized as an input or inferred from a generic opaque value.
+fn validate_map_root_verifier_boundary(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    let root_ty = crate::core::mir::types::map_root_type_id();
+    let has_map_root = function.result == root_ty
+        || function.values.values().any(|value| value.ty == root_ty)
+        || function.ownership.has_checker_map_root_actions()
+        || function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::MapRootNew { .. }
+                        | MirInstructionKind::MapRootSet { .. }
+                        | MirInstructionKind::MapRootSize { .. }
+                        | MirInstructionKind::MapRootDrop { .. }
+                )
+            })
+        });
+    if !has_map_root {
+        return Ok(());
+    }
+    function.validate().map_err(|errors| {
+        format!(
+            "canonical MIR MapRoot verifier receipt/shape rejected: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    catalog
+        .validate_glue(&root_ty, MirGlueOperation::MoveOut)
+        .map_err(|message| {
+            format!("canonical MIR MapRoot verifier TypeDesc rejected: {message}")
+        })?;
+    catalog
+        .validate_glue(&root_ty, MirGlueOperation::Drop)
+        .map_err(|message| {
+            format!("canonical MIR MapRoot verifier TypeDesc rejected: {message}")
+        })?;
+    if catalog
+        .validate_glue(&root_ty, MirGlueOperation::Clone)
+        .is_ok()
+    {
+        return Err(
+            "canonical MIR MapRoot verifier TypeDesc unexpectedly exposes Clone glue".into(),
+        );
+    }
+    let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
+        (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+            .then(|| ty.clone())
+    });
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+    {
+        let valid = match &instruction.kind {
+            MirInstructionKind::MapRootNew { result } => {
+                function.values.get(result).map(|value| &value.ty) == Some(&root_ty)
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                !key.contains('\0')
+                    && function.values.get(result).map(|value| &value.ty) == Some(&root_ty)
+                    && function.values.get(source).map(|value| &value.ty) == Some(&root_ty)
+                    && i32_ty.as_ref().is_some_and(|i32_ty| {
+                        function.values.get(value).map(|value| &value.ty) == Some(i32_ty)
+                    })
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
+                    && i32_ty.as_ref().is_some_and(|i32_ty| {
+                        function.values.get(result).map(|value| &value.ty) == Some(i32_ty)
+                    })
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(format!(
+                "{}: canonical MIR MapRoot instruction TypeDesc/key contract is invalid",
+                instruction.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Return paths retain their complete SSA environment in the constraints by
@@ -1097,6 +1204,10 @@ fn symbolic_value_for_type(
                 constraints,
             ))
         }
+        MirLayout::MapRoot => Err(
+            "MIR verifier MapRoot values may only be introduced by checker-receipted MapRootNew"
+                .into(),
+        ),
         layout => Err(format!(
             "MIR verifier layout {:?} is outside the Copy aggregate contract",
             layout
@@ -1899,14 +2010,158 @@ fn eval_instruction(
     instruction: &MirInstructionKind,
 ) -> Result<(), String> {
     match instruction {
-        MirInstructionKind::MapRootNew { .. }
-        | MirInstructionKind::MapRootSet { .. }
-        | MirInstructionKind::MapRootSize { .. }
-        | MirInstructionKind::MapRootDrop { .. } => {
-            return Err(format!(
-                "{}: MapRoot operation is outside the verifier's trusted subset",
-                instruction_id
-            ));
+        MirInstructionKind::MapRootNew { result } => {
+            let root_ty = crate::core::mir::types::map_root_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&root_ty) {
+                return Err(format!(
+                    "{instruction_id}: MapRoot New result does not use the canonical MapRoot TypeDesc"
+                ));
+            }
+            catalog
+                .validate_glue(&root_ty, MirGlueOperation::MoveOut)
+                .map_err(|message| format!("{instruction_id}: {message}"))?;
+            if state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: MapRoot New result '{}' is already defined",
+                    result
+                ));
+            }
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::MapRoot {
+                    keys: BTreeSet::new(),
+                },
+            );
+        }
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            key,
+            value,
+        } => {
+            let root_ty = crate::core::mir::types::map_root_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&root_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&root_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Set source/result does not use the canonical MapRoot TypeDesc"
+                ));
+            }
+            let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+                    .then(|| ty.clone())
+            });
+            if i32_ty.as_ref().is_none_or(|i32_ty| {
+                function.values.get(value).map(|value| &value.ty) != Some(i32_ty)
+            }) {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Set value is not the canonical i32 TypeDesc"
+                ));
+            }
+            if key.contains('\0') {
+                return Err(format!("{instruction_id}: MapRoot key contains NUL"));
+            }
+            let payload = state.values.get(value).cloned().ok_or_else(|| {
+                format!(
+                    "{instruction_id}: MapRoot Set scalar '{}' is unavailable",
+                    value
+                )
+            })?;
+            let SymbolicValue::Int(payload) = payload else {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Set scalar is not represented as an integer"
+                ));
+            };
+            let lower = payload.ge(Int::from_i64(i32::MIN as i64));
+            let upper = payload.le(Int::from_i64(i32::MAX as i64));
+            add_definedness(state, Bool::and(&[&lower, &upper]), "E0802")?;
+
+            let mut root = match state.values.remove(source) {
+                Some(SymbolicValue::MapRoot { keys }) => keys,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Set source is not a MapRoot value"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Set source '{}' is unavailable",
+                        source
+                    ))
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Set result aliases an existing root"
+                ));
+            }
+            root.insert(key.clone());
+            state
+                .values
+                .insert(result.clone(), SymbolicValue::MapRoot { keys: root });
+        }
+        MirInstructionKind::MapRootSize { result, root } => {
+            let root_ty = crate::core::mir::types::map_root_type_id();
+            let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+                    .then(|| ty.clone())
+            });
+            if i32_ty.as_ref().is_none_or(|i32_ty| {
+                function.values.get(result).map(|value| &value.ty) != Some(i32_ty)
+            }) || function.values.get(root).map(|value| &value.ty) != Some(&root_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Size result/root TypeDesc is invalid"
+                ));
+            }
+            let size = match state.values.get(root) {
+                Some(SymbolicValue::MapRoot { keys }) => keys.len() as u128,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Size source is not a MapRoot value"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Size root '{}' is unavailable",
+                        root
+                    ))
+                }
+            };
+            let narrowed = crate::core::mir::types::canonical_map_root_size_i32(size);
+            let (value, in_range) = match narrowed {
+                Ok(value) => (value, true),
+                Err(_) => (0, false),
+            };
+            add_definedness(state, Bool::from_bool(in_range), "E0802")?;
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::Int(Int::from_i64(i64::from(value))),
+            );
+            state.known_ints.insert(result.clone(), i64::from(value));
+        }
+        MirInstructionKind::MapRootDrop { root } => {
+            if function.values.get(root).map(|value| &value.ty)
+                != Some(&crate::core::mir::types::map_root_type_id())
+            {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Drop operand does not use the canonical MapRoot TypeDesc"
+                ));
+            }
+            match state.values.remove(root) {
+                Some(SymbolicValue::MapRoot { .. }) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Drop operand is not a MapRoot value"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Drop root '{}' is unavailable",
+                        root
+                    ))
+                }
+            }
         }
         MirInstructionKind::Const { result, literal } => {
             let result_ty = function
@@ -4026,6 +4281,7 @@ fn eval_materialized_call(
             target_owner.0
         )
     })?;
+    validate_map_root_verifier_boundary(target, catalog)?;
     if let Some(message) = crate::core::mir::validate_materialized_call_abi(
         callee,
         function,
@@ -6783,6 +7039,9 @@ fn symbolic_matches_type(
         (MirLayout::Handle, MirAbiClass::OpaqueHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_session_channel(ty).is_ok()
         }
+        (MirLayout::MapRoot, MirAbiClass::OpaqueHandle, SymbolicValue::MapRoot { .. }) => {
+            catalog.validate_glue(ty, MirGlueOperation::MoveOut).is_ok()
+        }
         (MirLayout::Tuple(elements), _, SymbolicValue::Tuple(values)) => {
             elements.len() == values.len()
                 && elements
@@ -7154,6 +7413,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
         | SymbolicValue::Record { .. }
         | SymbolicValue::Set { .. }
         | SymbolicValue::List { .. }
+        | SymbolicValue::MapRoot { .. }
         | SymbolicValue::Variant { .. } => Err(format!("{context} is not boolean")),
     }
 }

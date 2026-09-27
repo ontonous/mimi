@@ -129,6 +129,21 @@ impl<'a> CapabilityGate<'a> {
     }
 
     fn validate(&mut self) {
+        let has_map_root_type = self
+            .program
+            .type_catalog()
+            .iter()
+            .any(|(_, descriptor)| descriptor.kind == MirTypeKind::MapRoot);
+        let has_map_root_receipt = self
+            .program
+            .functions()
+            .values()
+            .any(|function| function.ownership.has_checker_map_root_actions());
+        if has_map_root_type != has_map_root_receipt {
+            self.error(
+                "MapRoot TypeDesc presence must match Checker-owned MapRoot action receipts".into(),
+            );
+        }
         for function in self.program.functions().values() {
             self.validate_function(function);
         }
@@ -437,6 +452,33 @@ impl<'a> CapabilityGate<'a> {
     }
 
     fn validate_function(&mut self, function: &MirFunction) {
+        let has_map_root = function.result == crate::core::mir::types::map_root_type_id()
+            || function
+                .values
+                .values()
+                .any(|value| value.ty == crate::core::mir::types::map_root_type_id())
+            || function.ownership.has_checker_map_root_actions()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::MapRootNew { .. }
+                            | MirInstructionKind::MapRootSet { .. }
+                            | MirInstructionKind::MapRootSize { .. }
+                            | MirInstructionKind::MapRootDrop { .. }
+                    )
+                })
+            });
+        if has_map_root {
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!(
+                        "function '{}' MapRoot MIR validation failed: {error}",
+                        function.owner.0
+                    ));
+                }
+            }
+        }
         for value in function.values.values() {
             self.validate_type(&value.ty, &format!("function '{}' value", function.owner.0));
         }
@@ -506,6 +548,50 @@ impl<'a> CapabilityGate<'a> {
         }
     }
 
+    fn validate_map_root_type(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        if function
+            .values
+            .get(value)
+            .is_none_or(|value| value.ty != crate::core::mir::types::map_root_type_id())
+        {
+            self.error(format!(
+                "{subject} MapRoot {role} does not use the canonical MapRoot TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_i32_value(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .and_then(|value| self.program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_copy_scalar(&descriptor.id)
+                        .is_ok()
+            });
+        if !valid {
+            self.error(format!(
+                "{subject} {role} is not the canonical i32 TypeDesc"
+            ));
+        }
+    }
+
     fn validate_type(&mut self, ty: &crate::core::ResolvedTypeId, subject: &str) {
         if !self.checked_types.insert(ty.clone()) {
             return;
@@ -561,6 +647,17 @@ impl<'a> CapabilityGate<'a> {
                             .into(),
                     )
                 }
+            }
+            MirLayout::MapRoot => {
+                catalog.validate_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
+                catalog.validate_glue(ty, crate::core::mir::types::MirGlueOperation::Drop)?;
+                if catalog
+                    .validate_glue(ty, crate::core::mir::types::MirGlueOperation::Clone)
+                    .is_ok()
+                {
+                    return Err("MapRoot TypeDesc unexpectedly exposes generic Clone glue".into());
+                }
+                Ok(())
             }
             MirLayout::List { element } => {
                 catalog
@@ -752,13 +849,28 @@ impl<'a> CapabilityGate<'a> {
     ) {
         let catalog = self.program.type_catalog();
         match instruction {
-            MirInstructionKind::MapRootNew { .. }
-            | MirInstructionKind::MapRootSet { .. }
-            | MirInstructionKind::MapRootSize { .. }
-            | MirInstructionKind::MapRootDrop { .. } => {
-                self.error(format!(
-                    "{subject} MapRoot operation is outside verifier capability"
-                ));
+            MirInstructionKind::MapRootNew { result } => {
+                self.validate_map_root_type(function, result, subject, "New result");
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_map_root_type(function, result, subject, "Set result");
+                self.validate_map_root_type(function, source, subject, "Set source");
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapRoot key contains NUL"));
+                }
+                self.validate_i32_value(function, value, subject, "MapRoot Set value");
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                self.validate_map_root_type(function, root, subject, "Size root");
+                self.validate_i32_value(function, result, subject, "MapRoot Size result");
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                self.validate_map_root_type(function, root, subject, "Drop operand");
             }
             MirInstructionKind::Const { result, literal } => {
                 let Some(ty) = value_type(function, result) else {

@@ -9879,11 +9879,186 @@ func main() -> i32 {
             crate::interp::Value::Int(1)
         );
         assert_eq!(vm.take_stdout(), reference.output);
-        let capability_errors = crate::verifier::validate_mir_capabilities(&program)
-            .expect_err("whole-program verifier capability gate must reject MapRoot");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("whole-program capability gate admits the exact receipted MapRoot profile");
+    }
+
+    #[test]
+    fn canonical_map_root_size_contract_is_proven_from_receipted_keys() {
+        let (owner, program) = canonical_program_with_main(
+            r#"
+func map_size_for(value: i32) -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let updated = map_set(root, "answer", value)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+func checked_map_size(value: i32) -> i32 {
+    ensures: result == 1
+    map_size_for(value)
+}
+func wrong_map_size() -> i32 {
+    ensures: result == 1
+    let first = map_new()
+    let alpha = map_set(first, "alpha", 1)
+    let beta = map_set(alpha, "beta", 2)
+    let size = map_size(beta)
+    drop(beta)
+    size
+}
+func overflow_map_size() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let updated = map_set(root, "overflow", 8)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+func main() -> i32 {
+    ensures: result == 2
+    let first = map_new()
+    let inserted = map_set(first, "answer", 41)
+    let overwritten = map_set(inserted, "answer", 42)
+    let with_unicode = map_set(overwritten, "雪", 7)
+    let size = map_size(with_unicode)
+    drop(with_unicode)
+    size
+}
+"#,
+        );
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("capability gate accepts the receipt-backed single-block profile");
+        let results = crate::verifier::verify_mir(&program, "canonical-map-root-size".into())
+            .expect("public MIR verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("main ensures result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("map_size_for"))
+            .expect("symbolic MapRoot ensures result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("checked_map_size"))
+            .expect("wrapper ensures result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("wrong_map_size"))
+            .expect("wrong MapRoot size ensures result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Disproven,
+            "{}",
+            result.message
+        );
+
+        let mut forged_receipt = program.clone();
+        forged_receipt
+            .functions
+            .get_mut(&owner)
+            .expect("main MIR")
+            .ownership
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
+            .expect("Set receipt")
+            .key = Some("forged-key".into());
+        let capability_errors = crate::verifier::validate_mir_capabilities(&forged_receipt)
+            .expect_err("the capability gate must recheck the private MapRoot receipt");
         assert!(capability_errors
             .iter()
-            .any(|error| error.contains("MapRoot operation is outside verifier capability")));
+            .any(|error| error.contains("MapRoot MIR validation failed")));
+        let verifier_result = crate::verifier::verify_mir(
+            &forged_receipt,
+            "canonical-map-root-forged-receipt".into(),
+        )
+        .expect("public verifier reports a trusted-subset rejection");
+        let verifier_result = verifier_result
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("main verifier result");
+        assert_eq!(
+            verifier_result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(verifier_result
+            .message
+            .contains("MapRoot verifier receipt/shape rejected"));
+
+        let mut overflowing = program.clone();
+        let overflow_owner = overflowing
+            .functions
+            .keys()
+            .find(|owner| owner.0.ends_with("overflow_map_size"))
+            .expect("overflow MapRoot function")
+            .clone();
+        let overflow_function = overflowing
+            .functions
+            .get_mut(&overflow_owner)
+            .expect("overflow MapRoot function");
+        let set_value = overflow_function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MapRootSet { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("MapRoot Set value");
+        let constant = overflow_function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const { result, .. } if result == &set_value
+                )
+            })
+            .expect("MapRoot Set scalar constant");
+        let MirInstructionKind::Const {
+            literal: crate::core::ir::ResolvedLiteral::Int(literal),
+            ..
+        } = &mut constant.kind
+        else {
+            panic!("MapRoot Set scalar must be an integer literal");
+        };
+        *literal = i64::from(i32::MAX) + 1;
+        let verifier_result =
+            crate::verifier::verify_mir(&overflowing, "canonical-map-root-set-overflow".into())
+                .expect("public verifier reports the reachable E0802 trap");
+        let verifier_result = verifier_result
+            .iter()
+            .find(|result| result.func_name == overflow_owner.0)
+            .expect("main verifier result");
+        assert_eq!(
+            verifier_result.status,
+            crate::verifier::VerifStatus::Disproven,
+            "{}",
+            verifier_result.message
+        );
+        assert!(verifier_result.message.contains("E0802"));
     }
 
     #[test]
@@ -10488,9 +10663,9 @@ func main() -> i32 {
         }));
 
         let mut malformed_catalog = root_program.type_catalog().clone();
-        let mut malformed_descriptor = descriptor;
+        let mut malformed_descriptor = descriptor.clone();
         malformed_descriptor.ownership = crate::core::mir::types::MirOwnership::Copy;
-        malformed_catalog.replace_for_test_only(root_id, malformed_descriptor);
+        malformed_catalog.replace_for_test_only(root_id.clone(), malformed_descriptor);
         let malformed =
             MirProgram::with_type_catalog(root_program.functions().clone(), malformed_catalog)
                 .expect_err("forged MapRoot ABI/ownership metadata must be rejected");
@@ -10498,6 +10673,20 @@ func main() -> i32 {
             error
                 .message
                 .contains("MapRoot TypeDesc has an inconsistent ABI/ownership/glue contract")
+        }));
+
+        let mut malformed_for_capability = root_program.clone();
+        let mut malformed_descriptor = descriptor.clone();
+        malformed_descriptor.ownership = crate::core::mir::types::MirOwnership::Copy;
+        malformed_for_capability
+            .type_catalog
+            .replace_for_test_only(root_id, malformed_descriptor);
+        let capability_errors = crate::verifier::validate_mir_capabilities(
+            &malformed_for_capability,
+        )
+        .expect_err("verifier capability must independently reject a forged MapRoot descriptor");
+        assert!(capability_errors.iter().any(|error| {
+            error.contains("MapRoot TypeDesc has an inconsistent ABI/ownership/glue contract")
         }));
     }
 
