@@ -25204,6 +25204,53 @@ fn canonical_mir_nested_shadow_callable_keeps_legacy_and_direct_cli_fails_closed
     fs::create_dir_all(&dir).expect("create nested shadow CLI directory");
     let native = dir.join("default.out");
 
+    let compatibility_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default nested shadow run");
+    let run_stderr = String::from_utf8_lossy(&compatibility_run.stderr);
+    assert!(
+        compatibility_run.status.success(),
+        "default nested shadow run must succeed: {run_stderr}"
+    );
+    assert_eq!(compatibility_run.stdout, b"42\n101\n");
+    assert!(
+        run_stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "default run must disclose its Actor compatibility route: {run_stderr}"
+    );
+
+    let compatibility_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default nested shadow verifier");
+    let verify_transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compatibility_verify.stdout),
+        String::from_utf8_lossy(&compatibility_verify.stderr)
+    );
+    assert!(
+        compatibility_verify.status.success(),
+        "default nested shadow verification without contracts must succeed: {verify_transcript}"
+    );
+    assert!(
+        verify_transcript.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "default verifier must disclose its Actor compatibility route: {verify_transcript}"
+    );
+    assert!(
+        verify_transcript.contains("no contracts to verify"),
+        "the no-contract verification result must remain neutral: {verify_transcript}"
+    );
+
     let build = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("build")
