@@ -282,6 +282,47 @@ impl<'a> ActionEmitter<'a> {
         });
     }
 
+    fn map_root_temporary_local(point: &NodeId) -> ResolvedLocalId {
+        ResolvedLocalId(NodeId(format!("map-root-temporary:{}", point.0)))
+    }
+
+    fn receipted_temporary_map_root(
+        &mut self,
+        expression: &ResolvedExpr,
+    ) -> Option<ResolvedLocalId> {
+        let ResolvedExprKind::Call(call) = &expression.kind else {
+            return None;
+        };
+        if !matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_new")
+            || !call.arguments.is_empty()
+            || !matches!(
+                self.types.get(&expression.ty),
+                Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+            )
+        {
+            return None;
+        }
+
+        let local = Self::map_root_temporary_local(&expression.node_id);
+        if !self.map_root_locals.insert(local.clone())
+            || !self.live_map_root_locals.insert(local.clone())
+        {
+            self.map_root_profile_invalid = true;
+            return None;
+        }
+        self.map_root_actions.push(MapRootAction {
+            kind: MapRootActionKind::New,
+            point: expression.node_id.clone(),
+            local: local.clone(),
+            root: Self::map_root_resource_identity(&local),
+            key: None,
+            value: None,
+            source_local: None,
+            source: None,
+        });
+        Some(local)
+    }
+
     fn prepare_map_root_call(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
         let builtin = match &call.callee {
             ResolvedCallee::Builtin(builtin) => builtin.as_str(),
@@ -289,19 +330,35 @@ impl<'a> ActionEmitter<'a> {
         };
         if builtin == "map_size" && call.arguments.len() == 1 {
             let argument = &call.arguments[0].value;
-            let ResolvedExprKind::Load(place) = &argument.kind else {
-                return;
+            let local = match &argument.kind {
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty()
+                        && self.live_map_root_locals.contains(&place.base) =>
+                {
+                    self.permitted_map_root_loads
+                        .insert(argument.node_id.clone());
+                    place.base.clone()
+                }
+                ResolvedExprKind::Call(_) => {
+                    let Some(local) = self.receipted_temporary_map_root(argument) else {
+                        return;
+                    };
+                    if !matches!(
+                        self.types.get(&expression.ty),
+                        Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+                    ) {
+                        self.map_root_profile_invalid = true;
+                        return;
+                    }
+                    self.live_map_root_locals.remove(&local);
+                    local
+                }
+                _ => return,
             };
-            if place.projections.is_empty()
-                && self.live_map_root_locals.contains(&place.base)
-                && matches!(
-                    self.types.get(&expression.ty),
-                    Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
-                )
-            {
-                self.permitted_map_root_loads
-                    .insert(argument.node_id.clone());
-                let local = place.base.clone();
+            if matches!(
+                self.types.get(&expression.ty),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+            ) {
                 self.map_root_actions.push(MapRootAction {
                     kind: MapRootActionKind::Size,
                     point: expression.node_id.clone(),
@@ -312,7 +369,19 @@ impl<'a> ActionEmitter<'a> {
                     source_local: None,
                     source: None,
                 });
-            } else if self.map_root_locals.contains(&place.base) {
+                if matches!(&argument.kind, ResolvedExprKind::Call(_)) {
+                    self.map_root_actions.push(MapRootAction {
+                        kind: MapRootActionKind::Drop,
+                        point: expression.node_id.clone(),
+                        local: local.clone(),
+                        root: Self::map_root_resource_identity(&local),
+                        key: None,
+                        value: None,
+                        source_local: None,
+                        source: None,
+                    });
+                }
+            } else if self.map_root_locals.contains(&local) {
                 self.map_root_profile_invalid = true;
             }
             return;
@@ -329,13 +398,12 @@ impl<'a> ActionEmitter<'a> {
             return;
         }
         let source = &call.arguments[0].value;
-        let ResolvedExprKind::Load(place) = &source.kind else {
-            return;
-        };
         let ResolvedExprKind::Literal(ResolvedLiteral::String(key)) = &call.arguments[1].value.kind
         else {
-            if self.map_root_locals.contains(&place.base) {
-                self.map_root_profile_invalid = true;
+            if let ResolvedExprKind::Load(place) = &source.kind {
+                if self.map_root_locals.contains(&place.base) {
+                    self.map_root_profile_invalid = true;
+                }
             }
             return;
         };
@@ -343,9 +411,22 @@ impl<'a> ActionEmitter<'a> {
             self.map_root_profile_invalid = true;
             return;
         }
-        if !place.projections.is_empty()
-            || !self.live_map_root_locals.contains(&place.base)
-            || self.map_root_locals.contains(&target)
+        let (source_local, source_is_temporary) = match &source.kind {
+            ResolvedExprKind::Load(place)
+                if place.projections.is_empty()
+                    && self.live_map_root_locals.contains(&place.base) =>
+            {
+                (place.base.clone(), false)
+            }
+            ResolvedExprKind::Call(_) => {
+                let Some(local) = self.receipted_temporary_map_root(source) else {
+                    return;
+                };
+                (local, true)
+            }
+            _ => return,
+        };
+        if self.map_root_locals.contains(&target)
             || !self
                 .body
                 .locals
@@ -368,14 +449,19 @@ impl<'a> ActionEmitter<'a> {
                 Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
             )
         {
-            if self.map_root_locals.contains(&place.base) {
+            if self.map_root_locals.contains(&source_local) {
                 self.map_root_profile_invalid = true;
             }
             return;
         }
 
-        self.permitted_map_root_loads.insert(source.node_id.clone());
-        let source_local = place.base.clone();
+        if !source_is_temporary {
+            let ResolvedExprKind::Load(place) = &source.kind else {
+                unreachable!("non-temporary MapRoot source is a local load")
+            };
+            self.permitted_map_root_loads.insert(source.node_id.clone());
+            debug_assert_eq!(place.base, source_local);
+        }
         self.live_map_root_locals.remove(&source_local);
         self.map_root_locals.insert(target.clone());
         self.live_map_root_locals.insert(target.clone());
@@ -3512,6 +3598,81 @@ func main() -> i32 {
     }
 
     #[test]
+    fn map_root_checker_receipts_cover_and_consume_temporary_roots() {
+        let immediate_observation = parse(
+            r#"
+func main() -> i32 {
+    map_size(map_new())
+}
+"#,
+        );
+        let program = crate::core::check_program(&immediate_observation)
+            .expect("MapRoot temporary observation checks");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("MapRoot resource analysis");
+        assert_eq!(analysis.map_root_new_attempts.len(), 1);
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(
+            analysis.map_root_actions[0].root,
+            analysis.map_root_actions[1].root
+        );
+        assert_eq!(
+            analysis.map_root_actions[1].root,
+            analysis.map_root_actions[2].root
+        );
+
+        let temporary_update = parse(
+            r#"
+func main() -> i32 {
+    let updated = map_set(map_new(), "answer", 42)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&temporary_update)
+            .expect("temporary MapRoot source is consumed by Set");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("MapRoot resource analysis");
+        assert_eq!(analysis.map_root_new_attempts.len(), 1);
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(
+            analysis.map_root_actions[0].root,
+            analysis.map_root_actions[1].source.clone().unwrap()
+        );
+        assert_eq!(
+            analysis.map_root_actions[2].root,
+            analysis.map_root_actions[3].root
+        );
+    }
+
+    #[test]
     fn map_root_checker_withholds_receipt_for_missing_drop_and_alias_copy() {
         let missing_drop = parse(
             r#"
@@ -3543,7 +3704,18 @@ func main() -> i32 {
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
         assert_eq!(analysis.map_root_new_attempts.len(), 1);
-        assert!(analysis.map_root_actions.is_empty());
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
 
         let mixed_lifecycle_and_temporary = parse(
             r#"
@@ -3552,6 +3724,7 @@ func main() -> i32 {
     let updated = map_set(root, "answer", 42)
     let size = map_size(updated)
     let temporary_size = map_size(map_new())
+    let unreceipted = map_get(map_new(), "missing")
     drop(updated)
     size + temporary_size
 }
@@ -3562,13 +3735,22 @@ func main() -> i32 {
         let analysis = program
             .resource_analysis(&NodeId("function:main".into()))
             .expect("Map-root resource analysis");
-        assert_eq!(analysis.map_root_new_attempts.len(), 2);
+        assert_eq!(analysis.map_root_new_attempts.len(), 3);
         assert!(
             analysis
                 .map_root_actions
                 .iter()
                 .any(|action| action.kind == MapRootActionKind::New),
             "the complete lifecycle must not mask the second temporary MapRoot"
+        );
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .filter(|action| action.kind == MapRootActionKind::New)
+                .count(),
+            2,
+            "the third map_new passed to borrowed map_get must remain unreceipted"
         );
 
         let alias_copy = parse(

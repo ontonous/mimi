@@ -43,7 +43,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n0\n1\n");
     assert!(String::from_utf8_lossy(&run.stderr)
         .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
 
@@ -73,7 +73,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         .expect("run built MapRoot binary");
     let _ = std::fs::remove_file(&built);
     assert!(native.status.success());
-    assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n");
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n0\n1\n");
 
     let verify = Command::new(&mimi)
         .env("MIMI_VERBOSE", "1")

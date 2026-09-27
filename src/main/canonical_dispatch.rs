@@ -2089,12 +2089,6 @@ mod tests {
                     0
                 }
             "#,
-            r#"
-                func main() -> i32 {
-                    let size = map_size(map_new())
-                    size
-                }
-            "#,
         ] {
             let (checked, file) = checked(source);
             assert_eq!(
@@ -2117,18 +2111,19 @@ mod tests {
         let source = r#"
             func main() -> i32 {
                 let root = map_new()
-                let updated = map_set(root, "answer", 42)
-                let size = map_size(updated)
-                let temporary_size = map_size(map_new())
-                drop(updated)
-                size + temporary_size
+                    let updated = map_set(root, "answer", 42)
+                    let size = map_size(updated)
+                    let temporary_size = map_size(map_new())
+                    let unreceipted = map_get(map_new(), "missing")
+                    drop(updated)
+                    size + temporary_size
             }
         "#;
         let (checked, file) = checked(source);
         assert_eq!(
             mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
             mimi::core::mir::MapRootAdmission::IncompleteCoverage,
-            "an action-bearing lifecycle must not mask an unreceipted temporary root"
+            "an action-bearing lifecycle must not mask a Map root outside the admitted operations"
         );
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("partial MapRoot lifecycle must fail closed");
@@ -2141,7 +2136,7 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_checks_new_attempts_across_callables() {
+    fn map_root_default_route_receipts_temporary_roots_across_callables() {
         let source = r#"
             func temporary_size() -> i32 {
                 map_size(map_new())
@@ -2157,17 +2152,16 @@ mod tests {
         let (checked, file) = checked(source);
         assert_eq!(
             mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
-            mimi::core::mir::MapRootAdmission::IncompleteCoverage,
-            "an action receipt in main must not mask a temporary MapRoot in another callable"
+            mimi::core::mir::MapRootAdmission::CompleteCoverage,
+            "each temporary MapRoot in the program has an exact New/Size/Drop receipt"
         );
-        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("whole-program MapRoot coverage must fail closed");
-        };
         assert!(
-            reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
-            "{reason}"
+            matches!(
+                select_default_route(&checked, &file),
+                DefaultMirRoute::Canonical(_)
+            ),
+            "whole-program MapRoot receipts must select canonical MIR"
         );
-        assert!(!reason.contains("legacy"), "{reason}");
     }
 
     #[test]

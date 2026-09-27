@@ -7788,14 +7788,22 @@ impl<'a> Lowerer<'a> {
                 let Some(source_arg) = call.arguments.first() else {
                     return false;
                 };
-                let ResolvedExprKind::Load(source_place) = &source_arg.value.kind else {
-                    return false;
-                };
                 let Some(value_arg) = call.arguments.get(2) else {
                     return false;
                 };
-                let source =
-                    self.map_root_local_value(&source_place.base, &source_arg.value.node_id);
+                let source = match &source_arg.value.kind {
+                    ResolvedExprKind::Load(source_place) => {
+                        self.map_root_local_value(&source_place.base, &source_arg.value.node_id)
+                    }
+                    ResolvedExprKind::Call(_) => self.lower_expr(&source_arg.value),
+                    _ => {
+                        self.error(
+                            &source_arg.value.node_id,
+                            "checker MapRoot Set source is not a local or receipted temporary",
+                        );
+                        return true;
+                    }
+                };
                 let value = self.lower_expr(&value_arg.value);
                 let result = self.map_root_local_value(target, &initializer.node_id);
                 let Some(key) = action.key else {
@@ -8434,6 +8442,20 @@ impl<'a> Lowerer<'a> {
 
     fn lower_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
         if let ResolvedExprKind::Call(call) = &expression.kind {
+            if let Some(action) = self
+                .map_root_action(&expression.node_id, crate::core::MapRootActionKind::New)
+                .cloned()
+            {
+                let result = self.map_root_local_value(&action.local, &expression.node_id);
+                self.emit(
+                    &expression.node_id,
+                    &format!("map_root_new:{}", result.0),
+                    MirInstructionKind::MapRootNew {
+                        result: result.clone(),
+                    },
+                );
+                return result;
+            }
             if self
                 .map_root_action(&expression.node_id, crate::core::MapRootActionKind::Size)
                 .is_some()
@@ -8445,14 +8467,19 @@ impl<'a> Lowerer<'a> {
                     );
                     return self.fallback_value(expression);
                 };
-                let ResolvedExprKind::Load(place) = &argument.value.kind else {
-                    self.error(
-                        &expression.node_id,
-                        "checker MapRoot Size root is not a direct local",
-                    );
-                    return self.fallback_value(expression);
+                let root = match &argument.value.kind {
+                    ResolvedExprKind::Load(place) => {
+                        self.map_root_local_value(&place.base, &argument.value.node_id)
+                    }
+                    ResolvedExprKind::Call(_) => self.lower_expr(&argument.value),
+                    _ => {
+                        self.error(
+                            &expression.node_id,
+                            "checker MapRoot Size root is not a local or receipted temporary",
+                        );
+                        return self.fallback_value(expression);
+                    }
                 };
-                let root = self.map_root_local_value(&place.base, &argument.value.node_id);
                 let Some(result) = self.id("expr", &expression.node_id) else {
                     return self.fallback_value(expression);
                 };
@@ -8462,9 +8489,27 @@ impl<'a> Lowerer<'a> {
                     &format!("map_root_size:{}", root.0),
                     MirInstructionKind::MapRootSize {
                         result: result.clone(),
-                        root,
+                        root: root.clone(),
                     },
                 );
+                if let Some(action) = self
+                    .map_root_action(&expression.node_id, crate::core::MapRootActionKind::Drop)
+                    .cloned()
+                {
+                    let dropped = self.map_root_local_value(&action.local, &expression.node_id);
+                    if dropped != root {
+                        self.error(
+                            &expression.node_id,
+                            "checker MapRoot temporary Drop identity disagrees with Size root",
+                        );
+                        return self.fallback_value(expression);
+                    }
+                    self.emit(
+                        &expression.node_id,
+                        &format!("map_root_drop:{}", dropped.0),
+                        MirInstructionKind::MapRootDrop { root: dropped },
+                    );
+                }
                 return result;
             }
         }

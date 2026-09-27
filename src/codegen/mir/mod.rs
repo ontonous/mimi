@@ -1224,6 +1224,12 @@ func main() -> i32 {
     drop(with_unicode)
     let checked = checked_map_size(73)
     println(checked)
+    let temporary_size = map_size(map_new())
+    println(temporary_size)
+    let temporary_updated = map_set(map_new(), "temporary", 9)
+    let temporary_updated_size = map_size(temporary_updated)
+    println(temporary_updated_size)
+    drop(temporary_updated)
     0
 }
 "#;
@@ -1234,7 +1240,9 @@ func main() -> i32 {
     let root = map_new()
     let updated = map_set(root, "reclaim-me", 17)
     drop(updated)
+    let temporary_size = map_size(map_new())
     println(mimi_test_map_root_live_count())
+    println(temporary_size)
     0
 }
 "#;
@@ -1261,7 +1269,7 @@ func main() -> i32 {
             .execute_with_output(&main, &[])
             .expect("reference MapRoot execution");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
-        assert_eq!(reference.output, "2\n1\n");
+        assert_eq!(reference.output, "2\n1\n0\n1\n");
 
         let mut vm = BytecodeVM::new(
             compile_mir_program(&program).expect("AST-free MapRoot bytecode compilation"),
@@ -1270,7 +1278,7 @@ func main() -> i32 {
             vm.run_value().expect("bytecode MapRoot execution"),
             Value::Int(0)
         ));
-        assert_eq!(vm.take_stdout(), "2\n1\n");
+        assert_eq!(vm.take_stdout(), "2\n1\n0\n1\n");
 
         let verification = crate::verifier::verify_mir(&program, "map-root-native".into())
             .expect("public MIR verifier consumes the same MapRoot program");
@@ -1316,7 +1324,7 @@ func main() -> i32 {
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
             .expect("same MIR native MapRoot process");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
-        assert_eq!(native.stdout, "2\n1\n");
+        assert_eq!(native.stdout, "2\n1\n0\n1\n");
         assert_eq!(native.stderr, "");
 
         if std::process::Command::new("valgrind")
@@ -1332,18 +1340,25 @@ func main() -> i32 {
                         "--tool=memcheck".into(),
                         "--leak-check=full".into(),
                         "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=definite,indirect".into(),
+                        "--errors-for-leak-kinds=all".into(),
                         "--error-exitcode=99".into(),
                     ],
                     ..crate::tests::E2EConfig::default()
                 },
             )
             .expect("production runtime link under Valgrind Memcheck");
+            if std::env::var_os("MIMI_MAP_ROOT_VALGRIND_TRACE").is_some() {
+                eprintln!(
+                    "Checker-receipted MapRoot lifecycle Memcheck report:\n{}",
+                    memcheck.stderr
+                );
+            }
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, "2\n1\n");
+            assert_eq!(memcheck.stdout, "2\n1\n0\n1\n");
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck.stderr.contains("definitely lost: 0 bytes"));
-            assert!(memcheck.stderr.contains("indirectly lost: 0 bytes"));
+            assert!(memcheck
+                .stderr
+                .contains("All heap blocks were freed -- no leaks are possible"));
         }
     }
 
@@ -1453,7 +1468,7 @@ func main() -> i32 {
             .expect("production runtime link observes the emitted Drop");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(
-            native.stdout, "0\n",
+            native.stdout, "0\n0\n",
             "emitted Drop must remove the live root"
         );
 
@@ -1470,7 +1485,7 @@ func main() -> i32 {
                         "--tool=memcheck".into(),
                         "--leak-check=full".into(),
                         "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=definite,indirect".into(),
+                        "--errors-for-leak-kinds=all".into(),
                         "--error-exitcode=99".into(),
                     ],
                     ..crate::tests::E2EConfig::default()
@@ -1478,10 +1493,11 @@ func main() -> i32 {
             )
             .expect("production runtime MapRoot lifecycle under Memcheck");
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, "0\n");
+            assert_eq!(memcheck.stdout, "0\n0\n");
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck.stderr.contains("definitely lost: 0 bytes"));
-            assert!(memcheck.stderr.contains("indirectly lost: 0 bytes"));
+            assert!(memcheck
+                .stderr
+                .contains("All heap blocks were freed -- no leaks are possible"));
         }
     }
 

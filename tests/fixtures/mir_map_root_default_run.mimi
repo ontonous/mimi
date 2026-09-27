@@ -4,5 +4,11 @@ func main() -> i32 {
     let size = map_size(updated)
     println(size)
     drop(updated)
+    let temporary_size = map_size(map_new())
+    println(temporary_size)
+    let temporary_updated = map_set(map_new(), "temporary", 7)
+    let temporary_updated_size = map_size(temporary_updated)
+    println(temporary_updated_size)
+    drop(temporary_updated)
     0
 }

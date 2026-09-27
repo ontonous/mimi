@@ -5,15 +5,87 @@
 //! prevents handle escape or aliasing. The runtime table owns each root until
 //! the dedicated MapRootDrop operation removes it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 static NEXT_MAP_ROOT_HANDLE: AtomicI64 = AtomicI64::new(1);
-static MAP_ROOTS: OnceLock<Mutex<HashMap<i64, BTreeSet<String>>>> = OnceLock::new();
+static MAP_ROOTS: Mutex<MapRootRegistry> = Mutex::new(MapRootRegistry { head: None });
 
-fn roots() -> &'static Mutex<HashMap<i64, BTreeSet<String>>> {
-    MAP_ROOTS.get_or_init(|| Mutex::new(HashMap::new()))
+struct MapRootNode {
+    handle: i64,
+    entries: BTreeSet<String>,
+    next: Option<Box<MapRootNode>>,
+}
+
+struct MapRootRegistry {
+    head: Option<Box<MapRootNode>>,
+}
+
+impl MapRootRegistry {
+    fn insert(&mut self, handle: i64, entries: BTreeSet<String>) -> bool {
+        if self.contains(handle) {
+            return false;
+        }
+        self.head = Some(Box::new(MapRootNode {
+            handle,
+            entries,
+            next: self.head.take(),
+        }));
+        true
+    }
+
+    fn contains(&self, handle: i64) -> bool {
+        self.find(handle).is_some()
+    }
+
+    fn find(&self, handle: i64) -> Option<&MapRootNode> {
+        let mut node = self.head.as_deref();
+        while let Some(current) = node {
+            if current.handle == handle {
+                return Some(current);
+            }
+            node = current.next.as_deref();
+        }
+        None
+    }
+
+    fn find_mut(&mut self, handle: i64) -> Option<&mut MapRootNode> {
+        let mut node = self.head.as_deref_mut();
+        while let Some(current) = node {
+            if current.handle == handle {
+                return Some(current);
+            }
+            node = current.next.as_deref_mut();
+        }
+        None
+    }
+
+    fn remove(&mut self, handle: i64) -> Option<Box<MapRootNode>> {
+        let mut link = &mut self.head;
+        loop {
+            if link.as_ref().is_some_and(|node| node.handle == handle) {
+                let mut removed = link.take()?;
+                *link = removed.next.take();
+                return Some(removed);
+            }
+            match link.as_mut() {
+                Some(node) => link = &mut node.next,
+                None => return None,
+            }
+        }
+    }
+
+    #[cfg(mimi_test_ub_symbols)]
+    fn len(&self) -> usize {
+        let mut count = 0usize;
+        let mut node = self.head.as_deref();
+        while let Some(current) = node {
+            count += 1;
+            node = current.next.as_deref();
+        }
+        count
+    }
 }
 
 fn abort(message: &'static [u8]) -> ! {
@@ -38,11 +110,11 @@ pub extern "C" fn mimi_mir_map_root_new() -> i64 {
             next.checked_add(1)
         })
         .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle space exhausted\0"));
-    let previous = roots()
+    let inserted = MAP_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(handle, BTreeSet::new());
-    if previous.is_some() {
+    if !inserted {
         abort(b"[E0800] canonical MIR MapRoot handle was reused\0");
     }
     handle
@@ -81,8 +153,8 @@ pub unsafe extern "C" fn mimi_mir_map_root_set(
     if key.contains('\0') {
         abort(b"[E0800] canonical MIR MapRoot.set key contains NUL\0");
     }
-    let mut roots = roots().lock().unwrap_or_else(|error| error.into_inner());
-    let Some(root) = roots.get_mut(&handle) else {
+    let mut roots = MAP_ROOTS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(root) = roots.find_mut(handle).map(|node| &mut node.entries) else {
         abort(b"[E0800] canonical MIR MapRoot.set handle is not live\0");
     };
     root.insert(key.to_owned());
@@ -95,8 +167,8 @@ pub extern "C" fn mimi_mir_map_root_size(handle: i64) -> i32 {
     if handle <= 0 {
         abort(b"[E0800] canonical MIR MapRoot.size received an invalid handle\0");
     }
-    let roots = roots().lock().unwrap_or_else(|error| error.into_inner());
-    let Some(root) = roots.get(&handle) else {
+    let roots = MAP_ROOTS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(root) = roots.find(handle).map(|node| &node.entries) else {
         abort(b"[E0800] canonical MIR MapRoot.size handle is not live\0");
     };
     checked_size_i32_or_abort(root.len() as u128)
@@ -108,10 +180,10 @@ pub extern "C" fn mimi_mir_map_root_drop(handle: i64) {
     if handle <= 0 {
         abort(b"[E0800] canonical MIR MapRoot.drop received an invalid handle\0");
     }
-    let removed = roots()
+    let removed = MAP_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .remove(&handle);
+        .remove(handle);
     if removed.is_none() {
         abort(b"[E0800] canonical MIR MapRoot.drop handle is not live\0");
     }
@@ -123,7 +195,7 @@ pub extern "C" fn mimi_mir_map_root_drop(handle: i64) {
 #[no_mangle]
 pub extern "C" fn mimi_test_map_root_live_count() -> i64 {
     i64::try_from(
-        roots()
+        MAP_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .len(),
@@ -169,9 +241,9 @@ mod tests {
         let root = unsafe { mimi_mir_map_root_set(root, snow.as_ptr(), snow.len() as i64, 9) };
         assert_eq!(mimi_mir_map_root_size(root), 2);
         mimi_mir_map_root_drop(root);
-        assert!(!roots()
+        assert!(!MAP_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .contains_key(&root));
+            .contains(root));
     }
 }
