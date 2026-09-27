@@ -622,11 +622,17 @@ fn classify_map_root_admission(program: &CheckedProgram) -> MapRootAdmission {
     let mut attempted_new_points = std::collections::BTreeSet::new();
     let mut receipted_new_points = std::collections::BTreeSet::new();
     for analysis in program.resource_analyses().values() {
-        attempted_new_points.extend(analysis.map_root_new_attempts.iter().cloned());
+        attempted_new_points.extend(
+            analysis
+                .map_root_new_attempts
+                .iter()
+                .cloned()
+                .map(|point| (analysis.owner.clone(), point)),
+        );
         for action in &analysis.map_root_actions {
             has_receipted_lifecycle = true;
             if action.kind == crate::core::MapRootActionKind::New {
-                receipted_new_points.insert(action.point.clone());
+                receipted_new_points.insert((analysis.owner.clone(), action.point.clone()));
             }
         }
     }

@@ -2141,6 +2141,36 @@ mod tests {
     }
 
     #[test]
+    fn map_root_default_route_checks_new_attempts_across_callables() {
+        let source = r#"
+            func temporary_size() -> i32 {
+                map_size(map_new())
+            }
+            func main() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "answer", 42)
+                let size = map_size(updated)
+                drop(updated)
+                size
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
+            mimi::core::mir::MapRootAdmission::IncompleteCoverage,
+            "an action receipt in main must not mask a temporary MapRoot in another callable"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("whole-program MapRoot coverage must fail closed");
+        };
+        assert!(
+            reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+            "{reason}"
+        );
+        assert!(!reason.contains("legacy"), "{reason}");
+    }
+
+    #[test]
     fn scalar_ffi_default_route_rejects_unsupported_declaration_before_legacy() {
         for (source, expected) in [
             (
