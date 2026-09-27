@@ -30683,3 +30683,160 @@ fn scalar_ffi_record_and_s8_flow_intersections_fail_closed() {
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
+
+#[test]
+fn scalar_ffi_structural_receipt_mutations_share_preflight_classification() {
+    const SOURCE: &str = r#"
+        extern "C" { func receipt_guard(value: i64) -> i64; }
+        func main() -> i64 { println(77); receipt_guard(1 as i64) }
+    "#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("structural receipt parity fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("structural receipt parity fixture materialization");
+    let instruction = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("structural receipt call instruction");
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        Missing,
+        Orphan,
+        KeyInstructionDrift,
+        CallerDrift,
+    }
+
+    const CASES: &[(Mutation, &str, &str)] = &[
+        (Mutation::Missing, "missing", "has no FFI receipt"),
+        (
+            Mutation::Orphan,
+            "orphan",
+            "orphaned from a MIR extern call",
+        ),
+        (
+            Mutation::KeyInstructionDrift,
+            "key-instruction-drift",
+            "disagrees with receipt instruction",
+        ),
+        (Mutation::CallerDrift, "caller-drift", "receipt caller"),
+    ];
+
+    struct CountingResolver(std::cell::Cell<usize>);
+    impl MirReferenceFfiResolver for CountingResolver {
+        fn preflight(&self, _: &[MirFfiCallContract]) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+
+        fn call(
+            &self,
+            _: &MirFfiCallContract,
+            _: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Int(7))
+        }
+    }
+
+    for (mutation, label, expected) in CASES {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let mut receipts = canonical.ffi_calls().clone();
+        match mutation {
+            Mutation::Missing => receipts.clear(),
+            Mutation::Orphan => {
+                let mut orphan = receipts.values().next().cloned().expect("receipt");
+                let orphan_id = crate::core::mir::MirInstructionId::new("inst:call:orphan")
+                    .expect("orphan instruction id");
+                orphan.instruction = orphan_id.clone();
+                receipts.insert(orphan_id, orphan);
+            }
+            Mutation::KeyInstructionDrift => {
+                let receipt = receipts.remove(&instruction).expect("receipt");
+                let forged_key = crate::core::mir::MirInstructionId::new("inst:call:wrong-key")
+                    .expect("forged receipt map key");
+                receipts.insert(forged_key, receipt);
+            }
+            Mutation::CallerDrift => {
+                receipts.get_mut(&instruction).expect("receipt").caller =
+                    crate::core::NodeId("function:wrong-caller".into());
+            }
+        }
+        let mut malformed = canonical.clone();
+        malformed.replace_ffi_calls_for_test_only(receipts);
+
+        // The reference boundary validates the receipt table before invoking
+        // either whole-manifest host preflight or the first foreign call.
+        let resolver = CountingResolver(std::cell::Cell::new(0));
+        let reference = MirReferenceInterpreter::new(&malformed).with_ffi_resolver(&resolver);
+        let reference_error = reference
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject the malformed receipt table");
+        assert!(
+            reference_error.to_string().contains(expected),
+            "{label} reference: {reference_error}"
+        );
+        assert_eq!(reference.captured_output(), "", "{label} executed println");
+        assert_eq!(resolver.0.get(), 0, "{label} reached host preflight/call");
+
+        let bytecode_error = compile_mir_program(&malformed)
+            .expect_err("AST-free bytecode must reject the malformed receipt table");
+        assert!(
+            bytecode_error
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} bytecode: {bytecode_error:?}"
+        );
+
+        let native_errors = crate::codegen::mir::validate_mir_native(&malformed)
+            .expect_err("native preflight must reject the malformed receipt table");
+        assert!(
+            native_errors
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} native: {native_errors:?}"
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_receipt_parity");
+        let native_compile = generator
+            .compile_mir_native(&malformed)
+            .expect_err("native codegen must stop before emitting malformed FFI MIR");
+        assert!(
+            native_compile
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} native compilation: {native_compile:?}"
+        );
+        assert!(generator.module.get_function("main").is_none());
+
+        let capability_errors = crate::verifier::validate_mir_capabilities(&malformed)
+            .expect_err("public MIR capability gate must reject the malformed receipt table");
+        assert!(
+            capability_errors
+                .iter()
+                .any(|error| error.contains(expected)),
+            "{label} capability: {capability_errors:?}"
+        );
+        let source_hash = format!("structural-receipt-{label}");
+        let verifier_error = crate::verifier::verify_mir(&malformed, source_hash.clone())
+            .expect_err("general MIR verifier must reject the malformed receipt table");
+        assert!(
+            verifier_error.contains(expected),
+            "{label} general verifier: {verifier_error}"
+        );
+        let route_receipt = malformed.route_receipt("scalar-ffi-receipt-parity-v1");
+        let ffi_verifier_error = crate::verifier::verify_ffi_mir_with_route_receipt(
+            &malformed,
+            &route_receipt,
+            source_hash,
+        )
+        .expect_err("FFI MIR verifier must reject the malformed receipt table");
+        assert!(
+            ffi_verifier_error.contains(expected),
+            "{label} FFI verifier: {ffi_verifier_error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
