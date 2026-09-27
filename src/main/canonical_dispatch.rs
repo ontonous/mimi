@@ -302,16 +302,18 @@ pub(crate) fn select_default_route(
         option_nested_tuple_admission,
         mimi::core::mir::OptionNestedTupleVariantAdmission::CompleteCoverage
     );
-    let generic_variant_hint = !matches!(
-        generic_variant_admission,
-        mimi::core::mir::GenericVariantPredicateAdmission::OutsideProfile
-    );
+    let generic_variant_hint =
+        mimi::core::mir::has_generic_variant_predicate_operation_candidate(checked)
+            || !matches!(
+                generic_variant_admission,
+                mimi::core::mir::GenericVariantPredicateAdmission::OutsideProfile
+            );
     let complete_generic_variant_candidate = matches!(
         generic_variant_admission,
         mimi::core::mir::GenericVariantPredicateAdmission::CompleteCoverage
     );
     let generic_option_projection_unsupported_hint =
-        mimi::core::mir::has_unsupported_generic_option_projection_candidate(checked);
+        mimi::core::mir::has_generic_option_projection_operation_candidate(checked);
     let generic_option_projection_hint = generic_option_projection_unsupported_hint
         || !matches!(
             generic_option_projection_admission,
@@ -322,7 +324,7 @@ pub(crate) fn select_default_route(
         mimi::core::mir::GenericOptionProjectionAdmission::CompleteCoverage
     );
     let generic_option_projection_fallback_unsupported_hint =
-        mimi::core::mir::has_unsupported_generic_option_projection_fallback_candidate(checked);
+        mimi::core::mir::has_generic_option_projection_fallback_operation_candidate(checked);
     let generic_option_projection_fallback_hint =
         generic_option_projection_fallback_unsupported_hint
             || !matches!(
@@ -334,7 +336,7 @@ pub(crate) fn select_default_route(
         mimi::core::mir::GenericOptionProjectionFallbackAdmission::CompleteCoverage
     );
     let generic_result_projection_unsupported_hint =
-        mimi::core::mir::has_unsupported_generic_result_projection_candidate(checked);
+        mimi::core::mir::has_generic_result_projection_operation_candidate(checked);
     let generic_result_projection_hint = generic_result_projection_unsupported_hint
         || !matches!(
             generic_result_projection_admission,
@@ -345,7 +347,7 @@ pub(crate) fn select_default_route(
         mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
     );
     let generic_result_projection_fallback_unsupported_hint =
-        mimi::core::mir::has_unsupported_generic_result_projection_fallback_candidate(checked);
+        mimi::core::mir::has_generic_result_projection_fallback_operation_candidate(checked);
     let generic_result_projection_fallback_hint =
         generic_result_projection_fallback_unsupported_hint
             || !matches!(
@@ -460,7 +462,7 @@ pub(crate) fn select_default_route(
         && !complete_generic_option_projection_fallback_candidate
     {
         return DefaultMirRoute::Rejected(
-            "generic Option fallback projection candidate is outside complete coverage".into(),
+            "generic Option projection fallback candidate is outside complete coverage".into(),
         );
     }
     if generic_result_projection_hint && !complete_generic_result_projection_candidate {
@@ -800,7 +802,7 @@ pub(crate) fn select_default_route(
                 );
             }
             if generic_variant_hint
-                && mimi::core::mir::has_unsupported_generic_variant_predicate_candidate(checked)
+                && mimi::core::mir::has_generic_variant_predicate_operation_candidate(checked)
             {
                 return reject_migrated_candidates(
                     flow_candidate,

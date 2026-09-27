@@ -1069,6 +1069,142 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_generic_option_result_and_managed_result_profiles_without_legacy_access()
+{
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
+    const CASES: &[(&str, Profile)] = &[
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_predicate.mimi"),
+            Profile::GenericOptionPredicate,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap.mimi"),
+            Profile::GenericOptionProjection,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"),
+            Profile::GenericOptionProjectionFallback,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap.mimi"),
+            Profile::GenericResultProjection,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi"),
+            Profile::GenericResultProjectionFallback,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_result_list_i32_call_return.mimi"),
+            Profile::ManagedResultCall,
+        ),
+    ];
+
+    for (source, profile) in CASES {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        crate::loader::merge_prelude_into(&mut file);
+        let program = crate::core::check_program(&file)
+            .unwrap_or_else(|diags| panic!("check {}: {diags:?}", profile.as_str()));
+        let route = crate::core::mir::materialize_canonical_mir_route(&program, None)
+            .unwrap_or_else(|error| panic!("materialize {}: {error:?}", profile.as_str()));
+        assert!(
+            profile.is_admitted(route.admission),
+            "{} must have checker-owned complete admission",
+            profile.as_str()
+        );
+        assert!(
+            profile.is_materialized(&route),
+            "{} must have its canonical operation receipt",
+            profile.as_str()
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, profile.as_str());
+        codegen
+            .compile_checked(&program)
+            .unwrap_or_else(|error| panic!("compile_checked {}: {error:?}", profile.as_str()));
+        assert!(
+            codegen.module.get_function("main").is_some(),
+            "{} direct native API must emit main",
+            profile.as_str()
+        );
+        assert!(
+            codegen.resolved_failed_functions().is_empty(),
+            "{} direct native API must not defer a resolved failure",
+            profile.as_str()
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{} direct native API must not access retained legacy bodies",
+            profile.as_str()
+        );
+    }
+}
+
+#[test]
+fn compile_checked_rejects_unmaterialized_migrated_candidates_without_legacy_fallback() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "generic Option predicate unsupported payload",
+            include_str!("../../tests/fixtures/mir_native_generic_option_predicate_rejected.mimi"),
+        ),
+        (
+            "generic Option managed payload",
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi"),
+        ),
+        (
+            "generic Option fallback with an extra statement",
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi"),
+        ),
+        (
+            "generic Result string error slot",
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"),
+        ),
+        (
+            "generic Result fallback with an extra statement",
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi"),
+        ),
+        (
+            "managed Result float list payload",
+            include_str!("../../tests/fixtures/mir_result_list_f64_call_rejected.mimi"),
+        ),
+    ];
+
+    for (name, source) in CASES {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        crate::loader::merge_prelude_into(&mut file);
+        let program = crate::core::check_program(&file)
+            .unwrap_or_else(|diags| panic!("check {name}: {diags:?}"));
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, "mixed_generic_profile_rejected");
+        let errors = match codegen.compile_checked(&program) {
+            Ok(()) => panic!("{name} must fail closed at the MIR boundary"),
+            Err(errors) => errors,
+        };
+        assert!(
+            errors.iter().any(|diagnostic| matches!(
+                diagnostic.code.as_deref(),
+                Some("MIR-COVERAGE-001" | "MIR-LOWERING-001")
+            )),
+            "{name} must report a stable MIR boundary error: {errors:?}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{name} must not enter the legacy code generator"
+        );
+    }
+}
+
+#[test]
 fn compile_checked_routes_copy_option_and_result_profiles_without_legacy_access() {
     use crate::core::mir::CanonicalMirRouteProfile as Profile;
 

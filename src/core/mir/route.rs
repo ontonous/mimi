@@ -683,11 +683,12 @@ pub fn materialize_canonical_mir_route(
     // All public scalar-FFI consumers use the same known prelude exclusion.
     // Imported/user code stays in the graph; calls into excluded prelude code
     // remain missing-target errors, never compatibility retries.  The
-    // session-channel island shares the exclusion: the direct native entry
-    // and the public verify path must observe the same prelude-free graph as
-    // the CLI dispatch wrapper.  A complete flat Copy-record admission shares
-    // it for the same reason: preloaded prelude bodies carry Assign statements
-    // MIR Phase 0 cannot lower, and the dispatch wrapper never lowers them.
+    // session-channel, generic Option/Result projection, and managed Result
+    // islands share the exclusion: direct native/public verify paths must
+    // observe the same prelude-free graph as CLI dispatch. A complete flat
+    // Copy-record admission shares it for the same reason: preloaded prelude
+    // bodies carry Assign statements MIR Phase 0 cannot lower, and dispatch
+    // never lowers them.
     // The plain-scalar collection island (R6-1052) shares the exclusion for
     // the same reason, so a direct `materialize_canonical_mir_route` caller
     // observes the same prelude-free graph as the CLI dispatch wrapper.
@@ -696,6 +697,12 @@ pub fn materialize_canonical_mir_route(
         || admission.map_root_complete()
         || admission.scalar_generic_identity_i32_complete()
         || admission.scalar_generic_identity_i64_complete()
+        || admission.generic_variant_complete()
+        || admission.generic_option_projection_complete()
+        || admission.generic_option_projection_fallback_complete()
+        || admission.generic_result_projection_complete()
+        || admission.generic_result_projection_fallback_complete()
+        || admission.managed_result_call_complete()
         || admission.session_complete()
         || admission.record_complete()
         || admission.collection_complete()

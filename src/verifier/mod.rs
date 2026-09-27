@@ -210,6 +210,212 @@ pub fn verify_source_with(
     Ok(verifier.verify_checked(&program))
 }
 
+/// Enforce the checker-owned boundaries that prevent a recognized but
+/// incomplete Canonical MIR profile from falling through to a compatibility
+/// verifier. Keep this shared by the single- and dual-engine public APIs so
+/// callers cannot obtain different answers merely by selecting an engine
+/// wrapper.
+fn validate_public_verifier_mir_boundary(
+    program: &crate::core::CheckedProgram,
+) -> Result<(), String> {
+    if let Some(reason) = crate::core::mir::scalar_ffi_boundary_reason(program) {
+        return Err(format!(
+            "{}: canonical scalar FFI declaration boundary: {reason}",
+            crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+        ));
+    }
+
+    // Result projection candidates are checker-owned route admissions. Once
+    // the front end recognizes an unsupported shape, verification must not
+    // silently enter the retained AST/Flow compatibility engine. Complete
+    // admission proceeds through the canonical MIR profile below; mixed or
+    // unsupported admission is a stable hard error.
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if admission.map_root.is_candidate() && !admission.map_root_complete() {
+        return Err(format!(
+            "{}: Checker recognized a MapRoot candidate but withheld its complete local lifecycle receipt",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if !admission.scalar_ffi
+        && matches!(
+            admission.flow,
+            crate::core::mir::S8FlowAdmission::MixedCoverage
+        )
+    {
+        return Err(
+            "MIR-COVERAGE-001: S8 Flow transition candidate is not complete coverage".into(),
+        );
+    }
+    if matches!(
+        admission.generic_variant,
+        crate::core::mir::GenericVariantPredicateAdmission::MixedCoverage
+    ) || (!admission.generic_variant_complete()
+        && crate::core::mir::has_generic_variant_predicate_operation_candidate(program))
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic variant predicate candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.record,
+        crate::core::mir::FlatCopyRecordAdmission::MixedCoverage
+    ) && crate::core::mir::has_unsupported_generic_record_projection_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic record projection candidate did not materialize a supported scalar MIR shape"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.record,
+        crate::core::mir::FlatCopyRecordAdmission::MixedCoverage
+    ) && crate::core::mir::has_unsupported_generic_record_update_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic record update candidate did not materialize a supported scalar MIR shape"
+                .into(),
+        );
+    }
+    if !matches!(
+        admission.collection,
+        crate::core::mir::ScalarCollectionAdmission::OutsideProfile
+    ) && crate::core::mir::has_unsupported_list_reverse_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: canonical List.reverse candidate did not materialize a supported MIR shape"
+                .into(),
+        );
+    }
+    if !matches!(
+        admission.collection,
+        crate::core::mir::ScalarCollectionAdmission::OutsideProfile
+    ) && crate::core::mir::has_unsupported_list_concat_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: canonical List.concat candidate did not materialize a supported MIR shape"
+                .into(),
+        );
+    }
+    if !matches!(
+        admission.collection,
+        crate::core::mir::ScalarCollectionAdmission::OutsideProfile
+    ) && crate::core::mir::has_unsupported_generic_list_facade_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: canonical generic List facade candidate did not materialize a supported scalar MIR shape"
+                .into(),
+        );
+    }
+    if admission.collection_complete()
+        && crate::core::mir::has_unsupported_generic_set_facade_candidate(program)
+    {
+        return Err("MIR-COVERAGE-001: canonical generic Set facade construction failed".into());
+    }
+    if matches!(
+        admission.generic_option_projection,
+        crate::core::mir::GenericOptionProjectionAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_option_projection_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Option projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.generic_option_projection_fallback,
+        crate::core::mir::GenericOptionProjectionFallbackAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_option_projection_fallback_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Option fallback projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.generic_result_projection,
+        crate::core::mir::GenericResultProjectionAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_result_projection_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Result projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.generic_result_projection_fallback,
+        crate::core::mir::GenericResultProjectionFallbackAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_result_projection_fallback_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Result fallback projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.managed_result_call,
+        crate::core::mir::ManagedResultCallAdmission::MixedCoverage
+    ) || (crate::core::mir::has_managed_result_call_candidate(program)
+        && !matches!(
+            admission.managed_result_call,
+            crate::core::mir::ManagedResultCallAdmission::CompleteCoverage
+        ))
+    {
+        return Err(
+            "MIR-COVERAGE-001: managed Result direct-call candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    for (mixed, profile) in [
+        (
+            matches!(
+                admission.copy_option_i32,
+                crate::core::mir::CopyOptionI32VariantAdmission::MixedCoverage
+            ),
+            "Copy Option<i32>",
+        ),
+        (
+            matches!(
+                admission.copy_option_bool,
+                crate::core::mir::CopyOptionI32VariantAdmission::MixedCoverage
+            ),
+            "Copy Option<bool>",
+        ),
+        (
+            matches!(
+                admission.copy_option_i64,
+                crate::core::mir::CopyOptionI32VariantAdmission::MixedCoverage
+            ),
+            "Copy Option<i64>",
+        ),
+        (
+            matches!(
+                admission.copy_option_f64,
+                crate::core::mir::CopyOptionI32VariantAdmission::MixedCoverage
+            ),
+            "Copy Option<f64>",
+        ),
+    ] {
+        if mixed {
+            return Err(format!(
+                "MIR-COVERAGE-001: {profile} projection candidate is outside complete coverage"
+            ));
+        }
+    }
+    if matches!(
+        admission.copy_result_i32,
+        crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
+    ) {
+        return Err(
+            "MIR-COVERAGE-001: Copy Result<i32, i32> projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Verify contracts in a type-checked program (supports pre-merged imports).
 ///
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
@@ -235,6 +441,7 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    validate_public_verifier_mir_boundary(program)?;
     if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
     }
@@ -554,76 +761,7 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    // Result projection candidates are checker-owned route admissions.  Once
-    // the front end recognizes an unsupported Result::unwrap shape, the
-    // verifier must not silently fall through to its retained AST/Flow
-    // compatibility engine: that would make verification disagree with the
-    // default run/build dispatch.  Complete admission proceeds through the
-    // canonical MIR profile below; mixed admission is a stable hard error.
-    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-    if matches!(
-        admission.generic_option_projection,
-        crate::core::mir::GenericOptionProjectionAdmission::MixedCoverage
-    ) || crate::core::mir::has_unsupported_generic_option_projection_candidate(program)
-    {
-        return Err(
-            "MIR-COVERAGE-001: generic Option projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
-        admission.generic_option_projection_fallback,
-        crate::core::mir::GenericOptionProjectionFallbackAdmission::MixedCoverage
-    ) || crate::core::mir::has_unsupported_generic_option_projection_fallback_candidate(program)
-    {
-        return Err(
-            "MIR-COVERAGE-001: generic Option fallback projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
-        admission.generic_result_projection,
-        crate::core::mir::GenericResultProjectionAdmission::MixedCoverage
-    ) || crate::core::mir::has_unsupported_generic_result_projection_candidate(program)
-    {
-        return Err(
-            "MIR-COVERAGE-001: generic Result projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
-        admission.generic_result_projection_fallback,
-        crate::core::mir::GenericResultProjectionFallbackAdmission::MixedCoverage
-    ) || crate::core::mir::has_unsupported_generic_result_projection_fallback_candidate(program)
-    {
-        return Err(
-            "MIR-COVERAGE-001: generic Result fallback projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
-        admission.managed_result_call,
-        crate::core::mir::ManagedResultCallAdmission::MixedCoverage
-    ) || (crate::core::mir::has_managed_result_call_candidate(program)
-        && !matches!(
-            admission.managed_result_call,
-            crate::core::mir::ManagedResultCallAdmission::CompleteCoverage
-        ))
-    {
-        return Err(
-            "MIR-COVERAGE-001: managed Result direct-call candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
-        admission.copy_result_i32,
-        crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
-    ) {
-        return Err(
-            "MIR-COVERAGE-001: Copy Result<i32, i32> projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
+    validate_public_verifier_mir_boundary(program)?;
     if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
     }

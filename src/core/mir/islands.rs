@@ -146,10 +146,20 @@ pub fn classify_managed_result_call_admission(
         let Some(result_ty) = program.resolved_node_type(&site.node_id) else {
             continue;
         };
-        let Some(ResolvedType::Result { error, .. }) = program.resolved_types().get(result_ty)
+        let Some(ResolvedType::Result { ok, error }) = program.resolved_types().get(result_ty)
         else {
             continue;
         };
+        // Result<(), E> is an established callable ABI in the compatibility
+        // emitter. It does not belong to the managed aggregate-return island;
+        // keep it on the explicit legacy path until MIR has a verified
+        // zero-sized Result payload representation.
+        if matches!(
+            program.resolved_types().get(ok),
+            Some(ResolvedType::Primitive(PrimitiveType::Unit))
+        ) {
+            continue;
+        }
         if !matches!(
             program.resolved_types().get(error),
             Some(ResolvedType::Primitive(PrimitiveType::I32))
@@ -186,10 +196,13 @@ pub fn has_managed_result_call_candidate(program: &CheckedProgram) -> bool {
                 .is_some_and(|ty| {
                     matches!(
                         ty,
-                        ResolvedType::Result { error, .. }
+                        ResolvedType::Result { ok, error }
                             if matches!(
                                 program.resolved_types().get(error),
                                 Some(ResolvedType::Primitive(PrimitiveType::I32))
+                            ) && !matches!(
+                                program.resolved_types().get(ok),
+                                Some(ResolvedType::Primitive(PrimitiveType::Unit))
                             )
                     )
                 })
@@ -386,6 +399,84 @@ pub fn has_unsupported_generic_result_projection_fallback_candidate(
         is_generic_result_projection_fallback_candidate(program, callable)
             && !is_generic_result_projection_fallback_callable(program, callable)
     })
+}
+
+/// Narrow operation-level hint for generic Option projection compatibility
+/// failures. Unlike the wider profile scan above, this only recognizes a
+/// direct trap-bearing `unwrap` body result. The total `unwrap_or` form has a
+/// separate fallback admission and must not be misclassified as a projection
+/// candidate; generic `Option<T>` black-box transfer and pattern-matching
+/// bodies remain outside this MIR profile and keep their compatibility route.
+pub fn has_generic_option_projection_operation_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        mentions_generic_option_callable(program, callable)
+            && callable_returns_builtin_result(callable, &["builtin.method.option.unwrap"])
+    })
+}
+
+/// Narrow operation-level hint for a generic Option fallback projection.
+pub fn has_generic_option_projection_fallback_operation_candidate(
+    program: &CheckedProgram,
+) -> bool {
+    program.callables().values().any(|callable| {
+        mentions_generic_option_callable(program, callable)
+            && callable_returns_builtin_result(callable, &["builtin.method.option.unwrap_or"])
+    })
+}
+
+/// Narrow operation-level hint for generic Result projection compatibility
+/// failures.  Result values transferred or destructured as a whole remain
+/// outside this projection-specific guard.
+pub fn has_generic_result_projection_operation_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        mentions_generic_result_callable(program, callable)
+            && callable_returns_builtin_result(callable, &["builtin.method.result.unwrap"])
+    })
+}
+
+/// Narrow operation-level hint for a generic Result fallback projection.
+pub fn has_generic_result_projection_fallback_operation_candidate(
+    program: &CheckedProgram,
+) -> bool {
+    program.callables().values().any(|callable| {
+        mentions_generic_result_callable(program, callable)
+            && callable_returns_builtin_result(callable, &["builtin.method.result.unwrap_or"])
+    })
+}
+
+/// Narrow operation-level hint for generic Option/Result variant predicates.
+/// This deliberately ignores generic black-box transfers and pattern matches.
+pub fn has_generic_variant_predicate_operation_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        (mentions_generic_option_callable(program, callable)
+            || mentions_generic_result_callable(program, callable))
+            && callable_returns_builtin_result(
+                callable,
+                &[
+                    "builtin.method.option.is_some",
+                    "builtin.method.option.is_none",
+                    "builtin.method.result.is_ok",
+                    "builtin.method.result.is_err",
+                ],
+            )
+    })
+}
+
+fn callable_returns_builtin_result(
+    callable: &crate::core::ir::ResolvedCallable,
+    builtin_names: &[&str],
+) -> bool {
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name) if builtin_names.contains(&name.as_str())
+    )
 }
 
 /// Classify the checker-owned generic variant predicate envelope before MIR

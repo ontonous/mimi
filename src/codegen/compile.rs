@@ -43,12 +43,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
         // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
-        // exact nested Option-tuple, and SessionChannel production islands
-        // have crossed the default route boundary. This public API is also an
-        // old production entry point, so an admitted graph must not continue into
-        // the old AST body compiler merely
-        // because a caller bypassed the CLI selector.  The helper performs
-        // the same whole-program, all-consumer preflight as the selector and
+        // exact nested Option-tuple, generic Option/Result projections and
+        // predicates, ManagedResultCall, and SessionChannel have crossed the
+        // default route boundary. This public API is also an old production
+        // entry point, so an admitted graph must not continue into the old AST
+        // body compiler merely because a caller bypassed the CLI selector.
+        // The helper performs the same whole-program, all-consumer preflight as the selector and
         // returns only after the canonical native consumer is ready.  If
         // canonical lowering has not materialized one of these candidates,
         // this remains the compatibility path for unrelated legacy programs.
@@ -612,6 +612,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.copy_option_bool_complete()
             || admission.copy_option_i64_complete()
             || admission.copy_result_i32_complete()
+            || admission.generic_variant_complete()
+            || admission.generic_option_projection_complete()
+            || admission.generic_option_projection_fallback_complete()
+            || admission.generic_result_projection_complete()
+            || admission.generic_result_projection_fallback_complete()
+            || admission.managed_result_call_complete()
             || admission.session_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()
@@ -1113,6 +1119,85 @@ impl<'ctx> CodeGenerator<'ctx> {
                         program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
                     )]);
                 }
+                if !matches!(
+                    admission.generic_variant,
+                    crate::core::mir::GenericVariantPredicateAdmission::OutsideProfile
+                ) || crate::core::mir::has_generic_variant_predicate_operation_candidate(program)
+                {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized generic Option predicate candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
+                    admission.generic_option_projection,
+                    crate::core::mir::GenericOptionProjectionAdmission::OutsideProfile
+                ) || crate::core::mir::has_generic_option_projection_operation_candidate(program)
+                {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized generic Option projection candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
+                    admission.generic_option_projection_fallback,
+                    crate::core::mir::GenericOptionProjectionFallbackAdmission::OutsideProfile
+                ) || crate::core::mir::has_generic_option_projection_fallback_operation_candidate(
+                    program,
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized generic Option fallback candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
+                    admission.generic_result_projection,
+                    crate::core::mir::GenericResultProjectionAdmission::OutsideProfile
+                ) || crate::core::mir::has_generic_result_projection_operation_candidate(program)
+                {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized generic Result projection candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
+                    admission.generic_result_projection_fallback,
+                    crate::core::mir::GenericResultProjectionFallbackAdmission::OutsideProfile
+                ) || crate::core::mir::has_generic_result_projection_fallback_operation_candidate(
+                    program,
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized generic Result fallback candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
+                    admission.managed_result_call,
+                    crate::core::mir::ManagedResultCallAdmission::OutsideProfile
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized managed Result direct-call candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
                 return Ok(None);
             }
         };
@@ -1137,6 +1222,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         let flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
         let option_string_candidate = route.materialized_option_string_candidate;
         let option_nested_tuple_candidate = route.materialized_option_nested_tuple_candidate;
+        let generic_option_predicate_candidate = route.admission.generic_variant_complete()
+            && route.materialized_generic_variant_candidate;
+        let generic_option_projection_candidate =
+            route.admission.generic_option_projection_complete()
+                && route.materialized_generic_option_projection_candidate;
+        let generic_option_projection_fallback_candidate = route
+            .admission
+            .generic_option_projection_fallback_complete()
+            && route.materialized_generic_option_projection_fallback_candidate;
+        let generic_result_projection_candidate =
+            route.admission.generic_result_projection_complete()
+                && route.materialized_generic_result_projection_candidate;
+        let generic_result_projection_fallback_candidate = route
+            .admission
+            .generic_result_projection_fallback_complete()
+            && route.materialized_generic_result_projection_fallback_candidate;
+        let managed_result_call_candidate = route.admission.managed_result_call_complete()
+            && route.materialized_managed_result_call_candidate;
         let copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
         let copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
@@ -1152,6 +1255,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !flat_copy_record_candidate
             && !flow_transition_candidate
             && !flow_failure_retry_candidate
+            && !generic_option_predicate_candidate
+            && !generic_option_projection_candidate
+            && !generic_option_projection_fallback_candidate
+            && !generic_result_projection_candidate
+            && !generic_result_projection_fallback_candidate
+            && !managed_result_call_candidate
             && !option_string_candidate
             && !option_nested_tuple_candidate
             && !copy_option_i32_candidate
@@ -1181,6 +1290,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             "recoverable Flow failure island"
         } else if scalar_collection_candidate {
             "scalar collection island"
+        } else if generic_option_predicate_candidate {
+            crate::core::mir::GENERIC_VARIANT_PREDICATE_ISLAND
+        } else if generic_option_projection_candidate {
+            crate::core::mir::GENERIC_OPTION_PROJECTION_ISLAND
+        } else if generic_option_projection_fallback_candidate {
+            crate::core::mir::GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND
+        } else if generic_result_projection_candidate {
+            crate::core::mir::GENERIC_RESULT_PROJECTION_ISLAND
+        } else if generic_result_projection_fallback_candidate {
+            crate::core::mir::GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND
+        } else if managed_result_call_candidate {
+            crate::core::mir::MANAGED_RESULT_CALL_ISLAND
         } else if flat_copy_record_candidate {
             "flat Copy record island"
         } else if option_string_candidate {
@@ -1322,6 +1443,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Err(errors) =
                 crate::core::mir::validate_copy_result_i32_variant_island(canonical)
             {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if managed_result_call_candidate {
+            if let Err(errors) = crate::core::mir::validate_managed_result_call_island(canonical) {
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

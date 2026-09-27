@@ -665,6 +665,7 @@ fn verify_ffi_no_requires() {
 extern "C" {
     func get_value() -> i64;
 }
+
     func caller() -> i64 {
         get_value()
     }
@@ -679,6 +680,148 @@ extern "C" {
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "declaration-only FFI must not enter the retained AST verifier"
     );
+}
+
+#[test]
+fn public_checked_verifiers_reject_non_scalar_extern_before_compatibility() {
+    let source = r#"
+extern "C" {
+    func host_text(x: string) -> i32;
+}
+func main() -> i32 { host_text("x") }
+"#;
+    let file = parse_memory_source(source, "verify-non-scalar-extern-boundary").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let single_error = verify_checked(&checked, source_hash.clone())
+        .expect_err("single verifier must reject unsupported called extern ABI");
+    assert!(
+        single_error.contains(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE),
+        "{single_error}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let dual_error = verify_checked_dual(&checked, source_hash)
+        .expect_err("dual verifier must reject unsupported called extern ABI");
+    assert_eq!(single_error, dual_error);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn public_checked_verifiers_reject_recognized_mir_candidates_before_legacy() {
+    let cases = [
+        (
+            "generic Option predicate",
+            include_str!("../../tests/fixtures/mir_native_generic_option_predicate_rejected.mimi"),
+            "generic-option-predicate",
+        ),
+        (
+            "generic Result predicate",
+            include_str!("../../tests/fixtures/mir_native_generic_result_predicate_rejected.mimi"),
+            "generic-option-predicate",
+        ),
+        (
+            "mixed Copy Option",
+            "func i32_unwrap() -> i32 { let value: Option<i32> = Some(41); value.unwrap() } func i64_unwrap() -> i64 { let value: Option<i64> = Some(7); value.unwrap() } func main() -> i32 { i32_unwrap() }",
+            "Copy Option<i32>",
+        ),
+        (
+            "mixed Copy Option bool",
+            "func bool_unwrap() -> bool { let value: Option<bool> = Some(true); value.unwrap() } func i64_unwrap() -> i64 { let value: Option<i64> = Some(7); value.unwrap() } func main() -> i32 { 42 }",
+            "Copy Option<bool>",
+        ),
+        (
+            "mixed Copy Option i64",
+            include_str!("../../tests/fixtures/mir_native_option_i64_mixed_rejected.mimi"),
+            "Copy Option<i64>",
+        ),
+        (
+            "mixed Copy Option f64",
+            include_str!("../../tests/fixtures/mir_native_option_f64_mixed_rejected.mimi"),
+            "Copy Option<f64>",
+        ),
+        (
+            "incomplete MapRoot",
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let updated = map_set(root, "answer", 42)
+                    let size = map_size(updated)
+                    let temporary_size = map_size(map_new())
+                    let unreceipted = map_get(map_new(), "missing")
+                    drop(updated)
+                    size + temporary_size
+                }
+            "#,
+            "Checker recognized a MapRoot candidate",
+        ),
+        (
+            "incomplete S8 Flow",
+            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) println(c2.n) c2.n }",
+            "S8 Flow transition candidate",
+        ),
+        (
+            "unsupported generic record projection",
+            include_str!("../../tests/fixtures/mir_native_generic_record_projection_eight_field_rejected.mimi"),
+            "generic record projection candidate",
+        ),
+        (
+            "unsupported generic record update",
+            include_str!("../../tests/fixtures/mir_native_generic_record_update_owned_copy_residual_f64_rejected.mimi"),
+            "MIR-MATERIALIZATION-001",
+        ),
+        (
+            "unsupported generic List facade",
+            include_str!("../../tests/fixtures/mir_native_generic_list_construct_rejected.mimi"),
+            "generic List facade candidate",
+        ),
+        (
+            "unsupported List reverse",
+            include_str!("../../tests/fixtures/mir_native_list_reverse_rejected.mimi"),
+            "List.reverse candidate",
+        ),
+        (
+            "unsupported List concat",
+            include_str!("../../tests/fixtures/mir_native_list_concat_method_rejected.mimi"),
+            "List.concat candidate",
+        ),
+    ];
+
+    for (label, source, expected_reason) in cases {
+        let file =
+            parse_memory_source(source, label).unwrap_or_else(|error| panic!("{label}: {error}"));
+        let checked =
+            crate::core::check_program(&file).unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let single_error = match verify_checked(&checked, source_hash.clone()) {
+            Ok(_) => panic!("single verifier accepted {label}"),
+            Err(error) => error,
+        };
+        assert!(
+            single_error.contains(expected_reason),
+            "{label}: {single_error}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "single verifier entered legacy for {label}"
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual_error = match verify_checked_dual(&checked, source_hash) {
+            Ok(_) => panic!("dual verifier accepted {label}"),
+            Err(error) => error,
+        };
+        assert_eq!(single_error, dual_error, "{label}");
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "dual verifier entered legacy for {label}"
+        );
+    }
 }
 
 #[test]
@@ -1108,6 +1251,101 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
             .map(|artifact| artifact.engine.as_str()),
         Some(ProofArtifact::ENGINE_MIR)
     );
+}
+
+#[test]
+fn public_checked_verifier_routes_generic_variant_and_managed_result_profiles_without_legacy_access(
+) {
+    require_z3!();
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
+    const CASES: &[(&str, Profile)] = &[
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_predicate.mimi"),
+            Profile::GenericOptionPredicate,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap.mimi"),
+            Profile::GenericOptionProjection,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"),
+            Profile::GenericOptionProjectionFallback,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap.mimi"),
+            Profile::GenericResultProjection,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi"),
+            Profile::GenericResultProjectionFallback,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_result_list_i32_call_return.mimi"),
+            Profile::ManagedResultCall,
+        ),
+    ];
+
+    for (source, profile) in CASES {
+        let file = parse_memory_source(source, profile.as_str()).expect("parse");
+        let mut file = file;
+        crate::loader::merge_prelude_into(&mut file);
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|diags| panic!("check {}: {diags:?}", profile.as_str()));
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .unwrap_or_else(|error| panic!("materialize {}: {error:?}", profile.as_str()));
+        assert!(
+            profile.is_admitted(route.admission),
+            "{} must have checker-owned complete admission",
+            profile.as_str()
+        );
+        assert!(
+            profile.is_materialized(&route),
+            "{} must have its canonical operation receipt",
+            profile.as_str()
+        );
+
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
+            .unwrap_or_else(|error| panic!("verify_checked {}: {error}", profile.as_str()));
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{} checked verifier must not access retained legacy bodies",
+            profile.as_str()
+        );
+        assert!(
+            checked_results.iter().any(|result| {
+                result.status == VerifStatus::Proven
+                    && result
+                        .artifact
+                        .as_ref()
+                        .is_some_and(|artifact| artifact.engine == ProofArtifact::ENGINE_MIR)
+            }),
+            "{} checked verifier must produce a MIR-backed proof for its contract: {checked_results:?}",
+            profile.as_str()
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+            .unwrap_or_else(|error| panic!("verify_checked_dual {}: {error}", profile.as_str()));
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{} dual verifier must not access retained legacy bodies",
+            profile.as_str()
+        );
+        assert!(
+            dual_results.iter().any(|result| {
+                result.status == VerifStatus::Proven
+                    && result
+                        .artifact
+                        .as_ref()
+                        .is_some_and(|artifact| artifact.engine == ProofArtifact::ENGINE_MIR)
+            }),
+            "{} dual verifier must produce a MIR-backed proof for its contract: {dual_results:?}",
+            profile.as_str()
+        );
+    }
 }
 
 #[test]
@@ -2672,6 +2910,7 @@ fn managed_generic_bool_result_unwrap_or_rejects_nested_managed_payload_before_l
     let file =
         parse_memory_source(source, "mir-managed-generic-result-bool-rejected").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let error = crate::verifier::verify_checked_dual(
         &checked,
         blake3::hash(source.as_bytes()).to_hex().to_string(),
@@ -2680,6 +2919,10 @@ fn managed_generic_bool_result_unwrap_or_rejects_nested_managed_payload_before_l
     assert!(
         error.contains("generic MIR instance") || error.contains("generic Result"),
         "{error}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "unsupported managed Result shape must not enter a legacy verifier"
     );
 }
 
@@ -2771,6 +3014,7 @@ fn generic_result_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
         include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi");
     let file = parse_memory_source(source, "mir-generic-result-unwrap-or-rejected").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let error = crate::verifier::verify_checked_dual(
         &checked,
         blake3::hash(source.as_bytes()).to_hex().to_string(),
@@ -2780,6 +3024,10 @@ fn generic_result_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
         error.contains("generic Result fallback projection"),
         "{error}"
     );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "unsupported generic Result fallback must not enter a legacy verifier"
+    );
 }
 
 #[test]
@@ -2788,16 +3036,33 @@ fn generic_result_projection_is_rejected_before_legacy_verifier_fallback() {
         include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi");
     let file = parse_memory_source(source, "mir-generic-result-rejected").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
-    let error = crate::verifier::verify_checked_dual(
-        &checked,
-        blake3::hash(source.as_bytes()).to_hex().to_string(),
-    )
-    .expect_err("unsupported generic Result projection must not fall through to AST verifier");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let single_error = crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect_err("single verifier must reject unsupported generic Result projection");
+    assert!(
+        single_error.contains("generic-result-projection-v1")
+            || single_error.contains("generic Result projection"),
+        "{single_error}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "single verifier must not enter the retained AST compatibility path"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let error = crate::verifier::verify_checked_dual(&checked, source_hash)
+        .expect_err("unsupported generic Result projection must not fall through to AST verifier");
     assert!(
         error.contains("generic-result-projection-v1")
             || error.contains("generic Result projection"),
         "{error}"
     );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "unsupported generic Result projection must not enter a legacy verifier"
+    );
+    assert_eq!(single_error, error);
 }
 
 #[test]
@@ -3173,12 +3438,17 @@ fn generic_option_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
         include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi");
     let file = parse_memory_source(source, "mir-generic-option-unwrap-or").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let error = crate::verifier::verify_checked_dual(
         &checked,
         blake3::hash(source.as_bytes()).to_hex().to_string(),
     )
     .expect_err("generic Option unwrap_or must not fall through to AST verifier");
     assert!(error.contains("generic Option projection"), "{error}");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "unsupported generic Option fallback must not enter a legacy verifier"
+    );
 }
 
 #[test]
