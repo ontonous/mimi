@@ -27,7 +27,7 @@ use super::islands::is_owned_generic_record_update_callable;
 use super::types::MirTypeCatalog;
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirCheckerLoanContract,
-    MirCheckerLoanEndSite, MirCheckerLoanLocation, MirEdgeId, MirFunction,
+    MirCheckerLoanEndSite, MirCheckerLoanLocation, MirCheckerMapRootAction, MirEdgeId, MirFunction,
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
     MirInstructionKind, MirListOperation, MirOwnershipEvent, MirOwnershipEventKind,
     MirOwnershipSummary, MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding,
@@ -126,6 +126,9 @@ fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
 fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
     use MirInstructionKind::*;
     match kind {
+        MapRootNew { result } | MapRootSize { result, .. } | MapRootSet { result, .. } => {
+            vec![result]
+        }
         Const { result, .. }
         | Load { result, .. }
         | Copy { result, .. }
@@ -158,7 +161,7 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
             .map(|result| vec![result])
             .unwrap_or_default(),
         SessionPairBind { lo, hi, .. } => vec![lo, hi],
-        Drop { .. } | EndBorrow { .. } | Nop => Vec::new(),
+        MapRootDrop { .. } | Drop { .. } | EndBorrow { .. } | Nop => Vec::new(),
     }
 }
 
@@ -7186,7 +7189,52 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
             })
             .collect(),
         checker_loans,
+        checker_map_roots: analysis
+            .map_root_actions
+            .iter()
+            .filter_map(|action| {
+                let role = match action.kind {
+                    crate::core::MapRootActionKind::New => "map_root_new",
+                    crate::core::MapRootActionKind::Set => "map_root_set",
+                    crate::core::MapRootActionKind::Size => "map_root_size",
+                    crate::core::MapRootActionKind::Drop => "map_root_drop",
+                };
+                let local = mir_value_for_local(&action.local);
+                let source_local = action.source_local.as_ref().map(mir_value_for_local);
+                let role = format!("{role}:{}", local.0);
+                let instruction =
+                    MirInstructionId::new(format!("inst:{role}:{}", action.point.0)).ok()?;
+                Some(MirCheckerMapRootAction {
+                    kind: action.kind,
+                    point: action.point.clone(),
+                    local,
+                    result: match action.kind {
+                        crate::core::MapRootActionKind::New
+                        | crate::core::MapRootActionKind::Set => {
+                            Some(mir_value_for_local(&action.local))
+                        }
+                        crate::core::MapRootActionKind::Size => {
+                            MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                        }
+                        crate::core::MapRootActionKind::Drop => None,
+                    },
+                    root: action.root.0 .0.clone(),
+                    key: action.key.clone(),
+                    value: action
+                        .value
+                        .as_ref()
+                        .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
+                    source_local,
+                    source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
+                    instruction,
+                })
+            })
+            .collect(),
     }
+}
+
+fn mir_value_for_local(local: &ResolvedLocalId) -> MirValueId {
+    MirValueId::new(format!("local:{}", local.0 .0)).expect("resolved local id is MIR-safe")
 }
 
 fn mir_local_value_for_resource(resource: &str) -> Option<MirValueId> {
@@ -7677,6 +7725,102 @@ impl<'a> Lowerer<'a> {
         Ok(value)
     }
 
+    fn map_root_action(
+        &self,
+        point: &NodeId,
+        kind: crate::core::MapRootActionKind,
+    ) -> Option<&crate::core::MapRootAction> {
+        self.resource_analysis?
+            .map_root_actions
+            .iter()
+            .find(|action| action.point == *point && action.kind == kind)
+    }
+
+    fn has_map_root_action(&self, point: &NodeId, kind: crate::core::MapRootActionKind) -> bool {
+        self.map_root_action(point, kind).is_some()
+    }
+
+    fn map_root_local_value(&mut self, local: &ResolvedLocalId, node: &NodeId) -> MirValueId {
+        let value = self.locals.get(local).cloned().unwrap_or_else(|| {
+            MirValueId::new(format!("local:{}", local.0 .0)).expect("resolved local id is MIR-safe")
+        });
+        self.insert_value(value.clone(), super::types::map_root_type_id(), node);
+        self.locals.insert(local.clone(), value.clone());
+        value
+    }
+
+    fn lower_map_root_binding(
+        &mut self,
+        target: &ResolvedLocalId,
+        initializer: &ResolvedExpr,
+    ) -> bool {
+        let Some(action) = self
+            .resource_analysis
+            .and_then(|analysis| {
+                analysis.map_root_actions.iter().find(|action| {
+                    action.point == initializer.node_id
+                        && action.local == *target
+                        && matches!(
+                            action.kind,
+                            crate::core::MapRootActionKind::New
+                                | crate::core::MapRootActionKind::Set
+                        )
+                })
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        match action.kind {
+            crate::core::MapRootActionKind::New => {
+                let result = self.map_root_local_value(target, &initializer.node_id);
+                self.emit(
+                    &initializer.node_id,
+                    &format!("map_root_new:{}", result.0),
+                    MirInstructionKind::MapRootNew { result },
+                );
+                true
+            }
+            crate::core::MapRootActionKind::Set => {
+                let ResolvedExprKind::Call(call) = &initializer.kind else {
+                    return false;
+                };
+                let Some(source_arg) = call.arguments.first() else {
+                    return false;
+                };
+                let ResolvedExprKind::Load(source_place) = &source_arg.value.kind else {
+                    return false;
+                };
+                let Some(value_arg) = call.arguments.get(2) else {
+                    return false;
+                };
+                let source =
+                    self.map_root_local_value(&source_place.base, &source_arg.value.node_id);
+                let value = self.lower_expr(&value_arg.value);
+                let result = self.map_root_local_value(target, &initializer.node_id);
+                let Some(key) = action.key else {
+                    self.error(
+                        &initializer.node_id,
+                        "checker MapRoot Set receipt has no static key",
+                    );
+                    return true;
+                };
+                self.emit(
+                    &initializer.node_id,
+                    &format!("map_root_set:{}", result.0),
+                    MirInstructionKind::MapRootSet {
+                        result,
+                        source,
+                        key,
+                        value,
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Lower the checker-proven MIR Phase 0 scalar-assign face (R6-1049;
     /// R6-1057 adds the Copy f64 target): a direct local target whose
     /// declared ABI is a signed 32/64-bit integer, bool, or 64-bit float,
@@ -8071,6 +8215,11 @@ impl<'a> Lowerer<'a> {
                     {
                         continue;
                     }
+                    if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
+                        if self.lower_map_root_binding(local, initializer) {
+                            continue;
+                        }
+                    }
                     let value = self.lower_expr(initializer);
                     if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
                         if let Ok(destination) = self.local_value(local) {
@@ -8141,7 +8290,26 @@ impl<'a> Lowerer<'a> {
                             );
                             continue;
                         }
-                        match self.local_value(&place.base) {
+                        let map_root = self.has_map_root_action(
+                            &statement.node_id,
+                            crate::core::MapRootActionKind::Drop,
+                        ) && self
+                            .map_root_action(
+                                &statement.node_id,
+                                crate::core::MapRootActionKind::Drop,
+                            )
+                            .is_some_and(|action| action.local == place.base);
+                        let value = if map_root {
+                            Ok(self.map_root_local_value(&place.base, &statement.node_id))
+                        } else {
+                            self.local_value(&place.base)
+                        };
+                        match value {
+                            Ok(value) if map_root => self.emit(
+                                &statement.node_id,
+                                &format!("map_root_drop:{}", value.0),
+                                MirInstructionKind::MapRootDrop { root: value },
+                            ),
                             Ok(value) => self.emit(
                                 &statement.node_id,
                                 &format!("drop.{index}"),
@@ -8265,6 +8433,41 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        if let ResolvedExprKind::Call(call) = &expression.kind {
+            if self
+                .map_root_action(&expression.node_id, crate::core::MapRootActionKind::Size)
+                .is_some()
+            {
+                let Some(argument) = call.arguments.first() else {
+                    self.error(
+                        &expression.node_id,
+                        "checker MapRoot Size receipt has no argument",
+                    );
+                    return self.fallback_value(expression);
+                };
+                let ResolvedExprKind::Load(place) = &argument.value.kind else {
+                    self.error(
+                        &expression.node_id,
+                        "checker MapRoot Size root is not a direct local",
+                    );
+                    return self.fallback_value(expression);
+                };
+                let root = self.map_root_local_value(&place.base, &argument.value.node_id);
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return self.fallback_value(expression);
+                };
+                self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+                self.emit(
+                    &expression.node_id,
+                    &format!("map_root_size:{}", root.0),
+                    MirInstructionKind::MapRootSize {
+                        result: result.clone(),
+                        root,
+                    },
+                );
+                return result;
+            }
+        }
         let Some(result) = self.id("expr", &expression.node_id) else {
             return self.fallback_value(expression);
         };

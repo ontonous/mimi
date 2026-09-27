@@ -5851,6 +5851,14 @@ impl<'a> ScalarCollectionValidator<'a> {
         subject: &str,
     ) {
         match instruction {
+            MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootDrop { .. } => {
+                self.error(format!(
+                    "{subject} MapRoot operation is outside this MIR island"
+                ));
+            }
             MirInstructionKind::Const { result, literal } => {
                 let Some(result_ty) = self.value_type(function, result, subject) else {
                     return;

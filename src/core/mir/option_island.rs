@@ -667,6 +667,12 @@ impl<'a> OptionStringVariantValidator<'a> {
         subject: &str,
     ) {
         match instruction {
+            MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootDrop { .. } => {
+                self.error(format!("{subject} MapRoot operation is outside the Option island"));
+            }
             MirInstructionKind::Const { result, literal } => {
                 let Some(ty) = self.validate_value(function, result, "constant result") else {
                     return;

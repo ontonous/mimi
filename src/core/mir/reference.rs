@@ -458,6 +458,50 @@ impl MirProgram {
         nested_callable_scopes: BTreeMap<NodeId, super::MirNestedCallableScopeReceipt>,
     ) -> Result<Self, Vec<super::MirValidationError>> {
         let mut errors = Vec::new();
+        for (id, descriptor) in type_catalog.iter() {
+            if descriptor.kind == super::types::MirTypeKind::MapRoot {
+                if id != &super::types::map_root_type_id() {
+                    errors.push(super::MirValidationError {
+                        subject: id.as_str().into(),
+                        message:
+                            "non-canonical MapRoot TypeDesc identity is present in MIR catalog"
+                                .into(),
+                    });
+                } else {
+                    for operation in [MirGlueOperation::MoveOut, MirGlueOperation::Drop] {
+                        if let Err(message) = type_catalog.validate_glue(id, operation) {
+                            errors.push(super::MirValidationError {
+                                subject: id.as_str().into(),
+                                message,
+                            });
+                        }
+                    }
+                    if type_catalog
+                        .validate_glue(id, MirGlueOperation::Clone)
+                        .is_ok()
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: id.as_str().into(),
+                            message: "MapRoot TypeDesc must not expose generic Clone glue".into(),
+                        });
+                    }
+                }
+            }
+        }
+        let has_map_root_descriptor = type_catalog
+            .iter()
+            .any(|(_, descriptor)| descriptor.kind == super::types::MirTypeKind::MapRoot);
+        let has_map_root_receipt = functions
+            .values()
+            .any(|function| !function.ownership.checker_map_roots.is_empty());
+        if has_map_root_descriptor != has_map_root_receipt {
+            errors.push(super::MirValidationError {
+                subject: "mir-type-catalog".into(),
+                message:
+                    "MapRoot TypeDesc presence must match a Checker-owned MapRoot action receipt"
+                        .into(),
+            });
+        }
         errors.extend(validate_instance_table(
             &functions,
             &type_catalog,
@@ -503,10 +547,81 @@ impl MirProgram {
                     });
                 }
             }
+            let i32_type = type_catalog.iter().find_map(|(id, desc)| {
+                (desc.kind == super::types::MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+                    .then(|| id.clone())
+            });
+            for block in function.blocks.values() {
+                for instruction in &block.instructions {
+                    let (roots, scalars): (Vec<&MirValueId>, Vec<&MirValueId>) = match &instruction
+                        .kind
+                    {
+                        super::MirInstructionKind::MapRootNew { result } => (vec![result], vec![]),
+                        super::MirInstructionKind::MapRootSet {
+                            result,
+                            source,
+                            value,
+                            ..
+                        } => (vec![result, source], vec![value]),
+                        super::MirInstructionKind::MapRootSize { result, root } => {
+                            (vec![root], vec![result])
+                        }
+                        super::MirInstructionKind::MapRootDrop { root } => (vec![root], vec![]),
+                        _ => continue,
+                    };
+                    for id in roots {
+                        if function
+                            .values
+                            .get(id)
+                            .is_none_or(|value| value.ty != super::types::map_root_type_id())
+                        {
+                            errors.push(super::MirValidationError { subject: instruction.id.to_string(), message: format!("MapRoot operand/result '{}' does not use canonical MapRoot TypeDesc", id) });
+                        }
+                    }
+                    for id in scalars {
+                        if function
+                            .values
+                            .get(id)
+                            .is_none_or(|value| Some(&value.ty) != i32_type.as_ref())
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!("MapRoot scalar '{}' is not i32", id),
+                            });
+                        }
+                    }
+                }
+            }
             for value in function.values.values() {
                 let Some(descriptor) = type_catalog.get(&value.ty) else {
                     continue;
                 };
+                if value.ty == super::types::map_root_type_id()
+                    && descriptor.kind != super::types::MirTypeKind::MapRoot
+                {
+                    errors.push(super::MirValidationError {
+                        subject: value.id.to_string(),
+                        message: "canonical MapRoot TypeDesc identity has a non-MapRoot descriptor"
+                            .into(),
+                    });
+                }
+                if descriptor.kind == super::types::MirTypeKind::MapRoot {
+                    if value.ty != super::types::map_root_type_id() {
+                        errors.push(super::MirValidationError {
+                            subject: value.id.to_string(),
+                            message: "MapRoot value uses a non-canonical TypeDesc identity".into(),
+                        });
+                    }
+                    for operation in [MirGlueOperation::MoveOut, MirGlueOperation::Drop] {
+                        if let Err(message) = type_catalog.validate_glue(&value.ty, operation) {
+                            errors.push(super::MirValidationError {
+                                subject: value.id.to_string(),
+                                message,
+                            });
+                        }
+                    }
+                    continue;
+                }
                 if matches!(
                     descriptor.ownership,
                     super::types::MirOwnership::Copy | super::types::MirOwnership::SharedBorrow
@@ -1419,6 +1534,7 @@ impl MirProgram {
                                 });
                             }
                         }
+                        _ => {}
                     }
                 }
                 if let super::MirTerminator::Switch { scrutinee, arms }
@@ -3663,6 +3779,11 @@ fn validate_call_argument_directions(
                         (result, Producer::Move)
                     }
                     super::MirInstructionKind::Clone { result, .. } => (result, Producer::Clone),
+                    super::MirInstructionKind::MapRootNew { result }
+                    | super::MirInstructionKind::MapRootSet { result, .. }
+                    | super::MirInstructionKind::MapRootSize { result, .. } => {
+                        (result, Producer::Fresh)
+                    }
                     super::MirInstructionKind::Copy { result, .. }
                     | super::MirInstructionKind::Const { result, .. }
                     | super::MirInstructionKind::Load { result, .. }
@@ -3695,6 +3816,7 @@ fn validate_call_argument_directions(
                     | super::MirInstructionKind::Drop { .. }
                     | super::MirInstructionKind::EndBorrow { .. }
                     | super::MirInstructionKind::SessionPairBind { .. }
+                    | super::MirInstructionKind::MapRootDrop { .. }
                     | super::MirInstructionKind::Nop => return None,
                 };
                 (result == value).then_some(producer)
@@ -4893,6 +5015,12 @@ fn validate_borrow_usage(function: &MirFunction) -> Vec<super::MirValidationErro
 
 fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId) -> bool {
     match kind {
+        super::MirInstructionKind::MapRootNew { .. } => false,
+        super::MirInstructionKind::MapRootSet { source, value, .. } => {
+            source == needle || value == needle
+        }
+        super::MirInstructionKind::MapRootSize { root, .. }
+        | super::MirInstructionKind::MapRootDrop { root } => root == needle,
         super::MirInstructionKind::Const { .. }
         | super::MirInstructionKind::Load { .. }
         | super::MirInstructionKind::Nop => false,
@@ -4988,6 +5116,9 @@ fn terminator_uses_value(terminator: &super::MirTerminator, needle: &MirValueId)
 fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
     match kind {
         super::MirInstructionKind::Const { result, .. }
+        | super::MirInstructionKind::MapRootNew { result }
+        | super::MirInstructionKind::MapRootSet { result, .. }
+        | super::MirInstructionKind::MapRootSize { result, .. }
         | super::MirInstructionKind::Load { result, .. }
         | super::MirInstructionKind::Copy { result, .. }
         | super::MirInstructionKind::Move { result, .. }
@@ -5018,6 +5149,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         super::MirInstructionKind::EndBorrow { .. }
         | super::MirInstructionKind::Drop { .. }
         | super::MirInstructionKind::SessionPairBind { .. }
+        | super::MirInstructionKind::MapRootDrop { .. }
         | super::MirInstructionKind::Nop => None,
     }
 }
@@ -5723,6 +5855,12 @@ impl<'a> MirReferenceInterpreter<'a> {
         steps: &mut usize,
     ) -> Result<(), MirExecutionError> {
         match &instruction.kind {
+            MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootDrop { .. } => {
+                return Err(self.error(&function.owner, "MapRoot operations are structurally validated but not executable in the reference interpreter"));
+            }
             MirInstructionKind::Const { result, literal } => {
                 values.insert(result.clone(), runtime_literal(literal));
             }
@@ -9599,6 +9737,508 @@ mod tests {
             .expect("main callable");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         (owner, program)
+    }
+
+    fn canonical_map_root_program() -> (NodeId, MirProgram) {
+        canonical_program_with_main(
+            r#"
+func wide() -> i64 { 9 }
+func main() -> i32 {
+    let alternate = 7
+    let first = map_new()
+    let updated = map_set(first, "answer", 42)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn canonical_map_root_is_checker_receipted_and_consumers_remain_fail_closed() {
+        let (owner, program) = canonical_map_root_program();
+        let function = program.functions().get(&owner).expect("main MIR");
+        let operations = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::MapRootNew { .. }
+                        | crate::core::mir::MirInstructionKind::MapRootSet { .. }
+                        | crate::core::mir::MirInstructionKind::MapRootSize { .. }
+                        | crate::core::mir::MirInstructionKind::MapRootDrop { .. }
+                )
+            })
+            .count();
+        assert_eq!(operations, 4);
+        assert_eq!(function.ownership.checker_map_roots.len(), operations);
+        assert!(program
+            .type_catalog()
+            .get(&crate::core::mir::types::map_root_type_id())
+            .is_some());
+        let canonical_function = function.canonical_text();
+        let mut changed_receipt = function.clone();
+        changed_receipt
+            .ownership
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
+            .expect("Set receipt")
+            .root = "different:checker-root".into();
+        assert_ne!(canonical_function, changed_receipt.canonical_text());
+
+        let reference_error = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect_err("reference must not execute an unimplemented MapRoot op");
+        assert!(reference_error
+            .message
+            .contains("not executable in the reference interpreter"));
+        let bytecode_errors = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect_err("AST-free bytecode must keep the unsupported operation closed");
+        assert!(bytecode_errors.iter().any(|error| error
+            .message
+            .contains("MapRoot operations are not supported")));
+        let capability_errors = crate::verifier::validate_mir_capabilities(&program)
+            .expect_err("whole-program verifier capability gate must reject MapRoot");
+        assert!(capability_errors
+            .iter()
+            .any(|error| error.contains("MapRoot operation is outside verifier capability")));
+    }
+
+    #[test]
+    fn canonical_map_root_gate_rejects_missing_forged_and_mismatched_receipts() {
+        let (owner, program) = canonical_map_root_program();
+
+        let mut missing_functions = program.functions().clone();
+        missing_functions
+            .get_mut(&owner)
+            .expect("main MIR")
+            .ownership
+            .checker_map_roots
+            .clear();
+        let missing =
+            MirProgram::with_type_catalog(missing_functions, program.type_catalog().clone())
+                .expect_err("missing MapRoot receipts must fail before consumers");
+        assert!(missing.iter().any(|error| {
+            error.message.contains("MapRoot checker receipt count")
+                || error.message.contains("MapRoot TypeDesc presence")
+        }));
+
+        let mut forged_functions = program.functions().clone();
+        let function = forged_functions.get_mut(&owner).expect("main MIR");
+        let set = function
+            .ownership
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
+            .expect("Set receipt");
+        set.source = Some("forged:source-root".into());
+        let forged =
+            MirProgram::with_type_catalog(forged_functions, program.type_catalog().clone())
+                .expect_err("forged MapRoot source identity must fail before consumers");
+        assert!(forged.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot Set source resource identity does not match")
+        }));
+
+        let mut rewritten_identity_functions = program.functions().clone();
+        let function = rewritten_identity_functions
+            .get_mut(&owner)
+            .expect("main MIR");
+        for receipt in &mut function.ownership.checker_map_roots {
+            match receipt.kind {
+                crate::core::MapRootActionKind::New => {
+                    receipt.root = "forged:root:new".into();
+                }
+                crate::core::MapRootActionKind::Set => {
+                    receipt.root = "forged:root:set".into();
+                    receipt.source = Some("forged:root:new".into());
+                }
+                crate::core::MapRootActionKind::Size | crate::core::MapRootActionKind::Drop => {
+                    receipt.root = "forged:root:set".into();
+                }
+            }
+        }
+        let rewritten_identity = MirProgram::with_type_catalog(
+            rewritten_identity_functions,
+            program.type_catalog().clone(),
+        )
+        .expect_err("a coherently rewritten MapRoot identity chain must be rejected");
+        assert!(rewritten_identity
+            .iter()
+            .any(|error| { error.message.contains("invalid root/local identity") }));
+
+        let mut result_functions = program.functions().clone();
+        let function = result_functions.get_mut(&owner).expect("main MIR");
+        let (old_result, result_type) = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::MapRootSize { result, .. } => Some((
+                    result.clone(),
+                    function.values.get(result).expect("size result").ty.clone(),
+                )),
+                _ => None,
+            })
+            .expect("MapRoot Size instruction");
+        let forged_result = super::MirValueId::new("value:forged_map_size").expect("MIR value id");
+        function.values.insert(
+            forged_result.clone(),
+            super::super::MirValue {
+                id: forged_result.clone(),
+                ty: result_type,
+            },
+        );
+        let mut changed = false;
+        for instruction in function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+        {
+            if let crate::core::mir::MirInstructionKind::MapRootSize { result, .. } =
+                &mut instruction.kind
+            {
+                assert_eq!(result, &old_result);
+                *result = forged_result.clone();
+                changed = true;
+            }
+        }
+        assert!(changed);
+        let mismatched_result =
+            MirProgram::with_type_catalog(result_functions, program.type_catalog().clone())
+                .expect_err("unreceipted MapRoot Size result must fail before consumers");
+        assert!(mismatched_result.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot operation disagrees with its private Checker")
+        }));
+
+        let mut value_functions = program.functions().clone();
+        let function = value_functions.get_mut(&owner).expect("main MIR");
+        let alternate_value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Const {
+                    result,
+                    literal: crate::core::ir::ResolvedLiteral::Int(7),
+                } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("earlier alternate i32 value");
+        let mut changed = false;
+        for instruction in function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+        {
+            if let crate::core::mir::MirInstructionKind::MapRootSet { value, .. } =
+                &mut instruction.kind
+            {
+                *value = alternate_value.clone();
+                changed = true;
+            }
+        }
+        assert!(changed);
+        let mismatched_value =
+            MirProgram::with_type_catalog(value_functions, program.type_catalog().clone())
+                .expect_err("unreceipted MapRoot Set value must fail before consumers");
+        assert!(mismatched_value.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot operation disagrees with its private Checker")
+        }));
+
+        let mut wrong_scalar_functions = program.functions().clone();
+        let function = wrong_scalar_functions.get_mut(&owner).expect("main MIR");
+        let set_value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::MapRootSet { value, .. } => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .expect("MapRoot Set value");
+        let i64_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind
+                    == crate::core::mir::types::MirTypeKind::Primitive(
+                        crate::core::PrimitiveType::I64,
+                    ))
+                .then(|| id.clone())
+            })
+            .expect("canonical i64 TypeDesc");
+        function
+            .values
+            .get_mut(&set_value)
+            .expect("Set scalar value")
+            .ty = i64_type;
+        let wrong_scalar =
+            MirProgram::with_type_catalog(wrong_scalar_functions, program.type_catalog().clone())
+                .expect_err("MapRoot Set must reject a non-i32 scalar value");
+        assert!(
+            wrong_scalar
+                .iter()
+                .any(|error| error.message.contains("MapRoot scalar")
+                    && error.message.contains("i32"))
+        );
+
+        let mut escaping_functions = program.functions().clone();
+        let function = escaping_functions.get_mut(&owner).expect("main MIR");
+        let root = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::MapRootSize { root, .. } => {
+                    Some(root.clone())
+                }
+                _ => None,
+            })
+            .expect("MapRoot size root");
+        let entry = function.entry.clone();
+        function
+            .blocks
+            .get_mut(&entry)
+            .expect("entry block")
+            .instructions
+            .push(super::MirInstruction {
+                id: super::MirInstructionId::new("inst:forged_map_root_escape")
+                    .expect("instruction id"),
+                kind: crate::core::mir::MirInstructionKind::Call {
+                    result: None,
+                    callee: crate::core::ir::ResolvedCallee::Function(NodeId(
+                        "function:discard_map_root".into(),
+                    )),
+                    type_arguments: Vec::new(),
+                    arguments: vec![root],
+                    effect_receipts: Vec::new(),
+                    variant_call_contract: None,
+                },
+            });
+        let escaping =
+            MirProgram::with_type_catalog(escaping_functions, program.type_catalog().clone())
+                .expect_err("a generic MIR call must not receive a MapRoot alias");
+        assert!(escaping.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot local is used outside its dedicated Checker-receipted operation")
+        }));
+
+        let mut branching_functions = program.functions().clone();
+        let function = branching_functions.get_mut(&owner).expect("main MIR");
+        let entry = function.entry.clone();
+        let drop_block_id =
+            super::MirBlockId::new("block:zz_map_root_drop").expect("drop block id");
+        let skip_block_id =
+            super::MirBlockId::new("block:zz_map_root_skip").expect("skip block id");
+        let (drop_instruction, return_value) = {
+            let block = function.blocks.get_mut(&entry).expect("entry block");
+            let drop_index = block
+                .instructions
+                .iter()
+                .position(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        crate::core::mir::MirInstructionKind::MapRootDrop { .. }
+                    )
+                })
+                .expect("MapRoot drop instruction");
+            let drop_instruction = block.instructions.remove(drop_index);
+            let crate::core::mir::MirTerminator::Return { value: Some(value) } = &block.terminator
+            else {
+                panic!("scalar result return expected")
+            };
+            (drop_instruction, value.clone())
+        };
+        let condition =
+            super::MirValueId::new("value:forged_map_root_branch").expect("branch condition id");
+        let bool_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind
+                    == crate::core::mir::types::MirTypeKind::Primitive(
+                        crate::core::PrimitiveType::Bool,
+                    ))
+                .then(|| id.clone())
+            })
+            .expect("canonical bool TypeDesc");
+        function.values.insert(
+            condition.clone(),
+            super::super::MirValue {
+                id: condition.clone(),
+                ty: bool_type,
+            },
+        );
+        function
+            .blocks
+            .get_mut(&entry)
+            .expect("entry block")
+            .instructions
+            .push(super::MirInstruction {
+                id: super::MirInstructionId::new("inst:forged_map_root_branch_condition")
+                    .expect("instruction id"),
+                kind: crate::core::mir::MirInstructionKind::Const {
+                    result: condition.clone(),
+                    literal: crate::core::ir::ResolvedLiteral::Bool(true),
+                },
+            });
+        function
+            .blocks
+            .get_mut(&entry)
+            .expect("entry block")
+            .terminator = crate::core::mir::MirTerminator::Branch {
+            condition,
+            then_edge: super::super::MirEdgeId::new("edge:map_root_drop").expect("drop edge id"),
+            then_target: drop_block_id.clone(),
+            then_arguments: Vec::new(),
+            else_edge: super::super::MirEdgeId::new("edge:map_root_skip").expect("skip edge id"),
+            else_target: skip_block_id.clone(),
+            else_arguments: Vec::new(),
+        };
+        function.blocks.insert(
+            drop_block_id.clone(),
+            super::super::MirBlock {
+                id: drop_block_id,
+                parameters: Vec::new(),
+                instructions: vec![drop_instruction],
+                terminator: crate::core::mir::MirTerminator::Return {
+                    value: Some(return_value.clone()),
+                },
+            },
+        );
+        function.blocks.insert(
+            skip_block_id.clone(),
+            super::super::MirBlock {
+                id: skip_block_id,
+                parameters: Vec::new(),
+                instructions: Vec::new(),
+                terminator: crate::core::mir::MirTerminator::Return {
+                    value: Some(return_value),
+                },
+            },
+        );
+        let branch_around_drop =
+            MirProgram::with_type_catalog(branching_functions, program.type_catalog().clone())
+                .expect_err("every MapRoot path must discharge its root obligation");
+        assert!(branch_around_drop
+            .iter()
+            .any(|error| { error.message.contains("single-block, return-only profile") }));
+    }
+
+    #[test]
+    fn canonical_map_root_gate_rejects_unclaimed_or_noncanonical_descriptors() {
+        let (root_owner, root_program) = canonical_map_root_program();
+        let (_, scalar_program) = canonical_program_with_main("func main() -> i32 { 42 }");
+        let root_id = crate::core::mir::types::map_root_type_id();
+        let descriptor = root_program
+            .type_catalog()
+            .get(&root_id)
+            .expect("checker MapRoot descriptor")
+            .clone();
+
+        let mut extra_root_functions = root_program.functions().clone();
+        let function = extra_root_functions.get_mut(&root_owner).expect("main MIR");
+        let extra_root = super::MirValueId::new("param:unclaimed_map_root").expect("MIR value id");
+        function.values.insert(
+            extra_root.clone(),
+            super::super::MirValue {
+                id: extra_root.clone(),
+                ty: root_id.clone(),
+            },
+        );
+        function.parameters.push(extra_root);
+        let extra_root_error = MirProgram::with_type_catalog(
+            extra_root_functions,
+            root_program.type_catalog().clone(),
+        )
+        .expect_err("unreceipted MapRoot parameter must be rejected");
+        assert!(extra_root_error.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot values must match exactly the Checker-receipted local roots")
+        }));
+
+        let mut unclaimed_catalog = scalar_program.type_catalog().clone();
+        unclaimed_catalog.replace_for_test_only(root_id.clone(), descriptor.clone());
+        let unclaimed =
+            MirProgram::with_type_catalog(scalar_program.functions().clone(), unclaimed_catalog)
+                .expect_err("an unused MapRoot descriptor must not authorize a forged operation");
+        assert!(unclaimed
+            .iter()
+            .any(|error| error.message.contains("MapRoot TypeDesc presence")));
+
+        let mut mislabeled_catalog = scalar_program.type_catalog().clone();
+        let i32_descriptor = mislabeled_catalog
+            .iter()
+            .find_map(|(_, descriptor)| {
+                (descriptor.kind
+                    == crate::core::mir::types::MirTypeKind::Primitive(
+                        crate::core::PrimitiveType::I32,
+                    ))
+                .then(|| descriptor.clone())
+            })
+            .expect("canonical i32 descriptor");
+        mislabeled_catalog.replace_for_test_only(root_id.clone(), i32_descriptor);
+        let mut mislabeled_functions = scalar_program.functions().clone();
+        let function = mislabeled_functions
+            .get_mut(&NodeId("function:main".into()))
+            .expect("main MIR");
+        let forged_parameter =
+            super::MirValueId::new("param:forged_map_root_type").expect("MIR value id");
+        function.values.insert(
+            forged_parameter.clone(),
+            super::super::MirValue {
+                id: forged_parameter.clone(),
+                ty: root_id.clone(),
+            },
+        );
+        function.parameters.push(forged_parameter);
+        let mislabeled = MirProgram::with_type_catalog(mislabeled_functions, mislabeled_catalog)
+            .expect_err("canonical MapRoot identity with a different TypeDesc must be rejected");
+        assert!(mislabeled.iter().any(|error| {
+            error
+                .message
+                .contains("canonical MapRoot TypeDesc identity has a non-MapRoot descriptor")
+                || error.message.contains("MapRoot values must match exactly")
+        }));
+
+        let mut forged_catalog = root_program.type_catalog().clone();
+        let forged_id = crate::core::ResolvedTypeId::synthetic("forged:MapRoot");
+        forged_catalog.replace_for_test_only(forged_id, descriptor.clone());
+        let forged =
+            MirProgram::with_type_catalog(root_program.functions().clone(), forged_catalog)
+                .expect_err("noncanonical MapRoot TypeDesc identity must fail before consumers");
+        assert!(forged.iter().any(|error| {
+            error
+                .message
+                .contains("non-canonical MapRoot TypeDesc identity")
+        }));
+
+        let mut malformed_catalog = root_program.type_catalog().clone();
+        let mut malformed_descriptor = descriptor;
+        malformed_descriptor.ownership = crate::core::mir::types::MirOwnership::Copy;
+        malformed_catalog.replace_for_test_only(root_id, malformed_descriptor);
+        let malformed =
+            MirProgram::with_type_catalog(root_program.functions().clone(), malformed_catalog)
+                .expect_err("forged MapRoot ABI/ownership metadata must be rejected");
+        assert!(malformed.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot TypeDesc has an inconsistent ABI/ownership/glue contract")
+        }));
     }
 
     #[test]

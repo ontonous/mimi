@@ -5137,6 +5137,12 @@ impl MirTypeCatalog {
         ty: &ResolvedTypeId,
         operation: MirGlueOperation,
     ) -> Result<(), String> {
+        if ty != &map_root_type_id() {
+            return Err(format!(
+                "type '{}' is not the canonical MapRoot TypeDesc identity",
+                ty.as_str()
+            ));
+        }
         let descriptor = self.get(ty).ok_or_else(|| {
             format!(
                 "MapRoot type '{}' is absent from MIR type catalog",

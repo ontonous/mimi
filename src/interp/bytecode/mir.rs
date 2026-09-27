@@ -1098,6 +1098,12 @@ impl<'a> FunctionEmitter<'a> {
         instruction: &MirInstructionKind,
     ) {
         match instruction {
+            MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootDrop { .. } => {
+                self.error("canonical MapRoot operations are not supported by bytecode emission in this slice".to_owned());
+            }
             MirInstructionKind::Const { result, literal } => {
                 if let Err(message) = self.supported_type_for_value(result) {
                     self.error(format!("constant '{}' is unsupported: {message}", result));

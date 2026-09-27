@@ -216,6 +216,9 @@ pub(crate) struct MapRootAction {
     /// admits literals without embedded NUL because the current runtime
     /// entry point accepts a NUL-terminated key.
     pub(crate) key: Option<String>,
+    /// Value expression consumed by `Set`. The canonical lowering maps this
+    /// stable node identity to its SSA value and the MIR receipt binds it.
+    pub(crate) value: Option<NodeId>,
     /// Previous local consumed by persistent `Set`.
     pub(crate) source_local: Option<ResolvedLocalId>,
     pub(crate) source: Option<ResourceId>,

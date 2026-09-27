@@ -268,8 +268,9 @@ impl<'a> ActionEmitter<'a> {
             kind: MapRootActionKind::New,
             point: initializer.node_id.clone(),
             local: target.clone(),
-            root: self.resource_for_local(target),
+            root: Self::map_root_resource_identity(target),
             key: None,
+            value: None,
             source_local: None,
             source: None,
         });
@@ -299,8 +300,9 @@ impl<'a> ActionEmitter<'a> {
                     kind: MapRootActionKind::Size,
                     point: expression.node_id.clone(),
                     local: local.clone(),
-                    root: self.resource_for_local(&local),
+                    root: Self::map_root_resource_identity(&local),
                     key: None,
+                    value: None,
                     source_local: None,
                     source: None,
                 });
@@ -375,10 +377,11 @@ impl<'a> ActionEmitter<'a> {
             kind: MapRootActionKind::Set,
             point: expression.node_id.clone(),
             local: target.clone(),
-            root: self.resource_for_local(&target),
+            root: Self::map_root_resource_identity(&target),
             key: Some(key.clone()),
+            value: Some(call.arguments[2].value.node_id.clone()),
             source_local: Some(source_local.clone()),
-            source: Some(self.resource_for_local(&source_local)),
+            source: Some(Self::map_root_resource_identity(&source_local)),
         });
     }
 
@@ -1430,8 +1433,9 @@ impl<'a> ActionEmitter<'a> {
                             kind: MapRootActionKind::Drop,
                             point: statement.node_id.clone(),
                             local: local.clone(),
-                            root: self.resource_for_local(&local),
+                            root: Self::map_root_resource_identity(&local),
                             key: None,
+                            value: None,
                             source_local: None,
                             source: None,
                         });
@@ -3017,6 +3021,14 @@ impl<'a> ActionEmitter<'a> {
             .get(local)
             .and_then(|resources| resources.first().cloned())
             .unwrap_or_else(|| ResourceId(local.0.clone()))
+    }
+
+    /// Give the closed MapRoot profile a stable resource identity directly
+    /// from the Checker local. Map handles are not ordinary CFG-linear values
+    /// yet, so their receipt identity must not depend on the general resource
+    /// ledger's incidental contents.
+    fn map_root_resource_identity(local: &ResolvedLocalId) -> ResourceId {
+        ResourceId(local.0.clone())
     }
 
     fn resource_for_place(&self, place: &Place) -> ResourceId {

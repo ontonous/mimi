@@ -1899,6 +1899,15 @@ fn eval_instruction(
     instruction: &MirInstructionKind,
 ) -> Result<(), String> {
     match instruction {
+        MirInstructionKind::MapRootNew { .. }
+        | MirInstructionKind::MapRootSet { .. }
+        | MirInstructionKind::MapRootSize { .. }
+        | MirInstructionKind::MapRootDrop { .. } => {
+            return Err(format!(
+                "{}: MapRoot operation is outside the verifier's trusted subset",
+                instruction_id
+            ));
+        }
         MirInstructionKind::Const { result, literal } => {
             let result_ty = function
                 .values

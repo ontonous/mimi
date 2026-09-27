@@ -1273,6 +1273,26 @@ fn canonical_instance_contract_text(contract: &MirGenericInstanceContract) -> St
 /// operations remain fail-closed until their own effect summary is materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirInstructionKind {
+    /// Checker-authorized construction of an opaque runtime Map table root.
+    MapRootNew {
+        result: MirValueId,
+    },
+    /// Persistent update: consumes `source` and produces a distinct root.
+    MapRootSet {
+        result: MirValueId,
+        source: MirValueId,
+        key: String,
+        value: MirValueId,
+    },
+    /// Borrowing size query. The result is the checker's i32 surface value.
+    MapRootSize {
+        result: MirValueId,
+        root: MirValueId,
+    },
+    /// Consume and release a Map table root.
+    MapRootDrop {
+        root: MirValueId,
+    },
     Const {
         result: MirValueId,
         literal: ResolvedLiteral,
@@ -2442,6 +2462,20 @@ struct MirCheckerLoanContract {
     ends: Vec<MirCheckerLoanEndSite>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MirCheckerMapRootAction {
+    pub(super) kind: crate::core::MapRootActionKind,
+    pub(super) point: NodeId,
+    pub(super) local: MirValueId,
+    pub(super) result: Option<MirValueId>,
+    pub(super) root: String,
+    pub(super) key: Option<String>,
+    pub(super) value: Option<MirValueId>,
+    pub(super) source_local: Option<MirValueId>,
+    pub(super) source: Option<String>,
+    pub(super) instruction: MirInstructionId,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Checker ownership facts projected into canonical MIR.
 ///
@@ -2455,6 +2489,9 @@ pub struct MirOwnershipSummary {
     /// Kept private so consumers can validate that the public event stream
     /// was not selectively deleted or rewritten after checker lowering.
     checker_loans: BTreeMap<NodeId, MirCheckerLoanContract>,
+    /// Exact, private Checker Map-root action sequence. Public MIR operations
+    /// are accepted only when this receipt binds them one-to-one.
+    pub(super) checker_map_roots: Vec<MirCheckerMapRootAction>,
 }
 
 impl MirOwnershipSummary {
@@ -2698,6 +2735,52 @@ impl MirOwnershipSummary {
                 );
             }
         }
+        for (index, action) in self.checker_map_roots.iter().enumerate() {
+            let kind = match action.kind {
+                crate::core::MapRootActionKind::New => "new",
+                crate::core::MapRootActionKind::Set => "set",
+                crate::core::MapRootActionKind::Size => "size",
+                crate::core::MapRootActionKind::Drop => "drop",
+            };
+            let result = action
+                .result
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key = action
+                .key
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let value = action
+                .value
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let source_local = action
+                .source_local
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let source = action
+                .source
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let _ = writeln!(
+                output,
+                "    checker_map_root[{index}] {kind} point={} local={} result={} root={} key={} value={} source_local={} source={} instruction={}",
+                action.point.0,
+                action.local,
+                result,
+                format_mir_literal(&ResolvedLiteral::String(action.root.clone())),
+                key,
+                value,
+                source_local,
+                source,
+                action.instruction
+            );
+        }
         output
     }
 }
@@ -2749,6 +2832,7 @@ impl MirFunction {
         validator.check_ownership();
         let mut errors = validator.finish().err().unwrap_or_default();
         errors.extend(validate_ownership_event_receipts(self));
+        errors.extend(validate_map_root_action_receipts(self));
         if errors.is_empty() {
             Ok(())
         } else {
@@ -2817,6 +2901,437 @@ impl MirFunction {
         output.push_str(&self.ownership.canonical_text());
         output
     }
+}
+
+fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidationError> {
+    let mut errors = Vec::new();
+    let mut observed = Vec::<(usize, &MirInstruction)>::new();
+    let has_receipts = !function.ownership.checker_map_roots.is_empty();
+    if has_receipts
+        && (function.blocks.len() != 1
+            || function.blocks.values().any(|block| {
+                !block.parameters.is_empty()
+                    || !matches!(block.terminator, MirTerminator::Return { .. })
+            }))
+    {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot receipts require the Checker-owned single-block, return-only profile"
+                .into(),
+        });
+    }
+    for (block_order, block) in function.blocks.values().enumerate() {
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            if matches!(
+                instruction.kind,
+                MirInstructionKind::MapRootNew { .. }
+                    | MirInstructionKind::MapRootSet { .. }
+                    | MirInstructionKind::MapRootSize { .. }
+                    | MirInstructionKind::MapRootDrop { .. }
+            ) {
+                observed.push((block_order * 1_000_000 + index, instruction));
+            }
+            match &instruction.kind {
+                MirInstructionKind::Drop { value }
+                | MirInstructionKind::Clone { source: value, .. }
+                    if function
+                        .values
+                        .get(value)
+                        .is_some_and(|v| v.ty == types::map_root_type_id()) =>
+                {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: "MapRoot requires its checker-receipted dedicated operation"
+                            .into(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    let receipts = &function.ownership.checker_map_roots;
+    if receipts.len() != observed.len() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: format!(
+                "MapRoot checker receipt count {} disagrees with dedicated operation count {}",
+                receipts.len(),
+                observed.len()
+            ),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut previous_order = None;
+    for receipt in receipts {
+        let root_matches_checker_local = receipt
+            .local
+            .as_str()
+            .strip_prefix("local:")
+            .is_some_and(|local_identity| local_identity == receipt.root.as_str());
+        if receipt.point.0.trim().is_empty()
+            || receipt.root.trim().is_empty()
+            || !root_matches_checker_local
+            || !seen.insert(receipt.instruction.clone())
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapRoot checker receipt has an invalid root/local identity or duplicate instruction".into(),
+            });
+        }
+        let expected_role = match receipt.kind {
+            crate::core::MapRootActionKind::New => "map_root_new",
+            crate::core::MapRootActionKind::Set => "map_root_set",
+            crate::core::MapRootActionKind::Size => "map_root_size",
+            crate::core::MapRootActionKind::Drop => "map_root_drop",
+        };
+        let expected_id = format!(
+            "inst:{expected_role}:{}:{}",
+            receipt.local.0, receipt.point.0
+        );
+        if receipt.instruction.as_str() != expected_id {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapRoot checker receipt instruction identity is forged".into(),
+            });
+        }
+        let Some((order, instruction)) = observed
+            .iter()
+            .find(|(_, instruction)| instruction.id == receipt.instruction)
+        else {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapRoot checker receipt has no unique dedicated instruction".into(),
+            });
+            continue;
+        };
+        if previous_order.is_some_and(|previous| previous >= *order) {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapRoot operations disagree with Checker point order".into(),
+            });
+        }
+        previous_order = Some(*order);
+        let expected = match (&receipt.kind, &instruction.kind) {
+            (crate::core::MapRootActionKind::New, MirInstructionKind::MapRootNew { result }) => {
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.key.is_none()
+                    && receipt.value.is_none()
+                    && receipt.source_local.is_none()
+                    && receipt.source.is_none()
+            }
+            (
+                crate::core::MapRootActionKind::Set,
+                MirInstructionKind::MapRootSet {
+                    result,
+                    source,
+                    key,
+                    value,
+                },
+            ) => {
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && Some(source) == receipt.source_local.as_ref()
+                    && receipt.key.as_ref() == Some(key)
+                    && receipt.value.as_ref() == Some(value)
+                    && receipt.source.is_some()
+                    && source != result
+            }
+            (
+                crate::core::MapRootActionKind::Size,
+                MirInstructionKind::MapRootSize { result, root },
+            ) => {
+                root == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.key.is_none()
+                    && receipt.value.is_none()
+                    && receipt.source_local.is_none()
+                    && receipt.source.is_none()
+            }
+            (crate::core::MapRootActionKind::Drop, MirInstructionKind::MapRootDrop { root }) => {
+                root == &receipt.local
+                    && receipt.result.is_none()
+                    && receipt.key.is_none()
+                    && receipt.value.is_none()
+                    && receipt.source_local.is_none()
+                    && receipt.source.is_none()
+            }
+            _ => false,
+        };
+        if !expected {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message:
+                    "MapRoot operation disagrees with its private Checker root/type/key receipt"
+                        .into(),
+            });
+        }
+        if let Some(value) = function.values.get(&receipt.local) {
+            if value.ty != types::map_root_type_id() {
+                errors.push(MirValidationError {
+                    subject: receipt.local.to_string(),
+                    message:
+                        "MapRoot action local does not have the canonical MapRoot TypeDesc identity"
+                            .into(),
+                });
+            }
+        }
+    }
+    // Bind every checker resource identity to exactly one MIR local root and
+    // carry it through persistent Set; Size/Drop must cite the current root.
+    let mut live_roots = BTreeMap::<String, MirValueId>::new();
+    for receipt in receipts {
+        match receipt.kind {
+            crate::core::MapRootActionKind::New => {
+                if live_roots.contains_key(&receipt.root)
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "MapRoot root identity or live local is duplicated".into(),
+                    });
+                } else {
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            crate::core::MapRootActionKind::Set => {
+                let source = receipt.source_local.as_ref();
+                let source_root = receipt.source.as_ref();
+                if source_root.and_then(|root| live_roots.get(root)) != source {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "MapRoot Set source resource identity does not match the consumed root"
+                                .into(),
+                    });
+                } else if let Some(source_root) = source_root {
+                    live_roots.remove(source_root);
+                }
+                if live_roots.contains_key(&receipt.root)
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "MapRoot Set result root identity is duplicated".into(),
+                    });
+                } else {
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            crate::core::MapRootActionKind::Size => {
+                if live_roots.get(&receipt.root) != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "MapRoot read/drop resource identity does not match the current root"
+                                .into(),
+                    });
+                }
+            }
+            crate::core::MapRootActionKind::Drop => {
+                if live_roots.remove(&receipt.root).as_ref() != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "MapRoot Drop resource identity does not match a live root".into(),
+                    });
+                }
+            }
+        }
+    }
+    let mut expected_root_values = BTreeSet::new();
+    for receipt in receipts {
+        expected_root_values.insert(receipt.local.clone());
+        if let Some(source_local) = &receipt.source_local {
+            expected_root_values.insert(source_local.clone());
+        }
+    }
+    let actual_root_values = function
+        .values
+        .values()
+        .filter(|value| value.ty == types::map_root_type_id())
+        .map(|value| value.id.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_root_values != expected_root_values {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot values must match exactly the Checker-receipted local roots".into(),
+        });
+    }
+    if function.parameters.iter().any(|parameter| {
+        function
+            .values
+            .get(parameter)
+            .is_some_and(|value| value.ty == types::map_root_type_id())
+    }) {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot cannot enter this profile through a function parameter".into(),
+        });
+    }
+    for block in function.blocks.values() {
+        for parameter in &block.parameters {
+            if function
+                .values
+                .get(&parameter.value)
+                .is_some_and(|value| value.ty == types::map_root_type_id())
+            {
+                errors.push(MirValidationError {
+                    subject: parameter.value.to_string(),
+                    message: "MapRoot cannot enter this profile through a block parameter".into(),
+                });
+            }
+        }
+        for instruction in &block.instructions {
+            let dedicated_root_use = match &instruction.kind {
+                MirInstructionKind::MapRootSet { source, value, .. } => {
+                    actual_root_values.contains(source) && !actual_root_values.contains(value)
+                }
+                MirInstructionKind::MapRootSize { root, .. }
+                | MirInstructionKind::MapRootDrop { root } => actual_root_values.contains(root),
+                MirInstructionKind::MapRootNew { .. } => true,
+                _ => false,
+            };
+            if !dedicated_root_use
+                && mir_instruction_value_uses(&instruction.kind)
+                    .iter()
+                    .any(|value| actual_root_values.contains(value))
+            {
+                errors.push(MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message:
+                        "MapRoot local is used outside its dedicated Checker-receipted operation"
+                            .into(),
+                });
+            }
+        }
+        if mir_terminator_value_uses(&block.terminator)
+            .iter()
+            .any(|value| actual_root_values.contains(value))
+        {
+            errors.push(MirValidationError {
+                subject: block.id.to_string(),
+                message: "MapRoot cannot escape through a MIR terminator or control-flow edge"
+                    .into(),
+            });
+        }
+    }
+    if function.result == types::map_root_type_id() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot cannot escape through a function result in this closed profile"
+                .into(),
+        });
+    }
+    if !live_roots.is_empty() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot Checker receipt leaves live root obligations".into(),
+        });
+    }
+    errors
+}
+
+fn mir_instruction_value_uses(kind: &MirInstructionKind) -> Vec<MirValueId> {
+    use MirInstructionKind as I;
+    let mut uses = Vec::new();
+    match kind {
+        I::Const { .. } | I::Nop | I::MapRootNew { .. } => {}
+        I::MapRootSet { source, value, .. } => uses.extend([source.clone(), value.clone()]),
+        I::MapRootSize { root, .. } | I::MapRootDrop { root } => uses.push(root.clone()),
+        I::Load { place, .. } => {
+            if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
+                uses.push(local);
+            }
+        }
+        I::Copy { source, .. }
+        | I::Move { source, .. }
+        | I::Clone { source, .. }
+        | I::Convert { source, .. } => uses.push(source.clone()),
+        I::Drop { value } | I::EndBorrow { borrow: value } => uses.push(value.clone()),
+        I::Borrow { source, .. } => uses.push(source.clone()),
+        I::Project {
+            base, projection, ..
+        }
+        | I::MoveProject {
+            base, projection, ..
+        }
+        | I::MoveProjectDrop {
+            base, projection, ..
+        } => {
+            uses.push(base.clone());
+            if let MirProjection::Index(index) = projection {
+                uses.push(index.clone());
+            }
+        }
+        I::VariantProject { base, .. } | I::VariantProjectMove { base, .. } => {
+            uses.push(base.clone())
+        }
+        I::VariantProjectOr { base, fallback, .. } => uses.extend([base.clone(), fallback.clone()]),
+        I::Construct { fields, .. }
+        | I::ConstructSet {
+            elements: fields, ..
+        } => uses.extend(fields.iter().cloned()),
+        I::ConstructList { elements, .. } => uses.extend(elements.iter().cloned()),
+        I::ListOp { list, argument, .. }
+        | I::SetOp {
+            set: list,
+            argument,
+            ..
+        } => {
+            uses.push(list.clone());
+            uses.extend(argument.iter().cloned());
+        }
+        I::VariantPredicate { variant, .. } => uses.push(variant.clone()),
+        I::ConstructVariant { fields, .. } | I::ConstructVariantMove { fields, .. } => {
+            uses.extend(fields.iter().map(|(_, value)| value.clone()))
+        }
+        I::UpdateRecord { base, fields, .. } => {
+            uses.push(base.clone());
+            uses.extend(fields.iter().cloned());
+        }
+        I::Binary { left, right, .. } => uses.extend([left.clone(), right.clone()]),
+        I::Unary { operand, .. } => uses.push(operand.clone()),
+        I::Call { arguments, .. }
+        | I::FlowTransition { arguments, .. }
+        | I::BuiltinCall { arguments, .. } => uses.extend(arguments.iter().cloned()),
+        I::SessionCall {
+            endpoint, payload, ..
+        } => {
+            uses.push(endpoint.clone());
+            uses.extend(payload.iter().cloned());
+        }
+        I::SessionPairBind { .. } => {}
+    }
+    uses
+}
+
+fn mir_terminator_value_uses(terminator: &MirTerminator) -> Vec<MirValueId> {
+    let mut uses = Vec::new();
+    match terminator {
+        MirTerminator::Goto { arguments, .. } => uses.extend(arguments.iter().cloned()),
+        MirTerminator::Branch {
+            condition,
+            then_arguments,
+            else_arguments,
+            ..
+        } => {
+            uses.push(condition.clone());
+            uses.extend(then_arguments.iter().cloned());
+            uses.extend(else_arguments.iter().cloned());
+        }
+        MirTerminator::Switch { scrutinee, arms }
+        | MirTerminator::SwitchMove { scrutinee, arms } => {
+            uses.push(scrutinee.clone());
+            for arm in arms {
+                uses.extend(arm.arguments.iter().cloned());
+            }
+        }
+        MirTerminator::Return { value } | MirTerminator::Fault { value } => {
+            uses.extend(value.iter().cloned())
+        }
+        MirTerminator::Trap { .. } | MirTerminator::Unreachable => {}
+    }
+    uses
 }
 
 /// Validate the closed generic identity body contract shared by lowering,
@@ -4696,6 +5211,9 @@ fn instruction_produces_owned_string(
 ) -> bool {
     let result = match kind {
         MirInstructionKind::Load { result, .. }
+        | MirInstructionKind::MapRootNew { result }
+        | MirInstructionKind::MapRootSet { result, .. }
+        | MirInstructionKind::MapRootSize { result, .. }
         | MirInstructionKind::Copy { result, .. }
         | MirInstructionKind::Convert { result, .. }
         | MirInstructionKind::Borrow { result, .. }
@@ -4724,6 +5242,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Move { .. }
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
+        | MirInstructionKind::MapRootDrop { .. }
         | MirInstructionKind::EndBorrow { .. }
         | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => None,
@@ -4803,6 +5322,12 @@ fn instruction_consumes_owned_string(
                 sources.push(argument.clone());
             }
         }
+        MirInstructionKind::MapRootSet { source, value, .. } => {
+            sources.extend([source.clone(), value.clone()])
+        }
+        MirInstructionKind::MapRootSize { root, .. } | MirInstructionKind::MapRootDrop { root } => {
+            sources.push(root.clone())
+        }
         MirInstructionKind::ConstructVariant { fields, .. }
         | MirInstructionKind::ConstructVariantMove { fields, .. } => {
             sources.extend(fields.iter().map(|(_, value)| value.clone()))
@@ -4823,6 +5348,7 @@ fn instruction_consumes_owned_string(
         | MirInstructionKind::Move { .. }
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
+        | MirInstructionKind::MapRootNew { .. }
         | MirInstructionKind::VariantProject { .. }
         | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => {}
@@ -4993,6 +5519,17 @@ fn format_mir_switch_case(case: &MirSwitchCase) -> String {
 
 fn format_instruction(kind: &MirInstructionKind) -> String {
     match kind {
+        MirInstructionKind::MapRootNew { result } => format!("map_root_new {result}"),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            key,
+            value,
+        } => format!("map_root_set {result} <- {source}[{key:?}] = {value}"),
+        MirInstructionKind::MapRootSize { result, root } => {
+            format!("map_root_size {result} <- {root}")
+        }
+        MirInstructionKind::MapRootDrop { root } => format!("map_root_drop {root}"),
         MirInstructionKind::Const { result, literal } => {
             format!("const {result} = {}", format_mir_literal(literal))
         }
@@ -5703,6 +6240,25 @@ impl<'a> MirValidator<'a> {
     ) {
         use MirInstructionKind::*;
         match &instruction.kind {
+            MapRootNew { result } => self.result_at(result, &instruction.id, block, index),
+            MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.use_value(source);
+                self.use_value(value);
+                if key.as_bytes().contains(&0) {
+                    self.error(result.to_string(), "MapRoot key contains NUL");
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
+            MapRootSize { result, root } => {
+                self.use_value(root);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            MapRootDrop { root } => self.use_value(root),
             Const { result, .. } | Load { result, .. } => {
                 self.result_at(result, &instruction.id, block, index)
             }
@@ -6372,6 +6928,12 @@ impl<'a> MirValidator<'a> {
         let mut uses: Vec<MirValueId> = Vec::new();
         match &instruction.kind {
             MirInstructionKind::Const { .. } | MirInstructionKind::Nop => {}
+            MirInstructionKind::MapRootNew { .. } => {}
+            MirInstructionKind::MapRootSet { source, value, .. } => {
+                uses.extend([source.clone(), value.clone()])
+            }
+            MirInstructionKind::MapRootSize { root, .. }
+            | MirInstructionKind::MapRootDrop { root } => uses.push(root.clone()),
             MirInstructionKind::Load { place, .. } => {
                 if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
                     uses.push(local);

@@ -752,6 +752,14 @@ impl<'a> CapabilityGate<'a> {
     ) {
         let catalog = self.program.type_catalog();
         match instruction {
+            MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootDrop { .. } => {
+                self.error(format!(
+                    "{subject} MapRoot operation is outside verifier capability"
+                ));
+            }
             MirInstructionKind::Const { result, literal } => {
                 let Some(ty) = value_type(function, result) else {
                     self.error(format!("{subject} constant result '{}' is absent", result));
