@@ -25063,9 +25063,10 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
 }
 
 // R6-1114 L2 negative pin: a nested callable that captures an outer local has
-// no canonical MIR environment ABI. Inspection and explicit execution/build
-// entries must all stop during MIR construction rather than materializing an
-// undefined capture slot or silently routing the request to legacy codegen.
+// no canonical MIR environment ABI. Default run/verify stay on the explicit
+// compatibility disposition; inspection and every explicit execution/build/
+// verification entry must stop during MIR construction rather than
+// materializing an undefined capture slot or silently retrying through legacy.
 #[test]
 fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
     let source = project_root()
@@ -25077,6 +25078,53 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         std::process::id()
     ));
     let _ = fs::remove_file(&native);
+
+    let compatibility_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default actor-capture compatibility run");
+    let run_stderr = String::from_utf8_lossy(&compatibility_run.stderr);
+    assert!(
+        compatibility_run.status.success(),
+        "default actor-capture compatibility run must succeed: {run_stderr}"
+    );
+    assert_eq!(compatibility_run.stdout, b"15\n");
+    assert!(
+        run_stderr.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "the known actor capture fallback must remain an explicit route: {run_stderr}"
+    );
+
+    let compatibility_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&source)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn default actor-capture compatibility verifier");
+    let verify_transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compatibility_verify.stdout),
+        String::from_utf8_lossy(&compatibility_verify.stderr)
+    );
+    assert!(
+        compatibility_verify.status.success(),
+        "default actor-capture verification without contracts must succeed: {verify_transcript}"
+    );
+    assert!(
+        verify_transcript.contains(
+            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        ),
+        "the compatibility verifier must disclose its route: {verify_transcript}"
+    );
+    assert!(
+        verify_transcript.contains("no contracts to verify"),
+        "the no-contract verification result must remain neutral: {verify_transcript}"
+    );
 
     let mut mir = Command::new(mimi_bin());
     mir.current_dir(project_root()).arg("mir").arg(&source);
@@ -25098,6 +25146,16 @@ fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
         ("mimi mir", mir.output().expect("spawn MIR inspection")),
         ("mimi run --mir", run.output().expect("spawn MIR run")),
         ("mimi build --mir", build.output().expect("spawn MIR build")),
+        (
+            "mimi verify --mir",
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("verify")
+                .arg(&source)
+                .arg("--mir")
+                .output()
+                .expect("spawn MIR verifier"),
+        ),
     ] {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
