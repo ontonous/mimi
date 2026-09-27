@@ -315,6 +315,18 @@ const MISSING_SYMBOL_SOURCE: &str = r#"
 extern "C" { func mir_ffi_absent_symbol(value: i64) -> i64; }
 func main() -> i64 { println(9); mir_ffi_absent_symbol(7 as i64); 0 }
 "#;
+const UNREACHABLE_MISSING_SYMBOL_SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_present_only(value: i64) -> i64;
+    func mir_ffi_absent_symbol(value: i64) -> i64;
+}
+func main() -> i64 {
+    println(9)
+    println(mir_ffi_present_only(7 as i64))
+    0
+}
+func unreachable_helper() -> i64 { mir_ffi_absent_symbol(1 as i64) }
+"#;
 const MISSING_LIBRARY_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_missing_library(int64_t value) { return value + 1; }
@@ -1185,7 +1197,7 @@ func main() -> i64 {
         .expect_err("bytecode f32 call must fail when the dynamic library is absent");
     assert_eq!(missing_library_error.code(), "E0800");
     assert!(missing_library_error.to_string().contains("failed to load"));
-    assert_eq!(missing_library_vm.stdout(), "1\n");
+    assert_eq!(missing_library_vm.stdout(), "");
     assert_eq!(missing_library_vm.debug_stack_state(), (0, 0));
 
     let mut vm = BytecodeVM::new(bytecode);
@@ -1196,7 +1208,7 @@ func main() -> i64 {
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
 
     vm.set_canonical_ffi_library_path(good_path.to_string_lossy().into_owned());
@@ -3915,7 +3927,11 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     assert!(reference_error
         .to_string()
         .contains("no reference FFI host binding"));
-    assert_eq!(reference_interpreter.captured_output(), "9\n");
+    assert_eq!(
+        reference_interpreter.captured_output(),
+        "",
+        "missing explicit host binding must fail before the entry body"
+    );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-missing-symbol".into())
@@ -3936,7 +3952,11 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
     assert!(bytecode_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "9\n");
+    assert_eq!(
+        vm.stdout(),
+        "",
+        "missing symbol preflight must fail before the entry body"
+    );
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_missing");
@@ -3957,7 +3977,114 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
 }
 
 #[test]
-fn scalar_ffi_missing_library_preserves_prefix_and_recovers() {
+fn scalar_ffi_manifest_preflight_rejects_unreachable_late_symbol_before_effects() {
+    struct ManifestPreflightOracle {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl MirReferenceFfiResolver for ManifestPreflightOracle {
+        fn preflight(&self, receipts: &[MirFfiCallContract]) -> Result<(), String> {
+            assert_eq!(receipts.len(), 2, "preflight must receive every call site");
+            assert!(receipts
+                .iter()
+                .any(|receipt| receipt.symbol == "mir_ffi_present_only"));
+            assert!(receipts
+                .iter()
+                .any(|receipt| receipt.symbol == "mir_ffi_absent_symbol"));
+            Err("missing binding for mir_ffi_absent_symbol".into())
+        }
+
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            _args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("preflight-rejected host call must never execute".into())
+        }
+    }
+
+    let mut guard = super::FfiEnvGuard::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, MISSING_SYMBOL_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    guard.set_path(&library);
+
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(UNREACHABLE_MISSING_SYMBOL_SOURCE)
+            .tokenize()
+            .expect("lex unreachable-symbol FFI fixture"),
+    )
+    .parse_file()
+    .expect("parse unreachable-symbol FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check unreachable-symbol fixture");
+    let mir =
+        MirProgram::from_checked_program(&checked).expect("materialize unreachable-symbol FFI MIR");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    assert_eq!(
+        mir.ffi_call_entries_in_source_order()[0].1.symbol,
+        "mir_ffi_present_only",
+        "the available main call must precede the uncalled missing helper symbol"
+    );
+    assert_eq!(
+        mir.ffi_call_entries_in_source_order()[1].1.symbol,
+        "mir_ffi_absent_symbol"
+    );
+
+    let oracle = ManifestPreflightOracle {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle);
+    let reference_error = reference
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must preflight even unreachable call sites");
+    assert!(reference_error
+        .to_string()
+        .contains("missing binding for mir_ffi_absent_symbol"));
+    assert_eq!(reference.captured_output(), "");
+    assert_eq!(oracle.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let bytecode = compile_mir_program(&mir).expect("unreachable-symbol AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode.clone());
+    vm.set_canonical_ffi_library_path(library.display().to_string());
+    let bytecode_error = vm
+        .run_value()
+        .expect_err("bytecode must resolve the full descriptor table at entry");
+    assert!(bytecode_error
+        .to_string()
+        .contains("failed to find canonical MIR FFI symbol 'mir_ffi_absent_symbol'"));
+    assert_eq!(vm.stdout(), "");
+    assert_eq!(vm.debug_stack_state(), (0, 0));
+
+    let mut direct_vm = BytecodeVM::new(bytecode);
+    direct_vm.set_canonical_ffi_library_path(library.display().to_string());
+    let direct_error = direct_vm
+        .call_named("function:main", Vec::new())
+        .expect_err("direct API must run the same whole-manifest preflight");
+    assert_eq!(direct_error.to_string(), bytecode_error.to_string());
+    assert_eq!(direct_vm.stdout(), "");
+    assert_eq!(direct_vm.debug_stack_state(), (0, 0));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_ffi_manifest_preflight");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native MIR lowering for unreachable-symbol fixture");
+    generator
+        .module
+        .verify()
+        .expect("valid native module before static symbol preflight");
+    let config = super::E2EConfig {
+        extra_c_src: Some(MISSING_SYMBOL_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_error = super::link_and_observe_module(&generator, &config, counter)
+        .expect_err("native link must reject the unreachable missing symbol before main");
+    assert!(native_error.contains("linker failed"), "{native_error}");
+}
+
+#[test]
+fn scalar_ffi_missing_library_fails_before_prefix_and_recovers() {
     struct MissingLibraryOracle;
     impl MirReferenceFfiResolver for MissingLibraryOracle {
         fn call(
@@ -4012,7 +4139,11 @@ fn scalar_ffi_missing_library_preserves_prefix_and_recovers() {
         missing_error.to_string().contains("failed to load"),
         "{missing_error}"
     );
-    assert_eq!(missing_vm.stdout(), "13\n");
+    assert_eq!(
+        missing_vm.stdout(),
+        "",
+        "missing library preflight must fail before the entry body"
+    );
 
     guard.set_path(&library);
     let mut recovered_vm = BytecodeVM::new(bytecode);
@@ -4070,9 +4201,9 @@ fn scalar_ffi_failed_vm_run_is_reusable_after_stdout_snapshot() {
         .run_value()
         .expect_err("the first run must fail while loading the absent library");
     assert_eq!(error.code(), "E0800");
-    assert_eq!(vm.stdout(), "13\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.take_stdout(), "13\n");
+    assert_eq!(vm.take_stdout(), "");
     assert_eq!(vm.stdout(), "");
 
     guard.set_path(&library);
@@ -4272,12 +4403,12 @@ func main() -> i64 {
     guard.set_path(&missing_library);
     let missing_error = vm
         .run_value()
-        .expect_err("missing-symbol VM call must fail closed after the prefix print");
+        .expect_err("missing-symbol VM call must fail closed before the prefix print");
     assert_eq!(missing_error.code(), "E0800");
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(
         vm.debug_canonical_ffi_loaded_library_count(),
@@ -4531,7 +4662,7 @@ func main() -> i64 {
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -4614,7 +4745,7 @@ func main() -> i64 {
     assert!(direct_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -4623,7 +4754,7 @@ func main() -> i64 {
         .expect_err("wrapped entry must share the missing-symbol failure boundary");
     assert_eq!(wrapped_error.code(), "E0800");
     assert_eq!(wrapped_error.to_string(), direct_error.to_string());
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -5674,7 +5805,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let mut generic_unchecked_vm = BytecodeVM::new(checked_program.clone());
     generic_unchecked_vm.verify_contracts = false;
@@ -5687,7 +5818,7 @@ func main() -> i64 { 0 }
     assert_eq!(generic_unchecked_vm.debug_stack_state(), (0, 0));
     assert_eq!(
         generic_unchecked_vm.debug_canonical_ffi_loaded_library_count(),
-        0
+        1
     );
 
     let mut explicitly_bound_vm = BytecodeVM::new(checked_program);
@@ -5708,7 +5839,7 @@ func main() -> i64 { 0 }
     assert_eq!(explicitly_bound_vm.debug_stack_state(), (0, 0));
     assert_eq!(
         explicitly_bound_vm.debug_canonical_ffi_loaded_library_count(),
-        0
+        1
     );
 }
 
@@ -5816,7 +5947,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let mut recovered_vm = BytecodeVM::new(program);
     recovered_vm.set_canonical_ffi_library_path(
@@ -5863,7 +5994,7 @@ func main() -> i64 { 0 }
     assert!(error.to_string().contains("FFI postcondition failed"));
     assert_eq!(recovered_vm.stdout(), "");
     assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
-    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 1);
     recovered_vm.set_canonical_ffi_library_path(
         good_fixture
             .dir
@@ -5877,7 +6008,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(recovered_vm.stdout(), "");
     assert_eq!(recovered_vm.debug_stack_state(), (0, 0));
-    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(recovered_vm.debug_canonical_ffi_loaded_library_count(), 2);
 }
 
 #[cfg(unix)]
@@ -5973,7 +6104,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*good_stdout.lock().unwrap(), "41\n");
     assert_eq!(good_vm.debug_stack_state(), (0, 0));
-    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let recovery_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut recovery_vm = BytecodeVM::new(bytecode);
@@ -5992,7 +6123,7 @@ func main() -> i64 { 0 }
     assert!(error.to_string().contains("FFI postcondition failed"));
     assert_eq!(&*recovery_stdout.lock().unwrap(), "41\n");
     assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
-    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     recovery_vm.set_canonical_ffi_library_path(
         good_fixture
@@ -6009,7 +6140,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*recovery_stdout.lock().unwrap(), "41\n41\n");
     assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
-    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 2);
 }
 
 #[cfg(unix)]
@@ -6142,13 +6273,13 @@ func main() -> i64 { 0 }
     assert_eq!(good_outcome.expect("good nested VM result"), Value::Int(5));
     assert_eq!(good_stdout, "41\n");
     assert_eq!(good_stack, (0, 0));
-    assert_eq!(good_cache, 0);
+    assert_eq!(good_cache, 1);
     let (code, message) = bad_outcome.expect_err("bad nested VM must reject postcondition");
     assert_eq!(code, "E0808");
     assert!(message.contains("FFI postcondition failed"), "{message}");
     assert_eq!(bad_stdout, "41\n");
     assert_eq!(bad_stack, (0, 0));
-    assert_eq!(bad_cache, 0);
+    assert_eq!(bad_cache, 1);
 }
 
 #[cfg(unix)]
@@ -6294,14 +6425,14 @@ func main() -> i64 { 0 }
     );
     assert_eq!(good_stdout, "41\n41\n");
     assert_eq!(good_stack, (0, 0));
-    assert_eq!(good_cache, 0);
+    assert_eq!(good_cache, 1);
     let (code, message) = bad_first.expect_err("bad first nested run must fail postcondition");
     assert_eq!(code, "E0808");
     assert!(message.contains("FFI postcondition failed"), "{message}");
     assert_eq!(bad_second.expect("recovered nested result"), Value::Int(5));
     assert_eq!(bad_stdout, "41\n41\n");
     assert_eq!(bad_stack, (0, 0));
-    assert_eq!(bad_cache, 0);
+    assert_eq!(bad_cache, 2);
 }
 
 #[cfg(unix)]
@@ -6452,7 +6583,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&good_stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(good_vm.debug_stack_state(), (0, 0));
-    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let bad_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut bad_vm = BytecodeVM::new(bytecode);
@@ -6474,7 +6605,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&bad_stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(bad_vm.debug_stack_state(), (0, 0));
-    assert_eq!(bad_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(bad_vm.debug_canonical_ffi_loaded_library_count(), 1);
 }
 
 #[cfg(unix)]
@@ -6642,7 +6773,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), expected_once);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     vm.set_canonical_ffi_library_path(
         bad_fixture
@@ -6661,7 +6792,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), expected_twice);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.set_canonical_ffi_library_path(
         good_fixture
@@ -6677,7 +6808,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), expected_thrice);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 }
 
 #[cfg(unix)]
@@ -6797,7 +6928,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "41\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
 
@@ -6955,7 +7086,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let original = descriptor_snapshot[0].clone();
     let mut forged = original.clone();
@@ -6974,7 +7105,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_ne!(vm.program().canonical_ffi[0], original);
 
     vm.replace_canonical_ffi_descriptor_for_test_only(0, original.clone());
@@ -6992,7 +7123,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.set_canonical_ffi_library_path(good_path);
     stdout.lock().unwrap().clear();
@@ -7003,7 +7134,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi[0], original);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
@@ -7167,7 +7298,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let mut forged_binding = original_b.clone();
     forged_binding.extern_idx = first_binding.extern_idx;
@@ -7192,7 +7323,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     stdout.lock().unwrap().clear();
@@ -7202,7 +7333,7 @@ func main() -> i64 { 0 }
     assert_eq!(second.to_string(), first.to_string());
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     vm.replace_canonical_ffi_call_extern_index_for_test_only(
         original_b.function,
@@ -7221,7 +7352,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7244,7 +7375,7 @@ func main() -> i64 { 0 }
         "direct nested bad-library stdout: {direct_error_stdout:?}"
     );
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.set_canonical_ffi_library_path(good_library.clone());
     stdout.lock().unwrap().clear();
@@ -7260,7 +7391,7 @@ func main() -> i64 { 0 }
         "direct nested recovered stdout: {direct_good_stdout:?}"
     );
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7284,7 +7415,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
@@ -7296,7 +7427,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7327,7 +7458,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
@@ -7339,7 +7470,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     let mut forged_window_binding = binding_snapshot[1].clone();
     forged_window_binding.args_base = u16::MAX;
@@ -7367,7 +7498,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
@@ -7385,7 +7516,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     let forged_argc = if original_b.argc == u16::MAX {
         0
@@ -7412,7 +7543,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
@@ -7424,7 +7555,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7458,7 +7589,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7497,7 +7628,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
@@ -7515,7 +7646,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7555,7 +7686,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     stdout.lock().unwrap().clear();
@@ -7566,7 +7697,7 @@ func main() -> i64 { 0 }
     assert_eq!(wrapped_combo_error.to_string(), combo_error.to_string());
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     stdout.lock().unwrap().clear();
     let direct_combo_error = vm
@@ -7576,7 +7707,7 @@ func main() -> i64 { 0 }
     assert_eq!(direct_combo_error.to_string(), combo_error.to_string());
     assert_eq!(&*stdout.lock().unwrap(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.replace_canonical_ffi_binding_for_test_only(1, binding_snapshot[1].clone());
     vm.replace_canonical_ffi_call_args_for_test_only(
@@ -7593,7 +7724,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7611,7 +7742,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     stdout.lock().unwrap().clear();
     let bad_wrapped_error = vm
@@ -7621,7 +7752,7 @@ func main() -> i64 { 0 }
     assert_eq!(bad_wrapped_error.to_string(), bad_run_error.to_string());
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.set_canonical_ffi_library_path(good_library);
     stdout.lock().unwrap().clear();
@@ -7632,7 +7763,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(sorted_lines(&stdout.lock().unwrap()), vec!["41", "42"]);
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 }
@@ -8845,7 +8976,7 @@ func main() -> i64 {
 }
 
 #[test]
-fn scalar_ffi_explicit_binding_requires_failure_precedes_library_load() {
+fn scalar_ffi_explicit_binding_requires_failure_precedes_host_call_after_preflight() {
     const SOURCE: &str = r#"
 extern "C" { func mir_ffi_rebindable(value: i64) -> i64 requires: value >= 0; }
 func invoke(value: i64) -> i64 {
@@ -8878,25 +9009,25 @@ func main() -> i64 {
     vm.set_canonical_ffi_library_path(second_path.clone());
     let first_error = vm
         .call_named("function:invoke", vec![Value::Int(-1)])
-        .expect_err("explicit B requires failure must precede its library load");
+        .expect_err("explicit B requires failure must precede the foreign call");
     assert_eq!(first_error.code(), "E0808");
     assert!(first_error.to_string().contains("precondition"));
     assert_eq!(vm.stdout(), "0\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(
         vm.debug_canonical_ffi_loaded_library_count(),
-        0,
-        "a failed requires predicate must not load the explicit library"
+        1,
+        "manifest symbol preflight loads the explicit library before entry"
     );
 
     let wrapped_error = vm
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
-        .expect_err("wrapped entry must preserve the pre-load requires boundary");
+        .expect_err("wrapped entry must preserve the requires boundary");
     assert_eq!(wrapped_error.code(), "E0808");
     assert!(wrapped_error.to_string().contains("precondition"));
     assert_eq!(vm.stdout(), "0\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     vm.clear_canonical_ffi_library_path();
     vm.set_verify_ffi(false);
@@ -8907,7 +9038,7 @@ func main() -> i64 {
     );
     assert_eq!(vm.stdout(), "0\n10\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
-    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
+    assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
     vm.set_canonical_ffi_library_path(second_path);
     assert_eq!(
@@ -8978,7 +9109,7 @@ func main() -> i64 {
         invalid_error.to_string().contains("failed to load"),
         "{invalid_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -8998,7 +9129,7 @@ func main() -> i64 {
         .expect_err("wrapped entry must preserve the invalid-path load failure");
     assert_eq!(wrapped_invalid_error.code(), "E0800");
     assert!(wrapped_invalid_error.to_string().contains("failed to load"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9054,7 +9185,7 @@ func main() -> i64 {
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9128,7 +9259,7 @@ func main() -> i64 {
         .expect_err("first-only library must fail at the second call site");
     assert_eq!(first_error.code(), "E0800");
     assert!(first_error.to_string().contains("mir_ffi_second"));
-    assert_eq!(vm.stdout(), "0\n31\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9148,7 +9279,7 @@ func main() -> i64 {
         .expect_err("switching back must reproduce the second-site failure");
     assert_eq!(second_error.code(), "E0800");
     assert_eq!(second_error.to_string(), first_error.to_string());
-    assert_eq!(vm.stdout(), "0\n31\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -9212,7 +9343,7 @@ func main() -> i64 {
         .expect_err("first-only library must fail at the second call site");
     assert_eq!(first_error.code(), "E0800");
     assert!(first_error.to_string().contains("mir_ffi_second"));
-    assert_eq!(vm.stdout(), "0\n61\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9232,7 +9363,7 @@ func main() -> i64 {
         .expect_err("wrapped entry must repeat the second-site failure");
     assert_eq!(wrapped_error.code(), "E0800");
     assert_eq!(wrapped_error.to_string(), first_error.to_string());
-    assert_eq!(vm.stdout(), "0\n61\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -9252,7 +9383,7 @@ func main() -> i64 {
         .expect_err("direct entry must repeat the failure after recovery");
     assert_eq!(direct_error.code(), "E0800");
     assert_eq!(direct_error.to_string(), first_error.to_string());
-    assert_eq!(vm.stdout(), "0\n61\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -9326,7 +9457,7 @@ func main() -> i64 {
         .expect_err("first-only explicit binding must fail at the second site");
     assert_eq!(first_error.code(), "E0800");
     assert!(first_error.to_string().contains("mir_ffi_second"));
-    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9346,7 +9477,7 @@ func main() -> i64 {
         .expect_err("first-only binding must fail again through wrapped entry");
     assert_eq!(repeated_error.code(), "E0800");
     assert_eq!(repeated_error.to_string(), first_error.to_string());
-    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -9370,7 +9501,7 @@ func main() -> i64 {
         .expect_err("rebinding first-only library must preserve second-site failure");
     assert_eq!(rebound_error.code(), "E0800");
     assert_eq!(rebound_error.to_string(), first_error.to_string());
-    assert_eq!(vm.stdout(), "0\n91\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 3);
 
@@ -9496,7 +9627,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("an explicit path containing NUL must fail at library loading");
     assert_eq!(error.code(), "E0800");
     assert!(error.to_string().contains("failed to load"), "{error}");
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -9546,7 +9677,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("NUL rebinding must fail without disturbing a cached library");
     assert_eq!(error.code(), "E0800");
     assert!(error.to_string().contains("failed to load"), "{error}");
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9598,7 +9729,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
             .expect_err("empty or whitespace binding must fail before a load");
         assert_eq!(error.code(), "E0800");
         assert!(error.to_string().contains("failed to load"), "{error}");
-        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.stdout(), "");
         assert_eq!(vm.debug_stack_state(), (0, 0));
         assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9651,7 +9782,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
             .expect_err("empty or whitespace environment path must fail before a load");
         assert_eq!(error.code(), "E0800");
         assert!(error.to_string().contains("failed to load"), "{error}");
-        assert_eq!(vm.stdout(), "0\n");
+        assert_eq!(vm.stdout(), "");
         assert_eq!(vm.debug_stack_state(), (0, 0));
         assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     }
@@ -9710,7 +9841,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("non-UTF-8 environment path must fail closed");
     assert_eq!(error.code(), "E0800");
     assert!(error.to_string().contains("not valid UTF-8"), "{error}");
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -9882,7 +10013,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("missing binding path must fail before caching");
     assert_eq!(missing.code(), "E0800");
     assert!(missing.to_string().contains("failed to load"), "{missing}");
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -9930,7 +10061,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         direct_error.to_string().contains("failed to load"),
         "{direct_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -9942,7 +10073,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         wrapped_error.to_string().contains("failed to load"),
         "{wrapped_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -9954,7 +10085,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         run_error.to_string().contains("failed to load"),
         "{run_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -10021,7 +10152,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         first_error.to_string().contains("failed to load"),
         "{first_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert!(!target.exists());
@@ -10071,7 +10202,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         first_error.to_string().contains("failed to load"),
         "{first_error}"
     );
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert!(!target.exists());
@@ -10132,7 +10263,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("unbound VM must fail while its environment path is absent");
     assert_eq!(missing.code(), "E0800");
     assert!(missing.to_string().contains("failed to load"), "{missing}");
-    assert_eq!(fallback_vm.stdout(), "0\n");
+    assert_eq!(fallback_vm.stdout(), "");
     assert_eq!(fallback_vm.debug_stack_state(), (0, 0));
     assert_eq!(fallback_vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -10241,7 +10372,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         clear_error.to_string().contains("failed to load"),
         "{clear_error}"
     );
-    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.stdout(), "");
     assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
     assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -10251,7 +10382,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("explicit rebind must still fail while its path is absent");
     assert_eq!(rebind_error.code(), "E0800");
     assert_eq!(rebind_error.to_string(), clear_error.to_string());
-    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.stdout(), "");
     assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
     assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -10605,7 +10736,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         malformed_error.to_string().contains("failed to load"),
         "{malformed_error}"
     );
-    assert_eq!(explicit_vm.stdout(), "0\n");
+    assert_eq!(explicit_vm.stdout(), "");
     assert_eq!(explicit_vm.debug_stack_state(), (0, 0));
     assert_eq!(explicit_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -10725,7 +10856,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
         .expect_err("malformed generation must fail through the named entry");
     assert_eq!(malformed_error.code(), "E0800");
     assert!(malformed_error.to_string().contains("failed to load"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -10740,7 +10871,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -10756,7 +10887,7 @@ func main() -> i64 { println(0 as i64); println(mir_ffi_rebindable(1 as i64)); 0
     assert!(cached_missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "0\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
 
@@ -13212,8 +13343,8 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     );
     assert_eq!(
         late_oracle.0.get(),
-        2,
-        "late receipt failure must preserve the two-call prefix"
+        0,
+        "receipt validation must reject before any host call"
     );
     let late_bytecode_error = compile_mir_program(&late_failure)
         .expect_err("bytecode must reject a late imported alias conversion forgery");
@@ -16839,8 +16970,8 @@ func main() -> i64 {
     );
     assert_eq!(
         vm.stdout(),
-        "1\n2\n",
-        "nested load failure must preserve output from parent and helper frames"
+        "",
+        "whole-program load preflight must reject before parent and helper frames execute"
     );
     assert_eq!(vm.debug_stack_state(), (0, 0));
 
@@ -18399,7 +18530,7 @@ void mir_ffi_unit_recover(int64_t value) {
     assert!(missing_error
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "");
@@ -20622,7 +20753,7 @@ func main() -> i64 {
     assert!(reference_error
         .to_string()
         .contains("no reference FFI host binding"));
-    assert_eq!(reference.captured_output(), "7\n");
+    assert_eq!(reference.captured_output(), "");
 
     let bytecode = compile_mir_program(&mir).expect("multi-argument missing-symbol bytecode");
     assert!(bytecode.ast.is_none());
@@ -20634,7 +20765,7 @@ func main() -> i64 {
     assert!(first
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -20642,7 +20773,7 @@ func main() -> i64 {
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
         .expect_err("wrapped entry must repeat the absent-symbol diagnostic");
     assert_eq!(wrapped.to_string(), first.to_string());
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -20650,7 +20781,7 @@ func main() -> i64 {
         .call_function(vm.program().entry, &[])
         .expect_err("direct entry must repeat the absent-symbol diagnostic");
     assert_eq!(direct.to_string(), first.to_string());
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -20803,7 +20934,7 @@ func main() -> i64 {
     assert!(first
         .to_string()
         .contains("failed to find canonical MIR FFI symbol"));
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -20811,7 +20942,7 @@ func main() -> i64 {
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
         .expect_err("wrapped entry must repeat the absent mixed-width symbol diagnostic");
     assert_eq!(wrapped.to_string(), first.to_string());
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -20819,7 +20950,7 @@ func main() -> i64 {
         .call_function(vm.program().entry, &[])
         .expect_err("direct entry must repeat the absent mixed-width symbol diagnostic");
     assert_eq!(direct.to_string(), first.to_string());
-    assert_eq!(vm.stdout(), "7\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
 
@@ -22078,11 +22209,7 @@ func main() -> i64 {
                 || reference_error.to_string().contains("conversion from"),
             "{label}: {reference_error}"
         );
-        assert_eq!(
-            reference.captured_output(),
-            "17\n",
-            "{label}: reference output"
-        );
+        assert_eq!(reference.captured_output(), "", "{label}: reference output");
 
         let bytecode_error = compile_mir_program(&forged)
             .expect_err("bytecode must reject a forged mixed-width receipt");
@@ -22210,7 +22337,7 @@ func main() -> i64 {
     assert!(reference_error
         .to_string()
         .contains("ABI conversion receipt"));
-    assert_eq!(reference.captured_output(), "7\n");
+    assert_eq!(reference.captured_output(), "");
     assert_eq!(oracle.calls.get(), 0, "host binding must remain untouched");
 
     let bytecode_error = compile_mir_program(&forged)
@@ -22310,8 +22437,8 @@ func main() -> i64 {
         .contains("parameter ABI conversion receipt count"));
     assert_eq!(
         reference.captured_output(),
-        "7\n",
-        "reference preserves the prefix before the malformed FFI call"
+        "",
+        "receipt validation must reject before source effects"
     );
     assert_eq!(
         oracle.calls.get(),
@@ -23202,7 +23329,7 @@ func main() -> i64 {
             .contains("failed to find canonical MIR FFI symbol"),
         "{bad_error}"
     );
-    assert_eq!(vm.stdout(), "8\n3\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
@@ -23229,7 +23356,7 @@ func main() -> i64 {
         .call_function_wrap_ok(vm.program().entry, &[], Value::Unit)
         .expect_err("wrapped entry must preserve bad-host effect prefix");
     assert_eq!(repeated_bad_error.to_string(), bad_error.to_string());
-    assert_eq!(vm.stdout(), "8\n3\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
@@ -23635,7 +23762,7 @@ func main() -> i64 {
             .contains("ABI conversion receipt"),
         "{forged_reference_error}"
     );
-    assert_eq!(forged_reference.captured_output(), "7\n42\n");
+    assert_eq!(forged_reference.captured_output(), "");
     let bytecode_error = compile_mir_program(&forged_conversion)
         .expect_err("bytecode must reject cross-call conversion forgery");
     assert!(
@@ -24690,19 +24817,12 @@ func main() -> i64 {
     let receipt_label = "scalar-ffi-mixed-abi-multi-receipt";
     let baseline_route = canonical.route_receipt(receipt_label);
 
-    // Two rejection stages, both pinned per receipt within one graph:
-    // a symbol forgery fails the preflight declaration-shape validator
-    // before any statement runs, while a parameter-types forgery survives
-    // preflight and isolates at the middle call site — earlier statements
-    // and the first receipt still execute, the forged call never reaches
-    // the host, and the later call site plus its sinks never run.
-    const FORGED_MIDDLE_LEGS: &[(&str, &str, u32)] = &[
-        // (forged field, expected captured stdout, host calls after the forged run)
-        ("symbol", "", 3),
-        ("parameter-types", "7\n3\n", 4),
-    ];
+    // Every receipt is validated as one manifest before source effects:
+    // either forged field rejects with no output and no additional host call.
+    const FORGED_MIDDLE_LEGS: &[&str] = &["symbol", "parameter-types"];
+    let calls_before_forgery = oracle.calls.get();
     let bool_id = entries[1].0.clone();
-    for &(field, expected_captured, expected_calls) in FORGED_MIDDLE_LEGS {
+    for &field in FORGED_MIDDLE_LEGS {
         let mut receipts = canonical.ffi_calls().clone();
         let receipt = receipts.get_mut(&bool_id).expect("middle receipt");
         if field == "symbol" {
@@ -24730,13 +24850,13 @@ func main() -> i64 {
         );
         assert_eq!(
             forged_reference.captured_output(),
-            expected_captured,
-            "{field}: forged call-site isolation"
+            "",
+            "{field}: whole-manifest receipt validation precedes source effects"
         );
         assert_eq!(
             oracle.calls.get(),
-            expected_calls,
-            "{field}: the forged call must never reach the host"
+            calls_before_forgery,
+            "{field}: whole-manifest validation must not add host calls"
         );
         assert!(
             crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
@@ -25321,7 +25441,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("Unit cache missing library must fail closed");
     assert_eq!(missing_error.code(), "E0800", "{missing_error}");
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
@@ -25343,7 +25463,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("repeated Unit cache missing library must remain deterministic");
     assert_eq!(repeated_missing.code(), "E0800", "{repeated_missing}");
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(
         vm.debug_canonical_ffi_loaded_library_count(),
@@ -25472,7 +25592,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("profile A missing Unit library must fail");
     assert_eq!(vm_a_missing.code(), "E0800", "{vm_a_missing}");
-    assert_eq!(vm_a.stdout(), "2\n");
+    assert_eq!(vm_a.stdout(), "");
     assert_eq!(vm_a.debug_stack_state(), (0, 0));
     assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -25498,7 +25618,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("profile B repeated missing Unit library must fail");
     assert_eq!(vm_b_missing.code(), "E0800", "{vm_b_missing}");
-    assert_eq!(vm_b.stdout(), "2\n");
+    assert_eq!(vm_b.stdout(), "");
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
     assert_eq!(
         vm_b.debug_canonical_ffi_loaded_library_count(),
@@ -25637,7 +25757,7 @@ func main() -> i64 { 0 }
     );
     assert_eq!(&*good_stdout.lock().unwrap(), "5\n");
     assert_eq!(good_vm.debug_stack_state(), (0, 0));
-    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(good_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     let recovery_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut recovery_vm = BytecodeVM::new(bytecode);
@@ -25654,7 +25774,7 @@ func main() -> i64 { 0 }
         .expect_err("nested Unit route missing library must fail");
     assert_eq!(first_error.code(), "E0800", "{first_error}");
     assert!(first_error.to_string().contains("failed to load"));
-    assert_eq!(&*recovery_stdout.lock().unwrap(), "5\n");
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "");
     assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
     assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
 
@@ -25669,9 +25789,9 @@ func main() -> i64 { 0 }
         recovery_vm.run_value().expect("nested Unit route recovery"),
         Value::Int(9)
     );
-    assert_eq!(&*recovery_stdout.lock().unwrap(), "5\n5\n");
+    assert_eq!(&*recovery_stdout.lock().unwrap(), "5\n");
     assert_eq!(recovery_vm.debug_stack_state(), (0, 0));
-    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     guard.set_path(&good_fixture.dir.join("ffi.so"));
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -25847,12 +25967,12 @@ func main() -> i64 { 0 }
     );
     assert_eq!(good_stdout, "7\n");
     assert_eq!(good_stack, (0, 0));
-    assert_eq!(good_cache, 0);
+    assert_eq!(good_cache, 1);
     let (code, message) =
         missing_outcome.expect_err("parallel nested Unit missing library must fail");
     assert_eq!(code, "E0800");
     assert!(message.contains("failed to load"), "{message}");
-    assert_eq!(missing_stdout, "7\n");
+    assert_eq!(missing_stdout, "");
     assert_eq!(missing_stack, (0, 0));
     assert_eq!(missing_cache, 0);
     guard.set_path(&fixture.dir.join("ffi.so"));
@@ -26811,7 +26931,7 @@ func main() -> i64 {
         .expect_err("missing route manifest library must fail closed");
     assert_eq!(missing_error.code(), "E0800", "{missing_error}");
     assert!(missing_error.to_string().contains("failed to load"));
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 0);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
@@ -27982,7 +28102,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("Unit multi-call missing library must fail before either host call");
     assert_eq!(missing_error.code(), "E0800", "{missing_error}");
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "");
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
@@ -28006,7 +28126,7 @@ func main() -> i64 {
         .run_value()
         .expect_err("Unit multi-call repeated missing library must fail deterministically");
     assert_eq!(repeated_missing.code(), "E0800", "{repeated_missing}");
-    assert_eq!(vm.stdout(), "1\n");
+    assert_eq!(vm.stdout(), "");
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n8\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
@@ -28825,7 +28945,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_a.lock().unwrap(), "5\n");
     assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\n");
     assert_eq!(vm_a.debug_stack_state(), (0, 0));
-    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(
@@ -28845,7 +28965,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_b.lock().unwrap(), "5\n");
     assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\n");
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
-    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(
@@ -28862,7 +28982,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_b.lock().unwrap(), "5\n5\n");
     assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB7\n");
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
-    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
 
     vm_b.set_canonical_ffi_library_path(path_a.to_string_lossy().into_owned());
     vm_b.set_verify_ffi(true);
@@ -28874,7 +28994,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_b.lock().unwrap(), "5\n5\n5\n");
     assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\nA7\n");
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
-    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -29052,7 +29172,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_a.lock().unwrap(), "3\n4\n");
     assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\n");
     assert_eq!(vm_a.debug_stack_state(), (0, 0));
-    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm_a.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_a.program().canonical_ffi_bindings, binding_snapshot);
 
@@ -29065,7 +29185,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_a.lock().unwrap(), "3\n4\n3\n4\n");
     assert_eq!(std::fs::read_to_string(&trace_a).unwrap(), "A7\nA7\nA-8\n");
     assert_eq!(vm_a.debug_stack_state(), (0, 0));
-    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_a.debug_canonical_ffi_loaded_library_count(), 1);
 
     let stdout_b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut vm_b = BytecodeVM::new(program);
@@ -29081,7 +29201,7 @@ func main() -> i64 { 0 }
     assert_eq!(&*stdout_b.lock().unwrap(), "3\n4\n");
     assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB-8\n");
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
-    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 1);
 
     vm_b.set_verify_ffi(true);
     let error = vm_b
@@ -29104,7 +29224,7 @@ func main() -> i64 { 0 }
         "A7\nA7\nA-8\nA7\n"
     );
     assert_eq!(vm_b.debug_stack_state(), (0, 0));
-    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 0);
+    assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -29794,7 +29914,7 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
             );
 
             // Reference leg: the host binding is explicit, so an unbound
-            // consumer fails at the call after emitting the stdout prefix.
+            // consumer fails during whole-manifest preflight before output.
             let reference_interpreter = MirReferenceInterpreter::new(&mir);
             let reference_error = reference_interpreter
                 .execute(&crate::core::NodeId("function:main".into()), &[])
@@ -29807,8 +29927,8 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
             );
             assert_eq!(
                 reference_interpreter.captured_output(),
-                format!("{prefix}\n"),
-                "round {round} ({label}): reference prefix order"
+                "",
+                "round {round} ({label}): reference preflight must precede output"
             );
 
             // Verifier leg: a contract-free foreign call carries no proof
@@ -29829,8 +29949,8 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
             );
             assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-            // Bytecode leg: both faces fail closed at E0800 with the stdout
-            // prefix preserved, distinguished only by the failure text.
+            // Bytecode leg: both missing-library and missing-symbol faces
+            // fail closed at E0800 before executing the source body.
             let bytecode = compile_mir_program(&mir)
                 .unwrap_or_else(|error| panic!("round {round} ({label}) bytecode: {error:?}"));
             assert!(bytecode.ast.is_none());
@@ -29849,8 +29969,8 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
             );
             assert_eq!(
                 vm.stdout(),
-                format!("{prefix}\n"),
-                "round {round} ({label}): bytecode prefix order"
+                "",
+                "round {round} ({label}): bytecode preflight must precede output"
             );
 
             // Native leg: lowering and module verification succeed, then the

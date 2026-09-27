@@ -812,13 +812,21 @@ impl BytecodeVM {
         Ok(())
     }
 
+    /// Validate the complete bytecode receipt graph, then resolve every host
+    /// symbol before any Mimi instruction can expose stdout or side effects.
+    fn preflight_canonical_ffi_program(&mut self) -> Result<(), InterpError> {
+        self.validate_canonical_ffi_program()?;
+        let descriptors = self.program.canonical_ffi.clone();
+        self.canonical_ffi_runtime.preflight(&descriptors)
+    }
+
     /// Run the program from the entry point. Returns the exit code.
     pub fn run(&mut self) -> Result<i64, InterpError> {
         // Each public entry owns a fresh stdout snapshot.  Clear it before
         // canonical FFI preflight so a malformed descriptor cannot inherit
         // output from a previous successful invocation.
         self.stdout.clear();
-        self.validate_canonical_ffi_program()?;
+        self.preflight_canonical_ffi_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -861,7 +869,7 @@ impl BytecodeVM {
         // failures must observe only this attempt's output, never a stale
         // snapshot left by an earlier invocation on the same VM.
         self.stdout.clear();
-        self.validate_canonical_ffi_program()?;
+        self.preflight_canonical_ffi_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -5802,11 +5810,11 @@ impl BytecodeVM {
 
     /// Establish the fresh-entry snapshot and canonical manifest guard shared
     /// by every public function entry. Nested calls retain the enclosing
-    /// stdout and validated program state.
+    /// stdout and already-preflighted program state.
     fn prepare_public_entry(&mut self) -> Result<(), InterpError> {
         if self.stack.is_empty() {
             self.stdout.clear();
-            self.validate_canonical_ffi_program()?;
+            self.preflight_canonical_ffi_program()?;
         }
         Ok(())
     }

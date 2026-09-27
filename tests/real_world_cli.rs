@@ -2912,7 +2912,7 @@ func main() -> i64 {
     );
     for output in &missing_library_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(stderr.contains("failed to load"), "{stderr}");
@@ -2926,7 +2926,7 @@ func main() -> i64 {
     );
     for output in &missing_symbol_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(
@@ -3600,7 +3600,7 @@ func main() -> i64 {
 }
 
 #[test]
-fn canonical_scalar_ffi_f64_imported_module_missing_symbol_preserves_prefix_and_recovers() {
+fn canonical_scalar_ffi_f64_imported_module_missing_symbol_fails_before_prefix_and_recovers() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
         return;
@@ -3703,7 +3703,7 @@ func main() -> i64 {
     );
     for output in &missing_symbol_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(
@@ -4618,7 +4618,7 @@ func main() -> i64 {
 }
 
 #[test]
-fn canonical_scalar_ffi_f32_imported_module_missing_symbol_preserves_prefix_and_recovers() {
+fn canonical_scalar_ffi_f32_imported_module_missing_symbol_fails_before_prefix_and_recovers() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
         return;
@@ -4722,7 +4722,7 @@ func main() -> i64 {
     );
     for output in &missing_library_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(stderr.contains("failed to load"), "{stderr}");
@@ -4736,7 +4736,7 @@ func main() -> i64 {
     );
     for output in &missing_symbol_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(
@@ -4764,6 +4764,9 @@ func main() -> i64 {
 
 #[test]
 fn canonical_scalar_ffi_f32_imported_module_auxiliary_cli_success_without_contract() {
+    if !can_link() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_cli_f32_imported_auxiliary_success_{}_{}",
         std::process::id(),
@@ -4798,10 +4801,31 @@ func main() -> i64 {
     )
     .expect("write imported f32 auxiliary success entry");
 
+    let host_source = dir.join("host.c");
+    let host_library = dir.join("host.so");
+    fs::write(
+        &host_source,
+        "float imported_f32(float value) { return value; }\n",
+    )
+    .expect("write imported f32 preflight host");
+    let compile_host = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&host_source)
+        .arg("-o")
+        .arg(&host_library)
+        .output()
+        .expect("compile imported f32 preflight host");
+    assert!(
+        compile_host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_host.stderr)
+    );
+
     let test = Command::new(mimi_bin())
         .current_dir(project_root())
         .args(["test"])
         .arg(&source)
+        .env("MIMI_FFI_LIB", &host_library)
         .output()
         .expect("spawn imported f32 auxiliary success test");
     assert!(
@@ -7429,7 +7453,7 @@ func main() -> i32 {
 }
 
 #[test]
-fn canonical_scalar_ffi_cli_cross_call_missing_symbol_preserves_prefix() {
+fn canonical_scalar_ffi_cli_cross_call_missing_symbol_fails_before_prefix() {
     if !can_link() {
         return;
     }
@@ -7518,10 +7542,7 @@ func main() -> i32 {
             !bad_run.status.success(),
             "cross-call missing run {explicit_mir} must fail: stdout={bad_stdout} stderr={bad_stderr}"
         );
-        assert_eq!(
-            bad_stdout, "8\n3\n",
-            "cross-call missing run {explicit_mir}"
-        );
+        assert_eq!(bad_stdout, "", "cross-call missing run {explicit_mir}");
         assert!(bad_stderr.contains("E0800"), "{bad_stderr}");
         assert!(
             bad_stderr.contains("failed to find canonical MIR FFI symbol"),
@@ -7632,7 +7653,7 @@ func main() -> i32 {
     );
     for output in &missing_library_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(stderr.contains("failed to load"), "{stderr}");
@@ -7646,7 +7667,7 @@ func main() -> i32 {
     );
     for output in &missing_symbol_runs {
         assert!(!output.status.success());
-        assert_eq!(output.stdout, b"8\n3\n");
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("E0800"), "{stderr}");
         assert!(

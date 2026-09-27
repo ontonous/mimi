@@ -92,6 +92,15 @@ pub struct MirExecutionObservation {
 /// the receipt; the returned value must use the declaration result ABI and is
 /// converted back to the MIR result type by the reference executor.
 pub trait MirReferenceFfiResolver {
+    /// Preflight the complete checker-owned manifest before any MIR
+    /// instruction executes. Implementations that maintain a partial binding
+    /// table must reject every missing receipt here. The default treats the
+    /// injected resolver as a total binding for the supplied manifest; it
+    /// must not call foreign functions or evaluate their contracts.
+    fn preflight(&self, _receipts: &[super::MirFfiCallContract]) -> Result<(), String> {
+        Ok(())
+    }
+
     fn call(
         &self,
         receipt: &super::MirFfiCallContract,
@@ -5697,6 +5706,46 @@ impl<'a> MirReferenceInterpreter<'a> {
         {
             return Err(self.error(owner, message));
         }
+        for function in self.program.functions().values() {
+            for block in function.blocks.values() {
+                for instruction in &block.instructions {
+                    let MirInstructionKind::Call {
+                        result,
+                        callee: super::ResolvedCallee::Extern(callee),
+                        arguments,
+                        ..
+                    } = &instruction.kind
+                    else {
+                        continue;
+                    };
+                    let receipt =
+                        self.program
+                            .ffi_calls()
+                            .get(&instruction.id)
+                            .ok_or_else(|| {
+                                self.error(
+                                    &function.owner,
+                                    "extern call has no canonical FFI receipt",
+                                )
+                            })?;
+                    if let Some(message) = super::validate_ffi_call_contract_receipt(
+                        self.program.type_catalog(),
+                        function,
+                        &instruction.id,
+                        callee,
+                        result.as_ref(),
+                        arguments,
+                        receipt,
+                    )
+                    .into_iter()
+                    .next()
+                    {
+                        return Err(self.error(&function.owner, message));
+                    }
+                }
+            }
+        }
+        self.preflight_ffi_bindings(owner)?;
         *self.next_session_handle.borrow_mut() = 1;
         self.session_peers.borrow_mut().clear();
         let mut session_queues = self.session_queues.borrow_mut();
@@ -5726,6 +5775,33 @@ impl<'a> MirReferenceInterpreter<'a> {
         Ok(MirExecutionObservation {
             value,
             output: self.output.borrow().clone(),
+        })
+    }
+
+    fn preflight_ffi_bindings(&self, owner: &NodeId) -> Result<(), MirExecutionError> {
+        let receipts = self
+            .program
+            .ffi_call_entries_in_source_order()
+            .into_iter()
+            .map(|(_, receipt)| receipt.clone())
+            .collect::<Vec<_>>();
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let resolver = self.ffi_resolver.ok_or_else(|| {
+            self.error(
+                owner,
+                format!(
+                    "extern call '{}' has no reference FFI host binding",
+                    receipts[0].symbol
+                ),
+            )
+        })?;
+        resolver.preflight(&receipts).map_err(|message| {
+            self.error(
+                owner,
+                format!("canonical MIR FFI host preflight failed: {message}"),
+            )
         })
     }
 

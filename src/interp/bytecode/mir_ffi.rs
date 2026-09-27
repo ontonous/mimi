@@ -5,6 +5,7 @@
 //! that receipt. The former surface-AST FFI runtime has been retired.
 
 use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 
 use libffi::middle::{arg as ffi_arg, Cif, CodePtr, Type as FfiType};
@@ -88,6 +89,11 @@ const CANONICAL_SELECTOR_DIALECT: SelectorDialect = SelectorDialect {
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
     loaded_libs: Vec<(String, Library)>,
+    /// Symbol-to-library selections proven for the complete bytecode
+    /// manifest before a public entry starts. This pins each call to the
+    /// library that was preflighted even if an earlier foreign call mutates
+    /// process environment state.
+    preflight_symbols: BTreeMap<String, usize>,
     /// Optional VM-local host binding. When absent, the compatibility
     /// environment contract (`MIMI_FFI_LIB` or discoverable system libraries)
     /// remains the
@@ -114,6 +120,7 @@ impl CanonicalMirFfiRuntime {
     pub(crate) fn new() -> Self {
         Self {
             loaded_libs: Vec::new(),
+            preflight_symbols: BTreeMap::new(),
             library_path: None,
             verify_contracts: true,
         }
@@ -121,10 +128,12 @@ impl CanonicalMirFfiRuntime {
 
     pub(crate) fn set_library_path(&mut self, path: impl Into<String>) {
         self.library_path = Some(path.into());
+        self.preflight_symbols.clear();
     }
 
     pub(crate) fn clear_library_path(&mut self) {
         self.library_path = None;
+        self.preflight_symbols.clear();
     }
 
     /// Return the VM-local host binding so child workers can inherit the same
@@ -139,6 +148,66 @@ impl CanonicalMirFfiRuntime {
         self.loaded_libs.len()
     }
 
+    /// Resolve every receipt symbol before bytecode executes any Mimi
+    /// instruction. Library handles remain owned by this VM, and symbol
+    /// selections are committed only after the entire manifest succeeds.
+    pub(crate) fn preflight(
+        &mut self,
+        descriptors: &[CanonicalFfiDescriptor],
+    ) -> Result<(), crate::interp::InterpError> {
+        self.preflight_symbols.clear();
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+
+        let mut seen_symbols = BTreeSet::new();
+        let mut symbols = Vec::new();
+        for descriptor in descriptors {
+            let args = descriptor
+                .arguments
+                .iter()
+                .map(|scalar| match scalar {
+                    CanonicalFfiScalarType::I32 | CanonicalFfiScalarType::I64 => Value::Int(0),
+                    CanonicalFfiScalarType::Bool => Value::Bool(false),
+                    CanonicalFfiScalarType::F32 | CanonicalFfiScalarType::F64 => Value::Float(0.0),
+                    CanonicalFfiScalarType::Unit => Value::Unit,
+                })
+                .collect::<Vec<_>>();
+            self.validate_descriptor(descriptor, &args, None, None)
+                .map_err(crate::interp::InterpError::new)?;
+            if seen_symbols.insert(descriptor.symbol.clone()) {
+                symbols.push(descriptor.symbol.clone());
+            }
+        }
+
+        let configured_path = match self.library_path.clone() {
+            Some(path) => Some(path),
+            None => resolve_explicit_binding().map_err(crate::interp::InterpError::new)?,
+        };
+        let configured = configured_path.is_some();
+        let candidate_paths = match configured_path {
+            Some(path) => vec![path],
+            None => discover_no_env_candidates(),
+        };
+        if candidate_paths.is_empty() {
+            return Err(crate::interp::InterpError::new(
+                "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc/libm",
+            ));
+        }
+
+        let mut resolved = BTreeMap::new();
+        for symbol in symbols {
+            match self.select_library_for_symbol(candidate_paths.clone(), configured, &symbol) {
+                Ok(index) => {
+                    resolved.insert(symbol, index);
+                }
+                Err(error) => return Err(crate::interp::InterpError::new(error)),
+            }
+        }
+        self.preflight_symbols = resolved;
+        Ok(())
+    }
+
     /// Execute one checker-owned scalar descriptor.
     ///
     /// The descriptor has already passed the MIR adapter's TypeDesc/layout
@@ -150,7 +219,7 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
     ) -> Result<Value, crate::interp::InterpError> {
-        self.call_with_context(descriptor, args, None, None)
+        self.call_with_context(descriptor, args, None, None, false)
     }
 
     /// Execute a descriptor while binding it to the bytecode function that
@@ -164,7 +233,7 @@ impl CanonicalMirFfiRuntime {
         args: &[Value],
         expected_caller: &str,
     ) -> Result<Value, crate::interp::InterpError> {
-        self.call_with_context(descriptor, args, Some(expected_caller), None)
+        self.call_with_context(descriptor, args, Some(expected_caller), None, false)
     }
 
     /// Execute a descriptor while binding both checker-owned provenance
@@ -183,6 +252,7 @@ impl CanonicalMirFfiRuntime {
             args,
             Some(expected_caller),
             Some(expected_instruction),
+            true,
         )
     }
 
@@ -192,9 +262,16 @@ impl CanonicalMirFfiRuntime {
         args: &[Value],
         expected_caller: Option<&str>,
         expected_instruction: Option<&str>,
+        require_manifest_preflight: bool,
     ) -> Result<Value, crate::interp::InterpError> {
         self.validate_descriptor(descriptor, args, expected_caller, expected_instruction)
             .map_err(crate::interp::InterpError::new)?;
+        if require_manifest_preflight && !self.preflight_symbols.contains_key(&descriptor.symbol) {
+            return Err(crate::interp::InterpError::new(format!(
+                "canonical MIR FFI symbol '{}' was not preflighted with the bytecode manifest",
+                descriptor.symbol
+            )));
+        }
         let converted_args = self
             .convert_arguments(descriptor, args)
             .map_err(ffi_runtime_error)?;
@@ -539,24 +616,26 @@ impl CanonicalMirFfiRuntime {
             }
         }
 
-        let configured_path = match self.library_path.clone() {
-            Some(path) => Some(path),
-            None => resolve_explicit_binding()?,
+        let lib_idx = if let Some(index) = self.preflight_symbols.get(&descriptor.symbol).copied() {
+            index
+        } else {
+            let configured_path = match self.library_path.clone() {
+                Some(path) => Some(path),
+                None => resolve_explicit_binding()?,
+            };
+            let configured = configured_path.is_some();
+            let candidate_paths = match configured_path {
+                Some(path) => vec![path],
+                None => discover_no_env_candidates(),
+            };
+            if candidate_paths.is_empty() {
+                return Err(
+                    "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc/libm"
+                        .to_owned(),
+                );
+            }
+            self.select_library_for_symbol(candidate_paths, configured, &descriptor.symbol)?
         };
-        let configured = configured_path.is_some();
-        let candidate_paths = match configured_path {
-            Some(path) => vec![path],
-            None => discover_no_env_candidates(),
-        };
-        if candidate_paths.is_empty() {
-            return Err(
-                "canonical MIR FFI needs MIMI_FFI_LIB or a discoverable system libc/libm"
-                    .to_owned(),
-            );
-        }
-
-        let lib_idx =
-            self.select_library_for_symbol(candidate_paths, configured, &descriptor.symbol)?;
 
         // SAFETY: `cif` matches the typed argument/return storage above;
         // `symbol` is looked up in the live library handle and the call is
