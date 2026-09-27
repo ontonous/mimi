@@ -928,6 +928,41 @@ fn scalar_ffi_public_mir_verifier_reports_preconditions_without_function_ensures
         assert_eq!(artifact.mir_hash, digest);
         assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        // The public CheckedProgram APIs must pick this same checker-owned
+        // scalar FFI MIR route before their retained AST verifier owners.
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        crate::core::mir::reset_test_route_materialization_count();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
+            .expect("public checked scalar FFI verifier");
+        assert_eq!(checked_results.len(), 1, "{checked_results:?}");
+        assert_eq!(checked_results[0].status, expected, "{checked_results:?}");
+        assert_eq!(
+            checked_results[0]
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.engine.as_str()),
+            Some(ProofArtifact::ENGINE_MIR)
+        );
+        assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::mir::reset_test_route_materialization_count();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+            .expect("public dual checked scalar FFI verifier");
+        assert_eq!(dual_results.len(), 1, "{dual_results:?}");
+        assert_eq!(dual_results[0].status, expected, "{dual_results:?}");
+        assert_eq!(
+            dual_results[0]
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.engine.as_str()),
+            Some(ProofArtifact::ENGINE_MIR)
+        );
+        assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -1345,6 +1380,161 @@ fn public_checked_verifier_routes_generic_variant_and_managed_result_profiles_wi
             "{} dual verifier must produce a MIR-backed proof for its contract: {dual_results:?}",
             profile.as_str()
         );
+    }
+}
+
+#[test]
+fn public_checked_verifier_materializes_generic_scalar_identity_before_no_contract_result() {
+    require_z3!();
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
+    let cases = [
+        (
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(42) }",
+            Profile::ScalarGenericIdentityI32,
+        ),
+        (
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i64 { identity(2147483690) }",
+            Profile::ScalarGenericIdentityI64,
+        ),
+    ];
+
+    for (source, profile) in cases {
+        let file = parse_memory_source(source, profile.as_str()).expect("parse");
+        let checked = crate::core::check_program(&file).expect("typecheck");
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("generic scalar identity route");
+        assert!(profile.is_admitted(route.admission));
+        assert!(profile.is_materialized(&route));
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+        // This profile is deliberately contract-free: adding a contract
+        // would widen its exact whole-program identity shape. The route
+        // materialization counter therefore proves the public verifier chose
+        // and validated the canonical profile before returning no obligations.
+        crate::core::mir::reset_test_route_materialization_count();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
+            .expect("public checked generic identity verifier");
+        assert!(checked_results.is_empty(), "identity has no contracts");
+        assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        crate::core::mir::reset_test_route_materialization_count();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+            .expect("public dual checked generic identity verifier");
+        assert!(dual_results.is_empty(), "identity has no contracts");
+        assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
+    require_z3!();
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
+    const SESSION_SOURCE: &str = r#"
+        session Proto = !i32 . ?i32 . end
+        func main() -> i64 {
+            ensures: result >= 0
+            let (tx, rx) = session_pair::<Proto>()
+            session_send(tx, 10)
+            let first = session_recv(rx)
+            session_send(rx, 11)
+            let second = session_recv(tx)
+            session_close(rx)
+            session_close(tx)
+            0
+        }
+    "#;
+    let cases: [(&str, Profile, bool); 6] = [
+        (
+            include_str!("../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),
+            Profile::CopyOptionI32Variant,
+            true,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_bool_unwrap.mimi"),
+            Profile::CopyOptionBoolVariant,
+            true,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_i64_unwrap.mimi"),
+            Profile::CopyOptionI64Variant,
+            true,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_option_f64_unwrap.mimi"),
+            Profile::CopyOptionF64Variant,
+            false,
+        ),
+        (
+            include_str!("../../tests/fixtures/mir_native_result_i32_unwrap.mimi"),
+            Profile::CopyResultI32Variant,
+            true,
+        ),
+        (SESSION_SOURCE, Profile::SessionChannel, true),
+    ];
+
+    for (source, profile, has_proof) in cases {
+        let file = parse_memory_source(source, profile.as_str()).expect("parse");
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|error| panic!("{} typecheck: {error:?}", profile.as_str()));
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .unwrap_or_else(|error| panic!("{} materialize: {error:?}", profile.as_str()));
+        assert!(profile.is_admitted(route.admission), "{}", profile.as_str());
+        assert!(profile.is_materialized(&route), "{}", profile.as_str());
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+        for dual in [false, true] {
+            crate::core::mir::reset_test_route_materialization_count();
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = if dual {
+                crate::verifier::verify_checked_dual(&checked, source_hash.clone())
+            } else {
+                crate::verifier::verify_checked(&checked, source_hash.clone())
+            }
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} {} verifier: {error}",
+                    profile.as_str(),
+                    if dual { "dual" } else { "single" }
+                )
+            });
+            assert_eq!(
+                crate::core::mir::test_route_materialization_count(),
+                1,
+                "{} must materialize exactly once through the public verifier",
+                profile.as_str()
+            );
+            assert!(
+                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+                "{} {} verifier touched retained legacy body",
+                profile.as_str(),
+                if dual { "dual" } else { "single" }
+            );
+            if has_proof {
+                assert!(
+                    results.iter().any(|result| {
+                        result.status == VerifStatus::Proven
+                            && result.artifact.as_ref().is_some_and(|artifact| {
+                                artifact.engine == ProofArtifact::ENGINE_MIR
+                            })
+                    }),
+                    "{} {} verifier must produce a MIR proof: {results:?}",
+                    profile.as_str(),
+                    if dual { "dual" } else { "single" }
+                );
+            } else {
+                assert!(
+                    results.is_empty(),
+                    "{} has no source contracts: {results:?}",
+                    profile.as_str()
+                );
+            }
+        }
     }
 }
 
@@ -4860,6 +5050,7 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
     );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
     let results = crate::verifier::verify_checked(
         &checked,
         blake3::hash(source.as_bytes()).to_hex().to_string(),
@@ -4898,6 +5089,36 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "public MapRoot verification must not access the retained legacy body"
     );
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let dual_results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("public dual checked verifier");
+    for (function, status) in [
+        ("checked_map_size", VerifStatus::Proven),
+        ("false_map_size", VerifStatus::Disproven),
+    ] {
+        let result = dual_results
+            .iter()
+            .find(|result| result.func_name == function)
+            .unwrap_or_else(|| {
+                panic!("missing dual MapRoot result for {function}: {dual_results:?}")
+            });
+        assert_eq!(result.status, status, "{}", result.message);
+        assert_eq!(
+            result
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.engine.as_str()),
+            Some(ProofArtifact::ENGINE_MIR)
+        );
+    }
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
