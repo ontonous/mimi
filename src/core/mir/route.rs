@@ -67,6 +67,7 @@ pub(crate) fn test_route_materialization_count() -> usize {
 /// lacked its canonical operation receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalMirRouteProfile {
+    MapRoot,
     ScalarFfi,
     ScalarGenericIdentityI32,
     ScalarGenericIdentityI64,
@@ -93,6 +94,7 @@ pub enum CanonicalMirRouteProfile {
 impl CanonicalMirRouteProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::MapRoot => MAP_ROOT_ISLAND,
             Self::ScalarFfi => "scalar-ffi-v1",
             Self::ScalarGenericIdentityI32 => super::SCALAR_GENERIC_IDENTITY_I32_ISLAND,
             Self::ScalarGenericIdentityI64 => super::SCALAR_GENERIC_IDENTITY_I64_ISLAND,
@@ -130,6 +132,7 @@ impl CanonicalMirRouteProfile {
     /// `is_exact -> construct -> contains_*` tables.
     pub const fn is_admitted(self, admission: CanonicalMirRouteAdmission) -> bool {
         match self {
+            Self::MapRoot => admission.map_root_complete(),
             Self::ScalarFfi => admission.scalar_ffi,
             Self::ScalarGenericIdentityI32 => admission.scalar_generic_identity_i32_complete(),
             Self::ScalarGenericIdentityI64 => admission.scalar_generic_identity_i64_complete(),
@@ -162,6 +165,7 @@ impl CanonicalMirRouteProfile {
     /// materialization receipt.
     pub const fn is_materialized(self, route: &CanonicalMirRouteMaterialization) -> bool {
         match self {
+            Self::MapRoot => route.materialized_map_root_candidate,
             Self::ScalarFfi => route.materialized_scalar_ffi_candidate,
             Self::ScalarGenericIdentityI32 => {
                 route.materialized_scalar_generic_identity_i32_candidate
@@ -194,6 +198,32 @@ impl CanonicalMirRouteProfile {
             Self::CopyResultI32Variant => route.materialized_copy_result_i32_candidate,
             Self::SessionChannel => route.materialized_session_candidate,
         }
+    }
+}
+
+/// Checker-owned admission for the opaque, local Map-root lifecycle.
+///
+/// `IncompleteCoverage` is a recognized attempt whose exact Checker receipt
+/// was withheld (for example because it uses MapGet, a dynamic key, control
+/// flow, or lets a root escape). Such a candidate is a hard route boundary,
+/// not permission to reinterpret the same value through the legacy Record
+/// ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapRootAdmission {
+    OutsideProfile,
+    IncompleteCoverage,
+    CompleteCoverage,
+}
+
+pub const MAP_ROOT_ISLAND: &str = "map-root-v1";
+
+impl MapRootAdmission {
+    pub const fn is_candidate(self) -> bool {
+        !matches!(self, Self::OutsideProfile)
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::CompleteCoverage)
     }
 }
 
@@ -290,6 +320,7 @@ impl CanonicalMirRouteMaterializationError {
 /// Checker-owned route admission captured alongside one canonical graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMirRouteAdmission {
+    pub map_root: MapRootAdmission,
     pub scalar_ffi: bool,
     pub scalar_generic_identity_i32: ScalarGenericIdentityAdmission,
     pub scalar_generic_identity_i64: ScalarGenericIdentityAdmission,
@@ -315,7 +346,8 @@ pub struct CanonicalMirRouteAdmission {
 
 impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
-        self.scalar_ffi
+        self.map_root.is_candidate()
+            || self.scalar_ffi
             || self.scalar_generic_identity_i32_complete()
             || self.scalar_generic_identity_i64_complete()
             || !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
@@ -379,6 +411,10 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn collection_complete(self) -> bool {
         matches!(self.collection, ScalarCollectionAdmission::CompleteCoverage)
+    }
+
+    pub const fn map_root_complete(self) -> bool {
+        self.map_root.is_complete()
     }
 
     pub const fn scalar_generic_identity_i32_complete(self) -> bool {
@@ -507,6 +543,7 @@ impl CanonicalMirRouteAdmission {
 pub struct CanonicalMirRouteMaterialization {
     pub program: MirProgram,
     pub admission: CanonicalMirRouteAdmission,
+    pub materialized_map_root_candidate: bool,
     pub materialized_scalar_ffi_candidate: bool,
     pub materialized_scalar_generic_identity_i32_candidate: bool,
     pub materialized_scalar_generic_identity_i64_candidate: bool,
@@ -541,6 +578,7 @@ pub fn classify_canonical_mir_route_admission(
     program: &CheckedProgram,
 ) -> CanonicalMirRouteAdmission {
     CanonicalMirRouteAdmission {
+        map_root: classify_map_root_admission(program),
         scalar_ffi: super::is_scalar_ffi_candidate(program),
         scalar_generic_identity_i32: classify_scalar_generic_identity_admission(program),
         scalar_generic_identity_i64: classify_scalar_generic_identity_i64_admission(program),
@@ -578,6 +616,35 @@ pub fn classify_canonical_mir_route_admission(
     }
 }
 
+fn classify_map_root_admission(program: &CheckedProgram) -> MapRootAdmission {
+    let candidates = program
+        .resource_analyses()
+        .values()
+        .filter(|analysis| {
+            analysis.map_root_profile_candidate
+                || !analysis.map_root_new_attempts.is_empty()
+                || !analysis.map_root_actions.is_empty()
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return MapRootAdmission::OutsideProfile;
+    }
+    if candidates.iter().all(|analysis| {
+        let receipted_new_points = analysis
+            .map_root_actions
+            .iter()
+            .filter(|action| action.kind == crate::core::MapRootActionKind::New)
+            .map(|action| action.point.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        !analysis.map_root_new_attempts.is_empty()
+            && analysis.map_root_new_attempts == receipted_new_points
+    }) {
+        MapRootAdmission::CompleteCoverage
+    } else {
+        MapRootAdmission::IncompleteCoverage
+    }
+}
+
 fn classify_s8_flow_admission(program: &CheckedProgram) -> S8FlowAdmission {
     if is_exact_s8_flow_transition(program) {
         S8FlowAdmission::CompleteCoverage
@@ -597,6 +664,13 @@ pub fn materialize_canonical_mir_route(
     #[cfg(test)]
     TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
+    if admission.map_root == MapRootAdmission::IncompleteCoverage {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapRoot,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized a MapRoot candidate but withheld its complete local lifecycle receipt".into(),
+        });
+    }
     if !admission.scalar_ffi {
         if let Some(reason) = scalar_ffi_boundary_reason(program) {
             return Err(CanonicalMirRouteMaterializationError::Compatibility {
@@ -618,6 +692,7 @@ pub fn materialize_canonical_mir_route(
     // observes the same prelude-free graph as the CLI dispatch wrapper.
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
     if admission.scalar_ffi
+        || admission.map_root_complete()
         || admission.scalar_generic_identity_i32_complete()
         || admission.scalar_generic_identity_i64_complete()
         || admission.session_complete()
@@ -652,6 +727,19 @@ pub fn materialize_canonical_mir_route(
     };
 
     let materialized_scalar_ffi_candidate = !canonical.ffi_calls().is_empty();
+    let materialized_map_root_candidate = canonical
+        .functions()
+        .values()
+        .any(|function| function.ownership.has_checker_map_root_actions());
+    if admission.map_root_complete() && !materialized_map_root_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapRoot,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete Checker MapRoot admission did not materialize a MapRoot action receipt"
+                    .into(),
+        });
+    }
     if admission.scalar_ffi && !materialized_scalar_ffi_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarFfi,
@@ -736,6 +824,18 @@ pub fn materialize_canonical_mir_route(
     let materialized_copy_result_i32_candidate =
         contains_copy_result_i32_variant_candidate(&canonical);
     let materialized_session_candidate = contains_session_channel_candidate(&canonical);
+    if admission.map_root_complete()
+        && has_unsupported_map_root_composition(
+            admission,
+            materialized_collection_operation_candidate,
+        )
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapRoot,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "MapRoot profile cannot be combined with a second migrated MIR island or unsupported scalar-collection operation".into(),
+        });
+    }
     if admission.scalar_ffi {
         // Recognizing FFI must not widen an existing aggregate/collection
         // island. Keep these intersection gates in the shared materializer,
@@ -965,6 +1065,7 @@ pub fn materialize_canonical_mir_route(
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
         admission,
+        materialized_map_root_candidate,
         materialized_scalar_ffi_candidate,
         materialized_scalar_generic_identity_i32_candidate,
         materialized_scalar_generic_identity_i64_candidate,
@@ -990,12 +1091,88 @@ pub fn materialize_canonical_mir_route(
     })
 }
 
+fn has_unsupported_map_root_composition(
+    admission: CanonicalMirRouteAdmission,
+    materialized_collection_operation_candidate: bool,
+) -> bool {
+    admission.scalar_ffi
+        || admission.scalar_generic_identity_i32_complete()
+        || admission.scalar_generic_identity_i64_complete()
+        || materialized_collection_operation_candidate
+        || !matches!(
+            admission.collection,
+            ScalarCollectionAdmission::OutsideProfile
+        ) && !admission.collection_complete()
+        || !matches!(admission.record, FlatCopyRecordAdmission::OutsideProfile)
+        || !matches!(admission.flow, S8FlowAdmission::OutsideProfile)
+        || admission.flow_failure_retry
+        || !matches!(
+            admission.option_string,
+            OptionStringVariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.option_nested_tuple,
+            OptionNestedTupleVariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.generic_variant,
+            GenericVariantPredicateAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.generic_option_projection,
+            GenericOptionProjectionAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.generic_option_projection_fallback,
+            GenericOptionProjectionFallbackAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.generic_result_projection,
+            GenericResultProjectionAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.generic_result_projection_fallback,
+            GenericResultProjectionFallbackAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.managed_result_call,
+            ManagedResultCallAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.copy_option_i32,
+            CopyOptionI32VariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.copy_option_bool,
+            CopyOptionI32VariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.copy_option_i64,
+            CopyOptionI32VariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.copy_option_f64,
+            CopyOptionI32VariantAdmission::OutsideProfile
+        )
+        || !matches!(
+            admission.copy_result_i32,
+            CopyResultI32VariantAdmission::OutsideProfile
+        )
+        || !matches!(admission.session, SessionChannelAdmission::OutsideProfile)
+}
+
 fn match_complete_or_compatibility(
     admission: CanonicalMirRouteAdmission,
     stage: CanonicalMirRouteFailureStage,
     message: String,
 ) -> CanonicalMirRouteMaterializationError {
-    if admission.scalar_ffi {
+    if admission.map_root.is_candidate() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapRoot,
+            stage,
+            message,
+        }
+    } else if admission.scalar_ffi {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarFfi,
             stage,
@@ -1417,6 +1594,7 @@ mod tests {
     #[test]
     fn compatibility_materialization_error_preserves_candidate_admission() {
         let admission = CanonicalMirRouteAdmission {
+            map_root: MapRootAdmission::OutsideProfile,
             scalar_ffi: false,
             scalar_generic_identity_i32: ScalarGenericIdentityAdmission::OutsideProfile,
             scalar_generic_identity_i64: ScalarGenericIdentityAdmission::OutsideProfile,

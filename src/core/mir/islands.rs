@@ -22,7 +22,8 @@ use crate::core::mir::types::{
     MirTypeDesc, MirTypeKind, MirVariantCallAbiMode,
 };
 use crate::core::{
-    CheckedProgram, NodeId, NominalTypeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId,
+    CheckedProgram, NodeId, NominalTypeId, PrimitiveType, ResolvedCallKind, ResolvedLocalId,
+    ResolvedTypeId,
 };
 
 use super::{
@@ -1322,6 +1323,9 @@ fn scan_scalar_collection_once(
         owned_string_param_rebind_callables,
         direct_float_callees: BTreeSet::new(),
         current_callable: None,
+        map_root_locals: BTreeSet::new(),
+        map_root_action_points: BTreeSet::new(),
+        map_root_set_points: BTreeSet::new(),
         float_symbolic_locals: BTreeMap::new(),
         int_literal_locals: BTreeMap::new(),
         branch_generation: 0,
@@ -1340,6 +1344,28 @@ fn scan_scalar_collection_once(
             continue;
         }
         scanner.current_callable = Some(owner.clone());
+        scanner.map_root_locals.clear();
+        scanner.map_root_action_points.clear();
+        scanner.map_root_set_points.clear();
+        if let Some(analysis) = program.resource_analyses().get(owner) {
+            for action in &analysis.map_root_actions {
+                scanner.map_root_locals.insert(action.local.clone());
+                match action.kind {
+                    crate::core::MapRootActionKind::New
+                    | crate::core::MapRootActionKind::Set
+                    | crate::core::MapRootActionKind::Size => {
+                        scanner.map_root_action_points.insert(action.point.clone());
+                    }
+                    crate::core::MapRootActionKind::Drop => {}
+                }
+                if action.kind == crate::core::MapRootActionKind::Set {
+                    scanner.map_root_set_points.insert(action.point.clone());
+                }
+                if let Some(source_local) = &action.source_local {
+                    scanner.map_root_locals.insert(source_local.clone());
+                }
+            }
+        }
         // R6-1061: the float-symbolic set is a per-callable, in-order walk
         // fact — nothing survives across callable boundaries.
         scanner.float_symbolic_locals.clear();
@@ -1510,6 +1536,13 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// re-records the same identities idempotently.
     direct_float_callees: BTreeSet<NodeId>,
     current_callable: Option<NodeId>,
+    /// Exact local roots and operation points from the Checker MapRoot
+    /// receipt. They are excluded from the scalar-collection type floor so
+    /// a closed MapRoot lifecycle can compose with the separately admitted
+    /// scalar stdout face without exempting arbitrary `Record` values.
+    map_root_locals: BTreeSet<ResolvedLocalId>,
+    map_root_action_points: BTreeSet<NodeId>,
+    map_root_set_points: BTreeSet<NodeId>,
     /// R6-1061: locals whose current value the MIR verifier models in the
     /// IEEE symbolic Float domain — bound by a float literal, a second-hand
     /// float-symbolic read, or an admitted finite-only float arithmetic
@@ -1874,8 +1907,23 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
         }
     }
 
+    fn pattern_binds_map_root(&self, pattern: &ResolvedPattern) -> bool {
+        matches!(
+            &pattern.kind,
+            ResolvedPatternKind::Binding { local, .. } if self.map_root_locals.contains(local)
+        )
+    }
+
+    fn is_map_root_local_load(&self, expression: &ResolvedExpr) -> bool {
+        matches!(
+            &expression.kind,
+            ResolvedExprKind::Load(place)
+                if place.projections.is_empty() && self.map_root_locals.contains(&place.base)
+        )
+    }
+
     fn visit_pattern(&mut self, pattern: &ResolvedPattern, concrete: bool, exempt_root_type: bool) {
-        if concrete && !exempt_root_type {
+        if concrete && !exempt_root_type && !self.pattern_binds_map_root(pattern) {
             self.require_profile_type(&pattern.ty);
         }
         match &pattern.kind {
@@ -1932,7 +1980,11 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             }
         }
         for statement in &block.statements {
-            if concrete {
+            let map_root_binding = matches!(
+                &statement.kind,
+                ResolvedStmtKind::Bind { pattern, .. } if self.pattern_binds_map_root(pattern)
+            );
+            if concrete && !map_root_binding {
                 self.require_profile_type(&statement.ty);
             }
             match &statement.kind {
@@ -2438,10 +2490,14 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.program.resolved_types().get(&expression.ty),
                     Some(ResolvedType::Primitive(PrimitiveType::String))
                 );
+            let is_map_root_receipted_value =
+                self.map_root_action_points.contains(&expression.node_id)
+                    || self.is_map_root_local_load(expression);
             if !is_print_face_literal
                 && !is_float_face_call_result
                 && !is_string_call_result
                 && !is_identity_param_value
+                && !is_map_root_receipted_value
             {
                 self.require_profile_type(&expression.ty);
             }
@@ -2538,6 +2594,11 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => self.visit_expr(operand, concrete),
             ResolvedExprKind::Call(call) => {
+                let map_root_set_call = self.map_root_set_points.contains(&expression.node_id)
+                    && matches!(
+                        &call.callee,
+                        ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_set"
+                    );
                 if concrete
                     && (is_list_len_call(self.program, call)
                         || is_list_reverse_call(self.program, call)
@@ -2696,13 +2757,21 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     })
                     && !is_scalar_println_call(self.program, call)
                     && !owned_string_member_call
+                    && !map_root_set_call
                 {
                     // A string literal argument to any callee other than the
                     // scalar print face (len, starts_with, user calls, ...)
                     // has no canonical MIR node in this island.
                     self.mixed = true;
                 }
-                for argument in &call.arguments {
+                for (argument_index, argument) in call.arguments.iter().enumerate() {
+                    if map_root_set_call && argument_index == 1 {
+                        // The exact Checker receipt binds this argument to a
+                        // static UTF-8 key literal; MapRoot consumers validate
+                        // it again. Do not let the key's String type turn this
+                        // narrow lifecycle into an unrelated String island.
+                        continue;
+                    }
                     let print_face_value_root = match (&argument.value.kind, float_print_call) {
                         (
                             ResolvedExprKind::Literal(crate::core::ResolvedLiteral::FloatBits(_)),

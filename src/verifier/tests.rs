@@ -4550,6 +4550,77 @@ fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
 }
 
 #[test]
+fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
+    require_z3!();
+    let source = r#"
+        func checked_map_size(value: i32) -> i32 {
+            requires: value >= 0
+            ensures: result == 1
+            let root = map_new()
+            let updated = map_set(root, "answer", value)
+            let size = map_size(updated)
+            drop(updated)
+            size
+        }
+        func false_map_size(value: i32) -> i32 {
+            ensures: result == 99
+            let root = map_new()
+            let updated = map_set(root, "answer", value)
+            let size = map_size(updated)
+            drop(updated)
+            size
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let file = parse_memory_source(source, "map-root-public-verify").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
+        crate::core::mir::MapRootAdmission::CompleteCoverage
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_checked(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("public checked verifier must use the MapRoot MIR profile");
+    let proven = results
+        .iter()
+        .find(|result| result.func_name == "checked_map_size")
+        .expect("positive MapRoot proof");
+    assert_eq!(proven.status, VerifStatus::Proven, "{}", proven.message);
+    assert_eq!(
+        proven
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+    let disproven = results
+        .iter()
+        .find(|result| result.func_name == "false_map_size")
+        .expect("negative MapRoot proof");
+    assert_eq!(
+        disproven.status,
+        VerifStatus::Disproven,
+        "{}",
+        disproven.message
+    );
+    assert_eq!(
+        disproven
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "public MapRoot verification must not access the retained legacy body"
+    );
+}
+
+#[test]
 fn non_copy_option_string_switch_move_closes_all_four_consumers() {
     require_z3!();
     let source = r#"

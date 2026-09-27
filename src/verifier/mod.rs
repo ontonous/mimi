@@ -661,7 +661,8 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 21] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 22] = [
+        crate::core::mir::CanonicalMirRouteProfile::MapRoot,
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
         crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32,
         crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI64,
@@ -707,6 +708,23 @@ fn verify_closed_mir_profile(
         return Ok(None);
     };
     match profile {
+        crate::core::mir::CanonicalMirRouteProfile::MapRoot => {
+            let receipt = canonical.route_receipt(profile.as_str());
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(
+                &canonical,
+                &receipt,
+            )
+            .map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the MapRoot bytecode consumer: {errors:?}"
+                )
+            })?;
+            crate::codegen::mir::validate_mir_native(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the MapRoot native consumer: {errors:?}"
+                )
+            })?;
+        }
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi => {}
         crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32 => {
             crate::core::mir::validate_scalar_generic_identity_island(&canonical).map_err(
@@ -849,12 +867,28 @@ fn materialize_closed_mir_island(
     program: &crate::core::CheckedProgram,
     island: crate::core::mir::CanonicalMirRouteProfile,
 ) -> Result<Option<crate::core::mir::reference::MirProgram>, String> {
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if island == crate::core::mir::CanonicalMirRouteProfile::MapRoot
+        && admission.map_root.is_candidate()
+        && !admission.map_root_complete()
+    {
+        return Err(format!(
+            "{}: Checker recognized a MapRoot candidate but withheld its complete local lifecycle receipt",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
     if !is_z3_available() {
+        if island == crate::core::mir::CanonicalMirRouteProfile::MapRoot
+            && admission.map_root_complete()
+        {
+            return Err(
+                "MIR-VERIFY-001: MapRoot Checker receipt profile requires the MIR contract verifier; compatibility fallback is forbidden".into(),
+            );
+        }
         // Preserve the existing CheckedProgram mock infrastructure boundary;
         // without Z3 the public API does not claim a MIR proof.
         return Ok(None);
     }
-    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
     if !island.is_admitted(admission) {
         return Ok(None);
     }

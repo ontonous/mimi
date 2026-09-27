@@ -527,7 +527,8 @@ pub use receipt::{
 pub use route::{
     classify_canonical_mir_route_admission, materialize_canonical_mir_route,
     CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
-    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, S8FlowAdmission,
+    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, MapRootAdmission,
+    S8FlowAdmission, MAP_ROOT_ISLAND,
 };
 #[cfg(test)]
 pub(crate) use route::{reset_test_route_materialization_count, test_route_materialization_count};

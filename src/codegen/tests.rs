@@ -308,6 +308,83 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
+    let source = r#"
+        func main() -> i32 {
+            let root = map_new()
+            let updated = map_set(root, "answer", 42)
+            let size = map_size(updated)
+            println(size)
+            drop(updated)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).map_root,
+        crate::core::mir::MapRootAdmission::CompleteCoverage
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "map_root_direct_route");
+    codegen
+        .compile_checked(&program)
+        .expect("direct CheckedProgram native entry must route MapRoot through MIR");
+    codegen
+        .module
+        .verify()
+        .expect("valid direct MapRoot module");
+    for runtime in [
+        "mimi_mir_map_root_new",
+        "mimi_mir_map_root_set",
+        "mimi_mir_map_root_size",
+        "mimi_mir_map_root_drop",
+    ] {
+        assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
+    }
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct MapRoot native compilation must not access retained legacy bodies"
+    );
+}
+
+#[test]
+fn compile_checked_rejects_withheld_map_root_receipt_without_legacy_retry() {
+    let source = r#"
+        func main() -> i32 {
+            let root = map_new()
+            let key = "answer"
+            let updated = map_set(root, key, 42)
+            drop(updated)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "map_root_dynamic_key_rejected");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("a dynamic MapRoot key has no Checker receipt");
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("MapRoot")));
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct MapRoot rejection must not enter the legacy body compiler"
+    );
+}
+
+#[test]
 fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     let source = r#"
         func choose<T>(left: T, right: T) -> T { left }

@@ -185,6 +185,24 @@ pub(crate) fn select_default_route(
     // The shared envelope also owns the materialization receipts, preventing
     // this selector from growing a second Set/record lowering walk.
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    if admission.map_root.is_candidate() {
+        if !admission.map_root_complete() {
+            return DefaultMirRoute::Rejected(format!(
+                "{}: Checker recognized a MapRoot candidate but withheld its complete local lifecycle receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_map_root_candidate => {
+                select_map_root_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete MapRoot admission did not materialize its operation receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
     if admission.scalar_ffi {
         return match materialize_canonical_route(checked, merged_file) {
             Ok(route) => select_scalar_ffi_route(route.program),
@@ -1580,6 +1598,42 @@ pub(crate) fn select_default_route(
     DefaultMirRoute::Canonical(route.program)
 }
 
+/// Consumer preflight for the closed Checker-owned MapRoot lifecycle. Every
+/// consumer receives the same immutable program and the same route receipt;
+/// no failure may resume in the legacy Record ABI.
+fn select_map_root_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!("MapRoot MIR verifier capability: {errors:?}"));
+    }
+    let receipt = program.route_receipt(mimi::core::mir::MAP_ROOT_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!("MapRoot MIR bytecode capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("MapRoot MIR native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            if std::env::var_os("MIMI_VERBOSE").is_some() {
+                eprintln!(
+                    "canonical route disposition: canonical ({}) mir_digest={}",
+                    mimi::core::mir::MAP_ROOT_ISLAND,
+                    program.canonical_digest()
+                );
+            }
+            DefaultMirRoute::Canonical(program)
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "MapRoot MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("MapRoot MIR verifier pass: {error}")),
+    }
+}
+
 /// Consumer preflight for the shared scalar FFI receipt. An error at any
 /// stage is a hard rejection; this adapter has no compatibility return arm.
 fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
@@ -1940,6 +1994,132 @@ mod tests {
                 matches!(route, DefaultMirRoute::Canonical(_)),
                 "{body}: {route:?}"
             );
+        }
+    }
+
+    #[test]
+    fn map_root_default_route_admits_no_contract_execution_with_stdout() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "answer", 42)
+                let size = map_size(updated)
+                println(size)
+                drop(updated)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.map_root,
+            mimi::core::mir::MapRootAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("complete MapRoot receipt must enter the default canonical route");
+        };
+        assert!(
+            program
+                .functions()
+                .values()
+                .all(|function| function.contracts.is_empty()),
+            "fixture must exercise execution with no source contracts"
+        );
+        assert_eq!(
+            program
+                .route_receipt(mimi::core::mir::MAP_ROOT_ISLAND)
+                .profile,
+            mimi::core::mir::MAP_ROOT_ISLAND
+        );
+        let main = mimi::core::NodeId("function:main".into());
+        let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference no-contract execution");
+        assert_eq!(reference.output, "1\n");
+        assert_eq!(
+            reference.value,
+            mimi::core::mir::reference::MirRuntimeValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn map_root_default_route_rejects_withheld_checker_receipts_without_legacy() {
+        for source in [
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let value = map_get(root, "answer")
+                    drop(root)
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let key = "answer"
+                    let updated = map_set(root, key, 42)
+                    drop(updated)
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    if true {
+                        let size = map_size(root)
+                    } else {
+                    }
+                    drop(root)
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    loop {
+                        let root = map_new()
+                        drop(root)
+                        break
+                    }
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let size = map_size(map_new())
+                    size
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let updated = map_set(root, "answer", 42)
+                    let size = map_size(updated)
+                    let temporary_size = map_size(map_new())
+                    drop(updated)
+                    size + temporary_size
+                }
+            "#,
+        ] {
+            let (checked, file) = checked(source);
+            assert_eq!(
+                mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
+                mimi::core::mir::MapRootAdmission::IncompleteCoverage,
+                "source should retain an incomplete MapRoot candidate: {source}"
+            );
+            let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+                panic!("withheld MapRoot receipt must fail closed: {source}");
+            };
+            assert!(
+                reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+                "{reason}"
+            );
+            assert!(!reason.contains("legacy"), "{reason}");
         }
     }
 

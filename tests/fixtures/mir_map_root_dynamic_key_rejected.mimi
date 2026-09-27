@@ -1,0 +1,7 @@
+func main() -> i32 {
+    let root = map_new()
+    let key = "answer"
+    let updated = map_set(root, key, 42)
+    drop(updated)
+    0
+}

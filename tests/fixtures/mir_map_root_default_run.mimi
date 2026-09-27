@@ -1,0 +1,8 @@
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "answer", 42)
+    let size = map_size(updated)
+    println(size)
+    drop(updated)
+    0
+}

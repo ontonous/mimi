@@ -41,11 +41,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
             )]);
         }
-        // S12/S15/S25/S30/R6-15: the scalar FFI, S8 Flow, scalar collection, flat Copy-record,
-        // exact non-Copy Option<string>, and exact nested Option-tuple production
-        // islands have crossed the default route boundary.  This direct
-        // native API is also an old production entry point, so an admitted
-        // graph must not continue into the old AST body compiler merely
+        // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
+        // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
+        // and exact nested Option-tuple production islands have crossed the
+        // default route boundary. This direct native API is also an old
+        // production entry point, so an admitted graph must not continue into
+        // the old AST body compiler merely
         // because a caller bypassed the CLI selector.  The helper performs
         // the same whole-program, all-consumer preflight as the selector and
         // returns only after the canonical native consumer is ready.  If
@@ -597,6 +598,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // narrow native Float contract and poison the graph before emission.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
         let excluded_sources = if admission.copy_option_f64_complete()
+            || admission.map_root_complete()
             // R6-1091 parity: a complete copy-Option (i32/bool/i64) admission
             // must see the same prelude-free graph the CLI dispatch wrapper
             // builds. Its recognized match face (R6-1089) otherwise dies on
@@ -641,6 +643,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 message,
             }) => {
                 let (code, detail) = match (profile, stage) {
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::MapRoot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("complete MapRoot MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::MapRoot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("complete MapRoot MIR island materialization failed: {message}"),
+                    ),
                     (crate::core::mir::CanonicalMirRouteProfile::ScalarFfi, stage) => (
                         "MIR-FFI-COVERAGE-001",
                         format!("scalar FFI canonical MIR {stage:?} failed: {message}"),
@@ -1102,13 +1118,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let canonical = &route.program;
         let scalar_ffi_candidate =
             route.admission.scalar_ffi && route.materialized_scalar_ffi_candidate;
+        let map_root_candidate = route.materialized_map_root_candidate;
         let scalar_generic_identity_i32_candidate =
             route.admission.scalar_generic_identity_i32_complete()
                 && route.materialized_scalar_generic_identity_i32_candidate;
         let scalar_generic_identity_i64_candidate =
             route.admission.scalar_generic_identity_i64_complete()
                 && route.materialized_scalar_generic_identity_i64_candidate;
-        let scalar_collection_candidate = route.materialized_collection_candidate;
+        // A MapRoot graph may use the already modeled scalar stdout face.
+        // Its dedicated Checker receipt and all-consumer preflight own that
+        // graph; the older collection-only validator rejects MapRoot by
+        // design and must not steal this narrower route.
+        let scalar_collection_candidate =
+            route.materialized_collection_candidate && !map_root_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
         let flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
@@ -1119,7 +1141,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
         let copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
         let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
-        if !scalar_ffi_candidate
+        if !map_root_candidate
+            && !scalar_ffi_candidate
             && !scalar_generic_identity_i32_candidate
             && !scalar_generic_identity_i64_candidate
             && !scalar_collection_candidate
@@ -1142,7 +1165,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // validator then rejects the unsupported combination.  This keeps the
         // candidate precedence identical to canonical_dispatch and prevents
         // a flat record from accidentally widening the collection envelope.
-        let island = if scalar_ffi_candidate {
+        let island = if map_root_candidate {
+            crate::core::mir::MAP_ROOT_ISLAND
+        } else if scalar_ffi_candidate {
             "scalar FFI island"
         } else if scalar_generic_identity_i32_candidate {
             crate::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND
