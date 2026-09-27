@@ -30840,3 +30840,186 @@ fn scalar_ffi_structural_receipt_mutations_share_preflight_classification() {
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
+
+#[test]
+fn scalar_ffi_instruction_and_call_result_identity_drift_fail_closed_across_consumers() {
+    const SOURCE: &str = r#"
+        extern "C" { func receipt_identity(value: i64) -> i64; }
+        func main() -> i64 { println(77); receipt_identity(1 as i64) }
+    "#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("call identity drift fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("call identity drift fixture materialization");
+    let owner = crate::core::NodeId("function:main".into());
+    let canonical_route = canonical.route_receipt("scalar-ffi-identity-drift-v1");
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        InstructionId,
+        CallResult,
+    }
+
+    const CASES: &[(Mutation, &str, &str)] = &[
+        (
+            Mutation::InstructionId,
+            "instruction-id-drift",
+            "has no FFI receipt",
+        ),
+        (
+            Mutation::CallResult,
+            "call-result-drift",
+            "FFI receipt result disagrees with MIR instruction",
+        ),
+    ];
+
+    struct CountingResolver(std::cell::Cell<usize>);
+    impl MirReferenceFfiResolver for CountingResolver {
+        fn preflight(&self, _: &[MirFfiCallContract]) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+
+        fn call(
+            &self,
+            _: &MirFfiCallContract,
+            _: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Int(9))
+        }
+    }
+
+    for (mutation, label, expected) in CASES {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let mut function = canonical
+            .functions()
+            .get(&owner)
+            .cloned()
+            .expect("main MIR body");
+        let mut changed = false;
+        for block in function.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                let crate::core::mir::MirInstructionKind::Call {
+                    callee: crate::core::ResolvedCallee::Extern(_),
+                    arguments,
+                    result,
+                    ..
+                } = &mut instruction.kind
+                else {
+                    continue;
+                };
+                match mutation {
+                    Mutation::InstructionId => {
+                        instruction.id = crate::core::mir::MirInstructionId::new(
+                            "inst:call:forged-identity-drift",
+                        )
+                        .expect("forged MIR instruction identity");
+                    }
+                    Mutation::CallResult => {
+                        *result = Some(
+                            arguments
+                                .first()
+                                .cloned()
+                                .expect("extern call argument for overlapping result identity"),
+                        );
+                    }
+                }
+                changed = true;
+                break;
+            }
+            if changed {
+                break;
+            }
+        }
+        assert!(changed, "{label} fixture has an extern call");
+        let mut malformed = canonical.clone();
+        malformed.replace_function_for_test_only(function);
+
+        // Replaying the checker route receipt from the original graph must not
+        // authorize a structurally modified MIR graph.
+        let replay_error = crate::verifier::verify_mir_with_route_receipt(
+            &malformed,
+            &canonical_route,
+            format!("stale-route-{label}"),
+        )
+        .expect_err("a route receipt for the original graph must not replay on a mutated graph");
+        assert!(
+            replay_error.contains("route receipt") || replay_error.contains("MIR input"),
+            "{label} stale route replay: {replay_error}"
+        );
+
+        // The fresh graph digest lets every consumer reach the shared MIR
+        // receipt preflight, which must still reject the actual call identity
+        // drift before user output, host binding, code emission or proof.
+        let resolver = CountingResolver(std::cell::Cell::new(0));
+        let reference = MirReferenceInterpreter::new(&malformed).with_ffi_resolver(&resolver);
+        let reference_error = reference
+            .execute(&owner, &[])
+            .expect_err("reference must reject a forged MIR call identity");
+        assert!(
+            reference_error.to_string().contains(expected),
+            "{label} reference: {reference_error}"
+        );
+        assert_eq!(reference.captured_output(), "", "{label} executed println");
+        assert_eq!(resolver.0.get(), 0, "{label} reached host preflight/call");
+
+        let bytecode_error = compile_mir_program(&malformed)
+            .expect_err("AST-free bytecode must reject forged MIR call identity");
+        assert!(
+            bytecode_error
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} bytecode: {bytecode_error:?}"
+        );
+
+        let native_errors = crate::codegen::mir::validate_mir_native(&malformed)
+            .expect_err("native validator must reject forged MIR call identity");
+        assert!(
+            native_errors
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} native validator: {native_errors:?}"
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_identity_drift");
+        let native_errors = generator
+            .compile_mir_native(&malformed)
+            .expect_err("native codegen must reject before emitting an executable entry");
+        assert!(
+            native_errors
+                .iter()
+                .any(|error| error.message.contains(expected)),
+            "{label} native codegen: {native_errors:?}"
+        );
+        assert!(generator.module.get_function("main").is_none());
+
+        let capability_errors = crate::verifier::validate_mir_capabilities(&malformed)
+            .expect_err("MIR capability gate must reject forged call identity");
+        assert!(
+            capability_errors
+                .iter()
+                .any(|error| error.contains(expected)),
+            "{label} capability: {capability_errors:?}"
+        );
+        let source_hash = format!("call-identity-{label}");
+        let verifier_error = crate::verifier::verify_mir(&malformed, source_hash.clone())
+            .expect_err("general MIR verifier must reject forged call identity");
+        assert!(
+            verifier_error.contains(expected),
+            "{label} general verifier: {verifier_error}"
+        );
+        let route_receipt = malformed.route_receipt("scalar-ffi-identity-drift-v1");
+        let ffi_verifier_error = crate::verifier::verify_ffi_mir_with_route_receipt(
+            &malformed,
+            &route_receipt,
+            source_hash,
+        )
+        .expect_err("FFI verifier must reject forged call identity");
+        assert!(
+            ffi_verifier_error.contains(expected),
+            "{label} FFI verifier: {ffi_verifier_error}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}

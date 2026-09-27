@@ -13079,12 +13079,23 @@ func main() -> i64 {
         let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
         let mut bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
         std::sync::Arc::make_mut(&mut bytecode).canonical_ffi[0].abi = "Rust".into();
-        let error = BytecodeVM::new(bytecode)
+        let mut vm = BytecodeVM::new(bytecode);
+        assert_eq!(
+            vm.debug_canonical_ffi_loaded_library_count(),
+            0,
+            "fresh VM must not load a host library before whole-program preflight"
+        );
+        let error = vm
             .run_value()
             .expect_err("forged ABI must be rejected before symbol execution");
         assert!(error
             .to_string()
             .contains("differs from its compiler binding"));
+        assert_eq!(
+            vm.debug_canonical_ffi_loaded_library_count(),
+            0,
+            "forged descriptor rejection must happen before any host library load"
+        );
     }
 
     #[test]
@@ -13122,10 +13133,21 @@ func main() -> i32 {
             }
         }
         assert!(changed, "fixture must contain a canonical extern call");
-        let error = BytecodeVM::new(bytecode)
+        let mut vm = BytecodeVM::new(bytecode);
+        assert_eq!(
+            vm.debug_canonical_ffi_loaded_library_count(),
+            0,
+            "fresh VM has no pre-existing library binding"
+        );
+        let error = vm
             .run_value()
             .expect_err("a forged descriptor index must fail before loading");
         assert!(error.to_string().contains("compiler binding"), "{error}");
+        assert_eq!(
+            vm.debug_canonical_ffi_loaded_library_count(),
+            0,
+            "descriptor index graph validation must precede library loading"
+        );
     }
 
     #[test]
