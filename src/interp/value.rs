@@ -4,7 +4,7 @@
 use crate::ast::*;
 use crate::interp::error::{ErrorContext, InterpError};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 
@@ -258,6 +258,10 @@ pub enum Value {
         tag: String,
         payload: Vec<Value>,
     },
+    /// Opaque runtime value for the checker-owned Canonical MIR MapRoot
+    /// island. It is separate from legacy `Record(None, fields)` Maps and is
+    /// only created/consumed by dedicated MIR bytecode operations.
+    CanonicalMapRoot(Arc<BTreeMap<String, i32>>),
     Record(Option<String>, HashMap<String, Value>),
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
@@ -375,6 +379,7 @@ impl Clone for Value {
                 tag: tag.clone(),
                 payload: payload.clone(),
             },
+            Value::CanonicalMapRoot(root) => Value::CanonicalMapRoot(Arc::clone(root)),
             Value::Record(name, fields) => Value::Record(name.clone(), fields.clone()),
             Value::Future(v) => Value::Future(Arc::clone(v)),
             Value::Error(v) => Value::Error(v.clone()),
@@ -1716,6 +1721,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::CanonicalMapRoot(_) => write!(f, "<canonical MapRoot>"),
             Value::Record(type_name, fields) => {
                 // Untyped records (JSON/Map) print as JSON objects for dual
                 // with codegen Map handles (mimi_map_to_json_i64).
@@ -2087,6 +2093,7 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
                     .zip(bv.iter())
                     .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
+        (Value::CanonicalMapRoot(a), Value::CanonicalMapRoot(b)) => a == b,
         (Value::Record(_, a), Value::Record(_, b)) => {
             a.len() == b.len()
                 && a.iter().all(|(k, v)| {
@@ -2212,6 +2219,7 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Tuple(_) => "tuple",
         Value::Variant(_, _) => "variant",
         Value::CanonicalVariant { .. } => "variant",
+        Value::CanonicalMapRoot(_) => "map-root",
         Value::Record(Some(_), _) => "record",
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",

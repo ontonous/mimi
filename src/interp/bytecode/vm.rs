@@ -1253,6 +1253,11 @@ impl BytecodeVM {
                 Op::Mov { rd, rs } => {
                     self.ensure_reg(rd, "mov destination")?;
                     self.ensure_reg(rs, "mov source")?;
+                    if matches!(self.get_reg(rs), Value::CanonicalMapRoot(_)) {
+                        return Err(InterpError::new(
+                            "canonical MapRoot values require Checker-receipted MIR operations",
+                        ));
+                    }
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
@@ -1261,6 +1266,11 @@ impl BytecodeVM {
                 Op::Move { rd, rs } => {
                     self.ensure_reg(rd, "move destination")?;
                     self.ensure_reg(rs, "move source")?;
+                    if matches!(self.get_reg(rs), Value::CanonicalMapRoot(_)) {
+                        return Err(InterpError::new(
+                            "canonical MapRoot values require Checker-receipted MIR operations",
+                        ));
+                    }
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         let value = std::mem::replace(&mut frame.regs[rs as usize], Value::Unit);
@@ -1270,6 +1280,11 @@ impl BytecodeVM {
                 Op::Clone { rd, rs } => {
                     self.ensure_reg(rd, "clone destination")?;
                     self.ensure_reg(rs, "clone source")?;
+                    if matches!(self.get_reg(rs), Value::CanonicalMapRoot(_)) {
+                        return Err(InterpError::new(
+                            "canonical MapRoot values require Checker-receipted MIR operations",
+                        ));
+                    }
                     if rd != rs {
                         let frame = self.cur_frame_mut();
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
@@ -1277,6 +1292,11 @@ impl BytecodeVM {
                 }
                 Op::Drop { ra } => {
                     self.ensure_reg(ra, "drop source")?;
+                    if matches!(self.get_reg(ra), Value::CanonicalMapRoot(_)) {
+                        return Err(InterpError::new(
+                            "canonical MapRoot values require Checker-receipted MIR operations",
+                        ));
+                    }
                     self.cur_frame_mut().regs[ra as usize] = Value::Unit;
                 }
                 Op::DropAggregate { ra, arity } => {
@@ -3827,6 +3847,90 @@ impl BytecodeVM {
                     combined.extend(left.iter().cloned());
                     combined.extend(right.iter().cloned());
                     self.set_reg(rd, Value::List(std::sync::Arc::new(combined)));
+                }
+                Op::MirMapRootNew { rd } => {
+                    self.ensure_reg(rd, "mir-map-root-new destination")?;
+                    self.set_reg(rd, Value::CanonicalMapRoot(Arc::new(BTreeMap::new())));
+                }
+                Op::MirMapRootSet { rd, ra, key, value } => {
+                    self.ensure_binary_regs(rd, ra, value, "mir-map-root-set")?;
+                    let key = self.const_str(key)?.to_owned();
+                    if key.contains('\0') {
+                        return Err(InterpError::new("MapRoot key contains NUL"));
+                    }
+                    let value = match self.get_reg(value) {
+                        Value::Int(value) => i32::try_from(*value).map_err(|_| {
+                            InterpError::integer_overflow(
+                                "E0802: canonical MapRoot.set value overflows i32",
+                            )
+                        })?,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical MapRoot.set: expected i32 runtime value, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    let root = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::CanonicalMapRoot(root) = root else {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.set: expected MapRoot source",
+                        ));
+                    };
+                    if Arc::strong_count(&root) != 1 {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.set: source root has an unreceipted alias",
+                        ));
+                    }
+                    let mut root = Arc::try_unwrap(root).map_err(|_| {
+                        InterpError::new(
+                            "canonical MapRoot.set: source root has an unreceipted alias",
+                        )
+                    })?;
+                    root.insert(key, value);
+                    self.set_reg(rd, Value::CanonicalMapRoot(Arc::new(root)));
+                }
+                Op::MirMapRootSize { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "mir-map-root-size")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.size: result aliases its borrowed root",
+                        ));
+                    }
+                    let size = match self.get_reg(ra) {
+                        Value::CanonicalMapRoot(root) => {
+                            crate::core::mir::types::canonical_map_root_size_i32(root.len() as u128)
+                                .map_err(InterpError::integer_overflow)?
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical MapRoot.size: expected MapRoot runtime value, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, Value::Int(i64::from(size)));
+                }
+                Op::MirMapRootDrop { ra } => {
+                    self.ensure_reg(ra, "mir-map-root-drop source")?;
+                    let root = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::CanonicalMapRoot(root) = root else {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.drop: expected MapRoot root",
+                        ));
+                    };
+                    if Arc::strong_count(&root) != 1 {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.drop: root has an unreceipted alias",
+                        ));
+                    }
+                    drop(root);
                 }
                 Op::MirVariantPredicate {
                     rd,

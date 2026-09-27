@@ -829,6 +829,25 @@ pub enum Op {
         /// Canonical MIR always supplies a ListOperationShape here.
         contract: Option<ConstIdx>,
     },
+    /// Canonical MIR MapRoot operations. The root is an opaque value separate
+    /// from legacy `NewMap`/`MapSet`: Set consumes `ra` and creates a fresh
+    /// `rd` from the static key constant and i32 `value` register.
+    MirMapRootNew {
+        rd: Reg,
+    },
+    MirMapRootSet {
+        rd: Reg,
+        ra: Reg,
+        key: ConstIdx,
+        value: Reg,
+    },
+    MirMapRootSize {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirMapRootDrop {
+        ra: Reg,
+    },
     /// rd = canonical Option/Result predicate(ra). The receipt is mandatory
     /// for MIR bytecode and carries the TypeDesc-selected discriminant.
     MirVariantPredicate {
@@ -1355,6 +1374,7 @@ impl Op {
             | NewMap { .. }
             | NewSet { .. }
             | MirSetNew { .. }
+            | MirMapRootNew { .. }
             | NewCap { .. }
             | Nop
             | Jmp { .. }
@@ -1414,6 +1434,7 @@ impl Op {
             | RecordSet { ra, rb, .. }
             | TupleSet { ra, rb, .. }
             | SharedSet { ra, rb, .. } => *ra == reg || *rb == reg,
+            MirMapRootSet { ra, value, .. } => *ra == reg || *value == reg,
             NegInt { ra, .. }
             | NegFloat { ra, .. }
             | BitNot { ra, .. }
@@ -1448,6 +1469,8 @@ impl Op {
             | MirSetToList { ra, .. }
             | MirListLen { ra, .. }
             | MirListReverse { ra, .. }
+            | MirMapRootSize { ra, .. }
+            | MirMapRootDrop { ra }
             | MirVariantPredicate { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }

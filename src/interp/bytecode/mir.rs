@@ -1098,11 +1098,30 @@ impl<'a> FunctionEmitter<'a> {
         instruction: &MirInstructionKind,
     ) {
         match instruction {
-            MirInstructionKind::MapRootNew { .. }
-            | MirInstructionKind::MapRootSet { .. }
-            | MirInstructionKind::MapRootSize { .. }
-            | MirInstructionKind::MapRootDrop { .. } => {
-                self.error("canonical MapRoot operations are not supported by bytecode emission in this slice".to_owned());
+            MirInstructionKind::MapRootNew { result } => {
+                let Some(rd) = self.reg(result) else { return };
+                self.proto.emit(Op::MirMapRootNew { rd });
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(source) else { return };
+                let Some(value) = self.reg(value) else { return };
+                let key = self.add_const(ConstValue::Str(key.clone()));
+                self.proto.emit(Op::MirMapRootSet { rd, ra, key, value });
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                self.proto.emit(Op::MirMapRootSize { rd, ra });
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                let Some(ra) = self.reg(root) else { return };
+                self.proto.emit(Op::MirMapRootDrop { ra });
             }
             MirInstructionKind::Const { result, literal } => {
                 if let Err(message) = self.supported_type_for_value(result) {
@@ -4411,6 +4430,13 @@ impl<'a> FunctionEmitter<'a> {
                 self.program.type_catalog().validate_copy_value(ty)
             }
             MirAbiClass::Unit if desc.is_canonical_ffi_unit() => Ok(()),
+            MirAbiClass::OpaqueHandle
+                if desc.kind == MirTypeKind::MapRoot
+                    && desc.layout == MirLayout::MapRoot
+                    && desc.ownership == MirOwnership::Move =>
+            {
+                Ok(())
+            }
             MirAbiClass::StringHandle
                 if desc.ownership == MirOwnership::Move
                     && desc.glue.move_out == MirGlueKind::OwnedString

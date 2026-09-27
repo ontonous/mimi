@@ -109,6 +109,10 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirListLen { .. } => "MIR_LIST_LEN",
         Op::MirListReverse { .. } => "MIR_LIST_REVERSE",
         Op::MirListConcat { .. } => "MIR_LIST_CONCAT",
+        Op::MirMapRootNew { .. } => "MIR_MAP_ROOT_NEW",
+        Op::MirMapRootSet { .. } => "MIR_MAP_ROOT_SET",
+        Op::MirMapRootSize { .. } => "MIR_MAP_ROOT_SIZE",
+        Op::MirMapRootDrop { .. } => "MIR_MAP_ROOT_DROP",
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
         Op::NewVariant { .. } => "NEW_VARIANT",
@@ -833,6 +837,30 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     .map(|contract| format!(" contract={contract}"))
                     .unwrap_or_default()
             )
+        }
+        Op::MirMapRootNew { rd } => {
+            format!("{:04}  {:<16} r{} = mir_map_root()", pc, name, rd)
+        }
+        Op::MirMapRootSet { rd, ra, key, value } => {
+            let key = proto
+                .constants
+                .get(*key as usize)
+                .map(|value| match value {
+                    ConstValue::Str(value) => format!("{:?}", value),
+                    _ => format!("const[{}]", key),
+                })
+                .unwrap_or_else(|| format!("const[{}]", key));
+            format!(
+                "{:04}  {:<16} r{} = mir_map_root_set_move(r{}, {}, r{})",
+                pc, name, rd, ra, key, value
+            )
+        }
+        Op::MirMapRootSize { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_map_root_size(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirMapRootDrop { ra } => {
+            format!("{:04}  {:<16} drop mir_map_root(r{})", pc, name, ra)
         }
         Op::MirVariantPredicate {
             rd,

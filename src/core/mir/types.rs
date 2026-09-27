@@ -25,6 +25,16 @@ pub(crate) fn map_root_type_id() -> ResolvedTypeId {
     ResolvedTypeId::synthetic("mimi-mir:MapRoot:v1")
 }
 
+pub(crate) const MAP_ROOT_SIZE_OVERFLOW_MESSAGE: &str =
+    "E0802: canonical MapRoot.size result overflows i32";
+
+/// Convert the physical root size to the Checker-visible i32 result without
+/// truncation. `u128` makes the overflow boundary directly testable without
+/// constructing a multi-billion-entry table.
+pub(crate) fn canonical_map_root_size_i32(len: u128) -> Result<i32, &'static str> {
+    i32::try_from(len).map_err(|_| MAP_ROOT_SIZE_OVERFLOW_MESSAGE)
+}
+
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
 /// backend format string; keeping it bounded and control-character-free makes
@@ -11872,10 +11882,23 @@ mod tests {
     use super::{
         MirAbiClass, MirBuiltinContract, MirBuiltinEffect, MirBuiltinKind, MirGlueKind,
         MirGlueOperation, MirLayout, MirListOperationMode, MirOwnership, MirReadProjectionKind,
-        MirReadProjectionStep, MirTypeCatalog, MirTypeKind, MIR_VARIANT_PROJECTION_TRAP_CODE,
+        MirReadProjectionStep, MirTypeCatalog, MirTypeKind, MAP_ROOT_SIZE_OVERFLOW_MESSAGE,
+        MIR_VARIANT_PROJECTION_TRAP_CODE,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable, SessionResidualId};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
+
+    #[test]
+    fn canonical_map_root_size_i32_checks_the_result_boundary() {
+        assert_eq!(
+            super::canonical_map_root_size_i32(i32::MAX as u128),
+            Ok(i32::MAX)
+        );
+        assert_eq!(
+            super::canonical_map_root_size_i32(i32::MAX as u128 + 1),
+            Err(MAP_ROOT_SIZE_OVERFLOW_MESSAGE)
+        );
+    }
 
     #[test]
     fn checked_map_root_type_desc_is_synthetic_and_checker_authorized() {

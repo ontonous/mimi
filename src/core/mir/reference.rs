@@ -27,6 +27,7 @@ pub enum MirRuntimeValue {
     FloatBits(u64),
     Bool(bool),
     String(String),
+    MapRoot(BTreeMap<String, i32>),
     Tuple(Vec<MirRuntimeValue>),
     List(Vec<MirRuntimeValue>),
     Set(Vec<MirRuntimeValue>),
@@ -5855,11 +5856,87 @@ impl<'a> MirReferenceInterpreter<'a> {
         steps: &mut usize,
     ) -> Result<(), MirExecutionError> {
         match &instruction.kind {
-            MirInstructionKind::MapRootNew { .. }
-            | MirInstructionKind::MapRootSet { .. }
-            | MirInstructionKind::MapRootSize { .. }
-            | MirInstructionKind::MapRootDrop { .. } => {
-                return Err(self.error(&function.owner, "MapRoot operations are structurally validated but not executable in the reference interpreter"));
+            MirInstructionKind::MapRootNew { result } => {
+                values.insert(result.clone(), MirRuntimeValue::MapRoot(BTreeMap::new()));
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                if key.contains('\0') {
+                    return Err(self.error(&function.owner, "MapRoot key contains NUL"));
+                }
+                let scalar = match values.get(value) {
+                    Some(MirRuntimeValue::Int(value)) => i32::try_from(*value).map_err(|_| {
+                        self.error(
+                            &function.owner,
+                            "E0802: canonical MapRoot.set value overflows i32",
+                        )
+                    })?,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "canonical MapRoot.set: expected i32 runtime value",
+                        ))
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!("MapRoot Set value '{}' is unavailable", value),
+                        ))
+                    }
+                };
+                let root = values.remove(source).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("MapRoot Set source '{}' is unavailable", source),
+                    )
+                })?;
+                let MirRuntimeValue::MapRoot(mut root) = root else {
+                    return Err(self.error(
+                        &function.owner,
+                        "canonical MapRoot.set: expected MapRoot source",
+                    ));
+                };
+                root.insert(key.clone(), scalar);
+                values.insert(result.clone(), MirRuntimeValue::MapRoot(root));
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                let size = match values.get(root) {
+                    Some(MirRuntimeValue::MapRoot(root)) => {
+                        super::types::canonical_map_root_size_i32(root.len() as u128)
+                            .map_err(|message| self.error(&function.owner, message))?
+                    }
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "canonical MapRoot.size: expected MapRoot runtime value",
+                        ))
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!("MapRoot Size root '{}' is unavailable", root),
+                        ))
+                    }
+                };
+                values.insert(result.clone(), MirRuntimeValue::Int(i64::from(size)));
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                let value = values.remove(root).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("MapRoot Drop root '{}' is unavailable", root),
+                    )
+                })?;
+                if !matches!(value, MirRuntimeValue::MapRoot(_)) {
+                    return Err(self.error(
+                        &function.owner,
+                        "canonical MapRoot.drop: expected MapRoot root",
+                    ));
+                }
             }
             MirInstructionKind::Const { result, literal } => {
                 values.insert(result.clone(), runtime_literal(literal));
@@ -9756,7 +9833,7 @@ func main() -> i32 {
     }
 
     #[test]
-    fn canonical_map_root_is_checker_receipted_and_consumers_remain_fail_closed() {
+    fn canonical_map_root_is_checker_receipted_and_reference_bytecode_agree() {
         let (owner, program) = canonical_map_root_program();
         let function = program.functions().get(&owner).expect("main MIR");
         let operations = function
@@ -9790,22 +9867,205 @@ func main() -> i32 {
             .root = "different:checker-root".into();
         assert_ne!(canonical_function, changed_receipt.canonical_text());
 
-        let reference_error = MirReferenceInterpreter::new(&program)
+        let reference = MirReferenceInterpreter::new(&program)
             .execute_with_output(&owner, &[])
-            .expect_err("reference must not execute an unimplemented MapRoot op");
-        assert!(reference_error
-            .message
-            .contains("not executable in the reference interpreter"));
-        let bytecode_errors = crate::interp::bytecode::mir::compile_mir_program(&program)
-            .expect_err("AST-free bytecode must keep the unsupported operation closed");
-        assert!(bytecode_errors.iter().any(|error| error
-            .message
-            .contains("MapRoot operations are not supported")));
+            .expect("reference executes checker-receipted MapRoot operations");
+        assert_eq!(reference.value, MirRuntimeValue::Int(1));
+        let bytecode = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free bytecode lowers checker-receipted MapRoot operations");
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+        assert_eq!(
+            vm.run_value().expect("bytecode execution"),
+            crate::interp::Value::Int(1)
+        );
+        assert_eq!(vm.take_stdout(), reference.output);
         let capability_errors = crate::verifier::validate_mir_capabilities(&program)
             .expect_err("whole-program verifier capability gate must reject MapRoot");
         assert!(capability_errors
             .iter()
             .any(|error| error.contains("MapRoot operation is outside verifier capability")));
+    }
+
+    #[test]
+    fn canonical_map_root_overwrite_unicode_and_stdout_match_reference_and_bytecode() {
+        let (owner, program) = canonical_program_with_main(
+            r#"
+func main() -> i32 {
+    let first = map_new()
+    let inserted = map_set(first, "alpha", 7)
+    let overwritten = map_set(inserted, "alpha", 9)
+    let first_size = map_size(overwritten)
+    println(first_size)
+    let unicode_key = map_set(overwritten, "雪", 11)
+    let final_size = map_size(unicode_key)
+    println(final_size)
+    drop(unicode_key)
+    final_size
+}
+"#,
+        );
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference MapRoot execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(2));
+        assert_eq!(reference.output, "1\n2\n");
+
+        let bytecode = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free MapRoot bytecode");
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+        assert_eq!(
+            vm.run_value().expect("bytecode MapRoot execution"),
+            crate::interp::Value::Int(2)
+        );
+        assert_eq!(vm.take_stdout(), reference.output);
+    }
+
+    #[test]
+    fn canonical_map_root_bytecode_rejects_forged_scalar_shape_key_and_alias() {
+        let (_, program) = canonical_map_root_program();
+        let compiled = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free MapRoot bytecode");
+        let set_location = |bytecode: &crate::interp::bytecode::BytecodeProgram| {
+            let function_index = bytecode.entry as usize;
+            let instruction_index = bytecode.functions[function_index]
+                .code
+                .iter()
+                .position(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootSet { .. }))
+                .expect("MapRoot Set bytecode");
+            (function_index, instruction_index)
+        };
+
+        let mut overflow = compiled.clone();
+        let (function_index, instruction_index) = set_location(&overflow);
+        let function = &overflow.functions[function_index];
+        let value_reg = match function.code[instruction_index] {
+            crate::interp::bytecode::Op::MirMapRootSet { value, .. } => value,
+            _ => unreachable!("located MapRoot Set"),
+        };
+        let const_index = function.code[..instruction_index]
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                crate::interp::bytecode::Op::LoadConst { rd, idx } if *rd == value_reg => {
+                    Some(*idx)
+                }
+                _ => None,
+            })
+            .expect("Set i32 constant register load");
+        let function = &mut std::sync::Arc::make_mut(&mut overflow).functions[function_index];
+        let crate::interp::bytecode::ConstValue::Int(value) =
+            &mut function.constants[const_index as usize]
+        else {
+            panic!("MapRoot Set value constant must be integer");
+        };
+        *value = i64::from(i32::MAX) + 1;
+        let error = crate::interp::bytecode::BytecodeVM::new(overflow)
+            .run_value()
+            .expect_err("an out-of-range Set value must trap before insertion");
+        assert_eq!(error.code(), "E0802");
+        assert!(error.message().contains("MapRoot.set value overflows i32"));
+
+        let mut wrong_scalar = compiled.clone();
+        let (function_index, instruction_index) = set_location(&wrong_scalar);
+        let function = &mut std::sync::Arc::make_mut(&mut wrong_scalar).functions[function_index];
+        let crate::interp::bytecode::Op::MirMapRootSet { ra, value, .. } =
+            &mut function.code[instruction_index]
+        else {
+            unreachable!("located MapRoot Set")
+        };
+        *value = *ra;
+        let error = crate::interp::bytecode::BytecodeVM::new(wrong_scalar)
+            .run_value()
+            .expect_err("MapRoot itself is not a Set scalar");
+        assert!(error.message().contains("expected i32 runtime value"));
+
+        let mut nul_key = compiled.clone();
+        let (function_index, instruction_index) = set_location(&nul_key);
+        let function = &mut std::sync::Arc::make_mut(&mut nul_key).functions[function_index];
+        let crate::interp::bytecode::Op::MirMapRootSet { key, .. } =
+            function.code[instruction_index]
+        else {
+            unreachable!("located MapRoot Set")
+        };
+        function.constants[key as usize] = crate::interp::bytecode::ConstValue::Str("\0".into());
+        let error = crate::interp::bytecode::BytecodeVM::new(nul_key)
+            .run_value()
+            .expect_err("a forged dynamic key encoding with NUL must fail closed");
+        assert!(error.message().contains("MapRoot key contains NUL"));
+
+        let mut generic_alias = compiled;
+        let (function_index, instruction_index) = set_location(&generic_alias);
+        let function = &mut std::sync::Arc::make_mut(&mut generic_alias).functions[function_index];
+        let crate::interp::bytecode::Op::MirMapRootSet { rd, ra, .. } =
+            function.code[instruction_index]
+        else {
+            unreachable!("located MapRoot Set")
+        };
+        function.code[instruction_index] = crate::interp::bytecode::Op::Clone { rd, rs: ra };
+        let error = crate::interp::bytecode::BytecodeVM::new(generic_alias)
+            .run_value()
+            .expect_err("generic Clone must not manufacture an unreceipted root alias");
+        assert!(error
+            .message()
+            .contains("require Checker-receipted MIR operations"));
+    }
+
+    #[test]
+    fn canonical_map_root_forged_i32_value_keeps_the_overflow_boundary() {
+        let (owner, program) = canonical_map_root_program();
+        let mut forged = program.clone();
+        let function = forged.functions.get_mut(&owner).expect("main MIR");
+        let value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MapRootSet { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("MapRoot Set scalar");
+        let constant = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const { result, .. } if result == &value
+                )
+            })
+            .expect("MapRoot Set scalar constant");
+        let MirInstructionKind::Const {
+            literal: crate::core::ir::ResolvedLiteral::Int(literal),
+            ..
+        } = &mut constant.kind
+        else {
+            panic!("MapRoot Set scalar must be an integer literal");
+        };
+        *literal = i64::from(i32::MAX) + 1;
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute_with_output(&owner, &[])
+            .expect_err("reference runtime must reject an out-of-range MapRoot scalar");
+        assert!(reference_error.message.contains("E0802"));
+        assert!(reference_error
+            .message
+            .contains("MapRoot.set value overflows i32"));
+
+        match crate::interp::bytecode::mir::compile_mir_program(&forged) {
+            Ok(bytecode) => {
+                let bytecode_error = crate::interp::bytecode::BytecodeVM::new(bytecode)
+                    .run_value()
+                    .expect_err("bytecode runtime must reject the same forged scalar");
+                assert_eq!(bytecode_error.code(), "E0802");
+                assert!(bytecode_error
+                    .message()
+                    .contains("MapRoot.set value overflows i32"));
+            }
+            Err(errors) => assert!(errors
+                .iter()
+                .any(|error| { error.message.contains("i32") || error.message.contains("range") })),
+        }
     }
 
     #[test]
