@@ -1339,7 +1339,17 @@ impl CheckedProgram {
             origin_catalog.register(&extern_block.node_id, &extern_block.origin, &mut errors);
         }
         origin_catalog.validate(&mut errors);
-        let legacy_file_clone = file.clone();
+        // The loaded production path resolves imports and merges their items
+        // before checking. Preserve the import-presence fact for all callers
+        // below, but legacy body consumers need only source items and
+        // provenance. Do not retain a second AST copy of import directives
+        // in the compatibility snapshot.
+        let legacy_file_clone = File {
+            sources: file.sources.clone(),
+            imports: Vec::new(),
+            items: file.items.clone(),
+            implicit_single: file.implicit_single,
+        };
         if !errors.is_empty() {
             return Err(errors);
         }

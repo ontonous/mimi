@@ -127,6 +127,28 @@ fn resolved_lowering_reads_source_provenance_from_checker_registry() {
 }
 
 #[test]
+fn checked_program_keeps_import_route_fact_without_legacy_import_ast() {
+    let file = parse("use std::io\nfunc main() -> i32 { 42 }");
+    assert_eq!(
+        file.imports.len(),
+        1,
+        "fixture must contain an import directive"
+    );
+
+    let program = crate::core::check_program(&file).expect("check imported source");
+    assert!(program.has_imports(), "route fact remains Checker-owned");
+    assert!(
+        program.legacy_file.imports.is_empty(),
+        "legacy body snapshot must not retain import directives"
+    );
+    assert!(program.function("main").is_some());
+    assert!(program.legacy_file.items.iter().any(|item| matches!(
+        item,
+        crate::ast::Item::Func(function) if function.name == "main"
+    )));
+}
+
+#[test]
 fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
     let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
 
