@@ -1471,7 +1471,7 @@ fn union_outside_promoted_payload_contract_stays_fail_closed() {
 }
 
 #[test]
-fn missing_union_effect_receipt_rejects_all_consumers() {
+fn missing_union_effect_receipt_is_rejected_before_consumers() {
     let mir = materialize(FLAT_COPY_UNION_SOURCE, "missing receipt fixture");
     let mut forged_main = mir
         .functions()
@@ -1524,10 +1524,26 @@ fn missing_union_effect_receipt_rejects_all_consumers() {
     assert!(native_error
         .iter()
         .any(|error| error.message.contains("explicit canonical effect receipt")));
+    // `verify_mir` requires a validated MirProgram. This test-only mutation
+    // bypasses that constructor, so prove the public structural boundary
+    // rejects the graph before handing it to any proof consumer.
+    let validation_error = MirProgram::with_type_catalog_and_instances_and_transitions(
+        forged.functions().clone(),
+        forged.type_catalog().clone(),
+        forged.instances().clone(),
+        forged.transitions().clone(),
+    )
+    .expect_err("validated MIR construction must reject a missing union receipt");
+    assert!(
+        validation_error
+            .iter()
+            .any(|error| error.message.contains("receipt")),
+        "validated MIR construction rejected for an unrelated reason: {validation_error:?}"
+    );
 }
 
 #[test]
-fn forged_union_receipt_target_rejects_all_consumers() {
+fn forged_union_receipt_target_is_rejected_before_consumers() {
     let mir = materialize(FLAT_COPY_UNION_SOURCE, "forged receipt fixture");
     // Forge the receipt to name the second target state instead of the union
     // identity: a multi-target union receipt must name contract.result.
@@ -1569,6 +1585,26 @@ fn forged_union_receipt_target_rejects_all_consumers() {
     assert!(capability_error
         .iter()
         .any(|error| error.contains("receipt")));
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native must reject a forged union receipt target");
+    assert!(native_error
+        .iter()
+        .any(|error| error.message.contains("receipt")));
+    // Keep the verifier's validated-input precondition explicit: the public
+    // MIR constructor owns structural receipt rejection for malformed graphs.
+    let validation_error = MirProgram::with_type_catalog_and_instances_and_transitions(
+        forged.functions().clone(),
+        forged.type_catalog().clone(),
+        forged.instances().clone(),
+        forged.transitions().clone(),
+    )
+    .expect_err("validated MIR construction must reject a forged union receipt target");
+    assert!(
+        validation_error
+            .iter()
+            .any(|error| error.message.contains("receipt")),
+        "validated MIR construction rejected for an unrelated reason: {validation_error:?}"
+    );
 }
 
 #[test]
