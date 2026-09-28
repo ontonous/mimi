@@ -470,6 +470,35 @@ pub(super) fn map_root_set_owned_any_string(
     Ok(())
 }
 
+/// Remove one MapRoot entry and release its String owner only after the
+/// registry lock is released. A payload may still be named by another entry
+/// in this exact table or by a shallow Map clone, so the local table is
+/// checked before detaching its shared owner record.
+pub(super) fn map_root_remove(handle: i64, key: &str) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let removed_owner = {
+        let mut t = lock_maps();
+        let slot = t
+            .slots
+            .get_mut(index as usize)
+            .ok_or(HandleError::Invalid)?;
+        validate_map_root_slot(slot, gen)?;
+        let map = slot.obj.as_mut().ok_or(HandleError::Destroyed)?;
+        let Some(removed_value) = map.inner.remove(key) else {
+            return Ok(());
+        };
+        if map.inner.values().any(|value| *value == removed_value) {
+            None
+        } else {
+            map.owned.remove(&removed_value)
+        }
+    };
+    // MapOwnedPayload may unregister a tagged Any String. Keep that destructor
+    // outside MAP_TABLE so Map and Any registry locks are never nested here.
+    drop(removed_owner);
+    Ok(())
+}
+
 pub(super) fn map_root_size(handle: i64) -> Result<usize, HandleError> {
     let (index, gen) = unpack(handle)?;
     let t = lock_maps();

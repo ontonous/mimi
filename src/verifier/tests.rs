@@ -5110,6 +5110,36 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             drop(updated)
             size
         }
+        func checked_map_remove_size() -> i32 {
+            ensures: result == 1
+            let root = map_new()
+            let first = map_set(root, "remove", 41)
+            let second = map_set(first, "keep", 42)
+            let removed = map_remove(second, "remove")
+            let size = map_size(removed)
+            drop(removed)
+            size
+        }
+        func false_map_remove_size() -> i32 {
+            ensures: result == 0
+            let root = map_new()
+            let first = map_set(root, "remove", 41)
+            let second = map_set(first, "keep", 42)
+            let removed = map_remove(second, "remove")
+            let size = map_size(removed)
+            drop(removed)
+            size
+        }
+        func checked_missing_map_remove_size() -> i32 {
+            ensures: result == 2
+            let root = map_new()
+            let first = map_set(root, "first", 41)
+            let second = map_set(first, "second", 42)
+            let unchanged = map_remove(second, "missing")
+            let size = map_size(unchanged)
+            drop(unchanged)
+            size
+        }
         func main() -> i32 { 0 }
     "#;
     let file = parse_memory_source(source, "map-root-public-verify").expect("parse");
@@ -5189,6 +5219,24 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             .map(|artifact| artifact.engine.as_str()),
         Some(ProofArtifact::ENGINE_MIR)
     );
+    for (function, status) in [
+        ("checked_map_remove_size", VerifStatus::Proven),
+        ("false_map_remove_size", VerifStatus::Disproven),
+        ("checked_missing_map_remove_size", VerifStatus::Proven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name == function)
+            .unwrap_or_else(|| panic!("missing MapRoot Remove result for {function}"));
+        assert_eq!(result.status, status, "{}", result.message);
+        assert_eq!(
+            result
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.engine.as_str()),
+            Some(ProofArtifact::ENGINE_MIR)
+        );
+    }
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "public MapRoot verification must not access the retained legacy body"
@@ -5207,6 +5255,9 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
         ("false_map_size", VerifStatus::Disproven),
         ("checked_string_map_size", VerifStatus::Proven),
         ("false_string_map_size", VerifStatus::Disproven),
+        ("checked_map_remove_size", VerifStatus::Proven),
+        ("false_map_remove_size", VerifStatus::Disproven),
+        ("checked_missing_map_remove_size", VerifStatus::Proven),
     ] {
         let result = dual_results
             .iter()

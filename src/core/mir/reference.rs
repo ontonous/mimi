@@ -3848,6 +3848,7 @@ fn validate_call_argument_directions(
                     super::MirInstructionKind::Clone { result, .. } => (result, Producer::Clone),
                     super::MirInstructionKind::MapRootNew { result }
                     | super::MirInstructionKind::MapRootSet { result, .. }
+                    | super::MirInstructionKind::MapRootRemove { result, .. }
                     | super::MirInstructionKind::MapRootSize { result, .. } => {
                         (result, Producer::Fresh)
                     }
@@ -5086,6 +5087,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::MapRootSet { source, value, .. } => {
             source == needle || value == needle
         }
+        super::MirInstructionKind::MapRootRemove { source, .. } => source == needle,
         super::MirInstructionKind::MapRootSize { root, .. }
         | super::MirInstructionKind::MapRootDrop { root } => root == needle,
         super::MirInstructionKind::Const { .. }
@@ -5185,6 +5187,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         super::MirInstructionKind::Const { result, .. }
         | super::MirInstructionKind::MapRootNew { result }
         | super::MirInstructionKind::MapRootSet { result, .. }
+        | super::MirInstructionKind::MapRootRemove { result, .. }
         | super::MirInstructionKind::MapRootSize { result, .. }
         | super::MirInstructionKind::Load { result, .. }
         | super::MirInstructionKind::Copy { result, .. }
@@ -6037,6 +6040,29 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ));
                 };
                 root.insert(key.clone(), payload);
+                values.insert(result.clone(), MirRuntimeValue::MapRoot(root));
+            }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                if key.contains('\0') {
+                    return Err(self.error(&function.owner, "MapRoot key contains NUL"));
+                }
+                let root = values.remove(source).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("MapRoot Remove source '{}' is unavailable", source),
+                    )
+                })?;
+                let MirRuntimeValue::MapRoot(mut root) = root else {
+                    return Err(self.error(
+                        &function.owner,
+                        "canonical MapRoot.remove: expected MapRoot source",
+                    ));
+                };
+                root.remove(key);
                 values.insert(result.clone(), MirRuntimeValue::MapRoot(root));
             }
             MirInstructionKind::MapRootSize { result, root } => {
@@ -9981,6 +10007,7 @@ func main() -> i32 {
                     instruction.kind,
                     crate::core::mir::MirInstructionKind::MapRootNew { .. }
                         | crate::core::mir::MirInstructionKind::MapRootSet { .. }
+                        | crate::core::mir::MirInstructionKind::MapRootRemove { .. }
                         | crate::core::mir::MirInstructionKind::MapRootSize { .. }
                         | crate::core::mir::MirInstructionKind::MapRootDrop { .. }
                 )
@@ -10390,6 +10417,71 @@ func main() -> i32 {
     }
 
     #[test]
+    fn canonical_map_root_remove_bytecode_tampering_fails_before_stdout() {
+        let (_, program) = canonical_program_with_main(
+            r#"
+func main() -> i32 {
+    println("before remove")
+    let root = map_new()
+    let inserted = map_set(root, "remove", "payload")
+    let removed = map_remove(inserted, "remove")
+    let size = map_size(removed)
+    drop(removed)
+    size
+}
+"#,
+        );
+        let compiled = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free Remove MapRoot bytecode");
+        let function_index = compiled.entry as usize;
+
+        let mut invalid_index = compiled.clone();
+        let function = &mut std::sync::Arc::make_mut(&mut invalid_index).functions[function_index];
+        let remove = function
+            .code
+            .iter_mut()
+            .find(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootRemove { .. }))
+            .expect("MapRoot Remove opcode");
+        let crate::interp::bytecode::Op::MirMapRootRemove { rd, ra, .. } = *remove else {
+            unreachable!("located Remove opcode")
+        };
+        *remove = crate::interp::bytecode::Op::MirMapRootRemove {
+            rd,
+            ra,
+            key: u32::MAX,
+        };
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(invalid_index);
+        let error = vm
+            .run_value()
+            .expect_err("an invalid Remove key index must fail bytecode preflight");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+
+        let mut replaced_opcode = compiled;
+        let function =
+            &mut std::sync::Arc::make_mut(&mut replaced_opcode).functions[function_index];
+        let remove = function
+            .code
+            .iter_mut()
+            .find(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootRemove { .. }))
+            .expect("MapRoot Remove opcode");
+        let crate::interp::bytecode::Op::MirMapRootRemove { rd, ra, .. } = *remove else {
+            unreachable!("located Remove opcode")
+        };
+        *remove = crate::interp::bytecode::Op::Clone { rd, rs: ra };
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(replaced_opcode);
+        let error = vm
+            .run_value()
+            .expect_err("a replaced Remove opcode must fail bytecode preflight");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+    }
+
+    #[test]
     fn canonical_bytecode_without_map_root_receipt_rejects_injected_map_root() {
         let (_, program) = canonical_program_with_main(
             "func main() -> i32 { println(\"before injected root\"); 0 }",
@@ -10515,6 +10607,10 @@ func main() -> i32 {
                 crate::core::MapRootActionKind::Set => {
                     receipt.root = "forged:root:set".into();
                     receipt.source = Some("forged:root:new".into());
+                }
+                crate::core::MapRootActionKind::Remove => {
+                    receipt.root = "forged:root:remove".into();
+                    receipt.source = Some("forged:root:set".into());
                 }
                 crate::core::MapRootActionKind::Size | crate::core::MapRootActionKind::Drop => {
                     receipt.root = "forged:root:set".into();

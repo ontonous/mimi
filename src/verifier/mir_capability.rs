@@ -464,6 +464,7 @@ impl<'a> CapabilityGate<'a> {
                         instruction.kind,
                         MirInstructionKind::MapRootNew { .. }
                             | MirInstructionKind::MapRootSet { .. }
+                            | MirInstructionKind::MapRootRemove { .. }
                             | MirInstructionKind::MapRootSize { .. }
                             | MirInstructionKind::MapRootDrop { .. }
                     )
@@ -894,6 +895,17 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} MapRoot key contains NUL"));
                 }
                 self.validate_map_root_set_payload(function, value, subject);
+            }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                self.validate_map_root_type(function, result, subject, "Remove result");
+                self.validate_map_root_type(function, source, subject, "Remove source");
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapRoot key contains NUL"));
+                }
             }
             MirInstructionKind::MapRootSize { result, root } => {
                 self.validate_map_root_type(function, root, subject, "Size root");

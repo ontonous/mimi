@@ -399,6 +399,108 @@ impl<'a> ActionEmitter<'a> {
             return;
         }
 
+        if builtin == "map_remove" {
+            let Some((initializer, target)) = self.direct_map_root_binding.clone() else {
+                return;
+            };
+            if initializer != expression.node_id || call.arguments.len() != 2 {
+                return;
+            }
+            let source = &call.arguments[0].value;
+            let key_expr = &call.arguments[1].value;
+            let ResolvedExprKind::Literal(ResolvedLiteral::String(key)) = &key_expr.kind else {
+                if let ResolvedExprKind::Load(place) = &source.kind {
+                    if self.map_root_locals.contains(&place.base) {
+                        self.map_root_profile_invalid = true;
+                    }
+                }
+                return;
+            };
+            if key.contains('\0') {
+                self.map_root_profile_invalid = true;
+                return;
+            }
+            let (source_local, source_is_temporary) = match &source.kind {
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty()
+                        && self.live_map_root_locals.contains(&place.base) =>
+                {
+                    (place.base.clone(), false)
+                }
+                ResolvedExprKind::Load(place) if self.map_root_locals.contains(&place.base) => {
+                    // A previously consumed MapRoot local, or a projection
+                    // from one, cannot enter this single-owner profile. The
+                    // general expression visitor also catches this, but
+                    // poison it here so the Remove recognizer remains closed
+                    // when its traversal context changes.
+                    self.map_root_profile_invalid = true;
+                    return;
+                }
+                ResolvedExprKind::Call(_) => {
+                    let Some(local) = self.receipted_temporary_map_root(source) else {
+                        return;
+                    };
+                    (local, true)
+                }
+                _ => return,
+            };
+            if self.map_root_locals.contains(&target)
+                || !self
+                    .body
+                    .locals
+                    .get(&target)
+                    .is_some_and(|local| local.ty == expression.ty)
+                || !matches!(
+                    self.types.get(&source.ty),
+                    Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+                )
+                || !matches!(
+                    self.types.get(&key_expr.ty),
+                    Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+                )
+                || !matches!(
+                    self.types.get(&expression.ty),
+                    Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+                )
+            {
+                if self.map_root_locals.contains(&source_local) {
+                    self.map_root_profile_invalid = true;
+                }
+                return;
+            }
+
+            if !source_is_temporary {
+                let ResolvedExprKind::Load(place) = &source.kind else {
+                    unreachable!("non-temporary MapRoot source is a local load")
+                };
+                self.permitted_map_root_loads.insert(source.node_id.clone());
+                debug_assert_eq!(place.base, source_local);
+            }
+            let inherited_payload_type = self
+                .map_root_payload_types
+                .get(&source_local)
+                .cloned()
+                .flatten();
+            self.live_map_root_locals.remove(&source_local);
+            self.map_root_payload_types.remove(&source_local);
+            self.map_root_locals.insert(target.clone());
+            self.live_map_root_locals.insert(target.clone());
+            self.map_root_payload_types
+                .insert(target.clone(), inherited_payload_type);
+            self.map_root_actions.push(MapRootAction {
+                kind: MapRootActionKind::Remove,
+                point: expression.node_id.clone(),
+                local: target.clone(),
+                root: Self::map_root_resource_identity(&target),
+                key: Some(key.clone()),
+                value: None,
+                value_type: None,
+                source_local: Some(source_local.clone()),
+                source: Some(Self::map_root_resource_identity(&source_local)),
+            });
+            return;
+        }
+
         if builtin != "map_set" {
             return;
         }
@@ -3598,6 +3700,122 @@ func main() -> i32 {
             analysis.map_root_actions[2].local,
             analysis.map_root_actions[3].local
         );
+    }
+
+    #[test]
+    fn map_root_remove_checker_receipts_consume_and_reissue_one_root_chain() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let first = map_new()
+    let inserted = map_set(first, "remove", "payload")
+    let with_keep = map_set(inserted, "keep", "stay")
+    let removed = map_remove(with_keep, "remove")
+    let size = map_size(removed)
+    drop(removed)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("closed Map-root Remove lifecycle");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("Map-root resource analysis");
+        let actions = &analysis.map_root_actions;
+        assert_eq!(
+            actions.iter().map(|action| action.kind).collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Set,
+                MapRootActionKind::Remove,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(actions[3].key.as_deref(), Some("remove"));
+        assert_eq!(actions[3].source.as_ref(), Some(&actions[2].root));
+        assert_eq!(actions[3].source_local.as_ref(), Some(&actions[2].local));
+        assert_eq!(actions[3].root, actions[4].root);
+        assert_eq!(actions[3].local, actions[4].local);
+        assert_eq!(actions[4].root, actions[5].root);
+
+        let temporary = parse(
+            r#"
+func main() -> i32 {
+    let removed = map_remove(map_new(), "missing")
+    let size = map_size(removed)
+    drop(removed)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&temporary)
+            .expect("temporary MapRoot source is consumed by Remove");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("temporary Map-root analysis");
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Remove,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(
+            analysis.map_root_actions[0].root,
+            analysis.map_root_actions[1].source.clone().unwrap()
+        );
+    }
+
+    #[test]
+    fn map_root_remove_dynamic_key_and_reuse_withhold_canonical_receipts() {
+        for source in [
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let inserted = map_set(root, "answer", 42)
+    let key = "answer"
+    let removed = map_remove(inserted, key)
+    drop(removed)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let inserted = map_set(root, "answer", 42)
+    let removed = map_remove(inserted, "answer")
+    let again = map_remove(inserted, "answer")
+    let size = map_size(again)
+    drop(removed)
+    drop(again)
+    size
+}
+"#,
+        ] {
+            let file = parse(source);
+            let program = crate::core::check_program(&file)
+                .expect("unsupported persistent Map source remains type-correct");
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("Map-root analysis");
+            assert!(
+                analysis.map_root_actions.is_empty(),
+                "unsupported Remove shape must withhold the entire ownership receipt"
+            );
+            assert_eq!(
+                crate::core::mir::classify_canonical_mir_route_admission(&program).map_root,
+                crate::core::mir::MapRootAdmission::OutsideProfile,
+                "unsupported persistent Map usage must remain on the compatibility route"
+            );
+        }
     }
 
     #[test]

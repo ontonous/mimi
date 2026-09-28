@@ -120,6 +120,39 @@ pub unsafe extern "C" fn mimi_mir_map_root_set_string(
     }
 }
 
+/// Remove one static key from a live MapRoot and reclaim its detached String
+/// payload when this is the final table/clone owner. Missing keys are a no-op.
+///
+/// # Safety
+/// For `key_len > 0`, `key` must point to `key_len` readable bytes for this
+/// call. The bytes must be UTF-8 and NUL-free. The handle must be a live
+/// MapRoot whose Checker receipt excludes aliases and value escapes.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_map_root_remove(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+) -> i64 {
+    if handle == 0 || key.is_null() || key_len < 0 {
+        abort(b"[E0800] canonical MIR MapRoot.remove received an invalid operand\0");
+    }
+    let Ok(key_len) = usize::try_from(key_len) else {
+        abort(b"[E0800] canonical MIR MapRoot.remove key length is invalid\0");
+    };
+    // SAFETY: the ABI precondition requires this exact key range to be
+    // readable for the call; null and negative lengths were rejected above.
+    let key_bytes = unsafe { std::slice::from_raw_parts(key, key_len) };
+    let Ok(key) = std::str::from_utf8(key_bytes) else {
+        abort(b"[E0800] canonical MIR MapRoot.remove key is not valid UTF-8\0");
+    };
+    if key.contains('\0') {
+        abort(b"[E0800] canonical MIR MapRoot.remove key contains NUL\0");
+    }
+    super::handle::map_root_remove(handle, key)
+        .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0"));
+    handle
+}
+
 /// Return the checked i32 size of one live MapRoot.
 #[no_mangle]
 pub extern "C" fn mimi_mir_map_root_size(handle: i64) -> i32 {
@@ -269,5 +302,113 @@ mod tests {
             !registered(),
             "the final clone drop must free the payload once"
         );
+    }
+
+    #[test]
+    fn remove_reclaims_string_only_after_last_shallow_map_owner() {
+        let root = mimi_mir_map_root_new();
+        let key = b"payload";
+        let value = "a\0b雪".as_bytes();
+        // SAFETY: the root is live and both byte slices remain readable for
+        // the exact explicit lengths passed to the String Set helper.
+        let root = unsafe {
+            mimi_mir_map_root_set_string(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                value.as_ptr().cast(),
+                value.len() as i64,
+            )
+        };
+        let c_key = std::ffi::CString::new("payload").expect("static key has no NUL");
+        // SAFETY: root is live and c_key is a live C string.
+        let tagged = unsafe { super::super::mimi_map_get(root, c_key.as_ptr()) };
+        let address = (tagged as usize) & !1;
+        // SAFETY: root is live; mimi_map_clone retains the owner Arc.
+        let clone = unsafe { super::super::mimi_map_clone(root) };
+        let registered = || {
+            super::super::any_value_strings()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&address)
+        };
+        assert!(registered());
+
+        // SAFETY: both handles are live and the static key range is readable.
+        assert_eq!(
+            unsafe { mimi_mir_map_root_remove(root, key.as_ptr(), key.len() as i64) },
+            root
+        );
+        assert!(registered(), "the shallow clone still owns the payload");
+        // SAFETY: clone and c_key are live; the entry remains in the clone.
+        let cloned_tagged = unsafe { super::super::mimi_map_get(clone, c_key.as_ptr()) };
+        assert_eq!(cloned_tagged, tagged);
+        assert_eq!(
+            super::super::copy_registered_any_string(cloned_tagged),
+            Some(value.to_vec())
+        );
+
+        // SAFETY: clone is live and the same exact key range remains readable.
+        assert_eq!(
+            unsafe { mimi_mir_map_root_remove(clone, key.as_ptr(), key.len() as i64) },
+            clone
+        );
+        assert!(!registered(), "removing the final owner frees the payload");
+        mimi_mir_map_root_drop(root);
+        mimi_mir_map_root_drop(clone);
+    }
+
+    #[test]
+    fn remove_keeps_payload_until_last_key_in_one_map_is_removed() {
+        let root = mimi_mir_map_root_new();
+        let key = b"first";
+        let value = b"shared";
+        // SAFETY: root and both explicit byte ranges stay live for each call.
+        let root = unsafe {
+            mimi_mir_map_root_set_string(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                value.as_ptr().cast(),
+                value.len() as i64,
+            )
+        };
+        let c_key = std::ffi::CString::new("first").expect("static key");
+        // SAFETY: root and key are live.
+        let tagged = unsafe { super::super::mimi_map_get(root, c_key.as_ptr()) };
+        let address = (tagged as usize) & !1;
+        let registered = || {
+            super::super::any_value_strings()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&address)
+        };
+        assert!(registered());
+
+        // This low-level duplicate models a shared opaque value handle held
+        // by two entries in the same table. Production MapRoot Set clones a
+        // fresh String per call, but the runtime must still retain the owner
+        // until the table's final reference disappears.
+        super::super::handle::map_root_set(root, "second".into(), tagged)
+            .expect("insert duplicate tagged handle for the runtime invariant");
+        // SAFETY: root and the exact key range are live.
+        assert_eq!(
+            unsafe { mimi_mir_map_root_remove(root, key.as_ptr(), key.len() as i64) },
+            root
+        );
+        assert!(registered(), "the second key still names the payload");
+        assert_eq!(
+            super::super::copy_registered_any_string(tagged),
+            Some(value.to_vec())
+        );
+
+        let last_key = b"second";
+        // SAFETY: root and the exact final key range are live.
+        assert_eq!(
+            unsafe { mimi_mir_map_root_remove(root, last_key.as_ptr(), last_key.len() as i64) },
+            root
+        );
+        assert!(!registered(), "the final key removal releases the payload");
+        mimi_mir_map_root_drop(root);
     }
 }

@@ -356,6 +356,25 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_mir_map_root_remove")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_remove",
+                i64.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_mir_map_root_size")
             .is_none()
         {
@@ -1045,6 +1064,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_map_root_set(result, source, key, value, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                let value = self.emit_map_root_remove(result, source, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::MapRootSize { result, root } => {
                 let value = self.emit_map_root_size(result, root, subject)?;
                 self.values.insert(result.clone(), value);
@@ -1285,14 +1312,38 @@ func wrong_string_map_size() -> i32 {
     drop(inserted)
     size
 }
+func map_remove_string_size(value: string) -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let first = map_set(root, "remove", value)
+    let second = map_set(first, "keep", "stay")
+    let removed = map_remove(second, "remove")
+    let size = map_size(removed)
+    drop(removed)
+    size
+}
+func wrong_map_remove_string_size() -> i32 {
+    ensures: result == 0
+    let root = map_new()
+    let first = map_set(root, "remove", "gone")
+    let second = map_set(first, "keep", "stay")
+    let removed = map_remove(second, "remove")
+    let size = map_size(removed)
+    drop(removed)
+    size
+}
 func main() -> i32 {
     let root = map_new()
     let inserted = map_set(root, "nul", "a\0b雪")
     let overwritten = map_set(inserted, "nul", "x\0y")
     let completed = map_set(overwritten, "second", "two")
-    let size = map_size(completed)
+    let removed = map_remove(completed, "nul")
+    let size = map_size(removed)
     println(size)
-    drop(completed)
+    let missing = map_remove(removed, "absent")
+    let missing_size = map_size(missing)
+    println(missing_size)
+    drop(missing)
     let helper_size = map_size_for_string("parameter\0payload")
     println(helper_size)
     0
@@ -1374,6 +1425,7 @@ func main() -> i32 {
         for runtime in [
             "mimi_mir_map_root_new",
             "mimi_mir_map_root_set",
+            "mimi_mir_map_root_remove",
             "mimi_mir_map_root_size",
             "mimi_mir_map_root_drop",
         ] {
@@ -1442,7 +1494,7 @@ func main() -> i32 {
             .execute_with_output(&main, &[])
             .expect("reference String MapRoot execution");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
-        assert_eq!(reference.output, "2\n1\n");
+        assert_eq!(reference.output, "1\n1\n1\n");
 
         let mut vm = BytecodeVM::new(
             compile_mir_program(&program).expect("AST-free String MapRoot bytecode"),
@@ -1465,6 +1517,16 @@ func main() -> i32 {
             "{}",
             proven.message
         );
+        let remove_proven = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("map_remove_string_size"))
+            .expect("positive String MapRoot Remove contract");
+        assert_eq!(
+            remove_proven.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            remove_proven.message
+        );
         let receipt_verification = crate::verifier::verify_mir_with_route_receipt(
             &program,
             &verifier_receipt,
@@ -1480,6 +1542,16 @@ func main() -> i32 {
             .find(|result| result.func_name.ends_with("wrong_string_map_size"))
             .expect("negative String MapRoot contract");
         assert_eq!(disproven.status, crate::verifier::VerifStatus::Disproven);
+        let remove_disproven = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("wrong_map_remove_string_size"))
+            .expect("negative String MapRoot Remove contract");
+        assert_eq!(
+            remove_disproven.status,
+            crate::verifier::VerifStatus::Disproven,
+            "{}",
+            remove_disproven.message
+        );
 
         let mut forged = program.clone();
         let i32_ty = forged
@@ -1520,6 +1592,43 @@ func main() -> i32 {
             .expect_err("forged String payload descriptor must fail verifier admission")
             .iter()
             .any(|error| error.contains("MapRoot MIR validation failed")));
+
+        let mut forged_remove = program.clone();
+        let mut main_with_forged_remove = forged_remove
+            .functions()
+            .get(&main)
+            .expect("String MapRoot main")
+            .clone();
+        assert!(main_with_forged_remove
+            .ownership
+            .forge_checker_map_root_remove_key_for_test_only("forged-key".into()));
+        forged_remove.replace_function_for_test_only(main_with_forged_remove);
+        let forged_remove_construction =
+            crate::core::mir::reference::MirProgram::with_type_catalog(
+                forged_remove.functions().clone(),
+                forged_remove.type_catalog().clone(),
+            )
+            .expect_err("public MIR constructor must reject a forged Remove key receipt");
+        assert!(forged_remove_construction
+            .iter()
+            .any(|error| error.message.contains("MapRoot operation disagrees")));
+        assert!(crate::codegen::mir::validate_mir_native(&forged_remove)
+            .expect_err("native admission must reject the forged Remove key")
+            .iter()
+            .any(|error| error
+                .to_string()
+                .contains("MapRoot receipt/shape validation failed")));
+        assert!(crate::verifier::validate_mir_capabilities(&forged_remove)
+            .expect_err("verifier capability gate must reject the forged Remove key")
+            .iter()
+            .any(|error| error.contains("MapRoot MIR validation failed")));
+        assert!(crate::verifier::verify_mir_with_route_receipt(
+            &forged_remove,
+            &verifier_receipt,
+            "map-root-string-forged-remove-key".into(),
+        )
+        .expect_err("valid route receipt cannot authorize a forged Remove key")
+        .contains("canonical route receipt rejected"));
 
         let mut missing_string_drop = program.clone();
         let mut main_without_string_drop = missing_string_drop

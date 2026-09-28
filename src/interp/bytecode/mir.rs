@@ -1117,6 +1117,16 @@ impl<'a> FunctionEmitter<'a> {
                 let key = self.add_const(ConstValue::Str(key.clone()));
                 self.proto.emit(Op::MirMapRootSet { rd, ra, key, value });
             }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(source) else { return };
+                let key = self.add_const(ConstValue::Str(key.clone()));
+                self.proto.emit(Op::MirMapRootRemove { rd, ra, key });
+            }
             MirInstructionKind::MapRootSize { result, root } => {
                 let Some(rd) = self.reg(result) else { return };
                 let Some(ra) = self.reg(root) else { return };

@@ -2,9 +2,11 @@ func checked_map_size() -> i32 {
     requires: true
     ensures: result == 1
     let root = map_new()
-    let updated = map_set(root, "payload", "x\0雪")
-    let size = map_size(updated)
-    drop(updated)
+    let inserted = map_set(root, "remove", "x\0雪")
+    let with_keep = map_set(inserted, "keep", "stay")
+    let removed = map_remove(with_keep, "remove")
+    let size = map_size(removed)
+    drop(removed)
     size
 }
 

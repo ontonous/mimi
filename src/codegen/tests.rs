@@ -344,8 +344,23 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             let size = string_map_size()
             0
         }
-    "#,
+            "#,
             "mimi_mir_map_root_set_string",
+        ),
+        (
+            "remove",
+            r#"
+        func main() -> i32 {
+            let root = map_new()
+            let inserted = map_set(root, "remove", "a\0b雪")
+            let with_keep = map_set(inserted, "keep", "stay")
+            let removed = map_remove(with_keep, "remove")
+            let size = map_size(removed)
+            drop(removed)
+            size
+        }
+    "#,
+            "mimi_mir_map_root_remove",
         ),
     ];
     for (profile, source, set_runtime) in profiles {
@@ -378,6 +393,12 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             "mimi_mir_map_root_drop",
         ] {
             assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
+        }
+        if profile == "remove" {
+            assert!(codegen
+                .module
+                .get_function("mimi_mir_map_root_remove")
+                .is_some());
         }
         assert!(
             crate::core::CheckedProgram::test_legacy_body_access().is_empty(),

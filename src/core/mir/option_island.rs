@@ -669,6 +669,7 @@ impl<'a> OptionStringVariantValidator<'a> {
         match instruction {
             MirInstructionKind::MapRootNew { .. }
             | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootRemove { .. }
             | MirInstructionKind::MapRootSize { .. }
             | MirInstructionKind::MapRootDrop { .. } => {
                 self.error(format!("{subject} MapRoot operation is outside the Option island"));

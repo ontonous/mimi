@@ -33,7 +33,7 @@ pub use list_string::{
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
 pub use mir_map_root::{
-    mimi_mir_map_root_drop, mimi_mir_map_root_new, mimi_mir_map_root_set,
+    mimi_mir_map_root_drop, mimi_mir_map_root_new, mimi_mir_map_root_remove, mimi_mir_map_root_set,
     mimi_mir_map_root_set_string, mimi_mir_map_root_size,
 };
 //

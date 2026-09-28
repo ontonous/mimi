@@ -272,6 +272,73 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(size)
     }
 
+    pub(super) fn emit_map_root_remove(
+        &mut self,
+        result: &MirValueId,
+        source: &MirValueId,
+        key: &str,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        self.validate_map_root_value(result, subject)?;
+        let handle = self.emit_live_root_handle(source, subject)?;
+        if key.contains('\0') {
+            return Err(NativeMirError::new(subject, "MapRoot key contains NUL"));
+        }
+        let key_len = i64::try_from(key.len()).map_err(|_| {
+            NativeMirError::new(
+                subject,
+                "MapRoot static key exceeds the native i64 length ABI",
+            )
+        })?;
+        let key_ptr = self
+            .generator
+            .builder
+            .build_global_string_ptr(key, "mir_map_root_remove_key")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let key_len = self
+            .generator
+            .context
+            .i64_type()
+            .const_int(key_len as u64, true);
+        let remove_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_map_root_remove")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let updated = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    remove_fn,
+                    &[
+                        BasicMetadataValueEnum::from(handle),
+                        BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
+                        BasicMetadataValueEnum::from(key_len),
+                    ],
+                    "mir_map_root_remove",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "MapRoot Remove returned void"))?
+        .into_int_value();
+        let preserved_identity = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                updated,
+                handle,
+                "mir_map_root_remove_identity",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_root_guard(
+            preserved_identity,
+            "[E0800] canonical MIR MapRoot Remove changed the consumed root identity",
+            subject,
+        )?;
+        Ok(updated.into())
+    }
+
     pub(super) fn emit_map_root_drop(
         &mut self,
         root: &MirValueId,

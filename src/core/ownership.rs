@@ -202,6 +202,7 @@ pub struct ResourceAnalysis {
 pub(crate) enum MapRootActionKind {
     New,
     Set,
+    Remove,
     Size,
     Drop,
 }
@@ -217,9 +218,8 @@ pub(crate) struct MapRootAction {
     /// result binding; for `Size`/`Drop` this is the observed/consumed root.
     pub(crate) local: ResolvedLocalId,
     pub(crate) root: ResourceId,
-    /// Static UTF-8 key for `Set`; the first native MapRoot profile only
-    /// admits literals without embedded NUL because the current runtime
-    /// entry point accepts a NUL-terminated key.
+    /// Static UTF-8 key for `Set` or `Remove`; the MapRoot profile only admits
+    /// literals without embedded NUL so every consumer observes the same key.
     pub(crate) key: Option<String>,
     /// Value expression consumed by `Set`. The canonical lowering maps this
     /// stable node identity to its SSA value and the MIR receipt binds it.

@@ -3939,6 +3939,39 @@ impl BytecodeVM {
                     root.insert(key, value);
                     self.set_reg(rd, Value::CanonicalMapRoot(Arc::new(root)));
                 }
+                Op::MirMapRootRemove { rd, ra, key } => {
+                    self.ensure_unary_regs(rd, ra, "mir-map-root-remove")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.remove: result aliases its consumed root",
+                        ));
+                    }
+                    let key = self.const_str(key)?.to_owned();
+                    if key.contains('\0') {
+                        return Err(InterpError::new("MapRoot key contains NUL"));
+                    }
+                    let root = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::CanonicalMapRoot(root) = root else {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.remove: expected MapRoot source",
+                        ));
+                    };
+                    if Arc::strong_count(&root) != 1 {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.remove: source root has an unreceipted alias",
+                        ));
+                    }
+                    let mut root = Arc::try_unwrap(root).map_err(|_| {
+                        InterpError::new(
+                            "canonical MapRoot.remove: source root has an unreceipted alias",
+                        )
+                    })?;
+                    root.remove(&key);
+                    self.set_reg(rd, Value::CanonicalMapRoot(Arc::new(root)));
+                }
                 Op::MirMapRootSize { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "mir-map-root-size")?;
                     if rd == ra {

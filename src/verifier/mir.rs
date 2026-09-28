@@ -61,8 +61,8 @@ enum SymbolicValue {
         size: Int,
     },
     /// A Checker-receipted canonical MapRoot. Its only admitted observation
-    /// is `MapRootSize`, so the verifier retains the finite set of literal
-    /// keys and intentionally abstracts away each i32 payload.
+    /// is `MapRootSize`; Set/Remove update the finite set of literal keys and
+    /// the verifier intentionally abstracts away payloads.
     MapRoot {
         keys: BTreeSet<String>,
     },
@@ -793,6 +793,7 @@ fn validate_map_root_verifier_boundary(
                     instruction.kind,
                     MirInstructionKind::MapRootNew { .. }
                         | MirInstructionKind::MapRootSet { .. }
+                        | MirInstructionKind::MapRootRemove { .. }
                         | MirInstructionKind::MapRootSize { .. }
                         | MirInstructionKind::MapRootDrop { .. }
                 )
@@ -861,6 +862,15 @@ fn validate_map_root_verifier_boundary(
                     && function.values.get(result).map(|value| &value.ty) == Some(&root_ty)
                     && function.values.get(source).map(|value| &value.ty) == Some(&root_ty)
                     && payload_type_valid
+            }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                !key.contains('\0')
+                    && function.values.get(result).map(|value| &value.ty) == Some(&root_ty)
+                    && function.values.get(source).map(|value| &value.ty) == Some(&root_ty)
             }
             MirInstructionKind::MapRootSize { result, root } => {
                 let result_is_i32 = function
@@ -2123,6 +2133,46 @@ fn eval_instruction(
                 ));
             }
             root.insert(key.clone());
+            state
+                .values
+                .insert(result.clone(), SymbolicValue::MapRoot { keys: root });
+        }
+        MirInstructionKind::MapRootRemove {
+            result,
+            source,
+            key,
+        } => {
+            let root_ty = crate::core::mir::types::map_root_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&root_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&root_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Remove source/result does not use the canonical MapRoot TypeDesc"
+                ));
+            }
+            if key.contains('\0') {
+                return Err(format!("{instruction_id}: MapRoot key contains NUL"));
+            }
+            let mut root = match state.values.remove(source) {
+                Some(SymbolicValue::MapRoot { keys }) => keys,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Remove source is not a MapRoot value"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Remove source '{}' is unavailable",
+                        source
+                    ))
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Remove result aliases an existing root"
+                ));
+            }
+            root.remove(key);
             state
                 .values
                 .insert(result.clone(), SymbolicValue::MapRoot { keys: root });

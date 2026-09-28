@@ -109,6 +109,25 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         stderr.contains("canonical route disposition: legacy"),
         "{stderr}"
     );
+
+    let dynamic_remove = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(fixture("mir_map_root_dynamic_remove_legacy.mimi"))
+        .output()
+        .expect("run legacy dynamic Map removal CLI fixture");
+    assert!(
+        dynamic_remove.status.success(),
+        "dynamic Map removal compatibility run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&dynamic_remove.stdout),
+        String::from_utf8_lossy(&dynamic_remove.stderr)
+    );
+    assert!(String::from_utf8_lossy(&dynamic_remove.stdout).is_empty());
+    let stderr = String::from_utf8_lossy(&dynamic_remove.stderr);
+    assert!(
+        stderr.contains("canonical route disposition: legacy"),
+        "dynamic-key MapRoot Remove must stay on the compatibility route: {stderr}"
+    );
 }
 
 #[test]
@@ -127,7 +146,7 @@ fn default_string_map_root_run_build_and_verify() {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "2\n");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n1\n");
     assert!(String::from_utf8_lossy(&run.stderr)
         .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
 
@@ -161,7 +180,7 @@ fn default_string_map_root_run_build_and_verify() {
         "{}",
         String::from_utf8_lossy(&native.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&native.stdout), "2\n");
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n1\n");
 
     let verify = Command::new(&mimi)
         .env("MIMI_VERBOSE", "1")

@@ -90,6 +90,7 @@ impl<'a> NativeMirValidator<'a> {
                         instruction.kind,
                         MirInstructionKind::MapRootNew { .. }
                             | MirInstructionKind::MapRootSet { .. }
+                            | MirInstructionKind::MapRootRemove { .. }
                             | MirInstructionKind::MapRootSize { .. }
                             | MirInstructionKind::MapRootDrop { .. }
                     )
@@ -861,6 +862,20 @@ impl<'a> NativeMirValidator<'a> {
                         .push(NativeMirError::new(subject, "MapRoot key contains NUL"));
                 }
                 self.validate_map_root_set_payload(function, value, subject);
+            }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                self.validate_value(function, result, "MapRoot Remove result");
+                self.validate_value(function, source, "MapRoot Remove source");
+                self.validate_map_root_value(function, result, subject, "Remove result");
+                self.validate_map_root_value(function, source, subject, "Remove source");
+                if key.contains('\0') {
+                    self.errors
+                        .push(NativeMirError::new(subject, "MapRoot key contains NUL"));
+                }
             }
             MirInstructionKind::MapRootSize { result, root } => {
                 self.validate_value(function, result, "MapRoot Size result");

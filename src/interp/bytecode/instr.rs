@@ -841,6 +841,11 @@ pub enum Op {
         key: ConstIdx,
         value: Reg,
     },
+    MirMapRootRemove {
+        rd: Reg,
+        ra: Reg,
+        key: ConstIdx,
+    },
     MirMapRootSize {
         rd: Reg,
         ra: Reg,
@@ -1209,6 +1214,7 @@ impl Op {
             | MirListLen { rd, .. }
             | MirListReverse { rd, .. }
             | MirListConcat { rd, .. }
+            | MirMapRootRemove { rd, .. }
             | MirVariantPredicate { rd, .. }
             | MirVariantProjectOr { rd, .. }
             | TupleGet { rd, .. }
@@ -1314,6 +1320,7 @@ impl Op {
             | Op::NewSet { rd, .. }
             | Op::ListGet { rd, .. }
             | Op::ListPop { rd, .. }
+            | Op::MirMapRootRemove { rd, .. }
             | Op::TupleGet { rd, .. }
             | Op::RecordGet { rd, .. }
             | Op::RecordMoveGet { rd, .. }
@@ -1469,6 +1476,7 @@ impl Op {
             | MirSetToList { ra, .. }
             | MirListLen { ra, .. }
             | MirListReverse { ra, .. }
+            | MirMapRootRemove { ra, .. }
             | MirMapRootSize { ra, .. }
             | MirMapRootDrop { ra }
             | MirVariantPredicate { ra, .. }
@@ -2028,6 +2036,7 @@ pub(crate) fn function_has_map_root_ops(function: &FunctionProto) -> bool {
             op,
             Op::MirMapRootNew { .. }
                 | Op::MirMapRootSet { .. }
+                | Op::MirMapRootRemove { .. }
                 | Op::MirMapRootSize { .. }
                 | Op::MirMapRootDrop { .. }
         )

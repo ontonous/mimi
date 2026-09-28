@@ -1,10 +1,13 @@
 func main() -> i32 {
     let root = map_new()
-    let first = map_set(root, "same", "a\0b雪")
-    let overwritten = map_set(first, "same", "")
-    let updated = map_set(overwritten, "🗺️", "雪")
-    let size = map_size(updated)
+    let first = map_set(root, "remove", "a\0b雪")
+    let updated = map_set(first, "🗺️", "雪")
+    let removed = map_remove(updated, "remove")
+    let size = map_size(removed)
     println(size)
-    drop(updated)
+    let missing = map_remove(removed, "absent")
+    let missing_size = map_size(missing)
+    println(missing_size)
+    drop(missing)
     0
 }

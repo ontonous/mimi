@@ -1416,7 +1416,6 @@ fn scan_scalar_collection_once(
         current_callable: None,
         map_root_locals: BTreeSet::new(),
         map_root_action_points: BTreeSet::new(),
-        map_root_set_points: BTreeSet::new(),
         float_symbolic_locals: BTreeMap::new(),
         int_literal_locals: BTreeMap::new(),
         branch_generation: 0,
@@ -1437,20 +1436,17 @@ fn scan_scalar_collection_once(
         scanner.current_callable = Some(owner.clone());
         scanner.map_root_locals.clear();
         scanner.map_root_action_points.clear();
-        scanner.map_root_set_points.clear();
         if let Some(analysis) = program.resource_analyses().get(owner) {
             for action in &analysis.map_root_actions {
                 scanner.map_root_locals.insert(action.local.clone());
                 match action.kind {
                     crate::core::MapRootActionKind::New
                     | crate::core::MapRootActionKind::Set
+                    | crate::core::MapRootActionKind::Remove
                     | crate::core::MapRootActionKind::Size => {
                         scanner.map_root_action_points.insert(action.point.clone());
                     }
                     crate::core::MapRootActionKind::Drop => {}
-                }
-                if action.kind == crate::core::MapRootActionKind::Set {
-                    scanner.map_root_set_points.insert(action.point.clone());
                 }
                 if let Some(source_local) = &action.source_local {
                     scanner.map_root_locals.insert(source_local.clone());
@@ -1633,7 +1629,6 @@ struct ScalarCollectionAdmissionScanner<'a> {
     /// scalar stdout face without exempting arbitrary `Record` values.
     map_root_locals: BTreeSet<ResolvedLocalId>,
     map_root_action_points: BTreeSet<NodeId>,
-    map_root_set_points: BTreeSet<NodeId>,
     /// R6-1061: locals whose current value the MIR verifier models in the
     /// IEEE symbolic Float domain — bound by a float literal, a second-hand
     /// float-symbolic read, or an admitted finite-only float arithmetic
@@ -2685,10 +2680,11 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => self.visit_expr(operand, concrete),
             ResolvedExprKind::Call(call) => {
-                let map_root_set_call = self.map_root_set_points.contains(&expression.node_id)
+                let map_root_key_call = self.map_root_action_points.contains(&expression.node_id)
                     && matches!(
                         &call.callee,
-                        ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_set"
+                        ResolvedCallee::Builtin(builtin)
+                            if matches!(builtin.as_str(), "map_set" | "map_remove")
                     );
                 if concrete
                     && (is_list_len_call(self.program, call)
@@ -2848,7 +2844,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     })
                     && !is_scalar_println_call(self.program, call)
                     && !owned_string_member_call
-                    && !map_root_set_call
+                    && !map_root_key_call
                 {
                     // A string literal argument to any callee other than the
                     // scalar print face (len, starts_with, user calls, ...)
@@ -2856,7 +2852,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.mixed = true;
                 }
                 for (argument_index, argument) in call.arguments.iter().enumerate() {
-                    if map_root_set_call && argument_index == 1 {
+                    if map_root_key_call && argument_index == 1 {
                         // The exact Checker receipt binds this argument to a
                         // static UTF-8 key literal; MapRoot consumers validate
                         // it again. Do not let the key's String type turn this
@@ -6013,6 +6009,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         match instruction {
             MirInstructionKind::MapRootNew { .. }
             | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootRemove { .. }
             | MirInstructionKind::MapRootSize { .. }
             | MirInstructionKind::MapRootDrop { .. } => {
                 self.error(format!(

@@ -126,7 +126,10 @@ fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
 fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
     use MirInstructionKind::*;
     match kind {
-        MapRootNew { result } | MapRootSize { result, .. } | MapRootSet { result, .. } => {
+        MapRootNew { result }
+        | MapRootSize { result, .. }
+        | MapRootSet { result, .. }
+        | MapRootRemove { result, .. } => {
             vec![result]
         }
         Const { result, .. }
@@ -7196,6 +7199,7 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                 let role = match action.kind {
                     crate::core::MapRootActionKind::New => "map_root_new",
                     crate::core::MapRootActionKind::Set => "map_root_set",
+                    crate::core::MapRootActionKind::Remove => "map_root_remove",
                     crate::core::MapRootActionKind::Size => "map_root_size",
                     crate::core::MapRootActionKind::Drop => "map_root_drop",
                 };
@@ -7210,7 +7214,8 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                     local,
                     result: match action.kind {
                         crate::core::MapRootActionKind::New
-                        | crate::core::MapRootActionKind::Set => {
+                        | crate::core::MapRootActionKind::Set
+                        | crate::core::MapRootActionKind::Remove => {
                             Some(mir_value_for_local(&action.local))
                         }
                         crate::core::MapRootActionKind::Size => {
@@ -7765,6 +7770,7 @@ impl<'a> Lowerer<'a> {
                             action.kind,
                             crate::core::MapRootActionKind::New
                                 | crate::core::MapRootActionKind::Set
+                                | crate::core::MapRootActionKind::Remove
                         )
                 })
             })
@@ -7835,6 +7841,45 @@ impl<'a> Lowerer<'a> {
                         MirInstructionKind::Drop { value },
                     );
                 }
+                true
+            }
+            crate::core::MapRootActionKind::Remove => {
+                let ResolvedExprKind::Call(call) = &initializer.kind else {
+                    return false;
+                };
+                let Some(source_arg) = call.arguments.first() else {
+                    return false;
+                };
+                let source = match &source_arg.value.kind {
+                    ResolvedExprKind::Load(source_place) => {
+                        self.map_root_local_value(&source_place.base, &source_arg.value.node_id)
+                    }
+                    ResolvedExprKind::Call(_) => self.lower_expr(&source_arg.value),
+                    _ => {
+                        self.error(
+                            &source_arg.value.node_id,
+                            "checker MapRoot Remove source is not a local or receipted temporary",
+                        );
+                        return true;
+                    }
+                };
+                let result = self.map_root_local_value(target, &initializer.node_id);
+                let Some(key) = action.key else {
+                    self.error(
+                        &initializer.node_id,
+                        "checker MapRoot Remove receipt has no static key",
+                    );
+                    return true;
+                };
+                self.emit(
+                    &initializer.node_id,
+                    &format!("map_root_remove:{}", result.0),
+                    MirInstructionKind::MapRootRemove {
+                        result,
+                        source,
+                        key,
+                    },
+                );
                 true
             }
             _ => false,
