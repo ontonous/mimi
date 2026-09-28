@@ -29,11 +29,11 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, CanonicalFfiBinding, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstIdx,
-    ConstValue, FuncIdx, FunctionProto, ListOperationShape, ListProjectionShape, Op,
-    RecordMoveDropProjectionShape, RecordProjectionShape, RecordResidualDropShape, Reg,
-    TupleDestructureShape, TupleProjectionShape, VariantPredicateShape,
-    VariantProjectionFallbackShape, VariantShape,
+    BytecodeProgram, CanonicalFfiBinding, CanonicalFfiDescriptor, CanonicalFfiScalarType,
+    CanonicalMapRootBytecodeReceipt, ConstIdx, ConstValue, FuncIdx, FunctionProto,
+    ListOperationShape, ListProjectionShape, Op, RecordMoveDropProjectionShape,
+    RecordProjectionShape, RecordResidualDropShape, Reg, TupleDestructureShape,
+    TupleProjectionShape, VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -196,6 +196,8 @@ fn compile_mir_program_inner(
 
     let builtin_names = super::registry::create_registry().names();
     let has_canonical_ffi_bindings = !canonical_ffi_bindings.is_empty();
+    let canonical_map_root_receipt =
+        Some(CanonicalMapRootBytecodeReceipt::capture(entry, &functions));
     Ok(Arc::new(BytecodeProgram {
         functions,
         entry,
@@ -203,6 +205,7 @@ fn compile_mir_program_inner(
         extern_names: Vec::new(),
         canonical_ffi,
         canonical_ffi_bindings,
+        canonical_map_root_receipt,
         canonical_ffi_route_receipt: if !has_canonical_ffi_bindings {
             None
         } else {

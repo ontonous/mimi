@@ -10227,9 +10227,11 @@ func main() -> i32 {
         *value = i64::from(i32::MAX) + 1;
         let error = crate::interp::bytecode::BytecodeVM::new(overflow)
             .run_value()
-            .expect_err("an out-of-range Set value must trap before insertion");
-        assert_eq!(error.code(), "E0802");
-        assert!(error.message().contains("MapRoot.set value overflows i32"));
+            .expect_err("tampered MapRoot value must fail its private receipt first");
+        assert_eq!(error.code(), "E0800");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
 
         let mut wrong_scalar = compiled.clone();
         let (function_index, instruction_index) = set_location(&wrong_scalar);
@@ -10242,8 +10244,10 @@ func main() -> i32 {
         *value = *ra;
         let error = crate::interp::bytecode::BytecodeVM::new(wrong_scalar)
             .run_value()
-            .expect_err("MapRoot itself is not a Set scalar");
-        assert!(error.message().contains("expected i32 runtime value"));
+            .expect_err("tampered MapRoot operands must fail their private receipt first");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
 
         let mut nul_key = compiled.clone();
         let (function_index, instruction_index) = set_location(&nul_key);
@@ -10256,8 +10260,10 @@ func main() -> i32 {
         function.constants[key as usize] = crate::interp::bytecode::ConstValue::Str("\0".into());
         let error = crate::interp::bytecode::BytecodeVM::new(nul_key)
             .run_value()
-            .expect_err("a forged dynamic key encoding with NUL must fail closed");
-        assert!(error.message().contains("MapRoot key contains NUL"));
+            .expect_err("tampered MapRoot key must fail its private receipt first");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
 
         let mut generic_alias = compiled;
         let (function_index, instruction_index) = set_location(&generic_alias);
@@ -10270,10 +10276,91 @@ func main() -> i32 {
         function.code[instruction_index] = crate::interp::bytecode::Op::Clone { rd, rs: ra };
         let error = crate::interp::bytecode::BytecodeVM::new(generic_alias)
             .run_value()
-            .expect_err("generic Clone must not manufacture an unreceipted root alias");
+            .expect_err("replacing a receipted MapRoot op must fail preflight");
         assert!(error
             .message()
-            .contains("require Checker-receipted MIR operations"));
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+    }
+
+    #[test]
+    fn canonical_map_root_bytecode_preflight_precedes_stdout_and_rejects_extra_ops() {
+        let (_, program) = canonical_program_with_main(
+            r#"
+func main() -> i32 {
+    println("before map root")
+    let first = map_new()
+    let updated = map_set(first, "answer", 42)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#,
+        );
+        let compiled = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free MapRoot bytecode");
+
+        let mut tampered = compiled.clone();
+        let function_index = tampered.entry as usize;
+        let function = &mut std::sync::Arc::make_mut(&mut tampered).functions[function_index];
+        let set = function
+            .code
+            .iter_mut()
+            .find(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootSet { .. }))
+            .expect("MapRoot Set opcode");
+        let crate::interp::bytecode::Op::MirMapRootSet {
+            rd,
+            ra,
+            key,
+            value: _,
+        } = *set
+        else {
+            unreachable!("located MapRoot Set opcode")
+        };
+        *set = crate::interp::bytecode::Op::MirMapRootSet {
+            rd,
+            ra,
+            key,
+            value: ra,
+        };
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(tampered);
+        let error = vm
+            .run_value()
+            .expect_err("mutated MapRoot operands must fail before execution");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+
+        let mut extra = compiled;
+        let function = &mut std::sync::Arc::make_mut(&mut extra).functions[function_index];
+        function
+            .code
+            .push(crate::interp::bytecode::Op::MirMapRootNew { rd: 0 });
+        let error = crate::interp::bytecode::BytecodeVM::new(extra)
+            .run_value()
+            .expect_err("an appended receiptless MapRoot opcode must fail preflight");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+    }
+
+    #[test]
+    fn canonical_bytecode_without_map_root_receipt_rejects_injected_map_root() {
+        let (_, program) = canonical_program_with_main(
+            "func main() -> i32 { println(\"before injected root\"); 0 }",
+        );
+        let mut bytecode = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free bytecode without MapRoot");
+        let function_index = bytecode.entry as usize;
+        std::sync::Arc::make_mut(&mut bytecode).functions[function_index]
+            .code
+            .insert(0, crate::interp::bytecode::Op::MirMapRootNew { rd: 0 });
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("MapRoot cannot be injected without a Checker receipt");
+        assert!(error.message().contains("has no Checker-owned MIR receipt"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
     }
 
     #[test]

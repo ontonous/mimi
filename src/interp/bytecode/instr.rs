@@ -1939,6 +1939,10 @@ pub struct BytecodeProgram {
     /// boundary so public bytecode fields cannot swap a call's descriptor and
     /// instruction identity together without being detected.
     pub(crate) canonical_ffi_bindings: Vec<CanonicalFfiBinding>,
+    /// Private compiler snapshot for canonical MIR programs that contain
+    /// Checker-owned MapRoot actions. Compatibility bytecode has no snapshot;
+    /// the VM then rejects any injected MIR MapRoot opcode.
+    pub(crate) canonical_map_root_receipt: Option<CanonicalMapRootBytecodeReceipt>,
     /// Route receipt anchor for canonical MIR bytecode. Compatibility
     /// bytecode leaves this unset; receipt-bound consumers copy the checked
     /// admission snapshot here so VM children and re-entry share one source
@@ -1969,6 +1973,74 @@ pub struct BytecodeProgram {
     /// Record field types: type_name → [(field_name, field_type_str)].
     /// Used by from_json_typed for recursive field coercion.
     pub record_fields: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+/// Private admission snapshot for the public, mutable bytecode tables used by
+/// the closed MapRoot profile. The entry index and full `FunctionProto` table
+/// are captured because bytecode register writes around a MapRoot opcode also
+/// determine its ownership and value flow. Current MapRoot bytecode does not
+/// consult the program-level actor/flow/type metadata. This is an in-process
+/// provenance check, not a serialized or cryptographic bytecode format.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalMapRootBytecodeReceipt {
+    expected_has_map_root: bool,
+    expected_program: String,
+}
+
+impl CanonicalMapRootBytecodeReceipt {
+    pub(crate) fn capture(entry: FuncIdx, functions: &[FunctionProto]) -> Self {
+        let expected_has_map_root = functions.iter().any(function_has_map_root_ops);
+        Self {
+            expected_has_map_root,
+            expected_program: if expected_has_map_root {
+                map_root_program_snapshot(entry, functions)
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        let has_map_root = functions.iter().any(function_has_map_root_ops);
+        if !self.expected_has_map_root && !has_map_root {
+            return Ok(());
+        }
+        if !self.expected_has_map_root && has_map_root {
+            return Err("canonical MapRoot bytecode has no Checker-owned MIR receipt".into());
+        }
+        if !has_map_root || map_root_program_snapshot(entry, functions) != self.expected_program {
+            return Err(
+                "canonical MapRoot bytecode disagrees with its Checker-owned receipt snapshot"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn function_has_map_root_ops(function: &FunctionProto) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirMapRootNew { .. }
+                | Op::MirMapRootSet { .. }
+                | Op::MirMapRootSize { .. }
+                | Op::MirMapRootDrop { .. }
+        )
+    })
+}
+
+fn map_root_program_snapshot(entry: FuncIdx, functions: &[FunctionProto]) -> String {
+    let mut snapshot = format!("entry={entry};functions={}", functions.len());
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
 }
 
 /// Immutable compiler-side provenance for one canonical FFI call site.

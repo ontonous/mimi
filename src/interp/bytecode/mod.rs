@@ -58,6 +58,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -102,6 +103,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -164,6 +166,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -225,6 +228,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![add_fn, main],
             entry: 1,
@@ -348,6 +352,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![fib, main],
             entry: 1,
@@ -438,6 +443,7 @@ mod tests {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -604,6 +610,29 @@ mod tests {
         let code = vm.run().unwrap();
         assert_eq!(code, 0);
         assert_eq!(vm.stdout().trim(), "42");
+    }
+
+    #[test]
+    fn compatibility_bytecode_rejects_injected_mir_map_root_before_stdout() {
+        let tokens =
+            crate::lexer::Lexer::new("func main() -> i32 { println(\"before injected root\"); 0 }")
+                .tokenize()
+                .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        assert!(program.canonical_map_root_receipt.is_none());
+        let entry = program.entry as usize;
+        std::sync::Arc::make_mut(&mut program).functions[entry]
+            .code
+            .insert(0, Op::MirMapRootNew { rd: 0 });
+
+        let mut vm = BytecodeVM::new(program);
+        let error = vm
+            .run_value()
+            .expect_err("compatibility bytecode has no authority to emit MIR MapRoot ops");
+        assert!(error.message().contains("has no Checker-owned MIR receipt"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
     }
 
     #[test]
@@ -1208,6 +1237,7 @@ mod bench {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1666,6 +1696,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1707,6 +1738,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1749,6 +1781,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1791,6 +1824,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1834,6 +1868,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1875,6 +1910,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1920,6 +1956,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -1965,6 +2002,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -2446,6 +2484,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![target],
             entry: 0,
@@ -2522,6 +2561,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![owner],
             entry: 0,
@@ -2544,6 +2584,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![current],
             entry: 0,
@@ -2595,6 +2636,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -2637,6 +2679,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -2680,6 +2723,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -2722,6 +2766,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
@@ -3753,6 +3798,7 @@ func main() -> i32 {
             extern_names: Vec::new(),
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,

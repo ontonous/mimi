@@ -820,12 +820,35 @@ impl BytecodeVM {
         Ok(())
     }
 
-    /// Validate the complete bytecode receipt graph, then resolve every host
+    /// Validate canonical ownership and FFI receipts, then resolve every host
     /// symbol before any Mimi instruction can expose stdout or side effects.
-    fn preflight_canonical_ffi_program(&mut self) -> Result<(), InterpError> {
+    fn preflight_canonical_program(&mut self) -> Result<(), InterpError> {
+        self.validate_canonical_map_root_program()?;
         self.validate_canonical_ffi_program()?;
         let descriptors = self.program.canonical_ffi.clone();
         self.canonical_ffi_runtime.preflight(&descriptors)
+    }
+
+    /// Canonical MapRoot operations are executable only when they came from
+    /// the validated MIR adapter. The public bytecode instruction tables are
+    /// mutable, so a private compiler snapshot binds the complete program
+    /// body for this ownership-sensitive profile before any FFI preflight or
+    /// Mimi side effect can run.
+    fn validate_canonical_map_root_program(&self) -> Result<(), InterpError> {
+        let has_map_root = self
+            .program
+            .functions
+            .iter()
+            .any(super::instr::function_has_map_root_ops);
+        match &self.program.canonical_map_root_receipt {
+            Some(receipt) => receipt
+                .validate(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if has_map_root => Err(InterpError::new(
+                "canonical MapRoot bytecode has no Checker-owned MIR receipt",
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Run the program from the entry point. Returns the exit code.
@@ -834,7 +857,7 @@ impl BytecodeVM {
         // canonical FFI preflight so a malformed descriptor cannot inherit
         // output from a previous successful invocation.
         self.stdout.clear();
-        self.preflight_canonical_ffi_program()?;
+        self.preflight_canonical_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -877,7 +900,7 @@ impl BytecodeVM {
         // failures must observe only this attempt's output, never a stale
         // snapshot left by an earlier invocation on the same VM.
         self.stdout.clear();
-        self.preflight_canonical_ffi_program()?;
+        self.preflight_canonical_program()?;
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
         let depth_before = self.depth;
@@ -5822,7 +5845,7 @@ impl BytecodeVM {
     fn prepare_public_entry(&mut self) -> Result<(), InterpError> {
         if self.stack.is_empty() {
             self.stdout.clear();
-            self.preflight_canonical_ffi_program()?;
+            self.preflight_canonical_program()?;
         }
         Ok(())
     }
