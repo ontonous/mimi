@@ -33,7 +33,8 @@ pub use list_string::{
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
 pub use mir_map_root::{
-    mimi_mir_map_root_drop, mimi_mir_map_root_new, mimi_mir_map_root_set, mimi_mir_map_root_size,
+    mimi_mir_map_root_drop, mimi_mir_map_root_new, mimi_mir_map_root_set,
+    mimi_mir_map_root_set_string, mimi_mir_map_root_size,
 };
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:
@@ -438,6 +439,21 @@ fn unregister_any_value_string(ptr: *const std::ffi::c_void) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.remove(&(ptr as usize));
+    if guard.is_empty() {
+        // The provenance table is intentionally process-global, but its
+        // temporary bucket allocation is not. Release it when the final
+        // tagged payload owner is freed so sanitizer runs can distinguish
+        // live registry state from a retained allocator bucket.
+        guard.shrink_to_fit();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mimi_test_any_value_string_count() -> usize {
+    any_value_strings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len()
 }
 
 // P0-10 (batch4/05): these runtime handles cross the LLVM `i64` ABI. Keeping
@@ -3090,6 +3106,9 @@ pub(super) enum MapOwnedValueKind {
     /// `mimi_list_free(list, /* free_elements */ true)`, which reclaims the
     /// data array and Record element pack bases.
     ListObject,
+    /// Tagged, provenance-registered Any String created for a Checker-owned
+    /// MapRoot String Set. Ordinary `mimi_map_set` values remain external.
+    TaggedAnyString,
 }
 
 /// Live count of map-owned value buffers (registered − freed). Observable
@@ -3162,6 +3181,28 @@ fn free_map_owned_value(vh: ValueHandle, kind: MapOwnedValueKind) {
                 mimi_list_free(vh as *mut MimiList, true);
             }
         }
+        MapOwnedValueKind::TaggedAnyString => {
+            let Ok(tagged) = usize::try_from(vh) else {
+                std::process::abort();
+            };
+            if tagged & 1 == 0 {
+                std::process::abort();
+            }
+            let base = (tagged & !1) as *mut std::ffi::c_void;
+            let registered = any_value_strings()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&(tagged & !1));
+            if !registered {
+                std::process::abort();
+            }
+            // SAFETY: this exact tagged payload was created by
+            // `mimi_any_string_clone` and is retained by one MapOwnedPayload
+            // shared across persistent Map clones. `mimi_free` serializes
+            // unregistration with typed Any-string reads and releases the
+            // matching runtime allocation.
+            mimi_free(base);
+        }
     }
     MAP_OWNED_VALUE_BALANCE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -3197,6 +3238,11 @@ fn map_owned_payload(
         #[cfg(test)]
         drop_probe: None,
     })
+}
+
+pub(super) fn map_owned_any_string_payload(handle: ValueHandle) -> std::sync::Arc<MapOwnedPayload> {
+    MAP_OWNED_VALUE_BALANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    map_owned_payload(handle, MapOwnedValueKind::TaggedAnyString)
 }
 
 /// Transfer a builder-created payload out of its temporary Map into a

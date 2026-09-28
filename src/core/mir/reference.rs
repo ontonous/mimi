@@ -27,7 +27,7 @@ pub enum MirRuntimeValue {
     FloatBits(u64),
     Bool(bool),
     String(String),
-    MapRoot(BTreeMap<String, i32>),
+    MapRoot(BTreeMap<String, MirMapRootValue>),
     Tuple(Vec<MirRuntimeValue>),
     List(Vec<MirRuntimeValue>),
     Set(Vec<MirRuntimeValue>),
@@ -41,6 +41,12 @@ pub enum MirRuntimeValue {
         payload: Vec<MirRuntimeValue>,
     },
     Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirMapRootValue {
+    I32(i32),
+    String(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,26 +578,28 @@ impl MirProgram {
                     });
                 }
             }
-            let i32_type = type_catalog.iter().find_map(|(id, desc)| {
-                (desc.kind == super::types::MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
-                    .then(|| id.clone())
-            });
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
-                    let (roots, scalars): (Vec<&MirValueId>, Vec<&MirValueId>) = match &instruction
-                        .kind
-                    {
-                        super::MirInstructionKind::MapRootNew { result } => (vec![result], vec![]),
+                    let (roots, set_payloads, scalars): (
+                        Vec<&MirValueId>,
+                        Vec<&MirValueId>,
+                        Vec<&MirValueId>,
+                    ) = match &instruction.kind {
+                        super::MirInstructionKind::MapRootNew { result } => {
+                            (vec![result], vec![], vec![])
+                        }
                         super::MirInstructionKind::MapRootSet {
                             result,
                             source,
                             value,
                             ..
-                        } => (vec![result, source], vec![value]),
+                        } => (vec![result, source], vec![value], vec![]),
                         super::MirInstructionKind::MapRootSize { result, root } => {
-                            (vec![root], vec![result])
+                            (vec![root], vec![], vec![result])
                         }
-                        super::MirInstructionKind::MapRootDrop { root } => (vec![root], vec![]),
+                        super::MirInstructionKind::MapRootDrop { root } => {
+                            (vec![root], vec![], vec![])
+                        }
                         _ => continue,
                     };
                     for id in roots {
@@ -607,11 +615,45 @@ impl MirProgram {
                         if function
                             .values
                             .get(id)
-                            .is_none_or(|value| Some(&value.ty) != i32_type.as_ref())
+                            .and_then(|value| type_catalog.get(&value.ty))
+                            .is_none_or(|descriptor| {
+                                descriptor.kind
+                                    != super::types::MirTypeKind::Primitive(
+                                        crate::core::PrimitiveType::I32,
+                                    )
+                                    || type_catalog.validate_copy_scalar(&descriptor.id).is_err()
+                            })
                         {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
-                                message: format!("MapRoot scalar '{}' is not i32", id),
+                                message: format!(
+                                    "MapRoot size scalar '{}' is not canonical i32",
+                                    id
+                                ),
+                            });
+                        }
+                    }
+                    for id in set_payloads {
+                        let valid = function
+                            .values
+                            .get(id)
+                            .and_then(|value| type_catalog.get(&value.ty))
+                            .is_some_and(|descriptor| match descriptor.kind {
+                                super::types::MirTypeKind::Primitive(
+                                    crate::core::PrimitiveType::I32,
+                                ) => type_catalog.validate_copy_scalar(&descriptor.id).is_ok(),
+                                super::types::MirTypeKind::Primitive(
+                                    crate::core::PrimitiveType::String,
+                                ) => type_catalog.validate_owned_string(&descriptor.id).is_ok(),
+                                _ => false,
+                            });
+                        if !valid {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "MapRoot Set payload '{}' is not receipted i32 or String",
+                                    id
+                                ),
                             });
                         }
                     }
@@ -5959,17 +6001,20 @@ impl<'a> MirReferenceInterpreter<'a> {
                 if key.contains('\0') {
                     return Err(self.error(&function.owner, "MapRoot key contains NUL"));
                 }
-                let scalar = match values.get(value) {
-                    Some(MirRuntimeValue::Int(value)) => i32::try_from(*value).map_err(|_| {
-                        self.error(
-                            &function.owner,
-                            "E0802: canonical MapRoot.set value overflows i32",
-                        )
-                    })?,
+                let payload = match values.get(value) {
+                    Some(MirRuntimeValue::Int(value)) => {
+                        MirMapRootValue::I32(i32::try_from(*value).map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "E0802: canonical MapRoot.set value overflows i32",
+                            )
+                        })?)
+                    }
+                    Some(MirRuntimeValue::String(value)) => MirMapRootValue::String(value.clone()),
                     Some(_) => {
                         return Err(self.error(
                             &function.owner,
-                            "canonical MapRoot.set: expected i32 runtime value",
+                            "canonical MapRoot.set: expected receipted i32 or String runtime value",
                         ))
                     }
                     None => {
@@ -5991,7 +6036,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "canonical MapRoot.set: expected MapRoot source",
                     ));
                 };
-                root.insert(key.clone(), scalar);
+                root.insert(key.clone(), payload);
                 values.insert(result.clone(), MirRuntimeValue::MapRoot(root));
             }
             MirInstructionKind::MapRootSize { result, root } => {
@@ -10600,12 +10645,36 @@ func main() -> i32 {
         let wrong_scalar =
             MirProgram::with_type_catalog(wrong_scalar_functions, program.type_catalog().clone())
                 .expect_err("MapRoot Set must reject a non-i32 scalar value");
-        assert!(
-            wrong_scalar
-                .iter()
-                .any(|error| error.message.contains("MapRoot scalar")
-                    && error.message.contains("i32"))
-        );
+        assert!(wrong_scalar.iter().any(|error| error
+            .message
+            .contains("MapRoot operation disagrees with its private Checker")));
+
+        let mut forged_payload_type_functions = program.functions().clone();
+        let function = forged_payload_type_functions
+            .get_mut(&owner)
+            .expect("main MIR");
+        let i64_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind
+                    == crate::core::mir::types::MirTypeKind::Primitive(
+                        crate::core::PrimitiveType::I64,
+                    ))
+                .then(|| id.clone())
+            })
+            .expect("canonical i64 TypeDesc");
+        assert!(function
+            .ownership
+            .forge_checker_map_root_set_value_type_for_test_only(i64_type));
+        let forged_payload_type = MirProgram::with_type_catalog(
+            forged_payload_type_functions,
+            program.type_catalog().clone(),
+        )
+        .expect_err("a forged MapRoot payload TypeDesc must fail before consumers");
+        assert!(forged_payload_type.iter().any(|error| error
+            .message
+            .contains("MapRoot operation disagrees with its private Checker")));
 
         let mut escaping_functions = program.functions().clone();
         let function = escaping_functions.get_mut(&owner).expect("main MIR");

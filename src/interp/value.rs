@@ -237,6 +237,14 @@ pub enum RuntimeProjection {
 /// The derived Clone is kept for backward compatibility but should be avoided
 /// in new code. Prefer `share()` for sharing and `deep_clone()` when a true
 /// copy is needed.
+/// Values admitted inside the checker-receipted Canonical MIR MapRoot.
+/// This intentionally stays separate from ordinary dynamic `Any` maps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalMapRootValue {
+    I32(i32),
+    String(Arc<String>),
+}
+
 #[derive(Debug)]
 pub enum Value {
     Int(i64),
@@ -261,7 +269,7 @@ pub enum Value {
     /// Opaque runtime value for the checker-owned Canonical MIR MapRoot
     /// island. It is separate from legacy `Record(None, fields)` Maps and is
     /// only created/consumed by dedicated MIR bytecode operations.
-    CanonicalMapRoot(Arc<BTreeMap<String, i32>>),
+    CanonicalMapRoot(Arc<BTreeMap<String, CanonicalMapRootValue>>),
     Record(Option<String>, HashMap<String, Value>),
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),

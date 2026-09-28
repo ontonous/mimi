@@ -7224,6 +7224,7 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                         .value
                         .as_ref()
                         .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
+                    value_type: action.value_type.clone(),
                     source_local,
                     source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
                     instruction,
@@ -7820,9 +7821,20 @@ impl<'a> Lowerer<'a> {
                         result,
                         source,
                         key,
-                        value,
+                        value: value.clone(),
                     },
                 );
+                if action.value_type.as_ref()
+                    == Some(&crate::core::ir::primitive_type_id(
+                        crate::core::PrimitiveType::String,
+                    ))
+                {
+                    self.emit(
+                        &value_arg.value.node_id,
+                        "drop.map-root-string-payload",
+                        MirInstructionKind::Drop { value },
+                    );
+                }
                 true
             }
             _ => false,

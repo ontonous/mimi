@@ -24,6 +24,7 @@ pub use callable::{
     ResolvedSignatureError,
 };
 
+pub(crate) use types::primitive_type_id;
 pub use types::{
     FunctionTypeAbi, NominalTypeId, OwnershipTypeKind, PrimitiveType, ResolvedType,
     ResolvedTypeCapabilities, ResolvedTypeError, ResolvedTypeId, ResolvedTypeName,

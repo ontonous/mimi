@@ -5094,6 +5094,22 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             drop(updated)
             size
         }
+        func checked_string_map_size() -> i32 {
+            ensures: result == 1
+            let root = map_new()
+            let updated = map_set(root, "answer", "x\0雪")
+            let size = map_size(updated)
+            drop(updated)
+            size
+        }
+        func false_string_map_size() -> i32 {
+            ensures: result == 99
+            let root = map_new()
+            let updated = map_set(root, "answer", "x\0雪")
+            let size = map_size(updated)
+            drop(updated)
+            size
+        }
         func main() -> i32 { 0 }
     "#;
     let file = parse_memory_source(source, "map-root-public-verify").expect("parse");
@@ -5139,6 +5155,40 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             .map(|artifact| artifact.engine.as_str()),
         Some(ProofArtifact::ENGINE_MIR)
     );
+    let string_proven = results
+        .iter()
+        .find(|result| result.func_name == "checked_string_map_size")
+        .expect("positive String MapRoot proof");
+    assert_eq!(
+        string_proven.status,
+        VerifStatus::Proven,
+        "{}",
+        string_proven.message
+    );
+    assert_eq!(
+        string_proven
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+    let string_disproven = results
+        .iter()
+        .find(|result| result.func_name == "false_string_map_size")
+        .expect("negative String MapRoot proof");
+    assert_eq!(
+        string_disproven.status,
+        VerifStatus::Disproven,
+        "{}",
+        string_disproven.message
+    );
+    assert_eq!(
+        string_disproven
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "public MapRoot verification must not access the retained legacy body"
@@ -5155,6 +5205,8 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
     for (function, status) in [
         ("checked_map_size", VerifStatus::Proven),
         ("false_map_size", VerifStatus::Disproven),
+        ("checked_string_map_size", VerifStatus::Proven),
+        ("false_string_map_size", VerifStatus::Disproven),
     ] {
         let result = dual_results
             .iter()

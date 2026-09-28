@@ -98,6 +98,10 @@ struct ActionEmitter<'a> {
     /// dynamic Record/JSON uses on their existing type contract.
     map_root_locals: BTreeSet<ResolvedLocalId>,
     live_map_root_locals: BTreeSet<ResolvedLocalId>,
+    /// Payload type chosen by the first Set in each persistent root chain.
+    /// The current closed native/runtime profile keeps one exact Any payload
+    /// type per chain so every consumer can validate a single ownership ABI.
+    map_root_payload_types: BTreeMap<ResolvedLocalId, Option<ResolvedTypeId>>,
     permitted_map_root_loads: HashSet<NodeId>,
     map_root_profile_invalid: bool,
     direct_map_root_binding: Option<(NodeId, ResolvedLocalId)>,
@@ -149,6 +153,7 @@ impl<'a> ActionEmitter<'a> {
             map_root_new_attempts: BTreeSet::new(),
             map_root_locals: BTreeSet::new(),
             live_map_root_locals: BTreeSet::new(),
+            map_root_payload_types: BTreeMap::new(),
             permitted_map_root_loads: HashSet::new(),
             map_root_profile_invalid: false,
             direct_map_root_binding: None,
@@ -270,6 +275,7 @@ impl<'a> ActionEmitter<'a> {
             self.map_root_profile_invalid = true;
             return;
         }
+        self.map_root_payload_types.insert(target.clone(), None);
         self.map_root_actions.push(MapRootAction {
             kind: MapRootActionKind::New,
             point: initializer.node_id.clone(),
@@ -277,6 +283,7 @@ impl<'a> ActionEmitter<'a> {
             root: Self::map_root_resource_identity(target),
             key: None,
             value: None,
+            value_type: None,
             source_local: None,
             source: None,
         });
@@ -310,6 +317,7 @@ impl<'a> ActionEmitter<'a> {
             self.map_root_profile_invalid = true;
             return None;
         }
+        self.map_root_payload_types.insert(local.clone(), None);
         self.map_root_actions.push(MapRootAction {
             kind: MapRootActionKind::New,
             point: expression.node_id.clone(),
@@ -317,6 +325,7 @@ impl<'a> ActionEmitter<'a> {
             root: Self::map_root_resource_identity(&local),
             key: None,
             value: None,
+            value_type: None,
             source_local: None,
             source: None,
         });
@@ -351,6 +360,7 @@ impl<'a> ActionEmitter<'a> {
                         return;
                     }
                     self.live_map_root_locals.remove(&local);
+                    self.map_root_payload_types.remove(&local);
                     local
                 }
                 _ => return,
@@ -366,6 +376,7 @@ impl<'a> ActionEmitter<'a> {
                     root: Self::map_root_resource_identity(&local),
                     key: None,
                     value: None,
+                    value_type: None,
                     source_local: None,
                     source: None,
                 });
@@ -377,6 +388,7 @@ impl<'a> ActionEmitter<'a> {
                         root: Self::map_root_resource_identity(&local),
                         key: None,
                         value: None,
+                        value_type: None,
                         source_local: None,
                         source: None,
                     });
@@ -426,6 +438,39 @@ impl<'a> ActionEmitter<'a> {
             }
             _ => return,
         };
+        let value = &call.arguments[2].value;
+        let string_value = matches!(
+            self.types.get(&value.ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        );
+        let value_has_owned_temporary_shape = match &value.kind {
+            ResolvedExprKind::Literal(ResolvedLiteral::String(_)) => true,
+            ResolvedExprKind::Load(place) => place.projections.is_empty(),
+            _ => false,
+        };
+        if string_value && !value_has_owned_temporary_shape {
+            // String values are copied into the type-erased Map owner. This
+            // closed profile admits only shapes for which MIR materializes a
+            // fresh owned temporary (literal or direct local read), allowing
+            // every consumer to discharge that temporary after the copy.
+            self.map_root_profile_invalid = true;
+            return;
+        }
+        let inherited_payload_type = self
+            .map_root_payload_types
+            .get(&source_local)
+            .cloned()
+            .flatten();
+        if inherited_payload_type
+            .as_ref()
+            .is_some_and(|previous| previous != &value.ty)
+        {
+            // Keep source-checker receipts absent for a root whose successive
+            // Sets would change the admitted payload ABI. The legacy Map
+            // contract remains available to this mixed Any payload program.
+            self.map_root_profile_invalid = true;
+            return;
+        }
         if self.map_root_locals.contains(&target)
             || !self
                 .body
@@ -442,7 +487,9 @@ impl<'a> ActionEmitter<'a> {
             )
             || !matches!(
                 self.types.get(&call.arguments[2].value.ty),
-                Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+                Some(ResolvedType::Primitive(
+                    crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::String
+                ))
             )
             || !matches!(
                 self.types.get(&expression.ty),
@@ -463,8 +510,11 @@ impl<'a> ActionEmitter<'a> {
             debug_assert_eq!(place.base, source_local);
         }
         self.live_map_root_locals.remove(&source_local);
+        self.map_root_payload_types.remove(&source_local);
         self.map_root_locals.insert(target.clone());
         self.live_map_root_locals.insert(target.clone());
+        self.map_root_payload_types
+            .insert(target.clone(), Some(value.ty.clone()));
         self.map_root_actions.push(MapRootAction {
             kind: MapRootActionKind::Set,
             point: expression.node_id.clone(),
@@ -472,6 +522,7 @@ impl<'a> ActionEmitter<'a> {
             root: Self::map_root_resource_identity(&target),
             key: Some(key.clone()),
             value: Some(call.arguments[2].value.node_id.clone()),
+            value_type: Some(value.ty.clone()),
             source_local: Some(source_local.clone()),
             source: Some(Self::map_root_resource_identity(&source_local)),
         });
@@ -1521,6 +1572,7 @@ impl<'a> ActionEmitter<'a> {
                         && self.live_map_root_locals.remove(&place.base)
                     {
                         let local = place.base.clone();
+                        self.map_root_payload_types.remove(&local);
                         self.map_root_actions.push(MapRootAction {
                             kind: MapRootActionKind::Drop,
                             point: statement.node_id.clone(),
@@ -1528,6 +1580,7 @@ impl<'a> ActionEmitter<'a> {
                             root: Self::map_root_resource_identity(&local),
                             key: None,
                             value: None,
+                            value_type: None,
                             source_local: None,
                             source: None,
                         });
@@ -3598,6 +3651,42 @@ func main() -> i32 {
     }
 
     #[test]
+    fn map_root_checker_withholds_mixed_payload_type_chain() {
+        for source in [
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let integer_value = map_set(root, "answer", 42)
+    let mixed_value = map_set(integer_value, "label", "forty-two")
+    drop(mixed_value)
+    0
+}
+"#,
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let string_value = map_set(root, "label", "forty-two")
+    let mixed_value = map_set(string_value, "answer", 42)
+    drop(mixed_value)
+    0
+}
+"#,
+        ] {
+            let file = parse(source);
+            let program = crate::core::check_program(&file)
+                .expect("legacy Any Map semantics remain available for mixed payloads");
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("MapRoot resource analysis");
+            assert_eq!(analysis.map_root_new_attempts.len(), 1);
+            assert!(
+                analysis.map_root_actions.is_empty(),
+                "a root chain that changes payload TypeDesc must not receive partial MapRoot authority"
+            );
+        }
+    }
+
+    #[test]
     fn map_root_checker_receipts_cover_and_consume_temporary_roots() {
         let immediate_observation = parse(
             r#"
@@ -3800,6 +3889,15 @@ func main() -> i32 {
 }
 "#,
             r#"
+func payload() -> string { "computed" }
+func main() -> i32 {
+    let map = map_new()
+    let updated = map_set(map, "answer", payload())
+    drop(updated)
+    0
+}
+"#,
+            r#"
 func main() -> i32 {
     let map = map_new()
     drop(map)
@@ -3825,7 +3923,7 @@ func main() -> i32 {
             r#"
 func main() -> i32 {
     let map = map_new()
-    let updated = map_set(map, "answer", "not-i32")
+    let updated = map_set(map, "answer", "not-" + "i32")
     drop(updated)
     0
 }

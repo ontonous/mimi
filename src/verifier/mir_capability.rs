@@ -592,6 +592,36 @@ impl<'a> CapabilityGate<'a> {
         }
     }
 
+    fn validate_map_root_set_payload(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .and_then(|value| self.program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| match descriptor.kind {
+                MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => self
+                    .program
+                    .type_catalog()
+                    .validate_copy_scalar(&descriptor.id)
+                    .is_ok(),
+                MirTypeKind::Primitive(crate::core::PrimitiveType::String) => self
+                    .program
+                    .type_catalog()
+                    .validate_owned_string(&descriptor.id)
+                    .is_ok(),
+                _ => false,
+            });
+        if !valid {
+            self.error(format!(
+                "{subject} MapRoot Set payload is outside the receipted i32/String TypeDesc profile"
+            ));
+        }
+    }
+
     fn validate_type(&mut self, ty: &crate::core::ResolvedTypeId, subject: &str) {
         if !self.checked_types.insert(ty.clone()) {
             return;
@@ -863,7 +893,7 @@ impl<'a> CapabilityGate<'a> {
                 if key.contains('\0') {
                     self.error(format!("{subject} MapRoot key contains NUL"));
                 }
-                self.validate_i32_value(function, value, subject, "MapRoot Set value");
+                self.validate_map_root_set_payload(function, value, subject);
             }
             MirInstructionKind::MapRootSize { result, root } => {
                 self.validate_map_root_type(function, root, subject, "Size root");

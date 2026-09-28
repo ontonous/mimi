@@ -829,10 +829,6 @@ fn validate_map_root_verifier_boundary(
             "canonical MIR MapRoot verifier TypeDesc unexpectedly exposes Clone glue".into(),
         );
     }
-    let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
-        (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
-            .then(|| ty.clone())
-    });
     for instruction in function
         .blocks
         .values()
@@ -848,18 +844,34 @@ fn validate_map_root_verifier_boundary(
                 key,
                 value,
             } => {
+                let payload_type_valid = function
+                    .values
+                    .get(value)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| match descriptor.kind {
+                        MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                            catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                        }
+                        MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                            catalog.validate_owned_string(&descriptor.id).is_ok()
+                        }
+                        _ => false,
+                    });
                 !key.contains('\0')
                     && function.values.get(result).map(|value| &value.ty) == Some(&root_ty)
                     && function.values.get(source).map(|value| &value.ty) == Some(&root_ty)
-                    && i32_ty.as_ref().is_some_and(|i32_ty| {
-                        function.values.get(value).map(|value| &value.ty) == Some(i32_ty)
-                    })
+                    && payload_type_valid
             }
             MirInstructionKind::MapRootSize { result, root } => {
-                function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
-                    && i32_ty.as_ref().is_some_and(|i32_ty| {
-                        function.values.get(result).map(|value| &value.ty) == Some(i32_ty)
-                    })
+                let result_is_i32 = function
+                    .values
+                    .get(result)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+                            && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                    });
+                function.values.get(root).map(|value| &value.ty) == Some(&root_ty) && result_is_i32
             }
             MirInstructionKind::MapRootDrop { root } => {
                 function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
@@ -2047,34 +2059,49 @@ fn eval_instruction(
                     "{instruction_id}: MapRoot Set source/result does not use the canonical MapRoot TypeDesc"
                 ));
             }
-            let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
-                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
-                    .then(|| ty.clone())
-            });
-            if i32_ty.as_ref().is_none_or(|i32_ty| {
-                function.values.get(value).map(|value| &value.ty) != Some(i32_ty)
-            }) {
-                return Err(format!(
-                    "{instruction_id}: MapRoot Set value is not the canonical i32 TypeDesc"
-                ));
-            }
             if key.contains('\0') {
                 return Err(format!("{instruction_id}: MapRoot key contains NUL"));
             }
             let payload = state.values.get(value).cloned().ok_or_else(|| {
                 format!(
-                    "{instruction_id}: MapRoot Set scalar '{}' is unavailable",
+                    "{instruction_id}: MapRoot Set payload '{}' is unavailable",
                     value
                 )
             })?;
-            let SymbolicValue::Int(payload) = payload else {
-                return Err(format!(
-                    "{instruction_id}: MapRoot Set scalar is not represented as an integer"
-                ));
-            };
-            let lower = payload.ge(Int::from_i64(i32::MIN as i64));
-            let upper = payload.le(Int::from_i64(i32::MAX as i64));
-            add_definedness(state, Bool::and(&[&lower, &upper]), "E0802")?;
+            let payload_ty = function
+                .values
+                .get(value)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("{instruction_id}: MapRoot Set payload value is absent"))?;
+            let descriptor = catalog.get(&payload_ty).ok_or_else(|| {
+                format!("{instruction_id}: MapRoot Set payload TypeDesc is absent")
+            })?;
+            match descriptor.kind {
+                MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                    catalog.validate_copy_scalar(&payload_ty)?;
+                    let SymbolicValue::Int(payload) = payload else {
+                        return Err(format!(
+                            "{instruction_id}: MapRoot i32 payload is not represented as an integer"
+                        ));
+                    };
+                    let lower = payload.ge(Int::from_i64(i32::MIN as i64));
+                    let upper = payload.le(Int::from_i64(i32::MAX as i64));
+                    add_definedness(state, Bool::and(&[&lower, &upper]), "E0802")?;
+                }
+                MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                    catalog.validate_owned_string(&payload_ty)?;
+                    if !matches!(payload, SymbolicValue::Opaque { ty } if ty == payload_ty) {
+                        return Err(format!(
+                            "{instruction_id}: MapRoot String payload is not represented by its exact owned String TypeDesc"
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Set payload is outside the receipted i32/String TypeDesc profile"
+                    ))
+                }
+            }
 
             let mut root = match state.values.remove(source) {
                 Some(SymbolicValue::MapRoot { keys }) => keys,

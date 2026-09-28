@@ -64,6 +64,62 @@ pub unsafe extern "C" fn mimi_mir_map_root_set(
     handle
 }
 
+/// Clone and insert one typed Mimi String as a map-owned Any payload. The
+/// payload uses exact byte length and is reclaimed on overwrite or when the
+/// final Map clone is destroyed.
+///
+/// # Safety
+/// For `key_len > 0` and `value_len > 0`, the corresponding pointers must
+/// reference readable byte ranges for this call. The key must be UTF-8 and
+/// NUL-free. The handle must be a live, exclusively owned MapRoot.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_map_root_set_string(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    value: *const std::ffi::c_char,
+    value_len: i64,
+) -> i64 {
+    if handle == 0
+        || key.is_null()
+        || key_len < 0
+        || value.is_null() && value_len != 0
+        || value_len < 0
+    {
+        abort(b"[E0800] canonical MIR MapRoot String Set received an invalid operand\0");
+    }
+    let (Ok(key_len), Ok(value_len)) = (usize::try_from(key_len), usize::try_from(value_len))
+    else {
+        abort(b"[E0800] canonical MIR MapRoot String Set length is invalid\0");
+    };
+    // SAFETY: the ABI contract requires readable key/value byte ranges for
+    // the checked explicit lengths; empty String accepts a null data pointer.
+    let key_bytes = unsafe { std::slice::from_raw_parts(key, key_len) };
+    let Ok(key) = std::str::from_utf8(key_bytes) else {
+        abort(b"[E0800] canonical MIR MapRoot String Set key is not valid UTF-8\0");
+    };
+    if key.contains('\0') {
+        abort(b"[E0800] canonical MIR MapRoot String Set key contains NUL\0");
+    }
+    let tagged = unsafe { super::mimi_any_string_clone(value, value_len as i64) };
+    if tagged == 0 {
+        abort(b"[E0800] canonical MIR MapRoot String clone failed\0");
+    }
+    match super::handle::map_root_set_owned_any_string(handle, key.to_owned(), tagged) {
+        Ok(()) => handle,
+        Err(_) => {
+            let Ok(tagged) = usize::try_from(tagged) else {
+                std::process::abort();
+            };
+            // SAFETY: `tagged` is the fresh allocation just returned by
+            // `mimi_any_string_clone`; the failed map operation did not take
+            // ownership of it.
+            super::mimi_free(((tagged & !1) as *mut u8).cast());
+            abort(b"[E0800] canonical MIR MapRoot String handle is busy or not live\0");
+        }
+    }
+}
+
 /// Return the checked i32 size of one live MapRoot.
 #[no_mangle]
 pub extern "C" fn mimi_mir_map_root_size(handle: i64) -> i32 {
@@ -153,5 +209,65 @@ mod tests {
         );
         mimi_mir_map_root_drop(root);
         assert!(super::super::handle::map_generation(root).is_err());
+    }
+
+    #[test]
+    fn owned_string_payload_survives_shallow_clone_until_last_map_owner() {
+        let root = mimi_mir_map_root_new();
+        let key = b"payload";
+        let value = "a\0b雪".as_bytes();
+        // SAFETY: the root is live and both byte slices remain readable for
+        // the exact explicit lengths passed to the String Set helper.
+        let root = unsafe {
+            mimi_mir_map_root_set_string(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                value.as_ptr().cast(),
+                value.len() as i64,
+            )
+        };
+        let c_key = std::ffi::CString::new("payload").expect("static key has no NUL");
+        // SAFETY: root is a live Map handle and c_key is a live C string.
+        let tagged = unsafe { super::super::mimi_map_get(root, c_key.as_ptr()) };
+        let address = (tagged as usize) & !1;
+        assert_ne!(
+            tagged & 1,
+            0,
+            "String payload must carry its explicit Any tag"
+        );
+
+        // SAFETY: root is live; mimi_map_clone retains the owner Arc for the
+        // shallow clone and returns an independent live handle.
+        let clone = unsafe { super::super::mimi_map_clone(root) };
+        assert_ne!(clone, 0);
+        let registered = || {
+            super::super::any_value_strings()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&address)
+        };
+        assert!(registered());
+        assert_eq!(
+            super::super::copy_registered_any_string(tagged),
+            Some(value.to_vec())
+        );
+
+        mimi_mir_map_root_drop(root);
+        assert!(registered(), "the clone must keep the String payload alive");
+        // SAFETY: clone remains live after its source root is destroyed.
+        let cloned_tagged = unsafe { super::super::mimi_map_get(clone, c_key.as_ptr()) };
+        assert_eq!(cloned_tagged, tagged);
+        assert_eq!(
+            super::super::copy_registered_any_string(cloned_tagged),
+            Some(value.to_vec())
+        );
+
+        // SAFETY: clone is the final remaining owner and is destroyed once.
+        unsafe { super::super::mimi_map_destroy(clone) };
+        assert!(
+            !registered(),
+            "the final clone drop must free the payload once"
+        );
     }
 }

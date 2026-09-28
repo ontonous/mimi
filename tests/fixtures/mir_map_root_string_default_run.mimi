@@ -1,0 +1,10 @@
+func main() -> i32 {
+    let root = map_new()
+    let first = map_set(root, "same", "a\0b雪")
+    let overwritten = map_set(first, "same", "")
+    let updated = map_set(overwritten, "🗺️", "雪")
+    let size = map_size(updated)
+    println(size)
+    drop(updated)
+    0
+}

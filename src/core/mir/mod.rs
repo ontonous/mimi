@@ -2486,6 +2486,7 @@ pub(super) struct MirCheckerMapRootAction {
     pub(super) root: String,
     pub(super) key: Option<String>,
     pub(super) value: Option<MirValueId>,
+    pub(super) value_type: Option<crate::core::ResolvedTypeId>,
     pub(super) source_local: Option<MirValueId>,
     pub(super) source: Option<String>,
     pub(super) instruction: MirInstructionId,
@@ -2527,6 +2528,22 @@ impl MirOwnershipSummary {
             return false;
         };
         receipt.key = Some(key);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forge_checker_map_root_set_value_type_for_test_only(
+        &mut self,
+        value_type: crate::core::ResolvedTypeId,
+    ) -> bool {
+        let Some(receipt) = self
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
+        else {
+            return false;
+        };
+        receipt.value_type = Some(value_type);
         true
     }
 
@@ -2797,6 +2814,11 @@ impl MirOwnershipSummary {
                 .as_ref()
                 .map(|value| format!("some:{value}"))
                 .unwrap_or_else(|| "none".into());
+            let value_type = action
+                .value_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
             let source_local = action
                 .source_local
                 .as_ref()
@@ -2809,13 +2831,14 @@ impl MirOwnershipSummary {
                 .unwrap_or_else(|| "none".into());
             let _ = writeln!(
                 output,
-                "    checker_map_root[{index}] {kind} point={} local={} result={} root={} key={} value={} source_local={} source={} instruction={}",
+                "    checker_map_root[{index}] {kind} point={} local={} result={} root={} key={} value={} value_ty={} source_local={} source={} instruction={}",
                 action.point.0,
                 action.local,
                 result,
                 format_mir_literal(&ResolvedLiteral::String(action.root.clone())),
                 key,
                 value,
+                value_type,
                 source_local,
                 source,
                 action.instruction
@@ -3057,6 +3080,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     && receipt.result.as_ref() == Some(result)
                     && receipt.key.is_none()
                     && receipt.value.is_none()
+                    && receipt.value_type.is_none()
                     && receipt.source_local.is_none()
                     && receipt.source.is_none()
             }
@@ -3069,11 +3093,27 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     value,
                 },
             ) => {
+                let string_payload_type =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                let string_payload_lifetime_valid = receipt.value_type.as_ref()
+                    != Some(&string_payload_type)
+                    || validate_map_root_string_payload_lifetime(
+                        function,
+                        &receipt.instruction,
+                        value,
+                    );
                 result == &receipt.local
                     && receipt.result.as_ref() == Some(result)
                     && Some(source) == receipt.source_local.as_ref()
                     && receipt.key.as_ref() == Some(key)
                     && receipt.value.as_ref() == Some(value)
+                    && receipt.value_type.as_ref().is_some_and(|expected| {
+                        function
+                            .values
+                            .get(value)
+                            .is_some_and(|actual| &actual.ty == expected)
+                    })
+                    && string_payload_lifetime_valid
                     && receipt.source.is_some()
                     && source != result
             }
@@ -3085,6 +3125,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     && receipt.result.as_ref() == Some(result)
                     && receipt.key.is_none()
                     && receipt.value.is_none()
+                    && receipt.value_type.is_none()
                     && receipt.source_local.is_none()
                     && receipt.source.is_none()
             }
@@ -3093,6 +3134,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     && receipt.result.is_none()
                     && receipt.key.is_none()
                     && receipt.value.is_none()
+                    && receipt.value_type.is_none()
                     && receipt.source_local.is_none()
                     && receipt.source.is_none()
             }
@@ -3120,6 +3162,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
     // Bind every checker resource identity to exactly one MIR local root and
     // carry it through persistent Set; Size/Drop must cite the current root.
     let mut live_roots = BTreeMap::<String, MirValueId>::new();
+    let mut live_payload_types = BTreeMap::<String, Option<crate::core::ResolvedTypeId>>::new();
     for receipt in receipts {
         match receipt.kind {
             crate::core::MapRootActionKind::New => {
@@ -3132,6 +3175,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     });
                 } else {
                     live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                    live_payload_types.insert(receipt.root.clone(), None);
                 }
             }
             crate::core::MapRootActionKind::Set => {
@@ -3147,6 +3191,20 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                 } else if let Some(source_root) = source_root {
                     live_roots.remove(source_root);
                 }
+                let inherited_payload_type = source_root
+                    .and_then(|root| live_payload_types.remove(root))
+                    .flatten();
+                let next_payload_type = receipt.value_type.clone();
+                if inherited_payload_type
+                    .as_ref()
+                    .zip(next_payload_type.as_ref())
+                    .is_some_and(|(previous, next)| previous != next)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "MapRoot Set changes the Checker-owned payload TypeDesc".into(),
+                    });
+                }
                 if live_roots.contains_key(&receipt.root)
                     || live_roots.values().any(|local| local == &receipt.local)
                 {
@@ -3156,6 +3214,10 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     });
                 } else {
                     live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                    live_payload_types.insert(
+                        receipt.root.clone(),
+                        next_payload_type.or(inherited_payload_type),
+                    );
                 }
             }
             crate::core::MapRootActionKind::Size => {
@@ -3175,6 +3237,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                         message: "MapRoot Drop resource identity does not match a live root".into(),
                     });
                 }
+                live_payload_types.remove(&receipt.root);
             }
         }
     }
@@ -3269,6 +3332,87 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
         });
     }
     errors
+}
+
+/// Prove the lifetime of a String copied into the opaque Map owner. The only
+/// admitted source shapes are a String literal or a direct local read; MIR
+/// materializes those as an owned constant or an owned Clone respectively.
+/// The copy must then be followed immediately by its one Drop, and that value
+/// cannot be reused after the Drop.
+fn validate_map_root_string_payload_lifetime(
+    function: &MirFunction,
+    set_instruction: &MirInstructionId,
+    value: &MirValueId,
+) -> bool {
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let Some((block, set_index)) = function.blocks.values().find_map(|block| {
+        block
+            .instructions
+            .iter()
+            .position(|instruction| instruction.id == *set_instruction)
+            .map(|index| (block, index))
+    }) else {
+        return false;
+    };
+    if !matches!(
+        block.instructions.get(set_index).map(|instruction| &instruction.kind),
+        Some(MirInstructionKind::MapRootSet { value: set_value, .. }) if set_value == value
+    ) || !matches!(
+        block.instructions.get(set_index + 1).map(|instruction| &instruction.kind),
+        Some(MirInstructionKind::Drop { value: dropped }) if dropped == value
+    ) {
+        return false;
+    }
+    let has_fresh_owner_definition =
+        block.instructions[..set_index]
+            .iter()
+            .any(|instruction| match &instruction.kind {
+                MirInstructionKind::Const {
+                    result,
+                    literal: ResolvedLiteral::String(_),
+                } => result == value,
+                MirInstructionKind::Clone { result, source } => {
+                    result == value
+                        && source.as_str().starts_with("local:")
+                        && function
+                            .values
+                            .get(source)
+                            .is_some_and(|source| source.ty == string_type)
+                }
+                _ => false,
+            });
+    if !has_fresh_owner_definition
+        || !function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == string_type)
+    {
+        return false;
+    }
+    let use_positions = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| {
+            mir_instruction_value_uses(&instruction.kind)
+                .contains(value)
+                .then_some(instruction.id.clone())
+        })
+        .collect::<Vec<_>>();
+    if use_positions.len() != 2 {
+        return false;
+    }
+    let expected_use_instructions = BTreeSet::from([
+        block.instructions[set_index].id.clone(),
+        block.instructions[set_index + 1].id.clone(),
+    ]);
+    if use_positions.into_iter().collect::<BTreeSet<_>>() != expected_use_instructions {
+        return false;
+    }
+    !function
+        .blocks
+        .values()
+        .any(|block| mir_terminator_value_uses(&block.terminator).contains(value))
 }
 
 fn mir_instruction_value_uses(kind: &MirInstructionKind) -> Vec<MirValueId> {

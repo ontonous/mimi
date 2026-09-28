@@ -122,26 +122,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return Err(NativeMirError::new(subject, "MapRoot key contains NUL"));
         }
         let value_ty = self.value_type(value, subject)?;
-        let i32_ty = self
-            .program
-            .type_catalog()
-            .iter()
-            .find_map(|(ty, descriptor)| {
-                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
-                    .then(|| ty.clone())
-            })
-            .ok_or_else(|| NativeMirError::new(subject, "canonical i32 TypeDesc is absent"))?;
-        if value_ty != i32_ty {
-            return Err(NativeMirError::new(
-                subject,
-                "MapRoot Set value is not the canonical i32 TypeDesc",
-            ));
-        }
-        self.program
-            .type_catalog()
-            .validate_copy_scalar(&i32_ty)
-            .map_err(|message| NativeMirError::new(subject, message))?;
-        let value = self.value(value, subject)?.into_int_value();
+        let descriptor =
+            self.program.type_catalog().get(&value_ty).ok_or_else(|| {
+                NativeMirError::new(subject, "MapRoot Set value TypeDesc is absent")
+            })?;
         let key_len = i64::try_from(key.len()).map_err(|_| {
             NativeMirError::new(
                 subject,
@@ -153,29 +137,71 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_global_string_ptr(key, "mir_map_root_static_key")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let key_len = self
+            .generator
+            .context
+            .i64_type()
+            .const_int(key_len as u64, true);
+        let value = self.value(value, subject)?;
+        let (set_name, args) = match descriptor.kind {
+            MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                self.program
+                    .type_catalog()
+                    .validate_copy_scalar(&value_ty)
+                    .map_err(|message| NativeMirError::new(subject, message))?;
+                (
+                    "mimi_mir_map_root_set",
+                    vec![
+                        BasicMetadataValueEnum::from(handle),
+                        BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
+                        BasicMetadataValueEnum::from(key_len),
+                        BasicMetadataValueEnum::from(value.into_int_value()),
+                    ],
+                )
+            }
+            MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                self.program
+                    .type_catalog()
+                    .validate_owned_string(&value_ty)
+                    .map_err(|message| NativeMirError::new(subject, message))?;
+                let string = value.into_struct_value();
+                let data = self
+                    .generator
+                    .builder
+                    .build_extract_value(string, 0, "mir_map_root_string_data")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    .into_pointer_value();
+                let len = self
+                    .generator
+                    .builder
+                    .build_extract_value(string, 1, "mir_map_root_string_len")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    .into_int_value();
+                let args = vec![
+                    BasicMetadataValueEnum::from(handle),
+                    BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
+                    BasicMetadataValueEnum::from(key_len),
+                    BasicMetadataValueEnum::from(data),
+                    BasicMetadataValueEnum::from(len),
+                ];
+                ("mimi_mir_map_root_set_string", args)
+            }
+            _ => {
+                return Err(NativeMirError::new(
+                    subject,
+                    "MapRoot Set value is outside the receipted i32/String TypeDesc profile",
+                ));
+            }
+        };
         let set_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_set")
+            .get_runtime_fn(set_name)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let updated = call_try_basic_value(
             &self
                 .generator
                 .builder
-                .build_call(
-                    set_fn,
-                    &[
-                        BasicMetadataValueEnum::from(handle),
-                        BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
-                        BasicMetadataValueEnum::from(
-                            self.generator
-                                .context
-                                .i64_type()
-                                .const_int(key_len as u64, true),
-                        ),
-                        BasicMetadataValueEnum::from(value),
-                    ],
-                    "mir_map_root_set",
-                )
+                .build_call(set_fn, &args, "mir_map_root_set")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
         .ok_or_else(|| NativeMirError::new(subject, "MapRoot Set returned void"))?

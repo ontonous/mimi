@@ -21,10 +21,10 @@ readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # digest beside each prose condition so scope changes are detected by the
 # gate and reviewed together with the migration that changes the condition.
 readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=2568b029a170043114b68ea0d35f9061617cc969ea2f9c8b7288d3d7f4f5e40c
-readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=7b995e0731f7fd98c881107d01a68f18f72c254a49df0239f62056f80b8d541a
+readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=bd5ea9e2bce323e05ac07aaa9ed3eee3c48b1fcfb2ceb3dae879bccef9904f93
 readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=f760de7d0a7f11cb703995b9069da4a510935d9ffcb34715418516aa5cc6b5fe
 readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=ff30fc215553993cb653cab0746ce34c3b275936e8d699ac25856f8201d210f4
-readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=60261d5b3a6c63c9b0ed4604a72e49505f33501960061ba8e8f4540bbbd67e3f
+readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=af85b1c18cdc527b8b0433b1fff23b06aa3593d3452225bce38050d2064ed4da
 audit_failed=0
 closed_scalar_marker_sequence=()
 
@@ -1530,8 +1530,8 @@ for owner in \
             ;;
         FlowVerifierCompatibility)
             dependency_class='flow-body-compatibility'
-            deletion_blocker='non-closed Flow shapes still require the AST/Z3 compatibility encoder'
-            condition='delete after the Flow verifier consumes canonical MIR contracts for every non-closed Flow shape'
+            deletion_blocker='non-closed function and Flow contract profiles still require the AST/Z3 compatibility encoder'
+            condition='delete after canonical MIR contracts cover every remaining function and Flow contract profile and the AST body walker is retired'
             ;;
         FfiVerifierCompatibility)
             dependency_class='ffi-declaration-compatibility'

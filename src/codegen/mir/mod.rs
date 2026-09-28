@@ -335,6 +335,27 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_mir_map_root_set_string")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_set_string",
+                i64.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_mir_map_root_size")
             .is_none()
         {
@@ -1247,6 +1268,37 @@ func main() -> i32 {
 }
 "#;
 
+    const MAP_ROOT_STRING_NATIVE_SOURCE: &str = r#"
+func map_size_for_string(value: string) -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "payload", value)
+    let size = map_size(inserted)
+    drop(inserted)
+    size
+}
+func wrong_string_map_size() -> i32 {
+    ensures: result == 0
+    let root = map_new()
+    let inserted = map_set(root, "payload", "value")
+    let size = map_size(inserted)
+    drop(inserted)
+    size
+}
+func main() -> i32 {
+    let root = map_new()
+    let inserted = map_set(root, "nul", "a\0b雪")
+    let overwritten = map_set(inserted, "nul", "x\0y")
+    let completed = map_set(overwritten, "second", "two")
+    let size = map_size(completed)
+    println(size)
+    drop(completed)
+    let helper_size = map_size_for_string("parameter\0payload")
+    println(helper_size)
+    0
+}
+"#;
+
     const MAP_ROOT_NATIVE_OVERFLOW_SOURCE: &str = r#"
 extern "C" { func mimi_test_map_root_size_from_len(len: i64) -> i32; }
 func main() -> i32 {
@@ -1368,6 +1420,222 @@ func main() -> i32 {
             assert!(memcheck
                 .stderr
                 .contains("All heap blocks were freed -- no leaks are possible"));
+        }
+    }
+
+    #[test]
+    fn receipt_backed_string_map_root_matches_all_consumers_and_reclaims_payloads() {
+        let program = canonical_program(MAP_ROOT_STRING_NATIVE_SOURCE);
+        let verifier_receipt = program.route_receipt("verifier-mir-v1");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier admits the exact typed String MapRoot profile");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validator admits Checker-receipted i32/String MapRoot payloads");
+
+        let main = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("main"))
+            .expect("String MapRoot main")
+            .clone();
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference String MapRoot execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "2\n1\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free String MapRoot bytecode"),
+        );
+        assert_eq!(
+            vm.run_value().expect("bytecode String MapRoot execution"),
+            Value::Int(0)
+        );
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let verification = crate::verifier::verify_mir(&program, "map-root-string".into())
+            .expect("public MIR verifier consumes the same String MapRoot graph");
+        let proven = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("map_size_for_string"))
+            .expect("positive String MapRoot contract");
+        assert_eq!(
+            proven.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            proven.message
+        );
+        let receipt_verification = crate::verifier::verify_mir_with_route_receipt(
+            &program,
+            &verifier_receipt,
+            "map-root-string-route-receipt".into(),
+        )
+        .expect("public receipt-bound verifier consumes the same String MapRoot graph");
+        assert!(receipt_verification.iter().any(|result| {
+            result.func_name.ends_with("map_size_for_string")
+                && result.status == crate::verifier::VerifStatus::Proven
+        }));
+        let disproven = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("wrong_string_map_size"))
+            .expect("negative String MapRoot contract");
+        assert_eq!(disproven.status, crate::verifier::VerifStatus::Disproven);
+
+        let mut forged = program.clone();
+        let i32_ty = forged
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, desc)| {
+                (desc.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+                    .then(|| ty.clone())
+            })
+            .expect("canonical i32 TypeDesc");
+        let mut function = forged.functions().get(&main).expect("main MIR").clone();
+        assert!(function
+            .ownership
+            .forge_checker_map_root_set_value_type_for_test_only(i32_ty));
+        forged.replace_function_for_test_only(function);
+        let forged_construction = crate::core::mir::reference::MirProgram::with_type_catalog(
+            forged.functions().clone(),
+            forged.type_catalog().clone(),
+        )
+        .expect_err("the public MIR constructor must reject a forged String payload receipt");
+        assert!(forged_construction.iter().any(|error| error
+            .message
+            .contains("MapRoot operation disagrees with its private Checker")));
+        let forged_route = crate::verifier::verify_mir_with_route_receipt(
+            &forged,
+            &verifier_receipt,
+            "map-root-string-forged-receipt".into(),
+        )
+        .expect_err("a valid verifier receipt must not replay against forged String MIR");
+        assert!(forged_route.contains("canonical route receipt rejected"));
+        assert!(crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("forged String payload descriptor must fail native admission")
+            .iter()
+            .any(|error| error
+                .to_string()
+                .contains("MapRoot receipt/shape validation failed")));
+        assert!(crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("forged String payload descriptor must fail verifier admission")
+            .iter()
+            .any(|error| error.contains("MapRoot MIR validation failed")));
+
+        let mut missing_string_drop = program.clone();
+        let mut main_without_string_drop = missing_string_drop
+            .functions()
+            .get(&main)
+            .expect("main MIR")
+            .clone();
+        let block = main_without_string_drop
+            .blocks
+            .values_mut()
+            .find(|block| {
+                block.instructions.windows(2).any(|pair| {
+                    matches!(
+                        &pair[0].kind,
+                        crate::core::mir::MirInstructionKind::MapRootSet { value, .. }
+                            if matches!(
+                                &pair[1].kind,
+                                crate::core::mir::MirInstructionKind::Drop { value: dropped }
+                                    if dropped == value
+                            )
+                    )
+                })
+            })
+            .expect("MapRoot Set and its owned String temporary Drop");
+        let set_index = block
+            .instructions
+            .windows(2)
+            .position(|pair| {
+                matches!(
+                    &pair[0].kind,
+                    crate::core::mir::MirInstructionKind::MapRootSet { value, .. }
+                        if matches!(
+                            &pair[1].kind,
+                            crate::core::mir::MirInstructionKind::Drop { value: dropped }
+                                if dropped == value
+                        )
+                )
+            })
+            .expect("MapRoot Set temporary Drop pair");
+        block.instructions.remove(set_index + 1);
+        missing_string_drop.replace_function_for_test_only(main_without_string_drop);
+        let missing_drop_construction = crate::core::mir::reference::MirProgram::with_type_catalog(
+            missing_string_drop.functions().clone(),
+            missing_string_drop.type_catalog().clone(),
+        )
+        .expect_err("the public MIR constructor must reject a missing String payload Drop");
+        assert!(missing_drop_construction.iter().any(|error| error
+            .message
+            .contains("MapRoot operation disagrees with its private Checker")));
+        let missing_drop_route = crate::verifier::verify_mir_with_route_receipt(
+            &missing_string_drop,
+            &verifier_receipt,
+            "map-root-string-missing-drop".into(),
+        )
+        .expect_err("a valid verifier receipt must not replay against MIR missing String Drop");
+        assert!(missing_drop_route.contains("canonical route receipt rejected"));
+        assert!(
+            crate::codegen::mir::validate_mir_native(&missing_string_drop)
+                .expect_err("omitted String temporary Drop must fail native admission")
+                .iter()
+                .any(|error| error
+                    .to_string()
+                    .contains("MapRoot receipt/shape validation failed"))
+        );
+        assert!(
+            crate::verifier::validate_mir_capabilities(&missing_string_drop)
+                .expect_err("omitted String temporary Drop must fail verifier admission")
+                .iter()
+                .any(|error| error.contains("MapRoot MIR validation failed"))
+        );
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_string_map_root");
+        generator
+            .compile_mir_native(&program)
+            .expect("native emitter consumes the same receipt-backed String MapRoot MIR");
+        generator
+            .module
+            .verify()
+            .expect("native String MapRoot module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_map_root_set_string")
+            .is_some());
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("production native String MapRoot process");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production String MapRoot lifecycle under Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, reference.output);
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(!memcheck.stderr.contains("definitely lost:"));
+            assert!(!memcheck.stderr.contains("indirectly lost:"));
+            assert!(!memcheck.stderr.contains("possibly lost:"));
         }
     }
 

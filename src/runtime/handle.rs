@@ -433,6 +433,43 @@ pub(super) fn map_root_set(handle: i64, key: String, value: i64) -> Result<(), H
     Ok(())
 }
 
+/// Store one newly cloned tagged Any String as an owned Map payload. The
+/// Checker-receipted profile has no get/values/escape operations; persistent
+/// Map clones still share the payload Arc so runtime API use cannot free the
+/// backing while a sibling clone remains alive.
+pub(super) fn map_root_set_owned_any_string(
+    handle: i64,
+    key: String,
+    value: i64,
+) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let previous_owner = {
+        let mut t = lock_maps();
+        let slot = t
+            .slots
+            .get_mut(index as usize)
+            .ok_or(HandleError::Invalid)?;
+        validate_map_root_slot(slot, gen)?;
+        let map = slot.obj.as_mut().ok_or(HandleError::Destroyed)?;
+        if map.owned.contains_key(&value) {
+            return Err(HandleError::Invalid);
+        }
+        map.owned
+            .insert(value, super::map_owned_any_string_payload(value));
+        let old_value = map.inner.insert(key, value);
+        old_value.and_then(|old_value| {
+            (old_value != value)
+                .then(|| map.owned.remove(&old_value))
+                .flatten()
+        })
+    };
+    // Releasing a replaced tagged string acquires the Any provenance lock.
+    // Drop outside MAP_TABLE so future changes cannot introduce lock nesting
+    // through a payload destructor.
+    drop(previous_owner);
+    Ok(())
+}
+
 pub(super) fn map_root_size(handle: i64) -> Result<usize, HandleError> {
     let (index, gen) = unpack(handle)?;
     let t = lock_maps();

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::span::Span;
 
 use super::cfg::{BasicBlockId, CallableCfg, EdgeId};
-use super::{NodeId, Origin, ResolvedLocalId};
+use super::{NodeId, Origin, ResolvedLocalId, ResolvedTypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalId(pub NodeId);
@@ -224,6 +224,9 @@ pub(crate) struct MapRootAction {
     /// Value expression consumed by `Set`. The canonical lowering maps this
     /// stable node identity to its SSA value and the MIR receipt binds it.
     pub(crate) value: Option<NodeId>,
+    /// Exact Checker-resolved payload type for `Set`. The first typed
+    /// MapRoot extensions admit only i32 and owned String values.
+    pub(crate) value_type: Option<ResolvedTypeId>,
     /// Previous local consumed by persistent `Set`.
     pub(crate) source_local: Option<ResolvedLocalId>,
     pub(crate) source: Option<ResourceId>,

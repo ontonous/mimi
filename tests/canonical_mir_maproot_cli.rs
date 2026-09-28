@@ -112,6 +112,75 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
 }
 
 #[test]
+fn default_string_map_root_run_build_and_verify() {
+    let mimi = mimi_bin();
+    let run_source = fixture("mir_map_root_string_default_run.mimi");
+    let run = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&run_source)
+        .output()
+        .expect("run String MapRoot CLI");
+    assert!(
+        run.status.success(),
+        "String MapRoot run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "2\n");
+    assert!(String::from_utf8_lossy(&run.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+
+    let built = std::env::temp_dir().join(format!(
+        "mimi-string-map-root-route-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("cli")
+    ));
+    let build = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("build")
+        .arg(&run_source)
+        .arg("--output")
+        .arg(&built)
+        .output()
+        .expect("build String MapRoot CLI");
+    assert!(
+        build.status.success(),
+        "String MapRoot build failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(String::from_utf8_lossy(&build.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+    let native = Command::new(&built)
+        .output()
+        .expect("run built String MapRoot binary");
+    let _ = std::fs::remove_file(&built);
+    assert!(
+        native.status.success(),
+        "{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "2\n");
+
+    let verify = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(fixture("mir_map_root_string_default_verify.mimi"))
+        .output()
+        .expect("verify String MapRoot CLI");
+    assert!(
+        verify.status.success(),
+        "String MapRoot verify failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("contract proven"));
+    assert!(String::from_utf8_lossy(&verify.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+}
+
+#[test]
 fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
     let mimi = mimi_bin();
     let stem = format!(

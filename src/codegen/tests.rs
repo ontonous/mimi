@@ -314,7 +314,10 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 
 #[test]
 fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
-    let source = r#"
+    let profiles = [
+        (
+            "i32",
+            r#"
         func main() -> i32 {
             let root = map_new()
             let updated = map_set(root, "answer", 42)
@@ -323,39 +326,64 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             drop(updated)
             0
         }
-    "#;
-    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
-    let file = crate::parser::Parser::new(tokens)
-        .parse_file()
-        .expect("parse");
-    let program = crate::core::check_program(&file).expect("check");
-    assert_eq!(
-        crate::core::mir::classify_canonical_mir_route_admission(&program).map_root,
-        crate::core::mir::MapRootAdmission::CompleteCoverage
-    );
+    "#,
+            "mimi_mir_map_root_set",
+        ),
+        (
+            "string",
+            r#"
+        func string_map_size() -> i32 {
+            let root = map_new()
+            let updated = map_set(root, "answer", "a\0b雪")
+            let size = map_size(updated)
+            println(size)
+            drop(updated)
+            size
+        }
+        func main() -> i32 {
+            let size = string_map_size()
+            0
+        }
+    "#,
+            "mimi_mir_map_root_set_string",
+        ),
+    ];
+    for (profile, source, set_runtime) in profiles {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.map_root,
+            crate::core::mir::MapRootAdmission::CompleteCoverage,
+            "{profile} MapRoot profile must be fully checker-receipted: {admission:#?}"
+        );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "map_root_direct_route");
-    codegen
-        .compile_checked(&program)
-        .expect("direct CheckedProgram native entry must route MapRoot through MIR");
-    codegen
-        .module
-        .verify()
-        .expect("valid direct MapRoot module");
-    for runtime in [
-        "mimi_mir_map_root_new",
-        "mimi_mir_map_root_set",
-        "mimi_mir_map_root_size",
-        "mimi_mir_map_root_drop",
-    ] {
-        assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, &format!("map_root_{profile}_direct_route"));
+        codegen
+            .compile_checked(&program)
+            .expect("direct CheckedProgram native entry must route MapRoot through MIR");
+        codegen
+            .module
+            .verify()
+            .expect("valid direct MapRoot module");
+        for runtime in [
+            "mimi_mir_map_root_new",
+            set_runtime,
+            "mimi_mir_map_root_size",
+            "mimi_mir_map_root_drop",
+        ] {
+            assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
+        }
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "direct {profile} MapRoot native compilation must not access retained legacy bodies"
+        );
     }
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct MapRoot native compilation must not access retained legacy bodies"
-    );
 }
 
 #[test]

@@ -34,6 +34,14 @@ impl ResolvedTypeId {
     }
 }
 
+/// Return the canonical stable identity for a primitive type without needing
+/// to retain a `ResolvedTypeTable`. Consumers that validate private Checker
+/// receipts use this to bind receipt-only ABI facts to the structural type
+/// identity already carried by MIR values.
+pub(crate) fn primitive_type_id(primitive: PrimitiveType) -> ResolvedTypeId {
+    ResolvedTypeId::from_canonical(&ResolvedType::Primitive(primitive).canonical())
+}
+
 /// Qualified identity of a nominal type declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NominalTypeId(String);

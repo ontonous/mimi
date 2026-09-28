@@ -1,0 +1,15 @@
+func checked_map_size() -> i32 {
+    requires: true
+    ensures: result == 1
+    let root = map_new()
+    let updated = map_set(root, "payload", "x\0雪")
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+
+func main() -> i32 {
+    let size = checked_map_size()
+    println(size)
+    0
+}

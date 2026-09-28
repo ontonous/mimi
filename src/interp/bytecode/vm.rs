@@ -3898,14 +3898,21 @@ impl BytecodeVM {
                         return Err(InterpError::new("MapRoot key contains NUL"));
                     }
                     let value = match self.get_reg(value) {
-                        Value::Int(value) => i32::try_from(*value).map_err(|_| {
-                            InterpError::integer_overflow(
-                                "E0802: canonical MapRoot.set value overflows i32",
+                        Value::Int(value) => {
+                            crate::interp::value::CanonicalMapRootValue::I32(
+                                i32::try_from(*value).map_err(|_| {
+                                    InterpError::integer_overflow(
+                                        "E0802: canonical MapRoot.set value overflows i32",
+                                    )
+                                })?,
                             )
-                        })?,
+                        }
+                        Value::String(value) => {
+                            crate::interp::value::CanonicalMapRootValue::String(Arc::clone(value))
+                        }
                         other => {
                             return Err(InterpError::new(format!(
-                                "canonical MapRoot.set: expected i32 runtime value, got {}",
+                                "canonical MapRoot.set: expected receipted i32 or String runtime value, got {}",
                                 other
                             )))
                         }

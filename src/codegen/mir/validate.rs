@@ -296,6 +296,39 @@ impl<'a> NativeMirValidator<'a> {
         }
     }
 
+    fn validate_map_root_set_payload(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+    ) {
+        let ty = function.values.get(value).map(|value| value.ty.clone());
+        let valid = ty.is_some_and(|ty| {
+            self.program
+                .type_catalog()
+                .get(&ty)
+                .is_some_and(|descriptor| match descriptor.kind {
+                    MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => self
+                        .program
+                        .type_catalog()
+                        .validate_copy_scalar(&ty)
+                        .is_ok(),
+                    MirTypeKind::Primitive(crate::core::PrimitiveType::String) => self
+                        .program
+                        .type_catalog()
+                        .validate_owned_string(&ty)
+                        .is_ok(),
+                    _ => false,
+                })
+        });
+        if !valid {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "MapRoot Set value is outside the receipted i32/String TypeDesc profile",
+            ));
+        }
+    }
+
     fn validate_value(&mut self, function: &MirFunction, value: &MirValueId, subject: &str) {
         let Some(info) = function.values.get(value) else {
             self.errors.push(NativeMirError::new(
@@ -827,7 +860,7 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors
                         .push(NativeMirError::new(subject, "MapRoot key contains NUL"));
                 }
-                self.validate_map_root_i32(function, value, subject, "Set value");
+                self.validate_map_root_set_payload(function, value, subject);
             }
             MirInstructionKind::MapRootSize { result, root } => {
                 self.validate_value(function, result, "MapRoot Size result");
