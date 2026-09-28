@@ -53,18 +53,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
         self.validate_map_root_value(value, subject)?;
         let handle = self.value(value, subject)?.into_int_value();
-        let positive = self
+        let nonzero = self
             .generator
             .builder
             .build_int_compare(
-                IntPredicate::SGT,
+                IntPredicate::NE,
                 handle,
                 self.generator.context.i64_type().const_zero(),
-                "mir_map_root_handle_positive",
+                "mir_map_root_handle_nonzero",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.emit_root_guard(
-            positive,
+            nonzero,
             "[E0800] canonical MIR MapRoot handle is invalid",
             subject,
         )?;
@@ -90,18 +90,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         )
         .ok_or_else(|| NativeMirError::new(subject, "MapRoot New returned void"))?
         .into_int_value();
-        let positive = self
+        let nonzero = self
             .generator
             .builder
             .build_int_compare(
-                IntPredicate::SGT,
+                IntPredicate::NE,
                 handle,
                 self.generator.context.i64_type().const_zero(),
-                "mir_map_root_new_positive",
+                "mir_map_root_new_nonzero",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.emit_root_guard(
-            positive,
+            nonzero,
             "[E0800] canonical MIR MapRoot allocation failed",
             subject,
         )?;

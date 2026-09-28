@@ -79,6 +79,11 @@ struct Slot<T> {
 struct Table<T: Send> {
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
+    // Generations for compacted tables must never restart at one.
+    generation_floor: HandleGeneration,
+    // At least one slot reached MAX. Keep retired indices in place forever,
+    // but continue allocating other free/fresh indices at the MAX generation.
+    generation_exhausted: bool,
 }
 
 impl<T: Send> Table<T> {
@@ -96,6 +101,8 @@ impl<T: Send> Table<T> {
                 obj: None,
             }],
             free: Vec::new(),
+            generation_floor: 1,
+            generation_exhausted: false,
         }
     }
 }
@@ -280,11 +287,23 @@ fn lock_sets() -> std::sync::MutexGuard<'static, Table<super::MimiSet>> {
 }
 
 fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
-    let gen: HandleGeneration = 1;
+    let gen = table.generation_floor;
+    if table.slots.is_empty() {
+        table.slots.push(Slot {
+            generation: 0,
+            leases: AtomicI64::new(0),
+            active_owner: None,
+            pins: AtomicI64::new(0),
+            retired: AtomicBool::new(true),
+            pending_free: AtomicBool::new(false),
+            obj: None,
+        });
+    }
     if let Some(idx) = table.free.pop() {
         let slot = &mut table.slots[idx as usize];
         // generation was bumped on destroy; use the current value
-        let g = slot.generation;
+        let g = slot.generation.max(gen);
+        slot.generation = g;
         slot.leases.store(0, Ordering::SeqCst);
         slot.active_owner = None;
         slot.pins.store(0, Ordering::SeqCst);
@@ -293,7 +312,9 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
         slot.obj = Some(Box::new(obj));
         pack(idx, g)
     } else {
-        let idx = table.slots.len() as u32;
+        let Some(idx) = checked_slot_index(table.slots.len()) else {
+            return 0;
+        };
         table.slots.push(Slot {
             generation: gen,
             leases: AtomicI64::new(0),
@@ -305,6 +326,17 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
         });
         pack(idx, gen)
     }
+}
+
+fn checked_slot_index(slot_count: usize) -> Option<u32> {
+    u32::try_from(slot_count).ok().filter(|index| *index != 0)
+}
+
+fn record_alloc_result(handle: i64) -> i64 {
+    if handle == 0 {
+        set_handle_error(HandleError::Invalid);
+    }
+    handle
 }
 
 pub(super) struct MapLease {
@@ -379,13 +411,98 @@ impl Drop for SetLease {
 pub fn map_new_handle(obj: super::MimiMap) -> i64 {
     clear_handle_error();
     let mut t = lock_maps();
-    alloc_slot(&mut t, obj)
+    record_alloc_result(alloc_slot(&mut t, obj))
+}
+
+/// MapRoot's closed-profile operations run under the registry lock itself.
+/// This avoids acquiring a thread-id lease while preserving the production
+/// Map object and handle validation rules.
+pub(super) fn map_root_set(handle: i64, key: String, value: i64) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_maps();
+    let slot = t
+        .slots
+        .get_mut(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    slot.obj
+        .as_mut()
+        .ok_or(HandleError::Destroyed)?
+        .inner
+        .insert(key, value);
+    Ok(())
+}
+
+pub(super) fn map_root_size(handle: i64) -> Result<usize, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let t = lock_maps();
+    let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    Ok(slot.obj.as_ref().ok_or(HandleError::Destroyed)?.inner.len())
+}
+
+pub(super) fn map_root_drop(handle: i64) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_maps();
+    let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    finish_map_free(&mut t, index);
+    Ok(())
+}
+
+fn validate_map_root_slot<T>(
+    slot: &Slot<T>,
+    generation: HandleGeneration,
+) -> Result<(), HandleError> {
+    if slot.generation != generation {
+        return Err(HandleError::StaleGeneration);
+    }
+    if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
+        return Err(HandleError::Destroyed);
+    }
+    if slot.leases.load(Ordering::SeqCst) != 0
+        || slot.pins.load(Ordering::SeqCst) != 0
+        || slot.active_owner.is_some()
+    {
+        return Err(HandleError::Reentrant);
+    }
+    Ok(())
+}
+
+fn compact_empty_map_table(t: &mut Table<super::MimiMap>) {
+    if t.generation_exhausted
+        || t.slots
+            .iter()
+            .skip(1)
+            .any(|s| s.obj.is_some() || s.retired.load(Ordering::SeqCst))
+    {
+        return;
+    }
+    // Retain the monotone generation floor while releasing slot/free capacity.
+    t.slots.clear();
+    t.slots.shrink_to_fit();
+    t.free.clear();
+    t.free.shrink_to_fit();
+}
+
+/// Count currently allocated production Map slots for the test-only
+/// MapRoot lifecycle probe.
+#[cfg(any(test, mimi_test_ub_symbols))]
+pub fn mimi_test_map_live_count() -> i64 {
+    let t = lock_maps();
+    i64::try_from(
+        t.slots
+            .iter()
+            .filter(|slot| slot.obj.is_some() && !slot.retired.load(Ordering::SeqCst))
+            .count(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 pub fn set_new_handle(obj: super::MimiSet) -> i64 {
     clear_handle_error();
     let mut t = lock_sets();
-    alloc_slot(&mut t, obj)
+    record_alloc_result(alloc_slot(&mut t, obj))
 }
 
 pub fn map_acquire(handle: i64) -> Result<MapLease, HandleError> {
@@ -626,12 +743,14 @@ fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
     }
     let can_reuse = if let Some(next) = slot.generation.checked_add(1) {
         slot.generation = next;
+        t.generation_floor = t.generation_floor.max(next);
         slot.retired.store(false, Ordering::SeqCst);
         true
     } else {
         // Never let a 32-bit generation wrap and make a very old handle live
         // again. This slot is permanently retired at exhaustion.
         slot.retired.store(true, Ordering::SeqCst);
+        t.generation_exhausted = true;
         false
     };
     slot.pending_free.store(false, Ordering::SeqCst);
@@ -641,6 +760,7 @@ fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
     if can_reuse {
         t.free.push(index);
     }
+    compact_empty_map_table(t);
 }
 
 fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
@@ -1058,6 +1178,195 @@ mod tests {
             inner: Default::default(),
             owned: Default::default(),
         })
+    }
+
+    fn empty_map() -> super::super::MimiMap {
+        super::super::MimiMap {
+            inner: std::collections::HashMap::new(),
+            owned: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn map_table_compaction_preserves_generation_and_live_slots() {
+        let mut table = Table::new();
+        let first = alloc_slot(&mut table, empty_map());
+        let (idx, gen1) = unpack(first).unwrap();
+        finish_map_free(&mut table, idx);
+        compact_empty_map_table(&mut table);
+        assert_eq!(table.slots.len(), 0);
+        assert_eq!(table.slots.capacity(), 0);
+        assert_eq!(table.free.capacity(), 0);
+        let second = alloc_slot(&mut table, empty_map());
+        let (idx2, gen2) = unpack(second).unwrap();
+        assert_eq!(idx, idx2);
+        assert!(gen2 > gen1);
+
+        let other = alloc_slot(&mut table, empty_map());
+        let (other_idx, _) = unpack(other).unwrap();
+        finish_map_free(&mut table, idx2);
+        compact_empty_map_table(&mut table);
+        assert!(table.slots[other_idx as usize].obj.is_some());
+        assert!(table.slots.len() > 1);
+    }
+
+    #[test]
+    fn exhausted_map_generation_retires_only_its_slot_and_preserves_signed_handles() {
+        let mut table = Table::new();
+        table.generation_floor = HandleGeneration::MAX - 1;
+        let first_old = alloc_slot(&mut table, empty_map());
+        let second_old = alloc_slot(&mut table, empty_map());
+        let guard = alloc_slot(&mut table, empty_map());
+        let (first_idx, first_old_gen) = unpack(first_old).unwrap();
+        let (second_idx, second_old_gen) = unpack(second_old).unwrap();
+        assert_eq!(first_old_gen, HandleGeneration::MAX - 1);
+        assert_eq!(second_old_gen, HandleGeneration::MAX - 1);
+        finish_map_free(&mut table, first_idx);
+        finish_map_free(&mut table, second_idx);
+
+        // Both free indices can safely advance to MAX: no handle for either
+        // index at MAX has been issued yet.
+        let max_handle = alloc_slot(&mut table, empty_map());
+        let (max_idx, max_gen) = unpack(max_handle).unwrap();
+        assert_eq!(max_idx, second_idx);
+        assert_eq!(max_gen, HandleGeneration::MAX);
+        assert!(
+            max_handle < 0,
+            "the generation high bit makes this i64 signed"
+        );
+        assert_eq!(unpack(max_handle), Ok((max_idx, HandleGeneration::MAX)));
+
+        // Once a MAX-generation handle is destroyed, its slot is burned. A
+        // different free index and then a fresh index remain usable.
+        finish_map_free(&mut table, max_idx);
+        compact_empty_map_table(&mut table);
+        assert!(table.generation_exhausted);
+        assert_eq!(table.slots.len(), 4);
+        assert!(table.slots[max_idx as usize].retired.load(Ordering::SeqCst));
+        assert!(table.free.contains(&first_idx));
+
+        let other_free = alloc_slot(&mut table, empty_map());
+        let (other_idx, other_gen) = unpack(other_free).unwrap();
+        assert_eq!(other_idx, first_idx);
+        assert_eq!(other_gen, HandleGeneration::MAX);
+        assert_eq!(
+            validate_map_root_slot(&table.slots[first_idx as usize], first_old_gen),
+            Err(HandleError::StaleGeneration)
+        );
+        assert_eq!(
+            validate_map_root_slot(&table.slots[max_idx as usize], HandleGeneration::MAX),
+            Err(HandleError::Destroyed)
+        );
+        finish_map_free(&mut table, other_idx);
+        let fresh = alloc_slot(&mut table, empty_map());
+        let (fresh_idx, fresh_gen) = unpack(fresh).unwrap();
+        assert_eq!(fresh_idx, unpack(guard).unwrap().0 + 1);
+        assert_eq!(fresh_gen, HandleGeneration::MAX);
+        assert_ne!(fresh, max_handle);
+        assert!(table.slots[max_idx as usize].retired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn slot_index_conversion_rejects_zero_and_out_of_range() {
+        assert_eq!(checked_slot_index(0), None);
+        assert_eq!(checked_slot_index(1), Some(1));
+        assert_eq!(checked_slot_index(u32::MAX as usize), Some(u32::MAX));
+        if let Ok(out_of_range) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(checked_slot_index(out_of_range), None);
+        }
+    }
+
+    #[test]
+    fn map_root_operations_reject_live_lease_on_another_thread() {
+        let handle = map_new_handle(empty_map());
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let lease = map_acquire(handle).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lease);
+        });
+        ready_rx.recv().unwrap();
+        assert_eq!(
+            map_root_set(handle, "busy".into(), 1),
+            Err(HandleError::Reentrant)
+        );
+        assert_eq!(map_root_size(handle), Err(HandleError::Reentrant));
+        assert_eq!(map_root_drop(handle), Err(HandleError::Reentrant));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        map_root_drop(handle).unwrap();
+    }
+
+    #[test]
+    fn zero_allocation_result_sets_observable_handle_error() {
+        clear_handle_error();
+        assert_eq!(record_alloc_result(0), 0);
+        assert_eq!(mimi_handle_last_error(), HANDLE_ERR_INVALID);
+    }
+
+    #[test]
+    fn map_root_slot_validation_rejects_stale_retired_and_busy() {
+        let mut table = Table::new();
+        let handle = alloc_slot(&mut table, empty_map());
+        let (index, generation) = unpack(handle).unwrap();
+        let slot = &table.slots[index as usize];
+        assert_eq!(
+            validate_map_root_slot(slot, generation + 1),
+            Err(HandleError::StaleGeneration)
+        );
+        slot.pins.store(1, Ordering::SeqCst);
+        assert_eq!(
+            validate_map_root_slot(slot, generation),
+            Err(HandleError::Reentrant)
+        );
+        slot.pins.store(0, Ordering::SeqCst);
+        slot.retired.store(true, Ordering::SeqCst);
+        assert_eq!(
+            validate_map_root_slot(slot, generation),
+            Err(HandleError::Destroyed)
+        );
+    }
+
+    #[test]
+    fn map_root_operations_reject_live_busy_and_old_generation() {
+        let handle = map_new_handle(empty_map());
+        let (index, generation) = unpack(handle).unwrap();
+        {
+            let mut table = lock_maps();
+            let slot = &mut table.slots[index as usize];
+            slot.active_owner = Some(std::thread::current().id());
+            slot.leases.store(1, Ordering::SeqCst);
+        }
+        assert_eq!(
+            map_root_set(handle, "busy".into(), 1),
+            Err(HandleError::Reentrant)
+        );
+        assert_eq!(map_root_size(handle), Err(HandleError::Reentrant));
+        assert_eq!(map_root_drop(handle), Err(HandleError::Reentrant));
+        {
+            let mut table = lock_maps();
+            let slot = &mut table.slots[index as usize];
+            slot.active_owner = None;
+            slot.leases.store(0, Ordering::SeqCst);
+            slot.pins.store(1, Ordering::SeqCst);
+        }
+        assert_eq!(
+            map_root_set(handle, "busy".into(), 1),
+            Err(HandleError::Reentrant)
+        );
+        assert_eq!(map_root_size(handle), Err(HandleError::Reentrant));
+        assert_eq!(map_root_drop(handle), Err(HandleError::Reentrant));
+        lock_maps().slots[index as usize]
+            .pins
+            .store(0, Ordering::SeqCst);
+        map_root_drop(handle).unwrap();
+        let replacement = map_new_handle(empty_map());
+        let (_, replacement_generation) = unpack(replacement).unwrap();
+        assert!(replacement_generation > generation);
+        assert_eq!(map_root_size(handle), Err(HandleError::StaleGeneration));
+        map_root_drop(replacement).unwrap();
     }
 
     fn new_set() -> i64 {

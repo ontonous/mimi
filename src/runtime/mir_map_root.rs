@@ -1,92 +1,8 @@
 //! Runtime support for the closed Canonical MIR MapRoot profile.
 //!
-//! This is deliberately separate from the public legacy Map ABI. MapRoot can
-//! retain only static UTF-8 keys and i32 values, and its Checker receipt
-//! prevents handle escape or aliasing. The runtime table owns each root until
-//! the dedicated MapRootDrop operation removes it.
-
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
-
-static NEXT_MAP_ROOT_HANDLE: AtomicI64 = AtomicI64::new(1);
-static MAP_ROOTS: Mutex<MapRootRegistry> = Mutex::new(MapRootRegistry { head: None });
-
-struct MapRootNode {
-    handle: i64,
-    entries: BTreeSet<String>,
-    next: Option<Box<MapRootNode>>,
-}
-
-struct MapRootRegistry {
-    head: Option<Box<MapRootNode>>,
-}
-
-impl MapRootRegistry {
-    fn insert(&mut self, handle: i64, entries: BTreeSet<String>) -> bool {
-        if self.contains(handle) {
-            return false;
-        }
-        self.head = Some(Box::new(MapRootNode {
-            handle,
-            entries,
-            next: self.head.take(),
-        }));
-        true
-    }
-
-    fn contains(&self, handle: i64) -> bool {
-        self.find(handle).is_some()
-    }
-
-    fn find(&self, handle: i64) -> Option<&MapRootNode> {
-        let mut node = self.head.as_deref();
-        while let Some(current) = node {
-            if current.handle == handle {
-                return Some(current);
-            }
-            node = current.next.as_deref();
-        }
-        None
-    }
-
-    fn find_mut(&mut self, handle: i64) -> Option<&mut MapRootNode> {
-        let mut node = self.head.as_deref_mut();
-        while let Some(current) = node {
-            if current.handle == handle {
-                return Some(current);
-            }
-            node = current.next.as_deref_mut();
-        }
-        None
-    }
-
-    fn remove(&mut self, handle: i64) -> Option<Box<MapRootNode>> {
-        let mut link = &mut self.head;
-        loop {
-            if link.as_ref().is_some_and(|node| node.handle == handle) {
-                let mut removed = link.take()?;
-                *link = removed.next.take();
-                return Some(removed);
-            }
-            match link.as_mut() {
-                Some(node) => link = &mut node.next,
-                None => return None,
-            }
-        }
-    }
-
-    #[cfg(mimi_test_ub_symbols)]
-    fn len(&self) -> usize {
-        let mut count = 0usize;
-        let mut node = self.head.as_deref();
-        while let Some(current) = node {
-            count += 1;
-            node = current.next.as_deref();
-        }
-        count
-    }
-}
+//! MapRoot uses the production Map storage while retaining the closed MIR
+//! profile: static UTF-8 keys, i32 values, and a Checker receipt that prevents
+//! handle escape or aliasing.
 
 fn abort(message: &'static [u8]) -> ! {
     // SAFETY: every caller passes a static, NUL-terminated diagnostic.
@@ -102,22 +18,10 @@ fn checked_size_i32_or_abort(len: u128) -> i32 {
         .unwrap_or_else(|_| abort(b"[E0802] canonical MIR MapRoot.size result overflows i32\0"))
 }
 
-/// Allocate one empty root for the dedicated Canonical MIR MapRoot ABI.
+/// Allocate one empty production Map for the Canonical MIR MapRoot ABI.
 #[no_mangle]
 pub extern "C" fn mimi_mir_map_root_new() -> i64 {
-    let handle = NEXT_MAP_ROOT_HANDLE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-            next.checked_add(1)
-        })
-        .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle space exhausted\0"));
-    let inserted = MAP_ROOTS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(handle, BTreeSet::new());
-    if !inserted {
-        abort(b"[E0800] canonical MIR MapRoot handle was reused\0");
-    }
-    handle
+    super::mimi_map_new()
 }
 
 /// Insert a static UTF-8 key into one exclusively owned MapRoot.
@@ -136,9 +40,9 @@ pub unsafe extern "C" fn mimi_mir_map_root_set(
     handle: i64,
     key: *const u8,
     key_len: i64,
-    _value: i32,
+    value: i32,
 ) -> i64 {
-    if handle <= 0 || key.is_null() || key_len < 0 {
+    if handle == 0 || key.is_null() || key_len < 0 {
         abort(b"[E0800] canonical MIR MapRoot.set received an invalid operand\0");
     }
     let Ok(key_len) = usize::try_from(key_len) else {
@@ -153,54 +57,47 @@ pub unsafe extern "C" fn mimi_mir_map_root_set(
     if key.contains('\0') {
         abort(b"[E0800] canonical MIR MapRoot.set key contains NUL\0");
     }
-    let mut roots = MAP_ROOTS.lock().unwrap_or_else(|error| error.into_inner());
-    let Some(root) = roots.find_mut(handle).map(|node| &mut node.entries) else {
-        abort(b"[E0800] canonical MIR MapRoot.set handle is not live\0");
-    };
-    root.insert(key.to_owned());
+    // The checker-only path validates and mutates under the registry lock;
+    // it does not create a thread-id lease (which is unnecessary here).
+    super::handle::map_root_set(handle, key.to_owned(), i64::from(value))
+        .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0"));
     handle
 }
 
 /// Return the checked i32 size of one live MapRoot.
 #[no_mangle]
 pub extern "C" fn mimi_mir_map_root_size(handle: i64) -> i32 {
-    if handle <= 0 {
+    if handle == 0 {
         abort(b"[E0800] canonical MIR MapRoot.size received an invalid handle\0");
     }
-    let roots = MAP_ROOTS.lock().unwrap_or_else(|error| error.into_inner());
-    let Some(root) = roots.find(handle).map(|node| &node.entries) else {
-        abort(b"[E0800] canonical MIR MapRoot.size handle is not live\0");
-    };
-    checked_size_i32_or_abort(root.len() as u128)
+    checked_size_i32_or_abort(live_map_size(handle) as u128)
+}
+
+fn live_map_size(handle: i64) -> i64 {
+    i64::try_from(
+        super::handle::map_root_size(handle).unwrap_or_else(|_| {
+            abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0")
+        }),
+    )
+    .unwrap_or_else(|_| abort(b"[E0802] canonical MIR MapRoot size exceeds i64\0"))
 }
 
 /// Consume and reclaim one live MapRoot. Duplicate/stale drops fail closed.
 #[no_mangle]
 pub extern "C" fn mimi_mir_map_root_drop(handle: i64) {
-    if handle <= 0 {
+    if handle == 0 {
         abort(b"[E0800] canonical MIR MapRoot.drop received an invalid handle\0");
     }
-    let removed = MAP_ROOTS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(handle);
-    if removed.is_none() {
-        abort(b"[E0800] canonical MIR MapRoot.drop handle is not live\0");
-    }
+    super::handle::map_root_drop(handle)
+        .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0"));
 }
 
 /// Test-runtime probe used to prove that emitted MapRootDrop reaches the
 /// production runtime table. It is absent from non-test runtime archives.
-#[cfg(mimi_test_ub_symbols)]
+#[cfg(any(test, mimi_test_ub_symbols))]
 #[no_mangle]
 pub extern "C" fn mimi_test_map_root_live_count() -> i64 {
-    i64::try_from(
-        MAP_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .len(),
-    )
-    .unwrap_or_else(|_| abort(b"[E0802] canonical MIR MapRoot test count overflows i64\0"))
+    super::handle::mimi_test_map_live_count()
 }
 
 /// Test-runtime entry into the exact checked-size trap branch used by
@@ -230,6 +127,7 @@ mod tests {
     #[test]
     fn runtime_map_root_set_overwrite_unicode_and_drop() {
         let root = mimi_mir_map_root_new();
+        assert!(super::super::handle::map_generation(root).is_ok());
         let answer = b"answer";
         let snow = "雪".as_bytes();
         // SAFETY: the byte slices stay live and immutable for each call; this
@@ -240,10 +138,20 @@ mod tests {
         // SAFETY: same live root and key slice preconditions as above.
         let root = unsafe { mimi_mir_map_root_set(root, snow.as_ptr(), snow.len() as i64, 9) };
         assert_eq!(mimi_mir_map_root_size(root), 2);
+        let answer_key = std::ffi::CString::new("answer").expect("static key has no NUL");
+        let snow_key = std::ffi::CString::new("雪").expect("Unicode key has no NUL");
+        // SAFETY: both keys are live C strings and `root` is still live.
+        assert_eq!(
+            unsafe { super::super::mimi_map_get(root, answer_key.as_ptr()) },
+            42,
+            "MapRoot Set must persist the checked scalar in production MimiMap storage"
+        );
+        // SAFETY: same live Map and C-string conditions as above.
+        assert_eq!(
+            unsafe { super::super::mimi_map_get(root, snow_key.as_ptr()) },
+            9
+        );
         mimi_mir_map_root_drop(root);
-        assert!(!MAP_ROOTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .contains(root));
+        assert!(super::super::handle::map_generation(root).is_err());
     }
 }

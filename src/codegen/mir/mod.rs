@@ -1310,6 +1310,15 @@ func main() -> i32 {
             .module
             .verify()
             .expect("native MapRoot module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(
+            native_ir.contains("mir_map_root_new_nonzero = icmp ne i64"),
+            "production MapHandles may be negative when their generation high bit is set"
+        );
+        assert!(
+            native_ir.contains("mir_map_root_handle_nonzero = icmp ne i64"),
+            "nonzero is the MapHandle validity sentinel; sign is not"
+        );
         for runtime in [
             "mimi_mir_map_root_new",
             "mimi_mir_map_root_set",
