@@ -44,6 +44,40 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
     require_resolved_native_program(program).is_ok()
 }
 
+/// The legacy compatibility remainder shares the erased-i64 ABI for Any and
+/// has no runtime tag check either. Keep its reachable body gate available to
+/// the public `compile_checked` entry so an eligibility fallback cannot
+/// silently emit DynamicAnyUnpack.
+pub(super) fn first_reachable_dynamic_any_unpack(
+    program: &CheckedProgram,
+) -> Option<(NodeId, NodeId)> {
+    eligibility::first_reachable_dynamic_any_unpack(program)
+}
+
+pub(super) fn dynamic_any_unpack_diagnostic(
+    program: &CheckedProgram,
+    owner: &NodeId,
+    node: &NodeId,
+) -> Diagnostic {
+    let mut diagnostic = Diagnostic::error_code(
+        crate::diagnostic::codes::E0722,
+        format!(
+            "native code generation is not supported for reachable DynamicAnyUnpack in `{}` (node `{}`): the runtime Any value has no checked tag conversion to the concrete type, so native execution can disagree with the VM. Map/Any tag-safe lowering is required before this native path can be enabled",
+            owner.0, node.0
+        ),
+        crate::span::Span::UNKNOWN,
+    );
+    if let Some(span) = program
+        .node_meta()
+        .get(node)
+        .map(|meta| meta.origin.user_span())
+        .or_else(|| program.entry_span())
+    {
+        diagnostic = diagnostic.with_span(span);
+    }
+    diagnostic
+}
+
 /// Returns the set of function NodeIds eligible for resolved native compilation.
 /// Returns None if program-level blockers prevent any resolved compilation.
 /// Also returns structured dispatch stats (0.34.40, MIMI_STAT=1).
@@ -207,6 +241,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         eligible: &std::collections::BTreeSet<NodeId>,
     ) -> Result<(usize, Vec<(String, Vec<ResolvedTypeId>)>), Vec<Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        if let Some((owner, node)) = eligibility::first_reachable_dynamic_any_unpack(program) {
+            return Err(vec![dynamic_any_unpack_diagnostic(program, &owner, &node)]);
+        }
         NativeResolvedEmitter {
             program,
             generator: self,
@@ -7546,44 +7583,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))),
                 }
             }
-            // 0.39.136: DynamicAny → concrete unpack. Mirror of Pack: the
-            // box is an i64 slot; narrow back to the concrete int width or
-            // pass through when the target already matches.
-            CheckedConversionKind::DynamicAnyUnpack => {
-                let target = self.lower_type(&conversion.to)?;
-                match value {
-                    BasicValueEnum::IntValue(iv) => {
-                        let i64_ty = self.generator.context.i64_type();
-                        if iv.get_type().get_bit_width() == 64 {
-                            if target == value.get_type() {
-                                Ok(value)
-                            } else if let BasicTypeEnum::IntType(it) = target {
-                                let truncated = self.generator.builder.build_int_truncate(
-                                    iv,
-                                    it,
-                                    "dynany_trunc",
-                                ).map_err(|e| CompileError::LlvmError(format!("dynany trunc: {}", e)))?;
-                                Ok(BasicValueEnum::IntValue(truncated))
-                            } else {
-                                Ok(value)
-                            }
-                        } else {
-                            let widened = self.generator.builder.build_int_s_extend(
-                                iv,
-                                i64_ty,
-                                "dynany_sext",
-                            ).map_err(|e| CompileError::LlvmError(format!("dynany sext: {}", e)))?;
-                            Ok(BasicValueEnum::IntValue(widened))
-                        }
-                    }
-                    _ if target == value.get_type() => Ok(value),
-                    _ => Err(CompileError::TypeMismatch(format!(
-                        "DynamicAnyUnpack: cannot unpack {} into {}",
-                        value.get_type(),
-                        target
-                    ))),
-                }
-            }
+            // Erased i64 identity/truncation is not a type check. Public
+            // native entry points reject reachable instances before emission;
+            // retain this arm as defense in depth for hand-built subsets and
+            // internal emitter callers.
+            CheckedConversionKind::DynamicAnyUnpack => Err(CompileError::Unsupported(
+                "DynamicAnyUnpack requires a checked runtime tag/owner descriptor".into(),
+            )),
             other => Err(CompileError::Unsupported(format!(
                 "resolved conversion {other:?} escaped resolved native eligibility"
             ))),

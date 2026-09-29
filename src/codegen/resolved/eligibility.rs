@@ -173,9 +173,364 @@ fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSe
     reachable
 }
 
+/// Find an unchecked Any-to-concrete conversion in a callable the native
+/// compatibility entry can reach. The legacy emitter has the same erased-i64
+/// ABI as the resolved emitter, so this is a program-wide hard boundary: an
+/// eligibility miss alone would merely route the unsafe conversion to legacy.
+pub(super) fn first_reachable_dynamic_any_unpack(
+    program: &CheckedProgram,
+) -> Option<(NodeId, NodeId)> {
+    let mut reachable = reachable_function_ids(program);
+    let mut uncertain_dispatch = false;
+    let mut scanned = std::collections::BTreeSet::new();
+
+    loop {
+        let pending = reachable.difference(&scanned).cloned().collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+        for owner in pending {
+            scanned.insert(owner.clone());
+            if let Some(callable) = program.callable(&owner) {
+                let scan = scan_dynamic_any_unpack_callable(callable);
+                if let Some(node) = scan.first_unpack {
+                    return Some((owner.clone(), node));
+                }
+                uncertain_dispatch |= scan.has_indirect_call;
+                reachable.extend(
+                    scan.direct_calls
+                        .into_iter()
+                        .filter(|callee| program.callable(callee).is_some()),
+                );
+            }
+        }
+        if uncertain_dispatch {
+            break;
+        }
+    }
+
+    let reachable_owner_keys = reachable
+        .iter()
+        .filter_map(|owner| program.functions().get(owner))
+        .map(|function| format!("function:{}", function.qualified_name))
+        .collect::<std::collections::BTreeSet<_>>();
+    uncertain_dispatch |= program.call_sites_sorted().into_iter().any(|site| {
+        if !reachable_owner_keys.contains(&site.owner) {
+            return false;
+        }
+        match site.kind {
+            crate::core::ResolvedCallKind::Unknown => true,
+            crate::core::ResolvedCallKind::Function | crate::core::ResolvedCallKind::Method => {
+                let callee = site.callee.as_str();
+                let qualified_match = program
+                    .functions()
+                    .values()
+                    .any(|function| function.qualified_name == callee);
+                let bare_match = !callee.contains("::")
+                    && program.functions().values().any(|function| {
+                        function
+                            .qualified_name
+                            .rsplit("::")
+                            .next()
+                            .is_some_and(|bare| bare == callee)
+                    });
+                !qualified_match && !bare_match
+            }
+            crate::core::ResolvedCallKind::Extern | crate::core::ResolvedCallKind::Builtin => false,
+        }
+    });
+
+    // The checker call-site directory cannot close a target for a local
+    // closure/unknown dynamic call. In that case every non-comptime callable
+    // is conservatively considered reachable; a false negative here could
+    // otherwise let an indirect call reach the erased conversion.
+    if uncertain_dispatch {
+        reachable = program
+            .callables()
+            .keys()
+            .filter(|owner| {
+                !program
+                    .functions()
+                    .get(*owner)
+                    .is_some_and(|function| function.is_comptime)
+            })
+            .cloned()
+            .collect();
+    }
+
+    for owner in reachable {
+        if let Some(callable) = program.callable(&owner) {
+            let scan = scan_dynamic_any_unpack_callable(callable);
+            if let Some(node) = scan.first_unpack {
+                return Some((owner, node));
+            }
+        }
+    }
+    None
+}
+
+/// Strict all-callable entry point for the all-or-nothing Resolved-native
+/// API, which does not perform legacy fallback and therefore validates every
+/// non-comptime body it may emit.
+fn first_dynamic_any_unpack_in_program(program: &CheckedProgram) -> Option<(NodeId, NodeId)> {
+    for (owner, callable) in program.callables() {
+        if program
+            .functions()
+            .get(owner)
+            .is_some_and(|function| function.is_comptime)
+        {
+            continue;
+        }
+        if let Some(node) = scan_dynamic_any_unpack_callable(callable).first_unpack {
+            return Some((owner.clone(), node));
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct DynamicAnyUnpackScan {
+    first_unpack: Option<NodeId>,
+    has_indirect_call: bool,
+    direct_calls: std::collections::BTreeSet<NodeId>,
+}
+
+impl DynamicAnyUnpackScan {
+    fn conversion(&mut self, kind: CheckedConversionKind, node: &NodeId) {
+        if self.first_unpack.is_none() && kind == CheckedConversionKind::DynamicAnyUnpack {
+            self.first_unpack = Some(node.clone());
+        }
+    }
+
+    fn block(&mut self, block: &ResolvedBlock) {
+        for statement in &block.statements {
+            match &statement.kind {
+                ResolvedStmtKind::Bind { initializer, .. } => {
+                    if let Some(initializer) = initializer {
+                        self.expression(initializer);
+                    }
+                }
+                ResolvedStmtKind::Assign {
+                    value, conversion, ..
+                } => {
+                    self.conversion(conversion.kind, &statement.node_id);
+                    self.expression(value);
+                }
+                ResolvedStmtKind::Return { value, conversion } => {
+                    if let Some(value) = value {
+                        self.expression(value);
+                    }
+                    if let Some(conversion) = conversion {
+                        self.conversion(conversion.kind, &statement.node_id);
+                    }
+                }
+                ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        self.expression(value);
+                    }
+                }
+                ResolvedStmtKind::Expr(expression) => self.expression(expression),
+                ResolvedStmtKind::While { condition, body } => {
+                    self.expression(condition);
+                    self.block(body);
+                }
+                ResolvedStmtKind::WhileLet {
+                    initializer, body, ..
+                }
+                | ResolvedStmtKind::For {
+                    iterable: initializer,
+                    body,
+                    ..
+                } => {
+                    self.expression(initializer);
+                    self.block(body);
+                }
+                ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    self.expression(initializer);
+                    self.block(then_block);
+                    if let Some(else_block) = else_block {
+                        self.block(else_block);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                    self.block(body)
+                }
+                ResolvedStmtKind::Contract { condition, .. } => self.expression(condition),
+                ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        self.expression(expression);
+                    }
+                }
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    self.expression(value);
+                    self.block(body);
+                }
+                ResolvedStmtKind::Continue
+                | ResolvedStmtKind::Drop(_)
+                | ResolvedStmtKind::NestedCallable(_) => {}
+            }
+        }
+        if let Some(result) = &block.result {
+            self.expression(result);
+        }
+    }
+
+    fn expression(&mut self, expression: &ResolvedExpr) {
+        match &expression.kind {
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let crate::core::ir::ResolvedFStringPart::Interpolation(value) = part {
+                        self.expression(value);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.expression(value);
+                if let crate::core::ir::ResolvedValueProjection::Index(index) = projection {
+                    self.expression(index);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.expression(left);
+                self.expression(right);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.expression(operand),
+            ResolvedExprKind::Cast { value, conversion } => {
+                self.conversion(conversion.kind, &expression.node_id);
+                self.expression(value);
+            }
+            ResolvedExprKind::Call(call) => {
+                match &call.callee {
+                    ResolvedCallee::Function(callee) => {
+                        self.direct_calls.insert(callee.clone());
+                    }
+                    ResolvedCallee::LocalClosure(_) => self.has_indirect_call = true,
+                    _ => {}
+                }
+                for argument in &call.arguments {
+                    self.conversion(argument.conversion.kind, &argument.value.node_id);
+                    self.expression(&argument.value);
+                }
+            }
+            ResolvedExprKind::Tuple(elements)
+            | ResolvedExprKind::List(elements)
+            | ResolvedExprKind::Set(elements) => {
+                for element in elements {
+                    self.expression(element);
+                }
+            }
+            ResolvedExprKind::Map(entries) => {
+                for (key, value) in entries {
+                    self.expression(key);
+                    self.expression(value);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.expression(value);
+                self.expression(iterable);
+                if let Some(guard) = guard {
+                    self.expression(guard);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => self.expression(receiver),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    self.conversion(field.conversion.kind, &field.value.node_id);
+                    self.expression(&field.value);
+                }
+                if let Some(rest) = rest {
+                    self.expression(rest);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.block(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.expression(condition);
+                self.block(then_block);
+                self.block(else_block);
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.expression(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.expression(guard);
+                    }
+                    self.expression(&arm.body);
+                }
+            }
+            ResolvedExprKind::Range { start, end } => {
+                self.expression(start);
+                self.expression(end);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.expression(target);
+                if let Some(start) = start {
+                    self.expression(start);
+                }
+                if let Some(end) = end {
+                    self.expression(end);
+                }
+            }
+            ResolvedExprKind::Lambda(lambda) => self.block(&lambda.body),
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Load(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+            ResolvedExprKind::Callable(ResolvedCallee::Function(_)) => {
+                // A callable value can flow to an indirect invocation that
+                // the call-site graph cannot bind to one target.
+                self.has_indirect_call = true;
+            }
+            ResolvedExprKind::Callable(_) => {}
+        }
+    }
+}
+
+fn scan_dynamic_any_unpack_callable(callable: &ResolvedCallable) -> DynamicAnyUnpackScan {
+    let mut scan = DynamicAnyUnpackScan::default();
+    for expression in callable.body.place_inputs.values() {
+        scan.expression(expression);
+    }
+    for expression in callable.body.default_values.values() {
+        scan.expression(expression);
+    }
+    scan.block(&callable.body.root);
+    scan
+}
+
 pub(super) fn require_resolved_native_program(
     program: &CheckedProgram,
 ) -> Result<(), UnsupportedResolvedNode> {
+    if let Some((owner, node)) = first_dynamic_any_unpack_in_program(program) {
+        return Err(UnsupportedResolvedNode::new(
+            &owner,
+            &node,
+            "DynamicAnyUnpack has no checked runtime tag validation in the resolved native slice",
+        ));
+    }
     let user_flow_count = program
         .flows()
         .values()
@@ -1097,7 +1452,6 @@ fn require_conversion(
             // widens narrow ints; map/set runtime boxes already use the same
             // ABI, so this conversion is supported in the native slice.
             | CheckedConversionKind::DynamicAnyPack
-            | CheckedConversionKind::DynamicAnyUnpack
     ) {
         Ok(())
     } else {

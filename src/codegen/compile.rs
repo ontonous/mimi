@@ -41,6 +41,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
             )]);
         }
+        // DynamicAnyUnpack currently carries only an erased i64 ABI: neither
+        // the Resolved emitter nor the legacy remainder checks that the
+        // stored runtime value actually matches the concrete generic type.
+        // Treat every reachable instance as a hard native boundary before
+        // MIR selection or per-function fallback can choose either emitter.
+        if let Some((owner, node)) = super::resolved::first_reachable_dynamic_any_unpack(program) {
+            return Err(vec![super::resolved::dynamic_any_unpack_diagnostic(
+                program, &owner, &node,
+            )]);
+        }
         // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
         // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
         // exact nested Option-tuple, generic Option/Result projections and

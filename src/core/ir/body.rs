@@ -121,8 +121,11 @@ pub enum CheckedConversionKind {
     /// conversion was checked.
     DynamicAnyPack,
     /// Any-tagged container value flowing OUT through a concrete signature
-    /// (generic stdlib accessors: `get_or_default<T> -> T`). ABI-level
-    /// identity/narrow on both backends — the runtime box is an i64/ptr slot.
+    /// (generic stdlib accessors: `get_or_default<T> -> T`). The current
+    /// checker records the conversion but the ordinary Map runtime has no
+    /// entry type tag/descriptor. Native codegen therefore fails closed on
+    /// reachable instances until a checked runtime validation is implemented;
+    /// an erased-i64 identity/narrow is not evidence that the value is T.
     DynamicAnyUnpack,
     /// C3 (audit 2026-08-03): bare container annotation accepts a
     /// parameterized container (`Set<i32>` → `Set`). No codegen — Set/List

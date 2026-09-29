@@ -16660,9 +16660,11 @@ func main() -> i64 {
 #[test]
 fn dual_maps_counter_generic_get_or_default() {
     // 0.39.136: get_or_default<T> — the read-modify-write counter pattern.
-    // Before this signature was generic, `get_or_default(m, k, 0)` returned
-    // `Any` and `+ 1` failed E0202 (the pattern was unwritable). VM and
-    // native must agree on the unpacked arithmetic.
+    // The source signature now typechecks `get_or_default(m, k, 0) + 1`, but
+    // this legacy dual harness does not exercise the production compile_checked
+    // route. Reachable DynamicAnyUnpack is now rejected by native codegen until
+    // Map entries carry checked runtime tags/owners; this homogeneous-value
+    // probe is not evidence that the native CLI route supports Map/Any.
     // The dual harness has no module loader, so the generic accessor is
     // inlined verbatim from std/maps.mimi (same pattern as the wrapper
     // recursion tests below).

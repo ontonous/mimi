@@ -1370,6 +1370,110 @@ fn compile_checked_keeps_map_any_borrowed_access_on_legacy_owner() {
     );
 }
 
+fn checked_with_std_maps(source: &str) -> (std::path::PathBuf, crate::core::CheckedProgram) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-codegen-any-unpack-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temporary Map/Any fixture directory");
+    let path = dir.join("main.mimi");
+    std::fs::write(&path, source).expect("write temporary Map/Any fixture");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader.load_main(&path).expect("load std::maps fixture");
+    let merged = loader.merge_all().expect("merge std::maps fixture");
+    let program = crate::core::check_program(&merged).expect("check std::maps fixture");
+    (dir, program)
+}
+
+#[test]
+fn compile_checked_fails_closed_on_reachable_map_any_unpack() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func main() -> i32 {
+    let m = new()
+    let with_text = set(m, "key", "text")
+    let observed = get_or_default(with_text, "key", 0)
+    println(observed)
+    0
+}
+"#,
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "reachable_dynamic_any_unpack");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("native compilation must not truncate a stored String into i32");
+    assert_eq!(
+        errors[0].code.as_deref(),
+        Some(crate::diagnostic::codes::E0722)
+    );
+    assert!(errors[0].message.contains("reachable DynamicAnyUnpack"));
+    assert!(errors[0]
+        .message
+        .contains("runtime Any value has no checked tag"));
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "the hard gate must run before touching legacy bodies"
+    );
+
+    let context = Context::create();
+    let mut strict = CodeGenerator::new(&context, "strict_dynamic_any_unpack");
+    let strict_errors = strict
+        .compile_resolved_native(&program)
+        .expect_err("strict Resolved-native API must reject DynamicAnyUnpack too");
+    assert!(strict_errors
+        .iter()
+        .any(|error| error.message.contains("DynamicAnyUnpack")));
+
+    let entry = program
+        .functions()
+        .values()
+        .find(|function| function.qualified_name == "main")
+        .expect("Map/Any fixture main")
+        .node_id
+        .clone();
+    let context = Context::create();
+    let mut subset = CodeGenerator::new(&context, "subset_dynamic_any_unpack");
+    let subset_errors = subset
+        .compile_resolved_subset(&program, &std::collections::BTreeSet::from([entry]))
+        .expect_err("public subset API must not bypass the reachable Any hard gate");
+    assert!(subset_errors
+        .iter()
+        .any(|error| error.message.contains("DynamicAnyUnpack")));
+
+    std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
+#[test]
+fn compile_checked_ignores_unreachable_map_any_unpack_bodies() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func main() -> i32 { 42 }
+"#,
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "unreachable_dynamic_any_unpack");
+    codegen
+        .compile_checked(&program)
+        .expect("unreachable std::maps accessors must not block an unrelated scalar entry");
+    assert!(codegen.module.get_function("main").is_some());
+
+    std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
 #[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
