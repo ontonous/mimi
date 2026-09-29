@@ -1455,7 +1455,7 @@ require_codegen_legacy_body_class_tripwire \
 require_codegen_legacy_body_class_tripwire \
     export-wrapper \
     compile_checked_keeps_export_wrapper_body_on_legacy_owner \
-    'owner_tripwire_export__mimi_export_body'
+    'CodeGenerator::export_body_symbol("owner_tripwire_export")'
 require_codegen_legacy_body_class_tripwire \
     actor-method \
     compile_checked_keeps_actor_method_on_legacy_owner \
