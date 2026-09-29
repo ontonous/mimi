@@ -57,17 +57,17 @@ pub(crate) fn verify(
     // programs without extern declarations retain their historical verifier
     // input, so prelude-only helper contracts do not turn a legacy request
     // into a new inconclusive proof batch.
-    if merged_file
+    let has_extern_block = merged_file
         .items
         .iter()
-        .any(|item| matches!(item, mimi::ast::Item::ExternBlock(_)))
-    {
+        .any(|item| matches!(item, mimi::ast::Item::ExternBlock(_)));
+    if has_extern_block {
         loader::merge_prelude_into(&mut merged_file);
     }
 
     // V-H8: typecheck before Z3 so ill-typed sources cannot produce
     // meaningless positive verification results.
-    let checked_program = match mimi::core::check_program(&merged_file) {
+    let mut checked_program = match mimi::core::check_program(&merged_file) {
         Ok(program) => program,
         Err(diags) => {
             let use_color = colors_enabled();
@@ -88,6 +88,26 @@ pub(crate) fn verify(
             ));
         }
     };
+
+    // `run` and `build` always merge the standard prelude before checking,
+    // while legacy `verify` historically omits it when no extern block is
+    // present. A complete MapRoot candidate has a canonical default route,
+    // so give that verifier route the same checked source graph (and MIR
+    // digest) as those execution consumers. Ordinary compatibility verifier
+    // inputs keep the historical prelude boundary above.
+    if !has_extern_block
+        && mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .map_root
+            .is_candidate()
+    {
+        loader::merge_prelude_into(&mut merged_file);
+        checked_program = mimi::core::check_program(&merged_file).map_err(|diags| {
+            format!(
+                "typecheck failed after loading the canonical MapRoot prelude ({} diagnostics): {diags:?}",
+                diags.len()
+            )
+        })?;
+    }
 
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();

@@ -113,6 +113,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirMapRootSet { .. } => "MIR_MAP_ROOT_SET",
         Op::MirMapRootRemove { .. } => "MIR_MAP_ROOT_REMOVE",
         Op::MirMapRootSize { .. } => "MIR_MAP_ROOT_SIZE",
+        Op::MirMapRootContains { .. } => "MIR_MAP_ROOT_CONTAINS",
         Op::MirMapRootDrop { .. } => "MIR_MAP_ROOT_DROP",
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
@@ -874,6 +875,20 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} r{} = mir_map_root_size(r{})",
             pc, name, rd, ra
         ),
+        Op::MirMapRootContains { rd, ra, key } => {
+            let key = proto
+                .constants
+                .get(*key as usize)
+                .map(|value| match value {
+                    ConstValue::Str(value) => format!("{:?}", value),
+                    _ => format!("const[{}]", key),
+                })
+                .unwrap_or_else(|| format!("const[{}]", key));
+            format!(
+                "{:04}  {:<16} r{} = mir_map_root_contains(r{}, {})",
+                pc, name, rd, ra, key
+            )
+        }
         Op::MirMapRootDrop { ra } => {
             format!("{:04}  {:<16} drop mir_map_root(r{})", pc, name, ra)
         }

@@ -128,6 +128,7 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
     match kind {
         MapRootNew { result }
         | MapRootSize { result, .. }
+        | MapRootContains { result, .. }
         | MapRootSet { result, .. }
         | MapRootRemove { result, .. } => {
             vec![result]
@@ -7201,6 +7202,7 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                     crate::core::MapRootActionKind::Set => "map_root_set",
                     crate::core::MapRootActionKind::Remove => "map_root_remove",
                     crate::core::MapRootActionKind::Size => "map_root_size",
+                    crate::core::MapRootActionKind::Contains => "map_root_contains",
                     crate::core::MapRootActionKind::Drop => "map_root_drop",
                 };
                 let local = mir_value_for_local(&action.local);
@@ -7219,6 +7221,9 @@ fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {
                             Some(mir_value_for_local(&action.local))
                         }
                         crate::core::MapRootActionKind::Size => {
+                            MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                        }
+                        crate::core::MapRootActionKind::Contains => {
                             MirValueId::new(format!("expr:{}", action.point.0)).ok()
                         }
                         crate::core::MapRootActionKind::Drop => None,
@@ -8567,6 +8572,54 @@ impl<'a> Lowerer<'a> {
                         MirInstructionKind::MapRootDrop { root: dropped },
                     );
                 }
+                return result;
+            }
+            if let Some(action) = self
+                .map_root_action(
+                    &expression.node_id,
+                    crate::core::MapRootActionKind::Contains,
+                )
+                .cloned()
+            {
+                let Some(source) = call.arguments.first() else {
+                    self.error(
+                        &expression.node_id,
+                        "checker MapRoot Contains receipt has no root argument",
+                    );
+                    return self.fallback_value(expression);
+                };
+                let root = match &source.value.kind {
+                    ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                        self.map_root_local_value(&place.base, &source.value.node_id)
+                    }
+                    _ => {
+                        self.error(
+                            &expression.node_id,
+                            "checker MapRoot Contains root is not a direct local",
+                        );
+                        return self.fallback_value(expression);
+                    }
+                };
+                let Some(key) = action.key.clone() else {
+                    self.error(
+                        &expression.node_id,
+                        "checker MapRoot Contains receipt has no static key",
+                    );
+                    return self.fallback_value(expression);
+                };
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return self.fallback_value(expression);
+                };
+                self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+                self.emit(
+                    &expression.node_id,
+                    &format!("map_root_contains:{}", root.0),
+                    MirInstructionKind::MapRootContains {
+                        result: result.clone(),
+                        root,
+                        key,
+                    },
+                );
                 return result;
             }
         }

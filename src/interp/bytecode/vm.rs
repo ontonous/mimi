@@ -3993,6 +3993,28 @@ impl BytecodeVM {
                     };
                     self.set_reg(rd, Value::Int(i64::from(size)));
                 }
+                Op::MirMapRootContains { rd, ra, key } => {
+                    self.ensure_unary_regs(rd, ra, "mir-map-root-contains")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "canonical MapRoot.contains: result aliases its borrowed root",
+                        ));
+                    }
+                    let key = self.const_str(key)?.to_owned();
+                    if key.contains('\0') {
+                        return Err(InterpError::new("MapRoot key contains NUL"));
+                    }
+                    let contains = match self.get_reg(ra) {
+                        Value::CanonicalMapRoot(root) => root.contains_key(&key),
+                        other => {
+                            return Err(InterpError::new(format!(
+                            "canonical MapRoot.contains: expected MapRoot runtime value, got {}",
+                            other
+                        )))
+                        }
+                    };
+                    self.set_reg(rd, Value::Bool(contains));
+                }
                 Op::MirMapRootDrop { ra } => {
                     self.ensure_reg(ra, "mir-map-root-drop source")?;
                     let root = {

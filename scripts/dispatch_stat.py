@@ -15,6 +15,7 @@
                                       # 对基线 skip_reasons 做根因分类，生成清单
   scripts/dispatch_stat.py sample [--limit N] [--program FILE] [--output FILE]
                                       # 跑 MIMI_VERBOSE=1，解析高频 resolved-skips
+                                      # build census 同时启用 MIMI_ROUTE_CENSUS=1 采集路由身份
 
 基线语料 = demos/*.mimi + examples/*.mimi + tests/real_world/*.mimi + projects/mimi-taskq|mimi-ledger/src/*.mimi。
 每个程序以 MIMI_STAT=1 独立 MIMI_STAT_OUT 目录编译，读取 DispatchStats JSON，
@@ -205,6 +206,7 @@ def compile_with_stat(
     env = dict(os.environ)
     env["MIMI_STAT"] = "1"
     env["MIMI_VERBOSE"] = "1"
+    env["MIMI_ROUTE_CENSUS"] = "1"
     env.pop("MIMI_REACHABLE_DISPATCH", None)
     if reachable:
         env["MIMI_REACHABLE_DISPATCH"] = "1"

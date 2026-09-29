@@ -124,9 +124,10 @@ pub unsafe extern "C" fn mimi_mir_map_root_set_string(
 /// payload when this is the final table/clone owner. Missing keys are a no-op.
 ///
 /// # Safety
-/// For `key_len > 0`, `key` must point to `key_len` readable bytes for this
-/// call. The bytes must be UTF-8 and NUL-free. The handle must be a live
-/// MapRoot whose Checker receipt excludes aliases and value escapes.
+/// `key` must be a non-null pointer to `key_len` readable bytes (including
+/// when the length is zero). The bytes must be UTF-8 and NUL-free. The handle
+/// must be a live MapRoot whose Checker receipt excludes aliases and value
+/// escapes.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_map_root_remove(
     handle: i64,
@@ -151,6 +152,39 @@ pub unsafe extern "C" fn mimi_mir_map_root_remove(
     super::handle::map_root_remove(handle, key)
         .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0"));
     handle
+}
+
+/// Return whether one live MapRoot contains a static UTF-8 key. This reads
+/// only the key index; the stored `ValueHandle` is never inspected.
+///
+/// # Safety
+/// For `key_len > 0`, `key` must point to `key_len` readable bytes for this
+/// call. The bytes must be UTF-8 and NUL-free. The handle must be a live
+/// MapRoot whose Checker receipt excludes aliases and value escapes.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_map_root_contains(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+) -> i32 {
+    if handle == 0 || key.is_null() || key_len < 0 {
+        abort(b"[E0800] canonical MIR MapRoot.contains received an invalid operand\0");
+    }
+    let Ok(key_len) = usize::try_from(key_len) else {
+        abort(b"[E0800] canonical MIR MapRoot.contains key length is invalid\0");
+    };
+    // SAFETY: the ABI precondition requires this exact key range to be
+    // readable for the call; null and negative lengths were rejected above.
+    let key_bytes = unsafe { std::slice::from_raw_parts(key, key_len) };
+    let Ok(key) = std::str::from_utf8(key_bytes) else {
+        abort(b"[E0800] canonical MIR MapRoot.contains key is not valid UTF-8\0");
+    };
+    if key.contains('\0') {
+        abort(b"[E0800] canonical MIR MapRoot.contains key contains NUL\0");
+    }
+    super::handle::map_root_contains(handle, key)
+        .map(i32::from)
+        .unwrap_or_else(|_| abort(b"[E0800] canonical MIR MapRoot handle is busy or not live\0"))
 }
 
 /// Return the checked i32 size of one live MapRoot.
@@ -242,6 +276,106 @@ mod tests {
         );
         mimi_mir_map_root_drop(root);
         assert!(super::super::handle::map_generation(root).is_err());
+    }
+
+    #[test]
+    fn runtime_map_root_contains_is_payload_blind_and_non_consuming() {
+        let scalar_root = mimi_mir_map_root_new();
+        let scalar_key = b"scalar";
+        let missing_key = b"missing";
+        // SAFETY: the key bytes remain readable and the root is live.
+        let scalar_root = unsafe {
+            mimi_mir_map_root_set(
+                scalar_root,
+                scalar_key.as_ptr(),
+                scalar_key.len() as i64,
+                73,
+            )
+        };
+        // SAFETY: each exact key range is readable and scalar_root remains live.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    scalar_root,
+                    scalar_key.as_ptr(),
+                    scalar_key.len() as i64,
+                )
+            },
+            1
+        );
+        // SAFETY: same live root and readable missing-key range.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    scalar_root,
+                    missing_key.as_ptr(),
+                    missing_key.len() as i64,
+                )
+            },
+            0
+        );
+        // SAFETY: contains is observational; repeated queries leave the root live.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    scalar_root,
+                    scalar_key.as_ptr(),
+                    scalar_key.len() as i64,
+                )
+            },
+            1
+        );
+        assert_eq!(mimi_mir_map_root_size(scalar_root), 1);
+        mimi_mir_map_root_drop(scalar_root);
+
+        let string_root = mimi_mir_map_root_new();
+        let string_key = b"string";
+        let payload = b"opaque payload";
+        // SAFETY: root and exact key/value byte ranges are valid for this call.
+        let string_root = unsafe {
+            mimi_mir_map_root_set_string(
+                string_root,
+                string_key.as_ptr(),
+                string_key.len() as i64,
+                payload.as_ptr().cast(),
+                payload.len() as i64,
+            )
+        };
+        // SAFETY: both key ranges remain readable and string_root remains live.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    string_root,
+                    string_key.as_ptr(),
+                    string_key.len() as i64,
+                )
+            },
+            1
+        );
+        // SAFETY: same live root and readable missing-key range.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    string_root,
+                    missing_key.as_ptr(),
+                    missing_key.len() as i64,
+                )
+            },
+            0
+        );
+        // SAFETY: repeated membership checks do not consume or inspect payloads.
+        assert_eq!(
+            unsafe {
+                mimi_mir_map_root_contains(
+                    string_root,
+                    string_key.as_ptr(),
+                    string_key.len() as i64,
+                )
+            },
+            1
+        );
+        assert_eq!(mimi_mir_map_root_size(string_root), 1);
+        mimi_mir_map_root_drop(string_root);
     }
 
     #[test]

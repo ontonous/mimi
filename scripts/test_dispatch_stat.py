@@ -92,6 +92,25 @@ class CompileOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "timeout")
         self.assertIn("still compiling", outcome["diagnostic"])
 
+    def test_build_census_enables_route_trace_without_redefining_verbose(self) -> None:
+        completed = dispatch_stat.subprocess.CompletedProcess(
+            args=["mimi", "build"], returncode=0, stdout="", stderr=""
+        )
+        with patch.object(dispatch_stat, "mimi_binary", return_value=Path("mimi")):
+            with patch.object(
+                dispatch_stat.subprocess,
+                "run",
+                return_value=completed,
+            ) as run:
+                dispatch_stat.compile_with_stat(
+                    self.src,
+                    self.out_dir,
+                    self.build_tmpdir,
+                )
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["MIMI_VERBOSE"], "1")
+        self.assertEqual(env["MIMI_ROUTE_CENSUS"], "1")
+
     def test_route_observation_distinguishes_canonical_legacy_and_rejected(self) -> None:
         canonical = dispatch_stat._route_observation(
             "",

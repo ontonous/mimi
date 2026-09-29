@@ -272,6 +272,88 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(size)
     }
 
+    pub(super) fn emit_map_root_contains(
+        &mut self,
+        result: &MirValueId,
+        root: &MirValueId,
+        key: &str,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        self.emit_live_root_handle(root, subject)?;
+        let bool_ty = self.value_type(result, subject)?;
+        let canonical_bool = self
+            .program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
+                    .then(|| ty.clone())
+            })
+            .ok_or_else(|| NativeMirError::new(subject, "canonical bool TypeDesc is absent"))?;
+        if bool_ty != canonical_bool {
+            return Err(NativeMirError::new(
+                subject,
+                "MapRoot Contains result is not the canonical bool TypeDesc",
+            ));
+        }
+        self.program
+            .type_catalog()
+            .validate_copy_scalar(&canonical_bool)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        if key.contains('\0') {
+            return Err(NativeMirError::new(subject, "MapRoot key contains NUL"));
+        }
+        let key_len = i64::try_from(key.len()).map_err(|_| {
+            NativeMirError::new(
+                subject,
+                "MapRoot static key exceeds the native i64 length ABI",
+            )
+        })?;
+        let key_ptr = self
+            .generator
+            .builder
+            .build_global_string_ptr(key, "mir_map_root_contains_key")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let key_len = self
+            .generator
+            .context
+            .i64_type()
+            .const_int(key_len as u64, true);
+        let contains_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_map_root_contains")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let contains = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    contains_fn,
+                    &[
+                        BasicMetadataValueEnum::from(self.value(root, subject)?.into_int_value()),
+                        BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
+                        BasicMetadataValueEnum::from(key_len),
+                    ],
+                    "mir_map_root_contains",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "MapRoot Contains returned void"))?
+        .into_int_value();
+        let zero = self.generator.context.i32_type().const_zero();
+        let boolean = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                contains,
+                zero,
+                "mir_map_root_contains_bool",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(boolean.into())
+    }
+
     pub(super) fn emit_map_root_remove(
         &mut self,
         result: &MirValueId,

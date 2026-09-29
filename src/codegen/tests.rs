@@ -362,6 +362,21 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
     "#,
             "mimi_mir_map_root_remove",
         ),
+        (
+            "contains",
+            r#"
+        func main() -> i32 {
+            let root = map_new()
+            let inserted = map_set(root, "answer", 42)
+            let present = has_key(inserted, "answer")
+            let size = map_size(inserted)
+            println(present)
+            drop(inserted)
+            size
+        }
+    "#,
+            "mimi_mir_map_root_contains",
+        ),
     ];
     for (profile, source, set_runtime) in profiles {
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

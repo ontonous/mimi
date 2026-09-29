@@ -204,12 +204,14 @@ pub(crate) enum MapRootActionKind {
     Set,
     Remove,
     Size,
+    Contains,
     Drop,
 }
 
 /// Checker-owned root identity and operation point for Map lifecycle work.
 /// `root` is the result root for `New`/`Set`, and the observed/consumed root
-/// for `Size`/`Drop`. `source` is present only for a persistent `Set` update.
+/// for `Size`/`Contains`/`Drop`. `source` is present only for a persistent
+/// `Set` or `Remove` update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MapRootAction {
     pub(crate) kind: MapRootActionKind,
@@ -218,8 +220,9 @@ pub(crate) struct MapRootAction {
     /// result binding; for `Size`/`Drop` this is the observed/consumed root.
     pub(crate) local: ResolvedLocalId,
     pub(crate) root: ResourceId,
-    /// Static UTF-8 key for `Set` or `Remove`; the MapRoot profile only admits
-    /// literals without embedded NUL so every consumer observes the same key.
+    /// Static UTF-8 key for `Set`, `Remove`, or `Contains`; the MapRoot profile
+    /// only admits literals without embedded NUL so every consumer observes
+    /// the same key.
     pub(crate) key: Option<String>,
     /// Value expression consumed by `Set`. The canonical lowering maps this
     /// stable node identity to its SSA value and the MIR receipt binds it.

@@ -1443,7 +1443,8 @@ fn scan_scalar_collection_once(
                     crate::core::MapRootActionKind::New
                     | crate::core::MapRootActionKind::Set
                     | crate::core::MapRootActionKind::Remove
-                    | crate::core::MapRootActionKind::Size => {
+                    | crate::core::MapRootActionKind::Size
+                    | crate::core::MapRootActionKind::Contains => {
                         scanner.map_root_action_points.insert(action.point.clone());
                     }
                     crate::core::MapRootActionKind::Drop => {}
@@ -2684,7 +2685,7 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     && matches!(
                         &call.callee,
                         ResolvedCallee::Builtin(builtin)
-                            if matches!(builtin.as_str(), "map_set" | "map_remove")
+                            if matches!(builtin.as_str(), "map_set" | "map_remove" | "has_key")
                     );
                 if concrete
                     && (is_list_len_call(self.program, call)
@@ -6011,6 +6012,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::MapRootSet { .. }
             | MirInstructionKind::MapRootRemove { .. }
             | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootContains { .. }
             | MirInstructionKind::MapRootDrop { .. } => {
                 self.error(format!(
                     "{subject} MapRoot operation is outside this MIR island"

@@ -23,6 +23,101 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn real_world_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("real_world")
+        .join(name)
+}
+
+#[test]
+fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile() {
+    let mimi = mimi_bin();
+    let source = real_world_fixture("map_root_static_contains.mimi");
+    let expected_stdout = "true\nfalse\ntrue\nfalse\ntrue\n1\ntrue\n";
+
+    let run = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg(&source)
+        .output()
+        .expect("run static Contains MapRoot CLI");
+    assert!(
+        run.status.success(),
+        "run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), expected_stdout);
+    assert!(String::from_utf8_lossy(&run.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+
+    let explicit_mir = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("run")
+        .arg("--mir")
+        .arg(&source)
+        .output()
+        .expect("run static Contains MapRoot through explicit MIR CLI");
+    assert!(
+        explicit_mir.status.success(),
+        "explicit MIR run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&explicit_mir.stdout),
+        String::from_utf8_lossy(&explicit_mir.stderr)
+    );
+    assert_eq!(explicit_mir.stdout, run.stdout);
+    let explicit_stderr = String::from_utf8_lossy(&explicit_mir.stderr);
+    assert!(!explicit_stderr.contains("canonical route disposition: legacy"));
+
+    let built = std::env::temp_dir().join(format!(
+        "mimi-map-root-contains-route-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("cli")
+    ));
+    let build = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&built)
+        .output()
+        .expect("build static Contains MapRoot CLI");
+    assert!(
+        build.status.success(),
+        "build failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(String::from_utf8_lossy(&build.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+    let native = Command::new(&built)
+        .output()
+        .expect("run built static Contains MapRoot binary");
+    let _ = std::fs::remove_file(&built);
+    assert!(
+        native.status.success(),
+        "{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&native.stdout), expected_stdout);
+
+    let verify = Command::new(&mimi)
+        .env("MIMI_VERBOSE", "1")
+        .arg("verify")
+        .arg(real_world_fixture("map_root_static_contains_verified.mimi"))
+        .output()
+        .expect("verify positive static Contains MapRoot contracts");
+    assert!(
+        verify.status.success(),
+        "verify failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("2/2 verified"));
+    assert!(String::from_utf8_lossy(&verify.stderr)
+        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+}
+
 #[test]
 fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     let mimi = mimi_bin();

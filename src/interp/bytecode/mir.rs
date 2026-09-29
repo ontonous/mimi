@@ -150,6 +150,41 @@ fn compile_mir_program_inner(
         }]);
     }
 
+    // `MirProgram` is immutable through production APIs, but adapters are
+    // public boundaries and must not assume every caller obtained it from
+    // the canonical constructors. Recheck each function's receipt-linked
+    // structure here so a mutated/forged MIR cannot make a fixed bytecode
+    // result ABI (for example Bool) disagree with its declared TypeDesc.
+    let mut validation_errors = Vec::new();
+    for (owner, function) in &ordered {
+        let has_map_root_surface = function.ownership.has_checker_map_root_actions()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::MapRootNew { .. }
+                            | MirInstructionKind::MapRootSet { .. }
+                            | MirInstructionKind::MapRootRemove { .. }
+                            | MirInstructionKind::MapRootSize { .. }
+                            | MirInstructionKind::MapRootContains { .. }
+                            | MirInstructionKind::MapRootDrop { .. }
+                    )
+                })
+            });
+        if !has_map_root_surface {
+            continue;
+        }
+        if let Err(errors) = function.validate() {
+            validation_errors.extend(errors.into_iter().map(|error| MirBytecodeError {
+                function: (*owner).clone(),
+                message: format!("canonical MIR validation failed: {error}"),
+            }));
+        }
+    }
+    if !validation_errors.is_empty() {
+        return Err(validation_errors);
+    }
+
     let mut indices = BTreeMap::new();
     for (index, (owner, _)) in ordered.iter().enumerate() {
         let function_index = checked_function_index(index, owner).map_err(|error| vec![error])?;
@@ -1131,6 +1166,12 @@ impl<'a> FunctionEmitter<'a> {
                 let Some(rd) = self.reg(result) else { return };
                 let Some(ra) = self.reg(root) else { return };
                 self.proto.emit(Op::MirMapRootSize { rd, ra });
+            }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                let key = self.add_const(ConstValue::Str(key.clone()));
+                self.proto.emit(Op::MirMapRootContains { rd, ra, key });
             }
             MirInstructionKind::MapRootDrop { root } => {
                 let Some(ra) = self.reg(root) else { return };

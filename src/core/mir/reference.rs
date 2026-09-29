@@ -580,25 +580,29 @@ impl MirProgram {
             }
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
-                    let (roots, set_payloads, scalars): (
+                    let (roots, set_payloads, scalars, booleans): (
+                        Vec<&MirValueId>,
                         Vec<&MirValueId>,
                         Vec<&MirValueId>,
                         Vec<&MirValueId>,
                     ) = match &instruction.kind {
                         super::MirInstructionKind::MapRootNew { result } => {
-                            (vec![result], vec![], vec![])
+                            (vec![result], vec![], vec![], vec![])
                         }
                         super::MirInstructionKind::MapRootSet {
                             result,
                             source,
                             value,
                             ..
-                        } => (vec![result, source], vec![value], vec![]),
+                        } => (vec![result, source], vec![value], vec![], vec![]),
                         super::MirInstructionKind::MapRootSize { result, root } => {
-                            (vec![root], vec![], vec![result])
+                            (vec![root], vec![], vec![result], vec![])
+                        }
+                        super::MirInstructionKind::MapRootContains { result, root, .. } => {
+                            (vec![root], vec![], vec![], vec![result])
                         }
                         super::MirInstructionKind::MapRootDrop { root } => {
-                            (vec![root], vec![], vec![])
+                            (vec![root], vec![], vec![], vec![])
                         }
                         _ => continue,
                     };
@@ -628,6 +632,28 @@ impl MirProgram {
                                 subject: instruction.id.to_string(),
                                 message: format!(
                                     "MapRoot size scalar '{}' is not canonical i32",
+                                    id
+                                ),
+                            });
+                        }
+                    }
+                    for id in booleans {
+                        if function
+                            .values
+                            .get(id)
+                            .and_then(|value| type_catalog.get(&value.ty))
+                            .is_none_or(|descriptor| {
+                                descriptor.kind
+                                    != super::types::MirTypeKind::Primitive(
+                                        crate::core::PrimitiveType::Bool,
+                                    )
+                                    || type_catalog.validate_copy_scalar(&descriptor.id).is_err()
+                            })
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "MapRoot contains result '{}' is not canonical bool",
                                     id
                                 ),
                             });
@@ -3849,7 +3875,8 @@ fn validate_call_argument_directions(
                     super::MirInstructionKind::MapRootNew { result }
                     | super::MirInstructionKind::MapRootSet { result, .. }
                     | super::MirInstructionKind::MapRootRemove { result, .. }
-                    | super::MirInstructionKind::MapRootSize { result, .. } => {
+                    | super::MirInstructionKind::MapRootSize { result, .. }
+                    | super::MirInstructionKind::MapRootContains { result, .. } => {
                         (result, Producer::Fresh)
                     }
                     super::MirInstructionKind::Copy { result, .. }
@@ -5089,6 +5116,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         }
         super::MirInstructionKind::MapRootRemove { source, .. } => source == needle,
         super::MirInstructionKind::MapRootSize { root, .. }
+        | super::MirInstructionKind::MapRootContains { root, .. }
         | super::MirInstructionKind::MapRootDrop { root } => root == needle,
         super::MirInstructionKind::Const { .. }
         | super::MirInstructionKind::Load { .. }
@@ -5189,6 +5217,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::MapRootSet { result, .. }
         | super::MirInstructionKind::MapRootRemove { result, .. }
         | super::MirInstructionKind::MapRootSize { result, .. }
+        | super::MirInstructionKind::MapRootContains { result, .. }
         | super::MirInstructionKind::Load { result, .. }
         | super::MirInstructionKind::Copy { result, .. }
         | super::MirInstructionKind::Move { result, .. }
@@ -6085,6 +6114,27 @@ impl<'a> MirReferenceInterpreter<'a> {
                     }
                 };
                 values.insert(result.clone(), MirRuntimeValue::Int(i64::from(size)));
+            }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                if key.contains('\0') {
+                    return Err(self.error(&function.owner, "MapRoot key contains NUL"));
+                }
+                let contains = match values.get(root) {
+                    Some(MirRuntimeValue::MapRoot(root)) => root.contains_key(key),
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "canonical MapRoot.contains: expected MapRoot runtime value",
+                        ))
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!("MapRoot Contains root '{}' is unavailable", root),
+                        ))
+                    }
+                };
+                values.insert(result.clone(), MirRuntimeValue::Bool(contains));
             }
             MirInstructionKind::MapRootDrop { root } => {
                 let value = values.remove(root).ok_or_else(|| {
@@ -10009,6 +10059,7 @@ func main() -> i32 {
                         | crate::core::mir::MirInstructionKind::MapRootSet { .. }
                         | crate::core::mir::MirInstructionKind::MapRootRemove { .. }
                         | crate::core::mir::MirInstructionKind::MapRootSize { .. }
+                        | crate::core::mir::MirInstructionKind::MapRootContains { .. }
                         | crate::core::mir::MirInstructionKind::MapRootDrop { .. }
                 )
             })
@@ -10482,6 +10533,71 @@ func main() -> i32 {
     }
 
     #[test]
+    fn canonical_map_root_contains_bytecode_index_tampering_fails_before_stdout() {
+        let (_, program) = canonical_program_with_main(
+            r#"
+func main() -> i32 {
+    println("before contains")
+    let root = map_new()
+    let inserted = map_set(root, "answer", 42)
+    let found = has_key(inserted, "answer")
+    println(found)
+    drop(inserted)
+    0
+}
+"#,
+        );
+        let compiled = crate::interp::bytecode::mir::compile_mir_program(&program)
+            .expect("AST-free static MapRoot contains bytecode");
+        let function_index = compiled.entry as usize;
+
+        let mut invalid_index = compiled.clone();
+        let function = &mut std::sync::Arc::make_mut(&mut invalid_index).functions[function_index];
+        let contains = function
+            .code
+            .iter_mut()
+            .find(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootContains { .. }))
+            .expect("MapRoot Contains opcode");
+        let crate::interp::bytecode::Op::MirMapRootContains { rd, ra, .. } = *contains else {
+            unreachable!("located Contains opcode")
+        };
+        *contains = crate::interp::bytecode::Op::MirMapRootContains {
+            rd,
+            ra,
+            key: u32::MAX,
+        };
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(invalid_index);
+        let error = vm
+            .run_value()
+            .expect_err("an invalid Contains constant index must fail preflight");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+
+        let mut replaced_opcode = compiled;
+        let function =
+            &mut std::sync::Arc::make_mut(&mut replaced_opcode).functions[function_index];
+        let contains = function
+            .code
+            .iter_mut()
+            .find(|op| matches!(op, crate::interp::bytecode::Op::MirMapRootContains { .. }))
+            .expect("MapRoot Contains opcode");
+        let crate::interp::bytecode::Op::MirMapRootContains { rd, ra, .. } = *contains else {
+            unreachable!("located Contains opcode")
+        };
+        *contains = crate::interp::bytecode::Op::Not { rd, ra };
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(replaced_opcode);
+        let error = vm
+            .run_value()
+            .expect_err("a replaced Contains opcode must fail preflight");
+        assert!(error
+            .message()
+            .contains("disagrees with its Checker-owned receipt snapshot"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+    }
+
+    #[test]
     fn canonical_bytecode_without_map_root_receipt_rejects_injected_map_root() {
         let (_, program) = canonical_program_with_main(
             "func main() -> i32 { println(\"before injected root\"); 0 }",
@@ -10612,7 +10728,9 @@ func main() -> i32 {
                     receipt.root = "forged:root:remove".into();
                     receipt.source = Some("forged:root:set".into());
                 }
-                crate::core::MapRootActionKind::Size | crate::core::MapRootActionKind::Drop => {
+                crate::core::MapRootActionKind::Size
+                | crate::core::MapRootActionKind::Contains
+                | crate::core::MapRootActionKind::Drop => {
                     receipt.root = "forged:root:set".into();
                 }
             }
@@ -10914,6 +11032,170 @@ func main() -> i32 {
         assert!(branch_around_drop
             .iter()
             .any(|error| { error.message.contains("single-block, return-only profile") }));
+    }
+
+    #[test]
+    fn canonical_map_root_contains_receipt_rejects_forgery_and_wrong_result_abi() {
+        let (_, program) = canonical_program_with_main(include_str!(
+            "../../../tests/real_world/map_root_static_contains.mimi"
+        ));
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("main"))
+            .expect("main MIR")
+            .clone();
+
+        let mut forged_key_functions = program.functions().clone();
+        let function = forged_key_functions.get_mut(&owner).expect("main MIR");
+        let receipt = function
+            .ownership
+            .checker_map_roots
+            .iter_mut()
+            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Contains)
+            .expect("Contains receipt");
+        receipt.key = Some("forged-key".into());
+        let forged_key =
+            MirProgram::with_type_catalog(forged_key_functions, program.type_catalog().clone())
+                .expect_err("forged Contains key receipt must fail before consumers");
+        assert!(forged_key
+            .iter()
+            .any(|error| error.message.contains("MapRoot operation disagrees")));
+
+        let mut missing_functions = program.functions().clone();
+        let function = missing_functions.get_mut(&owner).expect("main MIR");
+        function
+            .ownership
+            .checker_map_roots
+            .retain(|receipt| receipt.kind != crate::core::MapRootActionKind::Contains);
+        let missing =
+            MirProgram::with_type_catalog(missing_functions, program.type_catalog().clone())
+                .expect_err("missing Contains receipt must fail before consumers");
+        assert!(missing
+            .iter()
+            .any(|error| { error.message.contains("MapRoot checker receipt count") }));
+
+        let mut forged_instruction_functions = program.functions().clone();
+        let function = forged_instruction_functions
+            .get_mut(&owner)
+            .expect("main MIR");
+        let contains = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::MapRootContains { .. }
+                )
+            })
+            .expect("Contains instruction");
+        let MirInstructionKind::MapRootContains { key, .. } = &mut contains.kind else {
+            unreachable!("located Contains instruction")
+        };
+        *key = "different-key".into();
+        let forged_instruction = MirProgram::with_type_catalog(
+            forged_instruction_functions,
+            program.type_catalog().clone(),
+        )
+        .expect_err("instruction key cannot diverge from receipt key");
+        assert!(forged_instruction
+            .iter()
+            .any(|error| error.message.contains("MapRoot operation disagrees")));
+
+        let mut forged_root_functions = program.functions().clone();
+        let function = forged_root_functions.get_mut(&owner).expect("main MIR");
+        let contains_root = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MapRootContains { root, .. } => Some(root.clone()),
+                _ => None,
+            })
+            .expect("Contains root");
+        let alternate_root = function
+            .values
+            .values()
+            .find(|value| {
+                value.ty == crate::core::mir::types::map_root_type_id() && value.id != contains_root
+            })
+            .expect("another receipted MapRoot value")
+            .id
+            .clone();
+        let contains = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::MapRootContains { root, .. } if root == &contains_root
+                )
+            })
+            .expect("Contains instruction");
+        let MirInstructionKind::MapRootContains { root, .. } = &mut contains.kind else {
+            unreachable!("located Contains instruction")
+        };
+        *root = alternate_root;
+        let forged_root =
+            MirProgram::with_type_catalog(forged_root_functions, program.type_catalog().clone())
+                .expect_err("Contains cannot cite a different live root");
+        assert!(forged_root
+            .iter()
+            .any(|error| error.message.contains("MapRoot operation disagrees")));
+
+        let mut wrong_result_type_functions = program.functions().clone();
+        let function = wrong_result_type_functions
+            .get_mut(&owner)
+            .expect("main MIR");
+        let contains_result = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MapRootContains { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("Contains result");
+        let i32_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind
+                    == crate::core::mir::types::MirTypeKind::Primitive(
+                        crate::core::PrimitiveType::I32,
+                    ))
+                .then(|| id.clone())
+            })
+            .expect("canonical i32 TypeDesc");
+        function
+            .values
+            .get_mut(&contains_result)
+            .expect("Contains result value")
+            .ty = i32_type;
+        let forged_function = wrong_result_type_functions
+            .get(&owner)
+            .expect("forged Contains MIR")
+            .clone();
+        let invalid_constructor = MirProgram::with_type_catalog(
+            wrong_result_type_functions,
+            program.type_catalog().clone(),
+        )
+        .expect_err("MIR constructor must reject a non-bool Contains result TypeDesc");
+        assert!(invalid_constructor.iter().any(|error| {
+            error.message.contains("MapRoot operation disagrees")
+                || error.message.contains("canonical bool TypeDesc")
+        }));
+
+        let mut forged_program = program.clone();
+        forged_program.replace_function_for_test_only(forged_function);
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged_program)
+            .expect_err("direct bytecode adapter must revalidate a forged Contains result ABI");
+        assert!(bytecode_error.iter().any(|error| {
+            error.message.contains("canonical MIR validation failed")
+                && error.message.contains("MapRoot operation disagrees")
+        }));
     }
 
     #[test]
@@ -14138,7 +14420,15 @@ func main() -> i64 { foreign(1 as i64); 0 }
             "{errors:?}"
         );
 
-        for symbol in ["foreign symbol", "foreign=symbol", "foreign,symbol"] {
+        for (symbol, reason) in [
+            ("foreign symbol", "whitespace or a manifest delimiter"),
+            ("foreign=symbol", "whitespace or a manifest delimiter"),
+            ("foreign,symbol", "whitespace or a manifest delimiter"),
+            (
+                "mimi_mir_map_root_contains",
+                "reserved Canonical MIR MapRoot runtime helper",
+            ),
+        ] {
             let (_, program) = canonical_program_with_main(
                 "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
             );
@@ -14155,7 +14445,7 @@ func main() -> i64 { foreign(1 as i64); 0 }
             assert!(
                 errors.iter().any(|error| {
                     error.message.contains("FFI symbol is not manifest-safe")
-                        && error.message.contains("whitespace or a manifest delimiter")
+                        && error.message.contains(reason)
                 }),
                 "{symbol}: {errors:?}"
             );
@@ -14233,48 +14523,50 @@ func main() -> i64 { foreign(1 as i64); 0 }
 
     #[test]
     fn forged_ffi_symbol_is_rejected_by_every_direct_consumer() {
-        let (_, program) = canonical_program_with_main(
-            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
-        );
-        let mut receipts = program.ffi_calls().clone();
-        receipts.values_mut().next().expect("FFI receipt").symbol = "foreign symbol".into();
-        let mut forged = program;
-        forged.replace_ffi_calls_for_test_only(receipts);
+        for symbol in ["foreign symbol", "mimi_mir_map_root_contains"] {
+            let (_, program) = canonical_program_with_main(
+                "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+            );
+            let mut receipts = program.ffi_calls().clone();
+            receipts.values_mut().next().expect("FFI receipt").symbol = symbol.into();
+            let mut forged = program;
+            forged.replace_ffi_calls_for_test_only(receipts);
 
-        let reference_error = MirReferenceInterpreter::new(&forged)
-            .execute(&NodeId("function:main".into()), &[])
-            .expect_err("reference must reject a forged manifest-unsafe symbol");
-        assert!(
-            reference_error
-                .to_string()
-                .contains("FFI receipt disagrees with the MIR call")
-                || reference_error
+            let reference_error = MirReferenceInterpreter::new(&forged)
+                .execute(&NodeId("function:main".into()), &[])
+                .expect_err("reference must reject a forged manifest-unsafe symbol");
+            assert!(
+                reference_error
                     .to_string()
-                    .contains("FFI symbol is not manifest-safe")
-        );
+                    .contains("FFI receipt disagrees with the MIR call")
+                    || reference_error
+                        .to_string()
+                        .contains("FFI symbol is not manifest-safe")
+            );
 
-        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
-            .expect_err("bytecode must reject a forged manifest-unsafe symbol");
-        assert!(bytecode_error.iter().any(|error| {
-            error.message.contains("identity/ABI validation")
-                || error.message.contains("FFI symbol is not manifest-safe")
-        }));
+            let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+                .expect_err("bytecode must reject a forged manifest-unsafe symbol");
+            assert!(bytecode_error.iter().any(|error| {
+                error.message.contains("identity/ABI validation")
+                    || error.message.contains("FFI symbol is not manifest-safe")
+            }));
 
-        let native_error = crate::codegen::mir::validate_mir_native(&forged)
-            .expect_err("native validator must reject a forged manifest-unsafe symbol");
-        assert!(native_error
-            .iter()
-            .any(|error| error.message.contains("FFI symbol contains whitespace")));
+            let native_error = crate::codegen::mir::validate_mir_native(&forged)
+                .expect_err("native validator must reject a forged manifest-unsafe symbol");
+            assert!(native_error
+                .iter()
+                .any(|error| error.message.contains("FFI symbol")));
 
-        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
-            .expect_err("verifier capability gate must reject a forged symbol");
-        assert!(capability_error
-            .iter()
-            .any(|error| error.contains("FFI symbol is not manifest-safe")));
+            let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+                .expect_err("verifier capability gate must reject a forged symbol");
+            assert!(capability_error
+                .iter()
+                .any(|error| error.contains("FFI symbol is not manifest-safe")));
 
-        let verifier_error = crate::verifier::verify_mir(&forged, "forged-symbol".into())
-            .expect_err("direct verifier must reject a forged symbol even without obligations");
-        assert!(verifier_error.contains("FFI symbol 'foreign symbol' is not manifest-safe"));
+            let verifier_error = crate::verifier::verify_mir(&forged, "forged-symbol".into())
+                .expect_err("direct verifier must reject a forged symbol even without obligations");
+            assert!(verifier_error.contains(&format!("FFI symbol '{symbol}' is not manifest-safe")));
+        }
     }
 
     #[test]

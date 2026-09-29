@@ -466,6 +466,7 @@ impl<'a> CapabilityGate<'a> {
                             | MirInstructionKind::MapRootSet { .. }
                             | MirInstructionKind::MapRootRemove { .. }
                             | MirInstructionKind::MapRootSize { .. }
+                            | MirInstructionKind::MapRootContains { .. }
                             | MirInstructionKind::MapRootDrop { .. }
                     )
                 })
@@ -589,6 +590,32 @@ impl<'a> CapabilityGate<'a> {
         if !valid {
             self.error(format!(
                 "{subject} {role} is not the canonical i32 TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_bool_value(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .and_then(|value| self.program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_copy_scalar(&descriptor.id)
+                        .is_ok()
+            });
+        if !valid {
+            self.error(format!(
+                "{subject} {role} is not the canonical bool TypeDesc"
             ));
         }
     }
@@ -910,6 +937,13 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::MapRootSize { result, root } => {
                 self.validate_map_root_type(function, root, subject, "Size root");
                 self.validate_i32_value(function, result, subject, "MapRoot Size result");
+            }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                self.validate_map_root_type(function, root, subject, "Contains root");
+                self.validate_bool_value(function, result, subject, "MapRoot Contains result");
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapRoot key contains NUL"));
+                }
             }
             MirInstructionKind::MapRootDrop { root } => {
                 self.validate_map_root_type(function, root, subject, "Drop operand");

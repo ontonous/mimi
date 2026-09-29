@@ -1,0 +1,59 @@
+func contains_inserted_key() -> bool {
+    ensures: result == true
+    let root = map_new()
+    let inserted = map_set(root, "answer", 42)
+    let present = has_key(inserted, "answer")
+    drop(inserted)
+    present
+}
+
+func contains_missing_key() -> bool {
+    ensures: result == false
+    let root = map_new()
+    let missing = has_key(root, "missing")
+    drop(root)
+    missing
+}
+
+func contains_string_payload() -> bool {
+    ensures: result == true
+    let root = map_new()
+    let inserted = map_set(root, "string", "payload")
+    let present = has_key(inserted, "string")
+    drop(inserted)
+    present
+}
+
+func wrong_contains_contract() -> bool {
+    ensures: result == true
+    let root = map_new()
+    let missing = has_key(root, "never-inserted")
+    drop(root)
+    missing
+}
+
+func main() -> i32 {
+    let first = map_new()
+    let inserted = map_set(first, "answer", 42)
+    let with_unicode = map_set(inserted, "雪", 7)
+    let present = has_key(with_unicode, "answer")
+    let missing = has_key(with_unicode, "missing")
+    let unicode_present = has_key(with_unicode, "雪")
+    let removed = map_remove(with_unicode, "answer")
+    let after_remove = has_key(removed, "answer")
+    let retained_unicode = has_key(removed, "雪")
+    let size = map_size(removed)
+    println(present)
+    println(missing)
+    println(unicode_present)
+    println(after_remove)
+    println(retained_unicode)
+    println(size)
+    drop(removed)
+    let string_root = map_new()
+    let string_value = map_set(string_root, "string", "payload")
+    let string_present = has_key(string_value, "string")
+    println(string_present)
+    drop(string_value)
+    0
+}

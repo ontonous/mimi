@@ -399,6 +399,62 @@ impl<'a> ActionEmitter<'a> {
             return;
         }
 
+        if builtin == "has_key" && call.arguments.len() == 2 {
+            let source = &call.arguments[0].value;
+            let key_expr = &call.arguments[1].value;
+            let ResolvedExprKind::Literal(ResolvedLiteral::String(key)) = &key_expr.kind else {
+                if let ResolvedExprKind::Load(place) = &source.kind {
+                    if self.map_root_locals.contains(&place.base) {
+                        self.map_root_profile_invalid = true;
+                    }
+                }
+                return;
+            };
+            if key.contains('\0') {
+                self.map_root_profile_invalid = true;
+                return;
+            }
+            let local = match &source.kind {
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty()
+                        && self.live_map_root_locals.contains(&place.base) =>
+                {
+                    place.base.clone()
+                }
+                ResolvedExprKind::Load(place) if self.map_root_locals.contains(&place.base) => {
+                    self.map_root_profile_invalid = true;
+                    return;
+                }
+                _ => return,
+            };
+            if !matches!(
+                self.types.get(&source.ty),
+                Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+            ) || !matches!(
+                self.types.get(&key_expr.ty),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+            ) || !matches!(
+                self.types.get(&expression.ty),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::Bool))
+            ) {
+                self.map_root_profile_invalid = true;
+                return;
+            }
+            self.permitted_map_root_loads.insert(source.node_id.clone());
+            self.map_root_actions.push(MapRootAction {
+                kind: MapRootActionKind::Contains,
+                point: expression.node_id.clone(),
+                local: local.clone(),
+                root: Self::map_root_resource_identity(&local),
+                key: Some(key.clone()),
+                value: None,
+                value_type: None,
+                source_local: None,
+                source: None,
+            });
+            return;
+        }
+
         if builtin == "map_remove" {
             let Some((initializer, target)) = self.direct_map_root_binding.clone() else {
                 return;
@@ -3700,6 +3756,96 @@ func main() -> i32 {
             analysis.map_root_actions[2].local,
             analysis.map_root_actions[3].local
         );
+    }
+
+    #[test]
+    fn map_root_checker_contains_receipts_are_static_borrowing_and_fail_closed() {
+        let accepted = parse(
+            r#"
+func main() -> i32 {
+    let first = map_new()
+    let root = map_set(first, "answer", 42)
+    let present = has_key(root, "answer")
+    let missing = has_key(root, "missing")
+    drop(root)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&accepted).expect("static MapRoot contains");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("MapRoot resource analysis");
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Contains,
+                MapRootActionKind::Contains,
+                MapRootActionKind::Drop,
+            ]
+        );
+        let set = &analysis.map_root_actions[1];
+        let contains_present = &analysis.map_root_actions[2];
+        let contains_missing = &analysis.map_root_actions[3];
+        let drop = &analysis.map_root_actions[4];
+        assert_eq!(contains_present.key.as_deref(), Some("answer"));
+        assert_eq!(contains_missing.key.as_deref(), Some("missing"));
+        assert_eq!(contains_present.root, set.root);
+        assert_eq!(contains_missing.root, set.root);
+        assert_eq!(drop.root, set.root);
+        assert_eq!(contains_present.local, set.local);
+        assert_eq!(contains_missing.local, set.local);
+        assert_eq!(drop.local, set.local);
+        assert!(contains_present.value.is_none());
+        assert!(contains_present.source.is_none());
+        assert!(contains_present.value_type.is_none());
+
+        let dynamic_key = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let key = "answer"
+    let present = has_key(root, key)
+    drop(root)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&dynamic_key).expect("legacy Map stays checkable");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("MapRoot resource analysis");
+        assert!(analysis.map_root_actions.is_empty());
+        assert_eq!(analysis.map_root_new_attempts.len(), 1);
+
+        let nul_key = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let present = has_key(root, "bad\0key")
+    drop(root)
+    0
+}
+"#,
+        );
+        match crate::core::check_program(&nul_key) {
+            Ok(program) => {
+                let analysis = program
+                    .resource_analysis(&NodeId("function:main".into()))
+                    .expect("MapRoot resource analysis");
+                assert!(analysis
+                    .map_root_actions
+                    .iter()
+                    .all(|action| action.kind != MapRootActionKind::Contains));
+            }
+            Err(errors) => assert!(!errors.is_empty(), "NUL key is rejected during checking"),
+        }
     }
 
     #[test]

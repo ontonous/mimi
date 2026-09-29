@@ -61,7 +61,7 @@ enum SymbolicValue {
         size: Int,
     },
     /// A Checker-receipted canonical MapRoot. Its only admitted observation
-    /// is `MapRootSize`; Set/Remove update the finite set of literal keys and
+    /// is `MapRootSize`/`MapRootContains`; Set/Remove update the finite set of literal keys and
     /// the verifier intentionally abstracts away payloads.
     MapRoot {
         keys: BTreeSet<String>,
@@ -795,6 +795,7 @@ fn validate_map_root_verifier_boundary(
                         | MirInstructionKind::MapRootSet { .. }
                         | MirInstructionKind::MapRootRemove { .. }
                         | MirInstructionKind::MapRootSize { .. }
+                        | MirInstructionKind::MapRootContains { .. }
                         | MirInstructionKind::MapRootDrop { .. }
                 )
             })
@@ -882,6 +883,19 @@ fn validate_map_root_verifier_boundary(
                             && catalog.validate_copy_scalar(&descriptor.id).is_ok()
                     });
                 function.values.get(root).map(|value| &value.ty) == Some(&root_ty) && result_is_i32
+            }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                let result_is_bool = function
+                    .values
+                    .get(result)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                            && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                    });
+                !key.contains('\0')
+                    && function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
+                    && result_is_bool
             }
             MirInstructionKind::MapRootDrop { root } => {
                 function.values.get(root).map(|value| &value.ty) == Some(&root_ty)
@@ -2216,6 +2230,41 @@ fn eval_instruction(
                 SymbolicValue::Int(Int::from_i64(i64::from(value))),
             );
             state.known_ints.insert(result.clone(), i64::from(value));
+        }
+        MirInstructionKind::MapRootContains { result, root, key } => {
+            let root_ty = crate::core::mir::types::map_root_type_id();
+            let bool_ty = catalog.iter().find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
+                    .then(|| ty.clone())
+            });
+            if key.contains('\0')
+                || bool_ty.as_ref().is_none_or(|bool_ty| {
+                    function.values.get(result).map(|value| &value.ty) != Some(bool_ty)
+                })
+                || function.values.get(root).map(|value| &value.ty) != Some(&root_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: MapRoot Contains result/root TypeDesc is invalid"
+                ));
+            }
+            let contains = match state.values.get(root) {
+                Some(SymbolicValue::MapRoot { keys }) => keys.contains(key),
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Contains source is not a MapRoot value"
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: MapRoot Contains root '{}' is unavailable",
+                        root
+                    ))
+                }
+            };
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::Bool(Bool::from_bool(contains)),
+            );
         }
         MirInstructionKind::MapRootDrop { root } => {
             if function.values.get(root).map(|value| &value.ty)

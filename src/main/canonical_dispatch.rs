@@ -42,7 +42,8 @@ impl LegacyRouteReason {
 }
 
 pub(crate) fn report_legacy_route(reason: LegacyRouteReason) {
-    if std::env::var_os("MIMI_VERBOSE").is_some() {
+    if std::env::var_os("MIMI_VERBOSE").is_some() || std::env::var_os("MIMI_ROUTE_CENSUS").is_some()
+    {
         eprintln!("canonical route disposition: legacy ({})", reason.as_str());
     }
 }
@@ -175,10 +176,24 @@ pub(crate) fn select_default_route(
     merged_file: &File,
 ) -> DefaultMirRoute {
     let route = select_default_route_inner(checked, merged_file);
-    if std::env::var_os("MIMI_VERBOSE").is_some() {
-        if let DefaultMirRoute::Canonical(program) = &route {
+    let verbose = std::env::var_os("MIMI_VERBOSE").is_some();
+    let census = std::env::var_os("MIMI_ROUTE_CENSUS").is_some();
+    if let DefaultMirRoute::Canonical(program) = &route {
+        let is_map_root = mimi::core::mir::classify_canonical_mir_route_admission(checked)
+            .map_root
+            .is_candidate();
+        // `MIMI_VERBOSE` is an established CLI diagnostic surface and must
+        // not add stderr to canonical programs. Keep the historical
+        // MapRoot-specific evidence there; the whole-program route census
+        // gets every canonical disposition through its dedicated opt-in.
+        if census || (verbose && is_map_root) {
+            let profile = if is_map_root {
+                mimi::core::mir::MAP_ROOT_ISLAND
+            } else {
+                "default-route"
+            };
             eprintln!(
-                "canonical route disposition: canonical (default-route) mir_digest={}",
+                "canonical route disposition: canonical ({profile}) mir_digest={}",
                 program.canonical_digest()
             );
         }
@@ -2047,6 +2062,45 @@ mod tests {
         assert_eq!(
             reference.value,
             mimi::core::mir::reference::MirRuntimeValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn map_root_default_route_admits_static_contains_and_retains_the_root() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let inserted = map_set(root, "answer", 42)
+                let present = has_key(inserted, "answer")
+                let absent = has_key(inserted, "missing")
+                let size = map_size(inserted)
+                println(present)
+                println(absent)
+                drop(inserted)
+                size
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.map_root,
+            mimi::core::mir::MapRootAdmission::CompleteCoverage
+        );
+        assert!(matches!(
+            admission.collection,
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        ));
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("static MapRoot contains must enter the default canonical route");
+        };
+        let main = mimi::core::NodeId("function:main".into());
+        let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("MapRoot remains usable after static contains queries");
+        assert_eq!(reference.output, "true\nfalse\n");
+        assert_eq!(
+            reference.value,
+            mimi::core::mir::reference::MirRuntimeValue::Int(1)
         );
     }
 

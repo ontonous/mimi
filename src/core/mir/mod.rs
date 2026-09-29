@@ -1312,6 +1312,13 @@ pub enum MirInstructionKind {
         result: MirValueId,
         root: MirValueId,
     },
+    /// Borrowing static-key membership query. This reads only the Map key
+    /// index and leaves the Checker-owned root live for later operations.
+    MapRootContains {
+        result: MirValueId,
+        root: MirValueId,
+        key: String,
+    },
     /// Consume and release a Map table root.
     MapRootDrop {
         root: MirValueId,
@@ -2819,6 +2826,7 @@ impl MirOwnershipSummary {
                 crate::core::MapRootActionKind::Set => "set",
                 crate::core::MapRootActionKind::Remove => "remove",
                 crate::core::MapRootActionKind::Size => "size",
+                crate::core::MapRootActionKind::Contains => "contains",
                 crate::core::MapRootActionKind::Drop => "drop",
             };
             let result = action
@@ -3013,6 +3021,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     | MirInstructionKind::MapRootSet { .. }
                     | MirInstructionKind::MapRootRemove { .. }
                     | MirInstructionKind::MapRootSize { .. }
+                    | MirInstructionKind::MapRootContains { .. }
                     | MirInstructionKind::MapRootDrop { .. }
             ) {
                 observed.push((block_order * 1_000_000 + index, instruction));
@@ -3069,6 +3078,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
             crate::core::MapRootActionKind::Set => "map_root_set",
             crate::core::MapRootActionKind::Remove => "map_root_remove",
             crate::core::MapRootActionKind::Size => "map_root_size",
+            crate::core::MapRootActionKind::Contains => "map_root_contains",
             crate::core::MapRootActionKind::Drop => "map_root_drop",
         };
         let expected_id = format!(
@@ -3165,6 +3175,25 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                 root == &receipt.local
                     && receipt.result.as_ref() == Some(result)
                     && receipt.key.is_none()
+                    && receipt.value.is_none()
+                    && receipt.value_type.is_none()
+                    && receipt.source_local.is_none()
+                    && receipt.source.is_none()
+            }
+            (
+                crate::core::MapRootActionKind::Contains,
+                MirInstructionKind::MapRootContains { result, root, key },
+            ) => {
+                let canonical_bool =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+                root == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == canonical_bool)
+                    && receipt.key.as_ref() == Some(key)
+                    && !key.as_bytes().contains(&0)
                     && receipt.value.is_none()
                     && receipt.value_type.is_none()
                     && receipt.source_local.is_none()
@@ -3299,6 +3328,16 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     });
                 }
             }
+            crate::core::MapRootActionKind::Contains => {
+                if live_roots.get(&receipt.root) != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "MapRoot read/drop resource identity does not match the current root"
+                                .into(),
+                    });
+                }
+            }
             crate::core::MapRootActionKind::Drop => {
                 if live_roots.remove(&receipt.root).as_ref() != Some(&receipt.local) {
                     errors.push(MirValidationError {
@@ -3362,6 +3401,7 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
                     actual_root_values.contains(source)
                 }
                 MirInstructionKind::MapRootSize { root, .. }
+                | MirInstructionKind::MapRootContains { root, .. }
                 | MirInstructionKind::MapRootDrop { root } => actual_root_values.contains(root),
                 MirInstructionKind::MapRootNew { .. } => true,
                 _ => false,
@@ -3494,7 +3534,9 @@ fn mir_instruction_value_uses(kind: &MirInstructionKind) -> Vec<MirValueId> {
         I::Const { .. } | I::Nop | I::MapRootNew { .. } => {}
         I::MapRootSet { source, value, .. } => uses.extend([source.clone(), value.clone()]),
         I::MapRootRemove { source, .. } => uses.push(source.clone()),
-        I::MapRootSize { root, .. } | I::MapRootDrop { root } => uses.push(root.clone()),
+        I::MapRootSize { root, .. } | I::MapRootContains { root, .. } | I::MapRootDrop { root } => {
+            uses.push(root.clone())
+        }
         I::Load { place, .. } => {
             if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
                 uses.push(local);
@@ -5472,6 +5514,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::MapRootSet { result, .. }
         | MirInstructionKind::MapRootRemove { result, .. }
         | MirInstructionKind::MapRootSize { result, .. }
+        | MirInstructionKind::MapRootContains { result, .. }
         | MirInstructionKind::Copy { result, .. }
         | MirInstructionKind::Convert { result, .. }
         | MirInstructionKind::Borrow { result, .. }
@@ -5584,9 +5627,9 @@ fn instruction_consumes_owned_string(
             sources.extend([source.clone(), value.clone()])
         }
         MirInstructionKind::MapRootRemove { source, .. } => sources.push(source.clone()),
-        MirInstructionKind::MapRootSize { root, .. } | MirInstructionKind::MapRootDrop { root } => {
-            sources.push(root.clone())
-        }
+        MirInstructionKind::MapRootSize { root, .. }
+        | MirInstructionKind::MapRootContains { root, .. }
+        | MirInstructionKind::MapRootDrop { root } => sources.push(root.clone()),
         MirInstructionKind::ConstructVariant { fields, .. }
         | MirInstructionKind::ConstructVariantMove { fields, .. } => {
             sources.extend(fields.iter().map(|(_, value)| value.clone()))
@@ -5792,6 +5835,9 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         } => format!("map_root_remove {result} <- {source}[{key:?}]"),
         MirInstructionKind::MapRootSize { result, root } => {
             format!("map_root_size {result} <- {root}")
+        }
+        MirInstructionKind::MapRootContains { result, root, key } => {
+            format!("map_root_contains {result} <- {root}[{key:?}]")
         }
         MirInstructionKind::MapRootDrop { root } => format!("map_root_drop {root}"),
         MirInstructionKind::Const { result, literal } => {
@@ -6533,6 +6579,13 @@ impl<'a> MirValidator<'a> {
                 self.use_value(root);
                 self.result_at(result, &instruction.id, block, index);
             }
+            MapRootContains { result, root, key } => {
+                self.use_value(root);
+                if key.as_bytes().contains(&0) {
+                    self.error(result.to_string(), "MapRoot key contains NUL");
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             MapRootDrop { root } => self.use_value(root),
             Const { result, .. } | Load { result, .. } => {
                 self.result_at(result, &instruction.id, block, index)
@@ -7209,6 +7262,7 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::MapRootRemove { source, .. } => uses.push(source.clone()),
             MirInstructionKind::MapRootSize { root, .. }
+            | MirInstructionKind::MapRootContains { root, .. }
             | MirInstructionKind::MapRootDrop { root } => uses.push(root.clone()),
             MirInstructionKind::Load { place, .. } => {
                 if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {

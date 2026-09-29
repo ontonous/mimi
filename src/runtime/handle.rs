@@ -499,6 +499,16 @@ pub(super) fn map_root_remove(handle: i64, key: &str) -> Result<(), HandleError>
     Ok(())
 }
 
+/// Check whether a live MapRoot contains a key without observing its payload.
+pub(super) fn map_root_contains(handle: i64, key: &str) -> Result<bool, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let t = lock_maps();
+    let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    let map = slot.obj.as_ref().ok_or(HandleError::Destroyed)?;
+    Ok(map.inner.contains_key(key))
+}
+
 pub(super) fn map_root_size(handle: i64) -> Result<usize, HandleError> {
     let (index, gen) = unpack(handle)?;
     let t = lock_maps();

@@ -1,0 +1,18 @@
+func contains_inserted_key() -> bool {
+    ensures: result == true
+    let root = map_new()
+    let inserted = map_set(root, "answer", 42)
+    let present = has_key(inserted, "answer")
+    drop(inserted)
+    present
+}
+
+func contains_missing_key() -> bool {
+    ensures: result == false
+    let root = map_new()
+    let missing = has_key(root, "missing")
+    drop(root)
+    missing
+}
+
+func main() -> i32 { 0 }

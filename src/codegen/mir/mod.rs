@@ -387,6 +387,25 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_mir_map_root_contains")
+            .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_map_root_contains",
+                i32.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_mir_map_root_drop")
             .is_none()
         {
@@ -1076,6 +1095,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_map_root_size(result, root, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                let value = self.emit_map_root_contains(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::MapRootDrop { root } => {
                 self.emit_map_root_drop(root, subject)?;
             }
@@ -1473,6 +1496,111 @@ func main() -> i32 {
                 .stderr
                 .contains("All heap blocks were freed -- no leaks are possible"));
         }
+    }
+
+    #[test]
+    fn receipt_backed_static_map_root_contains_matches_same_mir_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/map_root_static_contains.mimi"
+        ));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("whole-program verifier admits static MapRoot contains receipts");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validator admits static MapRoot contains receipts");
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference executes the same MapRoot MIR");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(
+            reference.output,
+            "true\nfalse\ntrue\nfalse\ntrue\n1\ntrue\n"
+        );
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free bytecode consumes the same MIR"),
+        );
+        assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(0));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let verification = crate::verifier::verify_mir(&program, "map-root-static-contains".into())
+            .expect("public verifier consumes the same receipted MIR");
+        for (name, expected) in [
+            (
+                "contains_inserted_key",
+                crate::verifier::VerifStatus::Proven,
+            ),
+            ("contains_missing_key", crate::verifier::VerifStatus::Proven),
+            (
+                "contains_string_payload",
+                crate::verifier::VerifStatus::Proven,
+            ),
+            (
+                "wrong_contains_contract",
+                crate::verifier::VerifStatus::Disproven,
+            ),
+        ] {
+            let result = verification
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .expect("MapRoot contains contract result");
+            assert_eq!(result.status, expected, "{}: {}", name, result.message);
+        }
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_static_map_root_contains");
+        generator
+            .compile_mir_native(&program)
+            .expect("native emitter consumes the same receipted MIR");
+        generator
+            .module
+            .verify()
+            .expect("native contains module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_map_root_contains")
+            .is_some());
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native execution of the same MapRoot MIR");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production MapRoot.contains path under strict Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, reference.output);
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(!memcheck.stderr.contains("definitely lost:"));
+            assert!(!memcheck.stderr.contains("indirectly lost:"));
+            assert!(!memcheck.stderr.contains("possibly lost:"));
+        }
+
+        let (_owner, function) = program
+            .functions()
+            .iter()
+            .find(|(owner, _)| owner.0.ends_with("main"))
+            .expect("main MIR");
+        assert!(function.canonical_text().contains("map_root_contains"));
     }
 
     #[test]
