@@ -522,7 +522,9 @@ pub(super) fn map_root_drop(handle: i64) -> Result<(), HandleError> {
     let mut t = lock_maps();
     let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
     validate_map_root_slot(slot, gen)?;
-    finish_map_free(&mut t, index);
+    let retired_map = finish_map_free(&mut t, index);
+    drop(t);
+    drop(retired_map);
     Ok(())
 }
 
@@ -677,10 +679,16 @@ fn map_release(handle: i64) -> Result<i64, HandleError> {
         let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
         (remaining, should_free)
     };
-    if should_free {
-        finish_map_free(&mut t, index);
-    }
+    let retired_map = if should_free {
+        finish_map_free(&mut t, index)
+    } else {
+        None
+    };
     map_condvar().notify_all();
+    drop(t);
+    // Payload destructors can acquire other runtime registries. Never run
+    // them while holding MAP_TABLE.
+    drop(retired_map);
     Ok(remaining)
 }
 
@@ -774,10 +782,16 @@ fn map_unpin(handle: i64) -> Result<i64, HandleError> {
         let should_free = remaining == 0 && slot.pending_free.load(Ordering::SeqCst);
         (remaining, should_free)
     };
-    if should_free {
-        finish_map_free(&mut t, index);
-    }
+    let retired_map = if should_free {
+        finish_map_free(&mut t, index)
+    } else {
+        None
+    };
     map_condvar().notify_all();
+    drop(t);
+    // A pending destroy is completed by the final unpin. Defer owner drops
+    // until the registry lock is released, just like immediate destruction.
+    drop(retired_map);
     Ok(remaining)
 }
 
@@ -809,14 +823,9 @@ fn set_unpin(handle: i64) -> Result<i64, HandleError> {
     Ok(remaining)
 }
 
-fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
+fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) -> Option<Box<super::MimiMap>> {
     let slot = &mut t.slots[index as usize];
-    if let Some(map) = slot.obj.take() {
-        // Map-owned payloads are Arc-backed; dropping this Map releases its
-        // references and the payload Drop frees each allocation after the
-        // last sibling clone is gone.
-        drop(map);
-    }
+    let retired_map = slot.obj.take();
     let can_reuse = if let Some(next) = slot.generation.checked_add(1) {
         slot.generation = next;
         t.generation_floor = t.generation_floor.max(next);
@@ -837,6 +846,11 @@ fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
         t.free.push(index);
     }
     compact_empty_map_table(t);
+    // Slot invalidation and generation advancement are complete before this
+    // value leaves the table. The caller must release its table guard before
+    // dropping the returned Map, because its payload owners may lock other
+    // runtime registries or run descriptor-specific glue.
+    retired_map
 }
 
 fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
@@ -910,27 +924,32 @@ pub fn set_begin_destroy(handle: i64) -> Result<(), HandleError> {
 pub fn map_finish_destroy(handle: i64) -> Result<(), HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
-    let slot = t
-        .slots
-        .get_mut(index as usize)
-        .ok_or(HandleError::Invalid)?;
-    if slot.generation != gen {
-        return Err(HandleError::StaleGeneration);
-    }
-    if slot.obj.is_none() {
-        return Ok(());
-    }
-    slot.retired.store(true, Ordering::SeqCst);
-    let idle = slot.leases.load(Ordering::SeqCst) == 0 && slot.pins.load(Ordering::SeqCst) == 0;
-    if idle {
-        finish_map_free(&mut t, index);
+    let idle = {
+        let slot = t
+            .slots
+            .get_mut(index as usize)
+            .ok_or(HandleError::Invalid)?;
+        if slot.generation != gen {
+            return Err(HandleError::StaleGeneration);
+        }
+        if slot.obj.is_none() {
+            return Ok(());
+        }
+        slot.retired.store(true, Ordering::SeqCst);
+        slot.leases.load(Ordering::SeqCst) == 0 && slot.pins.load(Ordering::SeqCst) == 0
+    };
+    let retired_map = if idle {
+        finish_map_free(&mut t, index)
     } else {
         t.slots[index as usize]
             .pending_free
             .store(true, Ordering::SeqCst);
-    }
+        None
+    };
     map_condvar().notify_all();
     clear_handle_error();
+    drop(t);
+    drop(retired_map);
     Ok(())
 }
 
@@ -1268,7 +1287,7 @@ mod tests {
         let mut table = Table::new();
         let first = alloc_slot(&mut table, empty_map());
         let (idx, gen1) = unpack(first).unwrap();
-        finish_map_free(&mut table, idx);
+        drop(finish_map_free(&mut table, idx));
         compact_empty_map_table(&mut table);
         assert_eq!(table.slots.len(), 0);
         assert_eq!(table.slots.capacity(), 0);
@@ -1280,7 +1299,7 @@ mod tests {
 
         let other = alloc_slot(&mut table, empty_map());
         let (other_idx, _) = unpack(other).unwrap();
-        finish_map_free(&mut table, idx2);
+        drop(finish_map_free(&mut table, idx2));
         compact_empty_map_table(&mut table);
         assert!(table.slots[other_idx as usize].obj.is_some());
         assert!(table.slots.len() > 1);
@@ -1297,8 +1316,8 @@ mod tests {
         let (second_idx, second_old_gen) = unpack(second_old).unwrap();
         assert_eq!(first_old_gen, HandleGeneration::MAX - 1);
         assert_eq!(second_old_gen, HandleGeneration::MAX - 1);
-        finish_map_free(&mut table, first_idx);
-        finish_map_free(&mut table, second_idx);
+        drop(finish_map_free(&mut table, first_idx));
+        drop(finish_map_free(&mut table, second_idx));
 
         // Both free indices can safely advance to MAX: no handle for either
         // index at MAX has been issued yet.
@@ -1314,7 +1333,7 @@ mod tests {
 
         // Once a MAX-generation handle is destroyed, its slot is burned. A
         // different free index and then a fresh index remain usable.
-        finish_map_free(&mut table, max_idx);
+        drop(finish_map_free(&mut table, max_idx));
         compact_empty_map_table(&mut table);
         assert!(table.generation_exhausted);
         assert_eq!(table.slots.len(), 4);
@@ -1333,7 +1352,7 @@ mod tests {
             validate_map_root_slot(&table.slots[max_idx as usize], HandleGeneration::MAX),
             Err(HandleError::Destroyed)
         );
-        finish_map_free(&mut table, other_idx);
+        drop(finish_map_free(&mut table, other_idx));
         let fresh = alloc_slot(&mut table, empty_map());
         let (fresh_idx, fresh_gen) = unpack(fresh).unwrap();
         assert_eq!(fresh_idx, unpack(guard).unwrap().0 + 1);
