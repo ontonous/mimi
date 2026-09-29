@@ -174,6 +174,19 @@ pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
+    let route = select_default_route_inner(checked, merged_file);
+    if std::env::var_os("MIMI_VERBOSE").is_some() {
+        if let DefaultMirRoute::Canonical(program) = &route {
+            eprintln!(
+                "canonical route disposition: canonical (default-route) mir_digest={}",
+                program.canonical_digest()
+            );
+        }
+    }
+    route
+}
+
+fn select_default_route_inner(checked: &CheckedProgram, merged_file: &File) -> DefaultMirRoute {
     // A called extern declaration that is outside the migrated scalar C ABI
     // is still a canonical FFI boundary.  Reject it before considering any
     // unrelated island or the compatibility route; otherwise default `run`,
@@ -1620,13 +1633,6 @@ fn select_map_root_route(program: MirProgram) -> DefaultMirRoute {
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
-            if std::env::var_os("MIMI_VERBOSE").is_some() {
-                eprintln!(
-                    "canonical route disposition: canonical ({}) mir_digest={}",
-                    mimi::core::mir::MAP_ROOT_ISLAND,
-                    program.canonical_digest()
-                );
-            }
             DefaultMirRoute::Canonical(program)
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
