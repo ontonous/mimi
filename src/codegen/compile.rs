@@ -28,6 +28,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        // A serializer may only rely on a completed shared-mode scan for the
+        // module currently in this generator. Clear stale provenance before
+        // every attempt; compilation can fail after a partial emission.
+        self.shared_dynamic_any_preflight_passed = false;
+        let result = self.compile_checked_inner(program);
+        if result.is_ok() && self.shared {
+            self.shared_dynamic_any_preflight_passed = true;
+        }
+        result
+    }
+
+    /// Check the native entry roots that can be invoked from outside the
+    /// current Mimi call graph. Shared-library builds root every non-comptime
+    /// callable; executable builds root `main` plus C exports.
+    pub(crate) fn preflight_native_dynamic_any_unpack(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        let dynamic_any_unpack = if self.shared {
+            let external_roots = program
+                .callables()
+                .keys()
+                .filter(|owner| {
+                    !program
+                        .functions()
+                        .get(*owner)
+                        .is_some_and(|function| function.is_comptime)
+                })
+                .cloned()
+                .collect();
+            super::resolved::first_reachable_dynamic_any_unpack_from_roots(program, &external_roots)
+        } else {
+            super::resolved::first_reachable_dynamic_any_unpack(program)
+        };
+        if let Some((owner, node)) = dynamic_any_unpack {
+            return Err(vec![super::resolved::dynamic_any_unpack_diagnostic(
+                program, &owner, &node,
+            )]);
+        }
+        Ok(())
+    }
+
+    fn compile_checked_inner(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
         // Keep the public CheckedProgram API on the same FFI boundary as CLI
         // dispatch. `Compatibility` from canonical MIR means this declaration
@@ -46,11 +92,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // stored runtime value actually matches the concrete generic type.
         // Treat every reachable instance as a hard native boundary before
         // MIR selection or per-function fallback can choose either emitter.
-        if let Some((owner, node)) = super::resolved::first_reachable_dynamic_any_unpack(program) {
-            return Err(vec![super::resolved::dynamic_any_unpack_diagnostic(
-                program, &owner, &node,
-            )]);
-        }
+        self.preflight_native_dynamic_any_unpack(program)?;
         // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
         // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
         // exact nested Option-tuple, generic Option/Result projections and
@@ -1597,6 +1639,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
+        self.shared_dynamic_any_preflight_passed = false;
         self.compile_file_inner(
             Arc::new(File {
                 sources: file.sources.clone(),
@@ -1621,6 +1664,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
         eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
     ) -> MimiResult<()> {
+        self.shared_dynamic_any_preflight_passed = false;
         // C1 (permanent): the fifth pass compiles ineligible body classes
         // (capturing lambdas, generics, extern ABI wrappers) from the
         // surface AST. The resolved native emitter handles the eligible subset;

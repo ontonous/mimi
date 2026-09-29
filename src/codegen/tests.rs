@@ -1475,6 +1475,149 @@ func main() -> i32 { 42 }
 }
 
 #[test]
+fn compile_checked_rejects_map_any_unpack_in_c_export_roots() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+extern "C" func exported_wrong_tag() -> i32 {
+    let m = new()
+    let with_text = set(m, "key", "text")
+    get_or_default(with_text, "key", 0)
+}
+
+func main() -> i32 { 0 }
+"#,
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "exported_dynamic_any_unpack");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("a host-callable C export must be included in native safety roots");
+    assert_eq!(
+        errors[0].code.as_deref(),
+        Some(crate::diagnostic::codes::E0722)
+    );
+    assert!(errors[0].message.contains("reachable DynamicAnyUnpack"));
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "the exported-body gate must run before the legacy export wrapper is emitted"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
+#[test]
+fn shared_and_subset_native_entries_reject_map_any_unpack() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func host_callable_wrong_tag() -> i32 {
+    let m = new()
+    let with_text = set(m, "key", "text")
+    get_or_default(with_text, "key", 0)
+}
+
+func main() -> i32 { 0 }
+"#,
+    );
+    let helper = program
+        .functions()
+        .values()
+        .find(|function| function.qualified_name == "host_callable_wrong_tag")
+        .expect("host-callable fixture helper")
+        .node_id
+        .clone();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut shared = CodeGenerator::new(&context, "shared_dynamic_any_unpack");
+    shared.shared = true;
+    let errors = shared
+        .compile_checked(&program)
+        .expect_err("every emitted shared-library function can be called by its host");
+    assert_eq!(
+        errors[0].code.as_deref(),
+        Some(crate::diagnostic::codes::E0722)
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "shared-library host-entry rejection must precede any body emission"
+    );
+
+    let context = Context::create();
+    let mut subset = CodeGenerator::new(&context, "subset_host_dynamic_any_unpack");
+    let subset_errors = subset
+        .compile_resolved_subset(&program, &std::collections::BTreeSet::from([helper]))
+        .expect_err("a directly selected native function is itself an entry root");
+    assert!(subset_errors
+        .iter()
+        .any(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0722)));
+    assert!(
+        subset
+            .module
+            .get_function("host_callable_wrong_tag")
+            .is_none(),
+        "the subset gate must reject before partially emitting the selected body"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
+#[test]
+fn shared_object_serializers_require_shared_mode_dynamic_any_preflight() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func host_callable_wrong_tag() -> i32 {
+    let m = new()
+    let with_text = set(m, "key", "text")
+    get_or_default(with_text, "key", 0)
+}
+
+func main() -> i32 { 0 }
+"#,
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "shared_object_preflight_provenance");
+    codegen
+        .compile_checked(&program)
+        .expect("the ordinary executable entry cannot reach the unsafe helper");
+    codegen.shared = true;
+
+    let shared_output = dir.join("must-not-be-emitted-shared.o");
+    let shared_error = codegen
+        .compile_to_object_shared(&shared_output)
+        .expect_err("shared serialization must not reuse the executable-root preflight");
+    assert!(shared_error
+        .to_string()
+        .contains("requires a successful checked native compilation in shared mode"));
+    assert!(
+        !shared_output.exists(),
+        "rejected shared serialization must not leave an object file"
+    );
+
+    let ordinary_output = dir.join("must-not-be-emitted-shared-mode.o");
+    let ordinary_error = codegen
+        .compile_to_object(&ordinary_output)
+        .expect_err("compile_to_object also emits bare symbols while shared is enabled");
+    assert!(ordinary_error
+        .to_string()
+        .contains("requires a successful checked native compilation in shared mode"));
+    assert!(
+        !ordinary_output.exists(),
+        "rejected shared-mode serialization must not leave an object file"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
+#[test]
 fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

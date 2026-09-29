@@ -18,10 +18,12 @@ fn parse_and_check(src: &str) -> crate::ast::File {
 /// Compile a Mimi source string to an object file (internal helper).
 fn compile_to_object(src: &str, module_name: &str, obj_path: &std::path::Path) {
     let file = parse_and_check(src);
+    let program = crate::core::check_program(&file).expect("shared-library checked program");
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, module_name);
-    gen.compile_file(&file)
-        .expect("src/tests/build_shared.rs:21 unwrap failed");
+    gen.shared = true;
+    gen.compile_checked(&program)
+        .expect("src/tests/build_shared.rs:22 shared compile_checked failed");
     // Shared-library outputs keep bare exported symbols: the host dlopen/
     // dlsym contract resolves them by source name (SYMBOL-NAMESPACE-001).
     gen.compile_to_object_shared(obj_path)
@@ -541,10 +543,12 @@ func main() -> i32 { return 0 }
     let so = tmp.join("libm.so");
 
     let file = parse_and_check(src);
+    let program = crate::core::check_program(&file).expect("shared function checked program");
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, "m001b");
     gen.shared = true;
-    gen.compile_file(&file).expect("compile_file");
+    gen.compile_checked(&program)
+        .expect("compile_checked(shared)");
     gen.compile_to_object(&obj)
         .expect("compile_to_object(shared)");
     link_shared(&obj, &so, false);
@@ -586,7 +590,12 @@ func main() -> i32 { return 0 }
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, "m004");
     gen.shared = true;
-    gen.compile_file(&file).expect("compile_file");
+    // `compile_checked` currently does not materialize C data exports. This
+    // test-only AST harness retains coverage for the legacy const emitter;
+    // production shared-object emission still requires the checked route.
+    gen.compile_file(&file)
+        .expect("compile_file(test-only legacy const path)");
+    gen.allow_legacy_test_shared_object_emission();
     gen.compile_to_object(&obj)
         .expect("compile_to_object(shared)");
     link_shared(&obj, &so, false);
@@ -613,10 +622,11 @@ extern "C" const BAD: i32 = 2 + 3
 func main() -> i32 { return 0 }
 "#;
     let file = parse_and_check(src);
+    let program = crate::core::check_program(&file).expect("invalid shared const checked program");
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, "m004bad");
     gen.shared = true;
-    let err = gen.compile_file(&file).err();
+    let err = gen.compile_checked(&program).err();
     assert!(
         err.is_some(),
         "computed `extern \"C\" const` initializer must be rejected"

@@ -708,13 +708,21 @@ pub(crate) fn build(
         };
         let receipt = canonical.route_receipt("build-canonical-v1");
         (
-            codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+            codegen.compile_checked_mir_native_with_route_receipt(
+                &checked_program,
+                &canonical,
+                &receipt,
+            ),
             false,
         )
     } else if let Some(canonical) = canonical_for_build.take() {
         let receipt = canonical.route_receipt("build-canonical-v1");
         (
-            codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+            codegen.compile_checked_mir_native_with_route_receipt(
+                &checked_program,
+                &canonical,
+                &receipt,
+            ),
             true,
         )
     } else {
@@ -722,7 +730,11 @@ pub(crate) fn build(
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
                 let receipt = canonical.route_receipt("build-canonical-v1");
                 (
-                    codegen.compile_mir_native_with_route_receipt(&canonical, &receipt),
+                    codegen.compile_checked_mir_native_with_route_receipt(
+                        &checked_program,
+                        &canonical,
+                        &receipt,
+                    ),
                     true,
                 )
             }

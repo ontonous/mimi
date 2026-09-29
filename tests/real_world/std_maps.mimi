@@ -2,7 +2,9 @@
 //
 // The std::maps set/remove wrappers preserve their input value by copying its
 // entries before mutation, then return a new Record handle. Keep the snapshots
-// below explicit so both VM and native runs exercise that persistence contract.
+// below explicit so the VM path exercises that persistence contract. Native
+// `get_or_default<T>` remains fail-closed until Map entries carry a checked
+// dynamic type descriptor.
 
 use std::maps;
 

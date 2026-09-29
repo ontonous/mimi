@@ -65,6 +65,7 @@ pub fn validate_mir_native(program: &MirProgram) -> Result<(), Vec<Diagnostic>> 
 /// `build` path until the wider MIR shape and differential gates are closed.
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_mir_native(&mut self, program: &MirProgram) -> Result<(), Vec<Diagnostic>> {
+        self.shared_dynamic_any_preflight_passed = false;
         let mir_digest = program.canonical_digest();
         if let Some(compiled_digest) = self.mir_native_compiled_digest.as_deref() {
             if compiled_digest == mir_digest {
@@ -93,6 +94,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &MirProgram,
         receipt: &crate::core::mir::CanonicalMirRouteReceipt,
     ) -> Result<(), Vec<Diagnostic>> {
+        self.shared_dynamic_any_preflight_passed = false;
         if let Err(message) = receipt.validate_against_program(program) {
             return Err(vec![NativeMirError::new(
                 "mir-program",
@@ -145,6 +147,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.mir_native_route_receipt = Some(receipt.clone());
         }
         Ok(())
+    }
+
+    /// Crate-owned CLI route that couples shared-object preflight to the
+    /// CheckedProgram used to materialize the MIR graph. Raw MIR entry points
+    /// intentionally cannot authorize host-visible shared-object emission.
+    pub fn compile_checked_mir_native_with_route_receipt(
+        &mut self,
+        checked: &crate::core::CheckedProgram,
+        program: &MirProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.shared_dynamic_any_preflight_passed = false;
+        checked.validate_backend(crate::core::BackendProfile::Native)?;
+        self.preflight_native_dynamic_any_unpack(checked)?;
+        let result = self.compile_mir_native_with_route_receipt(program, receipt);
+        if result.is_ok() && self.shared {
+            self.shared_dynamic_any_preflight_passed = true;
+        }
+        result
     }
 
     /// Compile canonical MIR after parsing and checking a CLI route manifest.

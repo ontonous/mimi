@@ -90,11 +90,15 @@ impl UnsupportedResolvedNode {
 /// 0.37.2: reachable dispatch experiment (`MIMI_REACHABLE_DISPATCH=1`).
 ///
 /// Builds a conservative call graph from `CheckedProgram::call_sites()` and
-/// returns non-comptime function NodeIds reachable from any `main` entry plus
-/// everything referenced from those bodies. This is used only for dispatch
-/// statistics / per-function eligible-set filtering under the env flag, not
-/// for the ordinary production path.
-fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSet<NodeId> {
+/// returns non-comptime callable NodeIds reachable from any `main` entry,
+/// supplied external roots, plus everything referenced from those bodies.
+/// Dispatch statistics use only the `main` roots; native DynamicAny preflight
+/// also supplies C exports, selected subset bodies, or all shared-object
+/// callables as external roots.
+fn reachable_function_ids(
+    program: &CheckedProgram,
+    additional_roots: &std::collections::BTreeSet<NodeId>,
+) -> std::collections::BTreeSet<NodeId> {
     use std::collections::{BTreeSet, HashMap, VecDeque};
 
     let mut by_qualified: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -129,6 +133,20 @@ fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSe
         let is_entry = name == "main" || name.ends_with("::main") || name.ends_with(":main");
         if is_entry && reachable.insert(function.node_id.clone()) {
             queue.push_back(function.node_id.clone());
+        }
+    }
+    // C export wrappers are callable by the host even when Mimi `main` never
+    // calls them. Their internal body therefore belongs to the native safety
+    // root set just like `main`.
+    for root in additional_roots {
+        if !program
+            .functions()
+            .get(root)
+            .is_some_and(|function| function.is_comptime)
+            && program.callable(root).is_some()
+            && reachable.insert(root.clone())
+        {
+            queue.push_back(root.clone());
         }
     }
 
@@ -173,14 +191,33 @@ fn reachable_function_ids(program: &CheckedProgram) -> std::collections::BTreeSe
     reachable
 }
 
-/// Find an unchecked Any-to-concrete conversion in a callable the native
-/// compatibility entry can reach. The legacy emitter has the same erased-i64
-/// ABI as the resolved emitter, so this is a program-wide hard boundary: an
-/// eligibility miss alone would merely route the unsafe conversion to legacy.
+/// Find an unchecked Any-to-concrete conversion in a callable reachable from
+/// a Mimi entry or any external native entry root. The legacy emitter has the
+/// same erased-i64 ABI as the resolved emitter, so an eligibility miss alone
+/// would merely route the unsafe conversion to legacy.
 pub(super) fn first_reachable_dynamic_any_unpack(
     program: &CheckedProgram,
 ) -> Option<(NodeId, NodeId)> {
-    let mut reachable = reachable_function_ids(program);
+    first_reachable_dynamic_any_unpack_from_roots(program, &std::collections::BTreeSet::new())
+}
+
+/// Variant for consumers that emit an explicitly selected subset (and for
+/// shared-library compilation, where every emitted source function has an
+/// externally resolvable symbol). These bodies can be called by the host even
+/// when `main` does not reach them.
+pub(super) fn first_reachable_dynamic_any_unpack_from_roots(
+    program: &CheckedProgram,
+    additional_roots: &std::collections::BTreeSet<NodeId>,
+) -> Option<(NodeId, NodeId)> {
+    let mut roots = additional_roots.clone();
+    roots.extend(
+        program
+            .functions()
+            .values()
+            .filter(|function| !function.is_comptime && function.extern_abi.is_some())
+            .map(|function| function.node_id.clone()),
+    );
+    let mut reachable = reachable_function_ids(program, &roots);
     let mut uncertain_dispatch = false;
     let mut scanned = std::collections::BTreeSet::new();
 
@@ -714,7 +751,7 @@ pub(super) fn eligible_function_ids_with_stats(
     let verbose = std::env::var("MIMI_VERBOSE").is_ok();
     let reachable_only = std::env::var("MIMI_REACHABLE_DISPATCH").is_ok();
     let reachable = if reachable_only {
-        reachable_function_ids(program)
+        reachable_function_ids(program, &std::collections::BTreeSet::new())
     } else {
         std::collections::BTreeSet::new()
     };

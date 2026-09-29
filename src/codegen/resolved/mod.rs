@@ -54,6 +54,13 @@ pub(super) fn first_reachable_dynamic_any_unpack(
     eligibility::first_reachable_dynamic_any_unpack(program)
 }
 
+pub(super) fn first_reachable_dynamic_any_unpack_from_roots(
+    program: &CheckedProgram,
+    additional_roots: &std::collections::BTreeSet<NodeId>,
+) -> Option<(NodeId, NodeId)> {
+    eligibility::first_reachable_dynamic_any_unpack_from_roots(program, additional_roots)
+}
+
 pub(super) fn dynamic_any_unpack_diagnostic(
     program: &CheckedProgram,
     owner: &NodeId,
@@ -241,7 +248,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         eligible: &std::collections::BTreeSet<NodeId>,
     ) -> Result<(usize, Vec<(String, Vec<ResolvedTypeId>)>), Vec<Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        if let Some((owner, node)) = eligibility::first_reachable_dynamic_any_unpack(program) {
+        if let Some((owner, node)) =
+            eligibility::first_reachable_dynamic_any_unpack_from_roots(program, eligible)
+        {
             return Err(vec![dynamic_any_unpack_diagnostic(program, &owner, &node)]);
         }
         NativeResolvedEmitter {

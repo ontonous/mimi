@@ -256,6 +256,12 @@ pub struct CodeGenerator<'ctx> {
     pub strict: bool,
     pub no_std: bool,
     pub shared: bool,
+    /// True only after a checked native route successfully compiled this
+    /// module with `shared` enabled, preflighting every externally callable
+    /// source function for DynamicAnyUnpack. Shared-object serializers require
+    /// this provenance so callers cannot compile under executable roots and
+    /// later expose otherwise-unreachable bodies.
+    shared_dynamic_any_preflight_passed: bool,
     pub verify_contracts: bool,
     /// Runtime pre-call checks from canonical scalar FFI receipts.
     pub verify_ffi: bool,
@@ -784,6 +790,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             strict: false,
             no_std: false,
             shared: false,
+            shared_dynamic_any_preflight_passed: false,
             verify_contracts: true,
             verify_ffi: true,
             target_triple: None,
@@ -6384,6 +6391,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
+        if self.shared {
+            self.require_shared_dynamic_any_preflight()?;
+        }
         let tm = self.create_target_machine()?;
         // M-001(b): a `--shared` build opts OUT of the `u_` symbol-namespacing
         // pass so exported functions keep their bare source names for the
@@ -6397,8 +6407,27 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// host contract (`dlsym("mul_sse16")` must keep resolving). Executable
     /// links (the default path) keep the pass enabled.
     pub fn compile_to_object_shared(&self, output_path: &Path) -> Result<(), CompileError> {
+        self.require_shared_dynamic_any_preflight()?;
         let tm = self.create_target_machine()?;
         self.emit_object_with_namespacing(&tm, output_path, false)
+    }
+
+    fn require_shared_dynamic_any_preflight(&self) -> Result<(), CompileError> {
+        if self.shared_dynamic_any_preflight_passed {
+            Ok(())
+        } else {
+            Err(CompileError::Unsupported(
+                "shared-object emission requires a successful checked native compilation in shared mode so every host-callable body is checked for DynamicAnyUnpack".into(),
+            ))
+        }
+    }
+
+    /// The test-only legacy harness still exercises C data-symbol emission
+    /// through `compile_file`, which is itself unavailable outside tests.
+    /// Keep that fixture path separate from the production serializer gate.
+    #[cfg(test)]
+    pub(crate) fn allow_legacy_test_shared_object_emission(&mut self) {
+        self.shared_dynamic_any_preflight_passed = true;
     }
 
     /// Emit an object file using a pre-created TargetMachine.

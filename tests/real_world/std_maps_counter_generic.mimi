@@ -1,8 +1,7 @@
 // Regression (L1, 0.39.136): the maps read-modify-write counter pattern was
-// UNWRITABLE before `get_or_default<T>` became generic over the default's
-// type — it returned `Any`, and Any has no arithmetic. T now binds at the
-// call site from the default expression; DynamicAnyUnpack admits the
-// container value through the concrete signature on both backends.
+// unwritable while `get_or_default` returned untyped Any. Making it generic
+// over the default lets the counter typecheck. Native execution stays
+// fail-closed: static T does not prove the stored Any entry has that type.
 
 use std::maps
 

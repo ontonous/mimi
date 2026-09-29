@@ -2,20 +2,26 @@
 
 **评估时间**：2026-07-19（0.31.4 基线）；0.1.7 状态更新见下
 **Mimi 版本**：0.31.4-dev → 0.1.7-dev
-**最后更新**：0.1.7
+**最后更新**：R6-1177（0.1.10-dev working tree）
 **评估命令**：`cargo test --test real_world_cli -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
-## 0.1.7 状态更新
+## R6-1177 当前 Map/Any 边界
 
-- `tests/real_world_cli.rs` 的 `KNOWN_GAPS` 目前仅保留 `core_generics_return_abi.mimi`：该 fixture 依赖 `List<string>` / `List<List<string>>` 的泛型构造，S105 的 Canonical MIR 构造岛只接受单元素 Copy-scalar receipt，因此默认 `run/build` 稳定拒绝且不得回退 legacy；`flow_order_system.mimi` 与 `flow_system_trace.mimi` 仍在 interpreter 与 codegen 双后端通过。
-- 完整 CLI MCDD 套件通过：所有 `tests/real_world/*.mimi`（除 interpreter-only 的 `flow_test_macros.mimi`）均通过 `mimi run`、`mimi build` 和 native exec，且 stdout 与 interpreter 一致。
+- 普通 `Map<_, Any>` 的条目目前没有能供 checker/native 消费者核验的动态类型标签。`get_or_default<T>` 的默认值只能确定返回端静态 `T`，不能证明已存条目也是 `T`；String 条目按 `i32` 读取曾使 native 输出指针位值，而 VM 返回 String。
+- 因此 `std_maps.mimi` 与 `std_maps_counter_generic.mimi` 继续通过 `mimi run` 的 VM 兼容路径；默认 native build 对可达 `DynamicAnyUnpack` 以 E0722 拒绝，且不生成可执行文件。两者登记为 fail-closed known gaps，并由 `ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility` 钉住 VM 成功/native 拒绝/产物缺席三项行为。
+- 这不是普通 Map/Any 的 MIR 迁移证明：typed descriptor、entry/root owner graph、clone/overwrite/remove/retained get/values/destroy 的所有权证据及 same-MIR 四消费者语义仍未闭合；在那之前不能把 E0722 换成 legacy native fallback。
+- `run_suite.py` 与 Cargo 的 `KNOWN_GAPS` 已同步登记这两项，且仍逐项执行；若将来默认 native 路径通过，漂移检查会要求同一修复切片删除 gap 登记。
+
+## 0.1.7 状态快照（历史）
+
+- 在 0.1.7 基线，`tests/real_world_cli.rs` 的 `KNOWN_GAPS` 仅保留 `core_generics_return_abi.mimi`。此后 R6-1177 为普通 Map/Any 的 native DynamicAnyUnpack 增加 fail-closed 门禁，最新状态见前一节。
+- 该历史快照中 CLI MCDD 套件全绿；它不代表 R6-1177 更新后的 Map/Any 原生边界。
 - 新增 `std_mimispec_ast_typechecks` 回归：`mimi check std/mimispec/ast.mimi` 通过。
 
 ### run_suite.py 的 KNOWN_GAPS 漂移检测（R6-1056）
 
-`run_suite.py` 与 cargo 侧 `KNOWN_GAPS` 同源登记 fail-closed 已知缺口（当前唯一：
-`core_generics_return_abi.mimi`，S105 `fa6696fa` 裁决见上条）。机制语义：
+`run_suite.py` 与 cargo 侧 `KNOWN_GAPS` 同步登记 fail-closed 已知缺口。机制语义：
 
 - gap 程序**每次全量跑仍然执行**（登记是漂移检测器，不是跳过）；
 - 按裁决失败 → 行标记 `GAP`、独立计数（`known-gap: N`）、不计入失败、exit 0；

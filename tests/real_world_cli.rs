@@ -59,14 +59,16 @@ fn can_link() -> bool {
     *CAN_LINK.get_or_init(|| Command::new("cc").arg("--version").output().is_ok())
 }
 
-/// Files that are expected to fail because they exercise known
-/// language or codegen gaps. Keep this list minimal and aligned with
-/// `tests/real_world/RESULTS.md`.
-/// Generic List construction with managed or nested elements is intentionally
-/// fail-closed while the Canonical MIR construction island only proves the
-/// single Copy-scalar shape (S105). Keep this fixture visible as a known gap so
-/// the suite records the boundary instead of allowing a legacy fallback.
-const KNOWN_GAPS: &[&str] = &["core_generics_return_abi.mimi"];
+/// Files whose expected CLI failures are recorded capability boundaries. Keep
+/// the list minimal and in lockstep with `tests/real_world/run_suite.py` and
+/// `RESULTS.md`; each entry's run/build behavior is still executed by the suite.
+/// Generic List construction with managed or nested elements stays outside the
+/// single Copy-scalar construction island (S105).
+const KNOWN_GAPS: &[&str] = &[
+    "core_generics_return_abi.mimi",
+    "std_maps.mimi",
+    "std_maps_counter_generic.mimi",
+];
 
 /// Programs whose feature contract is intentionally interpreter-only. Keep in
 /// lockstep with `tests/real_world/run_suite.py`.
@@ -23494,6 +23496,46 @@ fn real_world_cli_suite() {
             msg.push_str(&format!("\n=== {name} ===\n{details}"));
         }
         panic!("{msg}");
+    }
+}
+
+#[test]
+fn ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility() {
+    let root = project_root().join("tests").join("real_world");
+    for fixture in ["std_maps.mimi", "std_maps_counter_generic.mimi"] {
+        let source = root.join(fixture);
+        assert!(
+            run_mimi_run_out(&source).is_ok(),
+            "the VM compatibility route must keep {fixture} executable"
+        );
+
+        let binary = std::env::temp_dir().join(format!(
+            "mimi_map_any_fail_closed_{}_{}",
+            std::process::id(),
+            source.file_stem().expect("fixture stem").to_string_lossy()
+        ));
+        let _ = fs::remove_file(&binary);
+        let build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("spawn Map/Any native build");
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            !build.status.success(),
+            "native compilation of {fixture} must stay outside the untagged Any profile"
+        );
+        assert!(
+            stderr.contains("E0722") && stderr.contains("DynamicAnyUnpack"),
+            "{fixture} must fail at the explicit tag-safety boundary: {stderr}"
+        );
+        assert!(
+            !binary.exists(),
+            "rejected native compilation of {fixture} must not leave an artifact"
+        );
     }
 }
 

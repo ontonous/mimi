@@ -31,6 +31,16 @@ KNOWN_GAPS = {
         "receipts, so default run/build stably reject without legacy "
         "fallback (fail-closed by design; see RESULTS.md 0.1.7 status)"
     ),
+    "std_maps.mimi": (
+        "R6-1177 b1e81324: ordinary Map entries erase the stored value tag; "
+        "get_or_default<T> cannot prove the stored Any matches T, so native "
+        "build rejects DynamicAnyUnpack with E0722 while VM run remains supported"
+    ),
+    "std_maps_counter_generic.mimi": (
+        "R6-1177 b1e81324: the generic Map counter relies on an unchecked "
+        "Any-to-T unpack; native build rejects DynamicAnyUnpack with E0722 "
+        "while VM run remains supported"
+    ),
 }
 
 
