@@ -423,6 +423,45 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_self_method_call(obj, args, vars, function, "method_call");
         }
 
+        // Native actor mailboxes currently register only methods written in
+        // the actor body. `runs Flow` transition methods are synthetic in the
+        // checker/bytecode VM, but LLVM has no persistent Flow-state storage or
+        // synthetic mailbox dispatch for them. Detect an actor *value* here,
+        // after explicit actor methods have had precedence, so it cannot fall
+        // through to the same-named Flow lookup below and be mistaken for a
+        // direct Flow transition call with the actor handle as its state.
+        // A bare Flow name (for example `Job.advance(state)`) is not a runtime
+        // value in `vars`, and remains on the existing standalone Flow path.
+        let is_actor_value = match obj.unlocated() {
+            Expr::Ident(name) => vars.contains_key(name),
+            _ => true,
+        };
+        let unsupported_runs_flow_transition = if is_actor_value {
+            self.actor_defs.get(&obj_type).and_then(|actor| {
+                let flow_name = actor.runs_flow.as_deref()?;
+                if actor
+                    .methods
+                    .iter()
+                    .any(|method| method.name == method_name)
+                {
+                    return None;
+                }
+                let flow = self.flow_defs.get(flow_name)?;
+                flow.transitions
+                    .iter()
+                    .any(|transition| transition.name == method_name)
+                    .then(|| (actor.name.clone(), flow_name.to_string()))
+            })
+        } else {
+            None
+        };
+        if let Some((actor_name, flow_name)) = unsupported_runs_flow_transition {
+            return Err(CompileError::Unsupported(format!(
+                "native LLVM backend does not support synthetic transition method '{}::{}' on actor '{}' (runs Flow '{}'): native actor mailboxes do not retain Flow state; use `mimi run` or define an explicit actor method",
+                actor_name, method_name, actor_name, flow_name
+            )));
+        }
+
         // 1.2. Variant method dispatch (Result/Option combinators)
         if obj_type.starts_with("Result<")
             || obj_type.starts_with("Option<")

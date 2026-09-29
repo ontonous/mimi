@@ -934,6 +934,105 @@ fn compile_checked_keeps_flow_transition_on_legacy_owner() {
     );
 }
 
+fn compile_native_fixture(
+    source: &str,
+    module_name: &str,
+) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("fixture lexes");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("fixture parses");
+    let program = crate::core::check_program(&file)
+        .unwrap_or_else(|diagnostics| panic!("fixture checks: {diagnostics:?}"));
+    let context = Context::create();
+    let result = CodeGenerator::new(&context, module_name).compile_checked(&program);
+    result
+}
+
+#[test]
+fn native_flow_actor_transition_fails_closed_without_hijacking_flow_or_actor_methods() {
+    let same_name_demo = include_str!("../../demos/13_actors.mimi");
+    let same_name_diagnostics =
+        compile_native_fixture(same_name_demo, "flow_actor_same_name_diagnostic")
+            .expect_err("native backend must reject synthetic runs-Flow transition dispatch");
+    assert!(
+        same_name_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0722)
+                && diagnostic
+                    .message
+                    .contains("native LLVM backend does not support synthetic transition method")
+                && diagnostic
+                    .message
+                    .contains("native actor mailboxes do not retain Flow state")
+        }),
+        "expected explicit native Flow-actor capability diagnostic, got: {same_name_diagnostics:?}"
+    );
+
+    let name_disjoint_actor = r#"
+        flow Counter {
+            state Zero { n: i32 }
+            transition add(Zero, amount: i32) -> Zero {
+                return Zero { n: self.n + amount }
+            }
+        }
+        actor Worker runs Counter {}
+        func main() -> i32 {
+            let worker = Worker.spawn()
+            worker.add(1)
+            0
+        }
+    "#;
+    let name_disjoint_diagnostics =
+        compile_native_fixture(name_disjoint_actor, "flow_actor_name_disjoint_diagnostic")
+            .expect_err("name-disjoint runs-Flow actor transition must fail closed too");
+    assert!(
+        name_disjoint_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0722)
+                && diagnostic.message.contains("Worker::add")
+                && diagnostic.message.contains("runs Flow 'Counter'")
+        }),
+        "expected explicit native Flow-actor capability diagnostic, got: {name_disjoint_diagnostics:?}"
+    );
+
+    let explicit_actor_method_precedence = r#"
+        flow Job {
+            state Ready { n: i32 }
+            transition ping(Ready) -> Ready { return Ready { n: self.n + 1 } }
+        }
+        actor Runner runs Job {
+            func ping() -> i32 { return 9 }
+        }
+        func main() -> i32 {
+            let runner = Runner.spawn()
+            runner.ping()
+        }
+    "#;
+    compile_native_fixture(
+        explicit_actor_method_precedence,
+        "flow_actor_explicit_method_precedence",
+    )
+    .expect("explicit actor method must take precedence over a colliding Flow transition");
+
+    let standalone_flow_transition = r#"
+        flow Job {
+            state Ready { n: i32 }
+            transition advance(Ready) -> Ready { return Ready { n: self.n + 1 } }
+        }
+        func main() -> i32 {
+            let before = Ready { n: 40 }
+            let after = Job.advance(before)
+            after.n
+        }
+    "#;
+    compile_native_fixture(
+        standalone_flow_transition,
+        "standalone_flow_transition_control",
+    )
+    .expect("standalone Flow namespace transition must remain compilable natively");
+}
+
 #[test]
 fn compile_checked_keeps_trait_impl_specialization_on_legacy_owner() {
     let source = r#"
