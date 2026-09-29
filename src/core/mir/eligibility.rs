@@ -48,6 +48,27 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
     is_scalar_ffi_candidate_excluding_sources(program, None)
 }
 
+/// Whether the checked program contains a defined C-export body. Canonical
+/// MIR currently rejects these callables because it does not carry the
+/// export-wrapper ABI receipt; default dispatch can therefore select the
+/// explicit compatibility route before attempting MIR materialization.
+pub fn exported_abi_body_boundary_reason(program: &CheckedProgram) -> Option<&'static str> {
+    has_exported_abi_body(program, None)
+        .then_some("defined extern-ABI functions need the legacy C export-wrapper emitter")
+}
+
+fn has_exported_abi_body(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+) -> bool {
+    program.functions().values().any(|function| {
+        function.extern_abi.is_some()
+            && program.callables().contains_key(&function.node_id)
+            && !excluded_sources
+                .is_some_and(|excluded| excluded.contains(&function.origin.user_span().source_id))
+    })
+}
+
 /// Checker-side scalar FFI eligibility for a source-filtered MIR graph.
 /// Call sites owned by excluded source functions cannot authorize another
 /// retained function's nested declarations.
@@ -55,6 +76,14 @@ pub(crate) fn is_scalar_ffi_candidate_excluding_sources(
     program: &CheckedProgram,
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> bool {
+    // A graph may import scalar C functions and also define C-export bodies,
+    // but MIR has no receipt for the export wrapper. Keep that whole program
+    // outside the scalar-import island before materialization. Explicit MIR
+    // constructors still reject the unsupported export body, while default
+    // dispatch can report a deliberate compatibility route.
+    if has_exported_abi_body(program, excluded_sources) {
+        return false;
+    }
     let mut found = false;
     for site in program.call_sites_sorted() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
@@ -1857,8 +1886,9 @@ fn is_supported_local_retry_state_type(ty: &Type) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
-        is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+        exported_abi_body_boundary_reason, is_exact_cross_state_f64_failure_receipt,
+        is_exact_s8_flow_transition, is_flow_failure_retry_candidate,
+        is_s8_flow_transition_candidate, is_scalar_ffi_candidate,
     };
 
     fn checked(source: &str) -> crate::core::CheckedProgram {
@@ -1867,6 +1897,22 @@ mod tests {
             .parse_file()
             .expect("parse");
         crate::core::check_program(&file).expect("check")
+    }
+
+    #[test]
+    fn scalar_ffi_import_with_exported_body_stays_outside_mir_profile() {
+        let program = checked(
+            r#"
+                extern "C" { func abs(value: i32) -> i32; }
+                extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+                func main() -> i32 { abs(internal_export(-3)) }
+            "#,
+        );
+        assert!(!is_scalar_ffi_candidate(&program));
+        assert_eq!(
+            exported_abi_body_boundary_reason(&program),
+            Some("defined extern-ABI functions need the legacy C export-wrapper emitter")
+        );
     }
 
     #[test]

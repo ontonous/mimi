@@ -460,9 +460,9 @@ pub use copy_result_island::{
     COPY_RESULT_I32_VARIANT_ISLAND,
 };
 pub use eligibility::{
-    is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
-    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, is_scalar_ffi_candidate,
-    scalar_ffi_boundary_reason,
+    exported_abi_body_boundary_reason, is_exact_cross_state_f64_failure_receipt,
+    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    is_scalar_ffi_candidate, scalar_ffi_boundary_reason,
 };
 pub use identity_island::{
     classify_scalar_generic_identity_admission, classify_scalar_generic_identity_i64_admission,

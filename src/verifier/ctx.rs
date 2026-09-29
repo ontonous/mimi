@@ -345,6 +345,18 @@ pub fn compute_resolved_ir_hash(program: &crate::core::CheckedProgram) -> String
     blake3::hash(repr.as_bytes()).to_hex().to_string()
 }
 
+fn is_stdlib_prelude_callable(
+    program: &crate::core::CheckedProgram,
+    node_id: &crate::core::NodeId,
+) -> bool {
+    program.functions().get(node_id).is_some_and(|function| {
+        program
+            .source_registry()
+            .key(function.origin.user_span().source_id)
+            .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+    })
+}
+
 /// Mock verification from CheckedProgram (Z3-unavailable fallback).
 /// Replaces the AST-based `mock_verify_file` with a CheckedProgram-based path.
 /// Used by verify_checked when Z3 is unavailable (C4 partial, 0.32.27+).
@@ -354,6 +366,9 @@ pub(crate) fn mock_verify_checked(
     let mut results = Vec::new();
     // Functions and callables with contracts.
     for (node_id, callable) in program.callables() {
+        if is_stdlib_prelude_callable(program, node_id) {
+            continue;
+        }
         let has_contracts = !callable.contracts.is_empty()
             || callable
                 .body
@@ -1822,6 +1837,9 @@ impl Verifier {
     ) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         for (node_id, callable) in program.callables() {
+            if is_stdlib_prelude_callable(program, node_id) {
+                continue;
+            }
             if callable.contracts.is_empty()
                 && !crate::verifier::resolved_expr::has_math_obligations(callable)
             {

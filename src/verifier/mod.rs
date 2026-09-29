@@ -188,6 +188,46 @@ fn parse_memory_source(source: &str, label: &str) -> Result<crate::ast::File, St
         .map_err(|error| error.message)
 }
 
+/// Build the retained verifier input while omitting only the injected stdlib
+/// prelude bodies. The prelude remains present in `CheckedProgram` for type
+/// resolution and route construction; its implementation details are not user
+/// proof targets. This matters for compatibility programs that still use the
+/// AST/Flow verifier, which otherwise reports unsupported prelude bodies such
+/// as `lerp` even when the user's program has no corresponding obligation.
+fn without_injected_prelude(file: &crate::ast::File) -> crate::ast::File {
+    let mut filtered = file.clone();
+    let Some(prelude_source) = filtered
+        .sources
+        .records()
+        .iter()
+        .find(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+    else {
+        return filtered;
+    };
+    filtered
+        .items
+        .retain(|item| item_source_id(item) != Some(prelude_source));
+    filtered
+}
+
+fn item_source_id(item: &crate::ast::Item) -> Option<crate::span::SourceId> {
+    use crate::ast::Item;
+    let span = match item {
+        Item::Func(item) => item.meta.span,
+        Item::Type(item) => item.meta.span,
+        Item::Actor(item) => item.meta.span,
+        Item::Cap(item) => item.meta.span,
+        Item::Trait(item) => item.meta.span,
+        Item::Impl(item) => item.meta.span,
+        Item::ExternBlock(item) => item.meta.span,
+        Item::Const { meta, .. } => meta.span,
+        Item::Flow(item) => item.meta.span,
+        Item::Session(item) => item.meta.span,
+    };
+    span.source_id.is_known().then_some(span.source_id)
+}
+
 /// Verify contracts in source text.
 pub fn verify_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let file = parse_memory_source(source, "contracts")?;
@@ -453,13 +493,12 @@ pub fn verify_checked(
         // boundary is required here because
         // the Z3 encoding is defined over AST Expr nodes, not ResolvedExpr.
         // The resolved_ir_hash is embedded in ProofArtifact by the flow verifier.
-        flow::flow_verify_file_with_hashes(
+        let compatibility_file = without_injected_prelude(
             program
                 .legacy_body_file(crate::core::LegacyBodyConsumer::FlowVerifierCompatibility)
                 .as_ref(),
-            source_hash,
-            resolved_ir_hash,
-        )
+        );
+        flow::flow_verify_file_with_hashes(&compatibility_file, source_hash, resolved_ir_hash)
     } else {
         // C4 mock path: from CheckedProgram, no retained surface body needed.
         Ok(ctx::mock_verify_checked(program))
@@ -575,7 +614,9 @@ pub fn verify_ffi_mir_with_route_manifest(
     verify_ffi_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
-fn verify_ffi_checked_with_source_hash(
+/// Verify FFI call-site obligations from a checked program and preserve the
+/// source snapshot identity in any canonical proof artifacts.
+pub fn verify_ffi_checked_with_source_hash(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
@@ -705,10 +746,13 @@ fn verify_ffi_checked_with_source_hash(
             .into_iter()
             .filter(|(name, _)| called_contract_names.contains(name))
             .collect::<std::collections::HashMap<_, _>>();
-        flow::flow_verify_ffi_call_sites_with_externs_or_mock(
+        let compatibility_file = without_injected_prelude(
             program
                 .legacy_body_file(crate::core::LegacyBodyConsumer::FfiVerifierCompatibility)
                 .as_ref(),
+        );
+        flow::flow_verify_ffi_call_sites_with_externs_or_mock(
+            &compatibility_file,
             &contract_externs,
         )
     } else {
@@ -775,13 +819,13 @@ pub fn verify_checked_dual(
     primary.set_source_hash(source_hash.clone());
     let resolved_results = primary.verify_checked(program);
     // Secondary engine: flow/VIR (encodes surface AST bodies).
-    let flow_results = flow::flow_verify_file_with_hashes(
+    let compatibility_file = without_injected_prelude(
         program
             .legacy_body_file(crate::core::LegacyBodyConsumer::DualVerifierCompatibility)
             .as_ref(),
-        source_hash,
-        resolved_ir_hash,
-    )?;
+    );
+    let flow_results =
+        flow::flow_verify_file_with_hashes(&compatibility_file, source_hash, resolved_ir_hash)?;
     Ok(merge_engine_verdicts(resolved_results, flow_results))
 }
 
@@ -799,6 +843,15 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
+    // Match default route precedence: a defined exported C body has no
+    // canonical export-wrapper ABI receipt, so the entire request belongs to
+    // the compatibility verifier even if another subgraph resembles a closed
+    // MIR profile. Do not let a later verifier-side island probe turn that
+    // explicit compatibility route into a construction failure.
+    if crate::core::mir::exported_abi_body_boundary_reason(program).is_some() {
+        return Ok(None);
+    }
+
     const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 22] = [
         crate::core::mir::CanonicalMirRouteProfile::MapRoot,
         crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,

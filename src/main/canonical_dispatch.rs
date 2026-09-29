@@ -25,6 +25,10 @@ pub(crate) enum LegacyRouteReason {
     /// (the graph carries an operation outside the island envelope), so the
     /// program keeps its explicit compatibility route.
     PlainScalarIslandPreflightCompatibility,
+    /// A defined C-export body has no canonical export-wrapper receipt yet.
+    /// This is an early, explicit default compatibility disposition; explicit
+    /// MIR requests still fail during construction.
+    ExportedAbiBodyCompatibility,
 }
 
 impl LegacyRouteReason {
@@ -37,6 +41,7 @@ impl LegacyRouteReason {
             Self::PlainScalarIslandPreflightCompatibility => {
                 "plain-scalar-island-preflight-compatibility"
             }
+            Self::ExportedAbiBodyCompatibility => "exported-abi-body-compatibility",
         }
     }
 }
@@ -208,6 +213,9 @@ fn select_default_route_inner(checked: &CheckedProgram, merged_file: &File) -> D
     // `build`, or `verify` could silently hand the call to the old emitter.
     if let Some(reason) = scalar_ffi_declaration_boundary_diagnostic(checked) {
         return DefaultMirRoute::Rejected(reason);
+    }
+    if mimi::core::mir::exported_abi_body_boundary_reason(checked).is_some() {
+        return DefaultMirRoute::Legacy(LegacyRouteReason::ExportedAbiBodyCompatibility);
     }
     // Admission is checker-owned and must happen before MIR construction.
     // The shared envelope also owns the materialization receipts, preventing
@@ -5287,6 +5295,10 @@ mod tests {
         assert_eq!(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate.as_str(),
             "mixed-coverage-without-materialized-candidate"
+        );
+        assert_eq!(
+            LegacyRouteReason::ExportedAbiBodyCompatibility.as_str(),
+            "exported-abi-body-compatibility"
         );
     }
 

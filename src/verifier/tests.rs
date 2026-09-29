@@ -79,6 +79,45 @@ macro_rules! require_z3 {
 }
 
 #[test]
+fn exported_body_keeps_direct_dual_verifier_on_compatibility_path_with_maproot_candidate() {
+    require_z3!();
+    let source = r#"
+        extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+        func map_contract() -> i32 {
+            ensures: result == 1
+            1
+        }
+        func main() -> i32 {
+            let root = map_new()
+            let inserted = map_set(root, "answer", 42)
+            let size = map_size(inserted)
+            drop(inserted)
+            internal_export(size)
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).map_root_complete());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("export body must preserve the explicit dual-verifier compatibility route");
+    assert!(results.iter().any(|result| {
+        result.func_name == "map_contract" && result.status == VerifStatus::Proven
+    }));
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
+    );
+}
+
+#[test]
 fn verifier_memory_sources_are_stable_registered_and_label_isolated() {
     let source = "func main() -> i32 { let value = 1; value }";
     let first = parse_memory_source(source, "contracts").expect("first parse");

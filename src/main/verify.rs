@@ -112,6 +112,7 @@ pub(crate) fn verify(
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
+    let mut default_legacy_reason = None;
     let canonical = if mir {
         if dump_z3 {
             return Err("--dump-z3 is not available with --mir".into());
@@ -132,6 +133,7 @@ pub(crate) fn verify(
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
             crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
                 crate::canonical_dispatch::report_legacy_route(reason);
+                default_legacy_reason = Some(reason);
                 None
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
@@ -148,7 +150,7 @@ pub(crate) fn verify(
         .as_ref()
         .map(|program| program.route_receipt("verify-canonical-v1"));
 
-    let results = if let Some(canonical) = canonical {
+    let mut results = if let Some(canonical) = canonical {
         // The default route is selected only after the shared dispatcher has
         // preflighted every consumer.  The verifier still validates its own
         // input at the final consumer boundary and never falls back.
@@ -175,6 +177,22 @@ pub(crate) fn verify(
         // when their verdict classes disagree.
         mimi::verifier::verify_checked_dual(&checked_program, source_hash)?
     };
+
+    // The canonical scalar FFI verifier proves call-site preconditions from
+    // the shared MIR receipts. A program containing an exported C body stays
+    // on the explicit compatibility route because MIR has no export-wrapper
+    // ABI receipt; preserve the scalar FFI obligations through their retained
+    // verifier owner on that route rather than silently skipping them.
+    if default_legacy_reason
+        == Some(crate::canonical_dispatch::LegacyRouteReason::ExportedAbiBodyCompatibility)
+        || (dump_z3
+            && mimi::core::mir::exported_abi_body_boundary_reason(&checked_program).is_some())
+    {
+        results.extend(mimi::verifier::verify_ffi_checked_with_source_hash(
+            &checked_program,
+            blake3::hash(source.as_bytes()).to_hex().to_string(),
+        )?);
+    }
 
     // `verify` historically exposed only human verdict text, which made it
     // impossible for a CLI caller to compare the proof artifact with a route

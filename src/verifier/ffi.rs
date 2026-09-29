@@ -38,12 +38,11 @@ impl VerifierCtx {
         results
     }
 
-    /// Wave-2 (wave1-review §5.8): call-site discovery covers every
-    /// top-level function — the Wave-1 walker made If/While/For conditions,
-    /// Match, Defer, etc. exhaustive INSIDE a function body, but some
-    /// declaration forms were never visited at all, so `--verify-ffi` stayed
-    /// blind to extern calls they contain. (0.39.139: inline `module`
-    /// nesting no longer exists; the walker is flat over `file.items`.)
+    /// Call-site discovery walks every declaration form whose expressions can
+    /// execute: functions, actor/impl methods, Flow transitions, top-level
+    /// constants and actor field initializers. Checker call-site ownership is
+    /// broader than `Item::Func`; leaving a method body out here can turn a
+    /// checked FFI precondition into a false successful verification.
     fn verify_ffi_items_with_externs(
         &mut self,
         session: &mut SolverSession,
@@ -53,47 +52,242 @@ impl VerifierCtx {
         results: &mut Vec<VerificationResult>,
     ) {
         for item in items {
-            if let Item::Func(func) = item {
-                if func.body.is_empty() {
-                    continue;
+            match item {
+                Item::Func(func) => {
+                    self.verify_ffi_func(session, &func.name, func, externs, extern_names, results)
                 }
-                let calls = Self::find_extern_calls_in_func(func, extern_names);
-                if calls.is_empty() {
-                    continue;
-                }
-                session.push();
-                let mut vars = self.setup_ffi_func_vars(session, func);
-                if let Some(msg) = self.assert_func_requires(session, func, &mut vars) {
-                    results.push(VerificationResult {
-                        func_name: func.name.clone(),
-                        status: VerifStatus::NotInTrustedSubset,
-                        message: msg,
-                        diagnostic: None,
-                        duration_us: 0,
-                        constraint_count: 0,
-                        artifact: None,
-                        trusted_subset_domain: None,
-                    });
-                    session.pop();
-                    continue;
-                }
-
-                for (extern_name, args, call_span) in &calls {
-                    if let Some(extern_func) = externs.get(extern_name.as_str()) {
-                        let result = self.check_extern_call(
+                Item::Actor(actor) => {
+                    for field in &actor.fields {
+                        if let Some(initializer) = &field.init {
+                            let caller =
+                                format!("{}::field {} initializer", actor.name, field.name);
+                            self.verify_ffi_expression(
+                                session,
+                                &caller,
+                                initializer,
+                                field.meta.span,
+                                externs,
+                                extern_names,
+                                results,
+                            );
+                        }
+                    }
+                    for method in &actor.methods {
+                        let caller = format!("{}::{}", actor.name, method.name);
+                        self.verify_ffi_func(
                             session,
-                            &func.name,
-                            extern_func,
-                            args,
-                            &mut vars,
-                            *call_span,
+                            &caller,
+                            method,
+                            externs,
+                            extern_names,
+                            results,
                         );
-                        results.push(result);
                     }
                 }
-                session.pop();
+                Item::Impl(implementation) => {
+                    for method in &implementation.methods {
+                        let caller = format!("{}::{}", implementation.type_name, method.name);
+                        self.verify_ffi_func(
+                            session,
+                            &caller,
+                            method,
+                            externs,
+                            extern_names,
+                            results,
+                        );
+                    }
+                }
+                Item::Flow(flow) => {
+                    for transition in &flow.transitions {
+                        let Some(body) = transition.body.as_ref() else {
+                            continue;
+                        };
+                        let caller = format!(
+                            "{}::{} from {}",
+                            flow.name, transition.name, transition.from_state
+                        );
+                        self.verify_ffi_callable_body(
+                            session,
+                            &caller,
+                            &transition.params,
+                            body,
+                            transition.meta.span,
+                            externs,
+                            extern_names,
+                            results,
+                        );
+                        self.verify_ffi_param_defaults(
+                            session,
+                            &caller,
+                            &transition.params,
+                            transition.meta.span,
+                            externs,
+                            extern_names,
+                            results,
+                        );
+                    }
+                }
+                Item::Const {
+                    name, value, meta, ..
+                } => {
+                    let caller = format!("constant {name}");
+                    self.verify_ffi_expression(
+                        session,
+                        &caller,
+                        value,
+                        meta.span,
+                        externs,
+                        extern_names,
+                        results,
+                    );
+                }
+                Item::Trait(trait_def) => {
+                    for method in &trait_def.methods {
+                        let caller =
+                            format!("{}::{} default argument", trait_def.name, method.name);
+                        self.verify_ffi_param_defaults(
+                            session,
+                            &caller,
+                            &method.params,
+                            method.meta.span,
+                            externs,
+                            extern_names,
+                            results,
+                        );
+                    }
+                }
+                Item::Type(_) | Item::Cap(_) | Item::ExternBlock(_) | Item::Session(_) => {}
             }
         }
+    }
+
+    fn verify_ffi_func(
+        &mut self,
+        session: &mut SolverSession,
+        caller_name: &str,
+        function: &FuncDef,
+        externs: &HashMap<String, ExternFunc>,
+        extern_names: &HashSet<String>,
+        results: &mut Vec<VerificationResult>,
+    ) {
+        self.verify_ffi_callable_body(
+            session,
+            caller_name,
+            &function.params,
+            &function.body,
+            function.meta.span,
+            externs,
+            extern_names,
+            results,
+        );
+        self.verify_ffi_param_defaults(
+            session,
+            caller_name,
+            &function.params,
+            function.meta.span,
+            externs,
+            extern_names,
+            results,
+        );
+    }
+
+    fn verify_ffi_param_defaults(
+        &mut self,
+        session: &mut SolverSession,
+        caller_name: &str,
+        params: &[Param],
+        fallback_span: Span,
+        externs: &HashMap<String, ExternFunc>,
+        extern_names: &HashSet<String>,
+        results: &mut Vec<VerificationResult>,
+    ) {
+        for param in params {
+            if let Some(default) = &param.default_value {
+                let caller = format!("{caller_name} default for {}", param.name);
+                self.verify_ffi_expression(
+                    session,
+                    &caller,
+                    default,
+                    fallback_span,
+                    externs,
+                    extern_names,
+                    results,
+                );
+            }
+        }
+    }
+
+    fn verify_ffi_expression(
+        &mut self,
+        session: &mut SolverSession,
+        caller_name: &str,
+        expression: &Expr,
+        fallback_span: Span,
+        externs: &HashMap<String, ExternFunc>,
+        extern_names: &HashSet<String>,
+        results: &mut Vec<VerificationResult>,
+    ) {
+        let body = [Stmt::Expr(expression.clone())];
+        self.verify_ffi_callable_body(
+            session,
+            caller_name,
+            &[],
+            &body,
+            fallback_span,
+            externs,
+            extern_names,
+            results,
+        );
+    }
+
+    fn verify_ffi_callable_body(
+        &mut self,
+        session: &mut SolverSession,
+        caller_name: &str,
+        params: &[Param],
+        body: &[Stmt],
+        fallback_span: Span,
+        externs: &HashMap<String, ExternFunc>,
+        extern_names: &HashSet<String>,
+        results: &mut Vec<VerificationResult>,
+    ) {
+        if body.is_empty() {
+            return;
+        }
+        let calls = Self::find_extern_calls_in_body(body, extern_names, fallback_span);
+        if calls.is_empty() {
+            return;
+        }
+        session.push();
+        let mut vars = self.setup_ffi_func_vars(session, params);
+        if let Some(message) = self.assert_func_requires(session, caller_name, body, &mut vars) {
+            results.push(VerificationResult {
+                func_name: caller_name.to_string(),
+                status: VerifStatus::NotInTrustedSubset,
+                message,
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: None,
+            });
+            session.pop();
+            return;
+        }
+
+        for (extern_name, args, call_span) in &calls {
+            if let Some(extern_func) = externs.get(extern_name.as_str()) {
+                results.push(self.check_extern_call(
+                    session,
+                    caller_name,
+                    extern_func,
+                    args,
+                    &mut vars,
+                    *call_span,
+                ));
+            }
+        }
+        session.pop();
     }
 
     fn collect_externs(items: &[Item], externs: &mut HashMap<String, ExternFunc>) {
@@ -106,15 +300,16 @@ impl VerifierCtx {
         }
     }
 
-    fn find_extern_calls_in_func(
-        func: &FuncDef,
+    fn find_extern_calls_in_body(
+        body: &[Stmt],
         extern_names: &HashSet<String>,
+        fallback_span: Span,
     ) -> Vec<(String, Vec<Expr>, Span)> {
         let mut calls = Vec::new();
-        Self::find_extern_calls_in_block(&func.body, extern_names, &mut calls);
+        Self::find_extern_calls_in_block(body, extern_names, &mut calls);
         for (_, _, span) in &mut calls {
             if span.start_line == 0 || span.start_col == 0 {
-                *span = func.meta.span;
+                *span = fallback_span;
             }
         }
         calls
@@ -381,9 +576,9 @@ impl VerifierCtx {
         }
     }
 
-    fn setup_ffi_func_vars(&mut self, session: &mut SolverSession, func: &FuncDef) -> Z3VarMap {
+    fn setup_ffi_func_vars(&mut self, session: &mut SolverSession, params: &[Param]) -> Z3VarMap {
         let mut vars = Z3VarMap::new();
-        for p in &func.params {
+        for p in params {
             if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "f64") {
                 vars.insert_real(p.name.as_str(), Z3Real::new_const(p.name.as_str()));
             } else if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
@@ -405,7 +600,7 @@ impl VerifierCtx {
         // real string theory, matching the ordinary AST verifier path. This
         // prevents len(s) > 0 / s != "" proofs from being vacuous when a
         // caller requires a concrete string value.
-        for p in &func.params {
+        for p in params {
             if matches!(p.ty.unlocated(), Type::Name(n, _) if n == "string") {
                 if let Some(z3_s) = vars.get_string_var(p.name.as_str()) {
                     if let Some(len_var) = vars.get_string_len(p.name.as_str()) {
@@ -425,10 +620,11 @@ impl VerifierCtx {
     fn assert_func_requires(
         &mut self,
         session: &mut SolverSession,
-        func: &FuncDef,
+        caller_name: &str,
+        body: &[Stmt],
         vars: &mut Z3VarMap,
     ) -> Option<String> {
-        for stmt in &func.body {
+        for stmt in body {
             if let Stmt::Requires(expr, _) = stmt.unlocated() {
                 match expr::expr_to_z3_bool(expr, vars) {
                     Some(z3_bool) => session.assert(&z3_bool),
@@ -438,7 +634,7 @@ impl VerifierCtx {
                         // and silently proceeding without that obligation.
                         return Some(format!(
                             "could not encode requires in function '{}': {} (fail-closed)",
-                            func.name,
+                            caller_name,
                             crate::verifier::helpers::format_expr(expr)
                         ));
                     }

@@ -1037,6 +1037,69 @@ fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
 }
 
 #[test]
+fn compile_checked_keeps_scalar_ffi_with_export_body_on_compatibility_owner() {
+    let source = r#"
+        extern "C" { func abs(value: i32) -> i32; }
+        extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+        func main() -> i32 { abs(internal_export(-3)) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "scalar_ffi_export_compatibility");
+    codegen
+        .compile_checked(&program)
+        .expect("mixed scalar import and export body must use compatibility codegen");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.module.get_function("internal_export").is_some());
+    assert!(codegen
+        .module
+        .get_function(&CodeGenerator::export_body_symbol("internal_export"))
+        .is_some());
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
+fn compile_checked_export_body_precedes_a_closed_maproot_candidate() {
+    let source = r#"
+        extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+        func main() -> i32 {
+            let root = map_new()
+            let inserted = map_set(root, "answer", 42)
+            let size = map_size(inserted)
+            drop(inserted)
+            internal_export(size)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).map_root_complete());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "export_body_precedes_map_root");
+    codegen
+        .compile_checked(&program)
+        .expect("direct default-compatible compilation must honor the export boundary");
+    codegen.module.verify().expect("valid compatibility module");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
 fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
     let source = r#"
         extern "C" func recursive_export(value: i32) -> i32 {

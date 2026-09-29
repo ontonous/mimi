@@ -52,10 +52,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // returns only after the canonical native consumer is ready.  If
         // canonical lowering has not materialized one of these candidates,
         // this remains the compatibility path for unrelated legacy programs.
-        if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
-            let receipt =
-                canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
-            return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
+        // The shared default selector gives unsupported exported C wrapper
+        // bodies an explicit compatibility disposition before considering
+        // other closed islands. Preserve that precedence for direct
+        // `compile_checked` callers too: an unrelated MapRoot/record candidate
+        // must not make MIR materialization fail on the export body after the
+        // caller has entered the compatibility API.
+        if crate::core::mir::exported_abi_body_boundary_reason(program).is_none() {
+            if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
+                let receipt =
+                    canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+                return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
+            }
         }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
         // gate — fail closed on native return types whose heap ownership the
