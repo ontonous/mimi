@@ -4,7 +4,7 @@
 
 **Flow-first、面向类型状态（Typestate-Oriented）的系统编程语言**
 
-[![Version](https://img.shields.io/badge/version-0.1.10-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.11--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 
@@ -439,7 +439,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## 状态
 
-**当前版本**：0.1.10。0.1.9 于 2026-08-28 切出，包含线性种类 + 权限闭环（cap 真 move + std、小步语义、E0439）；0.40.x 交付 fat-ABI bug-hunt 收口（F-001–F-024）、所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 **Canonical MIR 架构战役**（内部 sprint 0.41，目标 0.1.11）：Canonical MIR 按 island 逐个迁移，能力门禁显式，未建模形状 fail-closed。执行计划 **M0–M3 已验收**，其中 scalar FFI 仅覆盖窄标量 C ABI；字符串、指针、聚合体、variadic、参数模式、errno、`no_panic` 和非 C ABI 调用在执行入口明确拒绝。2026-09-29 删除审计确认生产 `raw_ast()` 调用点 **0**，仍有四类兼容 owner 保留 legacy 依赖。普通 Map/Any 与两个 Actor fallback 形状仍在 MIR admission 边界之外；默认 `run`/`build`/`verify` 仅对完整预检的 island 使用 Canonical MIR，本项目尚未宣称全局 VM≡native。见[FFI 范围与链接](readme/10-ffi.md)。
+**当前版本**：0.1.11-dev。0.1.10（2026-09-29）建立 Canonical MIR scalar FFI 与 island 默认路由基线。0.1.9 于 2026-08-28 切出，包含线性种类 + 权限闭环（cap 真 move + std、小步语义、E0439）；0.40.x 交付 fat-ABI bug-hunt 收口（F-001–F-024）、所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。**Canonical MIR 架构战役**（内部 sprint 0.41，目标 0.1.11）按 island 逐个迁移，能力门禁显式，未建模形状 fail-closed。执行计划 **M0–M3 已验收**，其中 scalar FFI 仅覆盖窄标量 C ABI；字符串、指针、聚合体、variadic、参数模式、errno、`no_panic` 和非 C ABI 调用在执行入口明确拒绝。2026-09-29 删除审计确认生产 `raw_ast()` 调用点 **0**，仍有四类兼容 owner 保留 legacy 依赖。普通 Map/Any 与两个 Actor fallback 形状仍在 MIR admission 边界之外；默认 `run`/`build`/`verify` 仅对完整预检的 island 使用 Canonical MIR，本项目尚未宣称全局 VM≡native。见[FFI 范围与链接](readme/10-ffi.md)。
 
 
 ### 文档索引与外部盲审
@@ -452,7 +452,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ## 版本历史
 
 ### 1. 当前版本
-- **0.1.10**（当前）：Canonical MIR scalar FFI 闭环、按 island 迁移默认路由、真实痛点修复与 FFI 组件符号闭合（M-004 `extern "C" const` 导出、M-001 导出前缀）；0.40.x 交付所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线自 2026-08-31 起转入 Canonical MIR 架构战役（内部 sprint 0.41，目标 0.1.11）；M0–M3 里程碑已验收，生产 raw-AST 调用点为零。普通 Map/Any 仍对 native MIR fail-closed，四类 legacy owner 仍可达。见 CHANGELOG.md。
+- **0.1.11-dev**（当前）：继续按 island 扩大 Canonical MIR admission 并按可达性退役 owner。**0.1.10**（2026-09-29）交付 scalar FFI 闭环、默认 MIR 路由、真实痛点修复与 FFI 组件符号闭合（M-004 `extern "C" const` 导出、M-001 导出前缀）；0.40.x 交付所有权元数据单源化（A1）与派生 value drop/clone glue（A2）。主线为 Canonical MIR 架构战役（内部 sprint 0.41，目标 0.1.11）；M0–M3 里程碑已验收，生产 raw-AST 调用点为零。普通 Map/Any 仍对 native MIR fail-closed，四类 legacy owner 仍可达。见 CHANGELOG.md。
 
 ### 2. 当前大版本（0.1.x）
 - **0.1.0 → 0.1.10**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）、语义诚实 + 身份纯度（0.1.8）、线性种类 + 权限闭环（0.1.9）、Canonical MIR scalar FFI / island 迁移（0.1.10）。逐 minor 细节见 CHANGELOG.md。

@@ -1,6 +1,6 @@
 # Mimi Runtime Architecture
 
-> 500-word runtime architecture overview（v0.31.22 盲审修正，0.1.10 当前；native runtime 是 Canonical MIR native emitter 的下游消费者）
+> 500-word runtime architecture overview（v0.31.22 盲审修正，0.1.11-dev 当前；native runtime 是 Canonical MIR native emitter 的下游消费者）
 
 ## Overview
 
