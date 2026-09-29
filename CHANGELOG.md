@@ -1,8 +1,36 @@
 # Changelog
 
-## [Unreleased] — 0.1.10-dev
+## [Unreleased] — 0.1.11-dev
 
-### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-24，游标 R6-22 → R6-1114）
+## [0.1.10] - 2026-09-29
+
+### 0.1.10 发布范围与边界
+
+0.1.10 收录 Canonical MIR 执行迁移、checker-owned 标量 FFI receipt、多消费者验证、
+Flow/union/Record/List 岛扩张，以及真实代码痛点修复。默认入口只对所有消费者预检通过
+的 profile 选择 MIR；未建模形状必须显式拒绝或保留已登记的兼容 owner，不承诺全语言
+VM≡native 或 legacy 全局退役。
+
+- **普通 Map/Any 仍是已知限制**：`Map<_, Any>` 尚无 checker 可验证的动态类型标签与闭合
+  owner graph。MapRoot 的静态 key `contains` 子集有独立 receipt 与同一 MIR 验证；普通
+  `map_get`/`values` 仍不进入 native MIR，`DynamicAnyUnpack` 在 native admission 中以
+  E0722 fail-closed，VM 兼容执行仍可用。不能把 MapRoot 的 L3 证据外推到普通 Map/Any。
+- **Actor 与 legacy 边界**：nested capture/shadow Actor helper 仍有两条兼容路由；四类
+  production legacy owner 继续可达（4 个 body accessor、6 个 legacy emitter 调用点、0 个
+  raw-AST 调用点、0 个删除就绪 owner）。各 owner 的依赖与删除前置条件逐项记录于 R6-1177
+  审计台账；本节
+  不宣称全局 legacy 清零。
+- **适用测试证据**：源码提交 `49e78f22f5f706fb4810ba33288ae9daf77d4679` 在 LLVM 18.1.3
+  dynamic 配置下 `cargo test --all-targets` 退出 0：lib 7,721 passed / 20 ignored、main
+  229、real-world CLI 352、stress 62 passed / 28 ignored，其他测试目标与 Criterion smoke
+  均通过；严格 all-target Clippy `-D warnings`、fmt/diff、native production audit、unsafe
+  SAFETY gate、edge-isolation gate 均通过。此源码提交之后的发布元数据切片不改 Rust 代码。
+- **未声称的门禁**：R6-1177 期间 fresh dispatch census 因磁盘 ENOSPC 中止；普通 Map/Any
+  Memcheck 仍有已登记的 possible-loss/reachable 分配，ASan 没有在该最新源码切片复采。
+  既有 MapRoot 定向 Memcheck 结果不替代普通 Map/Any 生命周期门禁；不能将这些缺口描述为
+  已通过。
+
+### Canonical MIR 执行计划 M0–M3 验收与 R6 家族推进（2026-09-06 – 2026-09-29，游标 R6-22 → R6-1177）
 
 按 `devdocs/MIR_EXECUTION_PLAN_2026-09-06.md`（M0 稳定化 → M1 家族组合 → M2 默认迁移/
 物理删除 → M3 Flow 失败闭环）完成首轮全部里程碑验收，随后按 §8 队列推进 R6 系列切片。
@@ -44,20 +72,27 @@
   lowering 增加显式 closure-environment ABI fail-closed 检查；三种 direct MIR CLI
   （`mir`/`run --mir`/`build --mir`）负例和 lowered-body 单测锁定拒绝边界。actor shadow
   与 capture fallback 仍需 parent/declaration receipt 或 closure ABI，不扩大支持面。
+- **R6-1177 Map/Any 与 Actor 边界加固（09-28–09-29）**：MapRoot static-key `contains`
+  保持为独立有 receipt 的 MIR 子集；普通 `DynamicAnyUnpack` 在 native shared/export/
+  resolved admission 中 fail-closed，不能从静态默认值推断 Any payload 类型。Map slot detach、
+  generation advance 后在 registry lock 外析构 owner；覆盖 actor self-transition 错误拒绝、
+  capture/shadow fallback 边界和共享 native Any provenance。普通 Map/Any 仍缺 checker-owned
+  tag/owner graph，MapRoot Memcheck 不代表其生命周期闭合。
 - **CLI 可用性收口**：删除无效 `promote`、`--strict`、`--verify-rules` 和测试分配器选项；
   `mimi build` 增加可重复的 `--link-search` / `--link-lib` 原生宿主链接选项；默认与显式
   `--mir` 对不支持的已调用 FFI 声明在相同源码边界拒绝，文档同步当前模块、测试、FFI 和
   预编译运行依赖边界。
-- **发布入口加固（尚未到 tag 阶段）**：release tag 在 archive 构建前复用完整 CI；仅接收
-  稳定 SemVer（历史 `mimi-v` 前缀也限制为稳定版本），校验 Cargo 包版本、locked 元数据和
+- **发布入口加固**：release tag 在 archive 构建前复用完整 CI；新 tag 使用纯稳定 SemVer
+  （历史 `mimi-v` 前缀也限制为稳定版本），校验 Cargo 包版本、locked 元数据和
   同版本 CHANGELOG 小节，发布说明缺失时 fail-closed；README 写明 LLVM 18/Z3/libffi 动态
-  运行依赖；Makefile 全部 Cargo 入口默认使用 setup 脚本生成的 LLVM wrapper。当前 Cargo
-  版本仍是 `0.1.10-dev` 且没有 `0.1.11` 发布小节，因此不能产出新版本 tag。
+  运行依赖；Makefile 全部 Cargo 入口默认使用 setup 脚本生成的 LLVM wrapper。2026-09-24
+  的基线当时仍是 `0.1.10-dev` 且没有对应 stable release section；本次稳定版本号为
+  `0.1.10`，后续开发线以 `0.1.11-dev` 继续。
 - **门禁与工具**：real_world `run_suite` 已知差距 drift 检测（R6-1056）；unsafe SAFETY
   gate 基线 37→0（R6-1058）。
 - **可移植性探查**：Android 四目标（aarch64/armv7/i686/x86_64）cfg check 通过（需
   `blake3/pure`，不宣称链接或运行）；wasm32 保持上游依赖层阻断记录。
-- **删除门禁现状（2026-09-24）**：`raw_ast()` 生产调用点 **0**；四类兼容 owner 仍各有
+- **删除门禁现状（2026-09-29）**：`raw_ast()` 生产调用点 **0**；四类兼容 owner 仍各有
   真实依赖，生产 body accessor 4 处、`compile_func_legacy` 6 处；scalar FFI direct
   expression legacy references **0**。不宣称全局 legacy 清零；R6-1114 已建立六条
   Codegen legacy 调用点身份矩阵并复核删除前置条件，scalar FFI profile 不受影响。
@@ -88,6 +123,15 @@ mimichat-modern 未到达；同一命令还输出若干非致命 Component IR ru
 E0713 是未迁移 legacy codegen 的既有 actor ABI 债务，不能通过放宽 layout verifier 修复，
 登记到 R6-1114 CodegenLegacyRemainder。wasm32 仍是上游依赖层未满足构建前提，Android
 只完成四目标 cfg check，不冒充链接/运行支持。版本仍为开发版，未 push、发布或打 tag。
+
+更新验证记录（2026-09-29，源码提交 `49e78f22f5f706fb4810ba33288ae9daf77d4679`，
+LLVM 18.1.3 dynamic）：MapRoot 静态 key 的 reference/bytecode/native 与 verifier 正反例
+通过；`map_` focused 为 260 passed / 2 ignored；完整 lib runner 为 7,716 passed / 20
+ignored；最终 all-targets 为上方 release evidence 所列 7,721 passed / 20 ignored，严格
+Clippy `-D warnings`、fmt/diff、unsafe、edge-isolation 与 native audit 通过。受剩余磁盘
+空间限制，没有在该源码切片重跑 ASan、普通 Map/Any Memcheck 或 fresh dispatch census；
+dispatch census 的 ENOSPC partial run 不作为覆盖证据。release tag workflow 仍会在 tag
+commit 上重跑完整 CI 与 release 构建，只有 CI 成功后才打包。
 
 ### Canonical MIR 架构战役（内部 sprint 0.41.x，2026-08-31 – 2026-09-05，s0–s144）
 

@@ -4,7 +4,7 @@
 
 **A Flow-first, Typestate-Oriented system programming language**
 
-[![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.10-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
 
@@ -439,7 +439,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status
 
-**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): Canonical MIR is migrated island-by-island behind explicit capability gates, and unmodeled shapes fail closed. The 2026-09-06 execution plan milestones **M0–M3 are accepted**, including default-entry migration and scalar FFI execution/verification across the MIR consumers. The scalar FFI profile is deliberately narrow; unsupported string, pointer, aggregate, variadic, parameter-mode, errno, `no_panic`, and non-C declarations are rejected before execution. As of the 2026-09-24 deletion audit, production `raw_ast()` call sites are **0**, while four compatibility owner classes still have remaining dependencies. Default `run`/`build`/`verify` use Canonical MIR only for fully preflighted islands; this does not claim global VM≡native equivalence. See [FFI limits and linking](readme/10-ffi.md) and [release history](CHANGELOG.md).
+**Current**: 0.1.10. 0.1.9 was cut on 2026-08-28 with linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): Canonical MIR is migrated island-by-island behind explicit capability gates, and unmodeled shapes fail closed. The 2026-09-06 execution plan milestones **M0–M3 are accepted**, including default-entry migration and scalar FFI execution/verification across the MIR consumers. The scalar FFI profile is deliberately narrow; unsupported string, pointer, aggregate, variadic, parameter-mode, errno, `no_panic`, and non-C declarations are rejected before execution. As of the 2026-09-29 deletion audit, production `raw_ast()` call sites are **0**, while four compatibility owner classes still have remaining dependencies. Ordinary Map/Any and two Actor fallback shapes remain outside MIR admission; default `run`/`build`/`verify` use Canonical MIR only for fully preflighted islands, and this does not claim global VM≡native equivalence. See [FFI limits and linking](readme/10-ffi.md) and [release history](CHANGELOG.md).
 
 
 ### References & External Reviews
@@ -454,17 +454,20 @@ CHANGELOG.md.
 ## Version History
 
 ### 1. Current Version
-- **0.1.10-dev** (current): real-world pain-point repairs and FFI component-symbol closure
+- **0.1.10** (current): Canonical MIR scalar FFI closure, island-by-island default routing,
+  and real-world pain-point repairs including FFI component-symbol closure
   (M-004 `extern "C" const` export, M-001 export-prefix); 0.40.x added ownership-metadata
   single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline
   is the Canonical MIR architecture campaign (internal sprint 0.41, targeting 0.1.11);
   M0–M3 execution-plan milestones are accepted and production raw-AST call sites are at zero.
-  See CHANGELOG.md.
+  Ordinary Map/Any remains fail-closed for native MIR and four compatibility owner classes
+  remain reachable; see the scope and evidence in CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)
-- **0.1.0 → 0.1.8**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,
+- **0.1.0 → 0.1.10**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,
   Bytecode VM as sole interpreter, full codegen migration, golden document + syntax freeze (0.1.4),
-  Deep core closure (0.1.6), Wave-3 honest infrastructure closeout (0.1.7). Per-minor detail in
+  Deep core closure (0.1.6), Wave-3 honest infrastructure closeout (0.1.7), and Canonical MIR
+  scalar FFI/island migration (0.1.10). Per-minor detail in
   CHANGELOG.md.
 
 ### 3. Pre-0.1 (v0.7 – v0.30)
