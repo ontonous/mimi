@@ -996,6 +996,36 @@ fn native_flow_actor_transition_fails_closed_without_hijacking_flow_or_actor_met
         "expected explicit native Flow-actor capability diagnostic, got: {name_disjoint_diagnostics:?}"
     );
 
+    let self_transition = r#"
+        flow Counter {
+            state Zero { n: i32 }
+            transition add(Zero, amount: i32) -> Zero {
+                return Zero { n: self.n + amount }
+            }
+        }
+        actor Worker runs Counter {
+            func invoke(amount: i32) -> i32 {
+                let next = self.add(amount)
+                next.n
+            }
+        }
+        func main() -> i32 {
+            let worker = Worker.spawn()
+            worker.invoke(1)
+        }
+    "#;
+    let self_transition_diagnostics =
+        compile_native_fixture(self_transition, "flow_actor_self_transition_diagnostic")
+            .expect_err("native actor self-call to a synthetic transition must fail closed");
+    assert!(
+        self_transition_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0722)
+                && diagnostic.message.contains("Worker::add")
+                && diagnostic.message.contains("runs Flow 'Counter'")
+        }),
+        "expected explicit native Flow-actor self-call diagnostic, got: {self_transition_diagnostics:?}"
+    );
+
     let explicit_actor_method_precedence = r#"
         flow Job {
             state Ready { n: i32 }
