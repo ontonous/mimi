@@ -463,6 +463,7 @@ pub(crate) fn transition_lowering_result(
 pub fn lower_program(
     program: &CheckedProgram,
 ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
+    reject_exported_abi_bodies(program, None)?;
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
@@ -509,6 +510,7 @@ pub(crate) fn lower_program_with_type_catalog_and_nested(
     type_catalog: &MirTypeCatalog,
     nested_callable_declarations: &BTreeMap<NodeId, BTreeMap<NodeId, NodeId>>,
 ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
+    reject_exported_abi_bodies(program, None)?;
     let call_parameter_permissions = program
         .resolved_signatures()
         .values()
@@ -553,6 +555,44 @@ pub(crate) fn lower_program_with_type_catalog_and_nested(
     }
     if errors.is_empty() {
         Ok(lowered)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Exported `extern "C"` functions need a C-ABI wrapper around an internal
+/// Mimi-ABI body. Until MIR carries and validates that wrapper contract, do
+/// not materialize the body as an ordinary callable: doing so would silently
+/// drop the public C symbol while still allowing `--mir` to execute it.
+///
+/// Extern imports are represented by `extern_blocks`, not by a callable with
+/// an `extern_abi`, so this guard leaves the canonical scalar-import slice
+/// available. The optional source set mirrors the checked-program constructor
+/// that intentionally excludes compatibility sources.
+pub(crate) fn reject_exported_abi_bodies(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+) -> Result<(), Vec<MirLoweringError>> {
+    let errors = program
+        .functions()
+        .values()
+        .filter(|function| function.extern_abi.is_some())
+        .filter(|function| program.callables().contains_key(&function.node_id))
+        .filter(|function| {
+            excluded_sources.map_or(true, |sources| {
+                !sources.contains(&function.origin.user_span().source_id)
+            })
+        })
+        .map(|function| MirLoweringError {
+            node_id: function.node_id.clone(),
+            message: format!(
+                "exported {} function body has no canonical MIR export-wrapper ABI",
+                function.extern_abi.as_deref().unwrap_or("foreign ABI")
+            ),
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
     } else {
         Err(errors)
     }
@@ -12795,6 +12835,7 @@ fn is_set_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) ->
 #[cfg(test)]
 mod tests {
     use super::{lower_body, lower_body_with_type_catalog, lower_program};
+    use crate::core::mir::reference::{MirProgram, MirProgramBuildError};
     use crate::core::mir::types::MirTypeCatalog;
     use crate::core::mir::{MirInstructionKind, MirTerminator};
     use crate::lexer::Lexer;
@@ -12816,6 +12857,38 @@ mod tests {
         assert!(mir.canonical_text().contains("binary"));
         let program_mir = lower_program(&program).expect("program MIR lowering");
         assert!(program_mir.contains_key(&callable.owner));
+    }
+
+    #[test]
+    fn exported_c_abi_function_body_is_rejected_by_every_program_lowering_entry() {
+        let source = r#"
+            extern "C" func exported(value: i32) -> i32 { value + 1 }
+            func main() -> i32 { exported(41) }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        let assert_export_rejected = |errors: &[super::MirLoweringError]| {
+            assert!(errors.iter().any(|error| {
+                error.node_id.0 == "function:exported"
+                    && error
+                        .message
+                        .contains("no canonical MIR export-wrapper ABI")
+            }));
+        };
+        assert_export_rejected(&lower_program(&program).expect_err("plain lowering"));
+
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("type catalog");
+        assert_export_rejected(
+            &super::lower_program_with_type_catalog(&program, &catalog)
+                .expect_err("typed lowering"),
+        );
+
+        match MirProgram::from_checked_program(&program).expect_err("canonical MIR construction") {
+            MirProgramBuildError::Lowering(errors) => assert_export_rejected(&errors),
+            other => panic!("expected exported ABI lowering error, got {other:?}"),
+        }
     }
 
     #[test]

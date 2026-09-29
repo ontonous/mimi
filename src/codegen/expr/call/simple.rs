@@ -7370,6 +7370,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return self.emit_function_call(function, name, metadata_args);
                 }
             }
+            // Calls from Mimi code to an exported `extern "C" func` use the
+            // private body symbol and Mimi's internal ABI. The public export
+            // symbol is a C ABI conversion wrapper and must only be entered
+            // by foreign callers.
+            if let Some(export) = self
+                .func_defs
+                .get(name)
+                .filter(|f| f.extern_abi.is_some() && f.generics.is_empty())
+            {
+                let body_name = CodeGenerator::export_body_symbol(&export.name);
+                let function = self.module.get_function(&body_name).ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "exported function '{}': internal body '{}' was not declared",
+                        export.name, body_name
+                    ))
+                })?;
+                return self.emit_function_call(function, name, metadata_args);
+            }
             // Extern wrappers are keyed by declaration name in the wrapper map
             // (wrapper itself is named `{name}.extern_wrapper` since 0.34.35b).
             // Check the wrapper map first to call the correct function.

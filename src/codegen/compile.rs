@@ -1820,7 +1820,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         // match the order used for the rest of codegen.
         for item in &file.items {
             if let Item::Func(f) = item {
-                if f.is_comptime || f.extern_abi.is_some() {
+                if f.is_comptime {
+                    continue;
+                }
+                if f.extern_abi.is_some() {
+                    // Exported C functions have a distinct C boundary
+                    // wrapper and a Mimi-internal body. Declare the body
+                    // before any caller is emitted so recursion and forward
+                    // calls can use Mimi's ABI without going through the C
+                    // conversion wrapper.
+                    if f.generics.is_empty() {
+                        let mut body = f.clone();
+                        body.name = Self::export_body_symbol(&f.name);
+                        body.extern_abi = None;
+                        self.declare_func(&body)?.0.set_linkage(Linkage::Internal);
+                    }
                     continue;
                 }
                 if matches!(

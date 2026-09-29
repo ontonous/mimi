@@ -312,6 +312,8 @@ impl MirProgram {
         program: &crate::core::CheckedProgram,
         excluded_sources: &HashSet<crate::span::SourceId>,
     ) -> Result<Self, MirProgramBuildError> {
+        super::lower::reject_exported_abi_bodies(program, Some(excluded_sources))
+            .map_err(MirProgramBuildError::Lowering)?;
         let type_catalog =
             MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
         let call_parameter_permissions = program

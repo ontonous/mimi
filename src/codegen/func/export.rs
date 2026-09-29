@@ -8,9 +8,9 @@
 //! `{fn_ptr, env_ptr}`, and `#[repr(C)]` records use an internal layout.
 //!
 //! To keep the internal representation unchanged while presenting a correct C
-//! ABI, we compile the function body as an *internal* function
-//! `foo__mimi_export_body` and emit an exported wrapper `foo` that converts
-//! arguments from C to internal, calls the body, and converts the result back.
+//! ABI, we compile the function body under a compiler-only internal symbol and
+//! emit an exported wrapper `foo` that converts arguments from C to internal,
+//! calls the body, and converts the result back.
 
 use crate::ast::{Field, FuncDef, Type, TypeDefKind};
 use crate::codegen::types;
@@ -48,6 +48,13 @@ pub(crate) enum SysVCoerce<'ctx> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    pub(crate) fn export_body_symbol(name: &str) -> String {
+        // `$` cannot appear in a Mimi identifier, so a source declaration
+        // cannot collide with this generated symbol. Keep the C-visible name
+        // exclusively on the conversion wrapper.
+        format!("$mimi.export.body.{name}")
+    }
+
     /// Compile an exported `extern "C"` function by emitting a C-ABI wrapper
     /// around an already-compiled internal body function.
     pub(super) fn compile_export_wrapper(

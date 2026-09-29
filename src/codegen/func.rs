@@ -4133,13 +4133,27 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Exported extern functions get a C ABI wrapper around an internal body.
         if func.extern_abi.is_some() && func.generics.is_empty() {
-            let body_name = format!("{}__mimi_export_body", func.name);
-            if self.module.get_function(&body_name).is_none() {
+            let body_name = Self::export_body_symbol(&func.name);
+            let body_needs_compile = self
+                .module
+                .get_function(&body_name)
+                .map(|body| body.count_basic_blocks() == 0)
+                .unwrap_or(true);
+            if body_needs_compile {
                 let mut body_func = func.clone();
                 body_func.name = body_name.clone();
                 body_func.extern_abi = None;
                 self.compile_func_legacy(&body_func)?;
             }
+            self.module
+                .get_function(&body_name)
+                .ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "exported function '{}': internal body '{}' was not emitted",
+                        func.name, body_name
+                    ))
+                })?
+                .set_linkage(inkwell::module::Linkage::Internal);
             return self.compile_export_wrapper(func, &body_name);
         }
 

@@ -555,7 +555,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator.clear_partial_body(function);
     }
 
-    fn callable_symbol(&self, owner: &NodeId) -> Result<&str, CompileError> {
+    fn callable_symbol(&self, owner: &NodeId) -> Result<String, CompileError> {
         let function = self.program.functions().get(owner).ok_or_else(|| {
             CompileError::Unsupported(format!("function catalog has no owner '{}'", owner.0))
         })?;
@@ -565,7 +565,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 function.qualified_name
             )));
         }
-        Ok(&function.qualified_name)
+        if function.extern_abi.is_some() && function.generics.is_empty() {
+            // Internal Mimi callers must bypass the public C ABI wrapper and
+            // target the separately declared Mimi-body symbol.
+            Ok(CodeGenerator::export_body_symbol(&function.qualified_name))
+        } else {
+            Ok(function.qualified_name.clone())
+        }
     }
 
     /// Lower a ResolvedTypeId to an LLVM type, with fallback for
@@ -3450,6 +3456,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         } else {
                             self.callable_symbol(owner)?.to_string()
                         };
+                        let tracking_name = self
+                            .program
+                            .functions()
+                            .get(owner)
+                            .filter(|function| {
+                                function.extern_abi.is_some() && function.generics.is_empty()
+                            })
+                            .map(|function| function.qualified_name.clone())
+                            .unwrap_or_else(|| symbol.clone());
                         let callee =
                             self.generator.module.get_function(&symbol).ok_or_else(|| {
                                 CompileError::LlvmError(format!(
@@ -3499,7 +3514,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // via the callee's return-type AST in func_defs).
                                 let result = self
                                     .generator
-                                    .track_enum_box_return_lifetime(&symbol, result)?;
+                                    .track_enum_box_return_lifetime(&tracking_name, result)?;
                                 // Heap-return ownership: resolved calls need
                                 // caller-side tracking for String, List, and
                                 // heap-field Record results. Register every
@@ -9715,19 +9730,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match callee {
             ResolvedCallee::Function(callee_owner) => {
-                let callee_fn = self.program.functions().get(callee_owner).ok_or_else(|| {
-                    CompileError::Unsupported(format!(
-                        "callable reference to unknown function '{:?}'",
-                        callee_owner
-                    ))
-                })?;
-                let fn_name = &callee_fn.qualified_name;
-                let llvm_fn = self.generator.module.get_function(fn_name).ok_or_else(|| {
-                    CompileError::LlvmError(format!(
-                        "callable reference: function '{}' not declared in LLVM module",
-                        fn_name
-                    ))
-                })?;
+                let fn_name = self.callable_symbol(callee_owner)?;
+                let llvm_fn = self
+                    .generator
+                    .module
+                    .get_function(&fn_name)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "callable reference: function '{}' not declared in LLVM module",
+                            fn_name
+                        ))
+                    })?;
                 Ok(llvm_fn.as_global_value().as_pointer_value().into())
             }
             _ => Err(CompileError::Unsupported(

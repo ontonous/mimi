@@ -1028,12 +1028,85 @@ fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
         .is_some());
     assert!(codegen
         .module
-        .get_function("owner_tripwire_export__mimi_export_body")
+        .get_function(&CodeGenerator::export_body_symbol("owner_tripwire_export"))
         .is_some());
     assert_eq!(
         crate::core::CheckedProgram::test_legacy_body_access(),
         vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
     );
+}
+
+#[test]
+fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
+    let source = r#"
+        extern "C" func recursive_export(value: i32) -> i32 {
+            if value <= 1 { 1 } else { value * recursive_export(value - 1) }
+        }
+        // This source-level name collided with the old generated suffix.
+        func recursive_export__mimi_export_body(value: bool) -> bool { value }
+        func main() -> i32 {
+            recursive_export(5)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "recursive_export_internal_abi");
+    codegen
+        .compile_checked(&program)
+        .expect("recursive C-export body must compile");
+
+    let public_wrapper = codegen
+        .module
+        .get_function("recursive_export")
+        .expect("public C wrapper");
+    let internal_body = codegen
+        .module
+        .get_function(&CodeGenerator::export_body_symbol("recursive_export"))
+        .expect("private Mimi body");
+    let source_collision = codegen
+        .module
+        .get_function("recursive_export__mimi_export_body")
+        .expect("legal source function formerly colliding with generated suffix");
+    let main = codegen.module.get_function("main").expect("main body");
+    assert_eq!(public_wrapper.count_basic_blocks(), 1);
+    assert_eq!(
+        public_wrapper.get_linkage(),
+        inkwell::module::Linkage::External,
+        "the ABI conversion wrapper owns the public symbol"
+    );
+    assert!(internal_body.count_basic_blocks() > 0);
+    assert_eq!(
+        internal_body.get_linkage(),
+        inkwell::module::Linkage::Internal,
+        "the implementation body is not part of the exported C ABI"
+    );
+    assert!(source_collision.count_basic_blocks() > 0);
+    let body_symbol = CodeGenerator::export_body_symbol("recursive_export");
+    let internal_text = internal_body.to_string();
+    assert!(
+        internal_text.contains("call i32") && internal_text.contains(&body_symbol),
+        "recursive calls must use Mimi's internal ABI: {internal_body}"
+    );
+    assert!(
+        !internal_body
+            .to_string()
+            .contains("call i32 @recursive_export("),
+        "the body must not recurse through the C ABI wrapper: {internal_body}"
+    );
+    let main_text = main.to_string();
+    assert!(
+        main_text.contains("call i32") && main_text.contains(&body_symbol),
+        "Mimi callers must use the internal body symbol: {main}"
+    );
+    codegen
+        .module
+        .verify()
+        .expect("recursive export LLVM module must verify");
 }
 
 #[test]
