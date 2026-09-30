@@ -574,6 +574,390 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Conservative surface ownership classification for Any-ingress and
+    /// generic-call checks. Unlike `is_linear_surface_type`, this also follows
+    /// named record/union/enum payload fields without changing global kind
+    /// policy.
+    pub(crate) fn is_linear_payload_type(&mut self, ty: &crate::ast::Type) -> bool {
+        fn payload_contains_linear(
+            checker: &Checker<'_>,
+            ty: &crate::ast::Type,
+            visiting: &mut HashSet<String>,
+        ) -> bool {
+            use crate::ast::{Type, TypeDefKind, VariantPayload};
+
+            if checker.is_linear_surface_type(ty) {
+                return true;
+            }
+
+            match ty.unlocated() {
+                Type::Name(name, arguments) => {
+                    if arguments
+                        .iter()
+                        .any(|argument| payload_contains_linear(checker, argument, visiting))
+                    {
+                        return true;
+                    }
+                    let Some(type_def) = checker.types.get(name) else {
+                        return false;
+                    };
+
+                    // Expand transparent aliases and opaque newtypes at the
+                    // payload boundary. This is local to Any-ingress checks;
+                    // it does not change the global generic-kind policy.
+                    // The same cycle guard also bounds recursive records.
+                    if !visiting.insert(name.clone()) {
+                        return false;
+                    }
+
+                    // Match the resolved ownership classifier's cycle-safe
+                    // traversal for named records/unions. Enum payloads are
+                    // included too because they can carry a linear value into
+                    // erased Any storage.
+                    let payload_types: Vec<&crate::ast::Type> = match &type_def.kind {
+                        TypeDefKind::Alias(target) | TypeDefKind::Newtype(target) => {
+                            vec![target]
+                        }
+                        TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {
+                            fields.iter().map(|field| &field.ty).collect()
+                        }
+                        TypeDefKind::Enum(variants) => variants
+                            .iter()
+                            .flat_map(|variant| match variant.payload.as_ref() {
+                                Some(VariantPayload::Tuple(types)) => {
+                                    types.iter().collect::<Vec<_>>()
+                                }
+                                Some(VariantPayload::Record(fields)) => {
+                                    fields.iter().map(|field| &field.ty).collect::<Vec<_>>()
+                                }
+                                None => Vec::new(),
+                            })
+                            .collect(),
+                    };
+                    let generics = &type_def.generics;
+                    let substitutions: HashMap<String, crate::ast::Type> =
+                        if arguments.len() == generics.len() {
+                            generics
+                                .iter()
+                                .zip(arguments.iter())
+                                .map(|(generic, argument)| (generic.name.clone(), argument.clone()))
+                                .collect()
+                        } else {
+                            HashMap::new()
+                        };
+                    let contains_linear = payload_types.iter().any(|field_ty| {
+                        let instantiated = crate::core::helpers::subst_type_params(
+                            field_ty,
+                            generics,
+                            &substitutions,
+                        );
+                        payload_contains_linear(checker, &instantiated, visiting)
+                    });
+                    visiting.remove(name);
+                    contains_linear
+                }
+                Type::Option(inner)
+                | Type::CBuffer(inner)
+                | Type::Slice(inner)
+                | Type::Array(inner, _)
+                | Type::Newtype(_, inner)
+                | Type::Shared(inner)
+                | Type::Weak(inner) => payload_contains_linear(checker, inner, visiting),
+                Type::Result(ok, err) => {
+                    payload_contains_linear(checker, ok, visiting)
+                        || payload_contains_linear(checker, err, visiting)
+                }
+                Type::Tuple(items) => items
+                    .iter()
+                    .any(|item| payload_contains_linear(checker, item, visiting)),
+                // Borrowed and raw-pointer values do not move the referenced
+                // payload's ownership obligation into Any.
+                Type::Ref(_, _)
+                | Type::RefMut(_, _)
+                | Type::RawPtr(_)
+                | Type::RawPtrMut(_)
+                | Type::Func(_, _)
+                | Type::ExternFunc(_, _)
+                | Type::Cap(_)
+                | Type::CapAtom(_)
+                | Type::ImplTrait(_)
+                | Type::DynTrait(_)
+                | Type::Located { .. }
+                | Type::Nothing
+                | Type::Infer
+                | Type::TypeVar(_)
+                | Type::ForAll(_, _)
+                | Type::TyErr => false,
+            }
+        }
+
+        // Inference may still be carrying a fresh TypeVar at a call site.
+        // resolve_infer preserves such variables, while zonk_or_unknown makes
+        // binding-cycle/depth failures visible through the checker's standard
+        // fail-closed path. The recursive classifier deliberately treats a
+        // remaining TypeVar as unknown/non-linear and never sends it through
+        // resolve_type (which is reserved for fully unified surface types).
+        let normalized = self.unification.zonk_or_unknown(ty);
+        payload_contains_linear(self, &normalized, &mut HashSet::new())
+    }
+
+    /// Return true when the actual type would be erased by an `Any` leaf in
+    /// the expected type. Concrete typed containers keep their element type
+    /// and remain eligible for the ordinary linear ledger.
+    pub(crate) fn linear_value_erased_by_any(
+        &mut self,
+        actual: &crate::ast::Type,
+        expected: &crate::ast::Type,
+    ) -> bool {
+        fn expand_transparent_aliases(
+            checker: &Checker<'_>,
+            ty: &crate::ast::Type,
+            visiting: &mut HashSet<String>,
+        ) -> crate::ast::Type {
+            use crate::ast::Type;
+
+            fn normalize_builtin_container(name: String, arguments: Vec<Type>) -> Type {
+                if name == "Option" && arguments.len() == 1 {
+                    Type::Option(Box::new(arguments[0].clone()))
+                } else if name == "Result" && arguments.len() == 2 {
+                    Type::Result(
+                        Box::new(arguments[0].clone()),
+                        Box::new(arguments[1].clone()),
+                    )
+                } else {
+                    Type::Name(name, arguments)
+                }
+            }
+
+            match ty {
+                Type::Located { meta, ty } => {
+                    expand_transparent_aliases(checker, ty, visiting).with_meta(*meta)
+                }
+                Type::Name(name, arguments) => {
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| expand_transparent_aliases(checker, argument, visiting))
+                        .collect::<Vec<_>>();
+                    let Some(type_def) = checker.types.get(name) else {
+                        return normalize_builtin_container(name.clone(), arguments);
+                    };
+                    let TypeDefKind::Alias(target) = &type_def.kind else {
+                        // Newtypes deliberately keep their nominal boundary.
+                        return Type::Name(name.clone(), arguments);
+                    };
+                    if arguments.len() != type_def.generics.len() || !visiting.insert(name.clone())
+                    {
+                        return Type::Name(name.clone(), arguments);
+                    }
+                    let substitutions: HashMap<String, Type> = type_def
+                        .generics
+                        .iter()
+                        .zip(arguments.iter())
+                        .map(|(generic, argument)| (generic.name.clone(), argument.clone()))
+                        .collect();
+                    let instantiated = crate::core::helpers::subst_type_params(
+                        target,
+                        &type_def.generics,
+                        &substitutions,
+                    );
+                    let expanded = expand_transparent_aliases(checker, &instantiated, visiting);
+                    visiting.remove(name);
+                    expanded
+                }
+                Type::Ref(lifetime, inner) => Type::Ref(
+                    lifetime.clone(),
+                    Box::new(expand_transparent_aliases(checker, inner, visiting)),
+                ),
+                Type::RefMut(lifetime, inner) => Type::RefMut(
+                    lifetime.clone(),
+                    Box::new(expand_transparent_aliases(checker, inner, visiting)),
+                ),
+                Type::Option(inner) => Type::Option(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::Result(ok, error) => Type::Result(
+                    Box::new(expand_transparent_aliases(checker, ok, visiting)),
+                    Box::new(expand_transparent_aliases(checker, error, visiting)),
+                ),
+                Type::Tuple(items) => Type::Tuple(
+                    items
+                        .iter()
+                        .map(|item| expand_transparent_aliases(checker, item, visiting))
+                        .collect(),
+                ),
+                Type::Func(parameters, result) => Type::Func(
+                    parameters
+                        .iter()
+                        .map(|parameter| expand_transparent_aliases(checker, parameter, visiting))
+                        .collect(),
+                    Box::new(expand_transparent_aliases(checker, result, visiting)),
+                ),
+                Type::ExternFunc(parameters, result) => Type::ExternFunc(
+                    parameters
+                        .iter()
+                        .map(|parameter| expand_transparent_aliases(checker, parameter, visiting))
+                        .collect(),
+                    Box::new(expand_transparent_aliases(checker, result, visiting)),
+                ),
+                Type::Shared(inner) => Type::Shared(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::Weak(inner) => Type::Weak(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::RawPtr(inner) => Type::RawPtr(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::RawPtrMut(inner) => Type::RawPtrMut(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::CBuffer(inner) => Type::CBuffer(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::Newtype(name, inner) => Type::Newtype(
+                    name.clone(),
+                    Box::new(expand_transparent_aliases(checker, inner, visiting)),
+                ),
+                Type::Array(inner, length) => Type::Array(
+                    Box::new(expand_transparent_aliases(checker, inner, visiting)),
+                    *length,
+                ),
+                Type::Slice(inner) => Type::Slice(Box::new(expand_transparent_aliases(
+                    checker, inner, visiting,
+                ))),
+                Type::ForAll(parameters, body) => Type::ForAll(
+                    parameters.clone(),
+                    Box::new(expand_transparent_aliases(checker, body, visiting)),
+                ),
+                Type::Cap(_)
+                | Type::CapAtom(_)
+                | Type::Nothing
+                | Type::Infer
+                | Type::TypeVar(_)
+                | Type::ImplTrait(_)
+                | Type::DynTrait(_)
+                | Type::TyErr => ty.clone(),
+            }
+        }
+
+        fn visit(
+            checker: &mut Checker<'_>,
+            actual: &crate::ast::Type,
+            expected: &crate::ast::Type,
+        ) -> bool {
+            use crate::ast::Type;
+
+            match expected.unlocated() {
+                Type::Name(name, args) if name == "Any" && args.is_empty() => {
+                    checker.is_linear_payload_type(actual)
+                }
+                Type::Name(expected_name, expected_args) => {
+                    let Type::Name(actual_name, actual_args) = actual.unlocated() else {
+                        return false;
+                    };
+                    expected_name == actual_name
+                        && expected_args.len() == actual_args.len()
+                        && actual_args.iter().zip(expected_args).any(
+                            |(actual_arg, expected_arg)| visit(checker, actual_arg, expected_arg),
+                        )
+                }
+                Type::Option(expected_inner) => match actual.unlocated() {
+                    Type::Option(actual_inner) => visit(checker, actual_inner, expected_inner),
+                    _ => false,
+                },
+                Type::CBuffer(expected_inner) => match actual.unlocated() {
+                    Type::CBuffer(actual_inner) => visit(checker, actual_inner, expected_inner),
+                    _ => false,
+                },
+                Type::Slice(expected_inner) => match actual.unlocated() {
+                    Type::Slice(actual_inner) => visit(checker, actual_inner, expected_inner),
+                    _ => false,
+                },
+                Type::Newtype(expected_name, expected_inner) => {
+                    let Type::Newtype(actual_name, actual_inner) = actual.unlocated() else {
+                        return false;
+                    };
+                    expected_name == actual_name && visit(checker, actual_inner, expected_inner)
+                }
+                Type::Result(expected_ok, expected_err) => {
+                    let Type::Result(actual_ok, actual_err) = actual.unlocated() else {
+                        return false;
+                    };
+                    visit(checker, actual_ok, expected_ok)
+                        || visit(checker, actual_err, expected_err)
+                }
+                Type::Tuple(expected_items) => {
+                    let Type::Tuple(actual_items) = actual.unlocated() else {
+                        return false;
+                    };
+                    actual_items.len() == expected_items.len()
+                        && actual_items.iter().zip(expected_items).any(
+                            |(actual_item, expected_item)| {
+                                visit(checker, actual_item, expected_item)
+                            },
+                        )
+                }
+                Type::Array(expected_inner, expected_len) => {
+                    let Type::Array(actual_inner, actual_len) = actual.unlocated() else {
+                        return false;
+                    };
+                    actual_len == expected_len && visit(checker, actual_inner, expected_inner)
+                }
+                Type::Located {
+                    ty: expected_inner, ..
+                } => visit(checker, actual, expected_inner),
+                _ => false,
+            }
+        }
+
+        // Preserve unresolved TypeVars during inference, but make pathological
+        // binding/recursion failures visible through the common fail-closed
+        // helper. Then expand only transparent aliases on both sides, keeping
+        // TypeVar leaves intact so a known Any hole beside an unresolved
+        // generic sibling still receives its linear-payload check.
+        let actual = self.unification.zonk_or_unknown(actual);
+        let expected = self.unification.zonk_or_unknown(expected);
+        let actual = expand_transparent_aliases(self, &actual, &mut HashSet::new());
+        let expected = expand_transparent_aliases(self, &expected, &mut HashSet::new());
+        visit(self, &actual, &expected)
+    }
+
+    /// Reject a linear argument that would enter a statically erased `Any`
+    /// position, using the argument's own source span.  Callers should skip
+    /// their follow-up type-mismatch diagnostic when this returns true.
+    pub(crate) fn reject_linear_any_erasure(
+        &mut self,
+        argument: &crate::ast::Expr,
+        actual: &crate::ast::Type,
+        expected: &crate::ast::Type,
+        context: &str,
+        argument_index: usize,
+    ) -> bool {
+        if !self.linear_value_erased_by_any(actual, expected) {
+            return false;
+        }
+        let span = argument
+            .meta()
+            .map(|meta| meta.span)
+            .unwrap_or_else(|| self.diagnostic_span());
+        self.errors.push(
+            crate::diagnostic::Diagnostic::error_code(
+                crate::diagnostic::codes::E0432,
+                format!(
+                    "linear type '{}' cannot enter an erased Any position (argument {} of '{}'); Map/Any storage has no typed owner receipt",
+                    crate::core::helpers::fmt_type(actual),
+                    argument_index + 1,
+                    context
+                ),
+                span,
+            )
+            .with_help(
+                "keep the value in a concrete typed container or use a concrete parameter type; Any cannot preserve exactly-once ownership",
+            ),
+        );
+        true
+    }
+
     /// Phase D (0.39.78): 是否恰为 SystemToken（transfer-only 线性能力，mailbox
     /// 单独开面）。与 `is_linear_surface_type` 配合：SystemToken 可跨 actor
     /// mailbox（TokenChannel 同款转移模型），SessionChan 等其余线性面禁令不动。

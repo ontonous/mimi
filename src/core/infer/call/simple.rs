@@ -1176,7 +1176,17 @@ impl<'a> Checker<'a> {
                     } else {
                         self.infer_expr(&args[0], scopes);
                         self.infer_expr(&args[1], scopes);
-                        self.infer_expr(&args[2], scopes);
+                        let value_ty = self.infer_expr(&args[2], scopes);
+                        // `map_set` stores its payload through the erased
+                        // `Any` ABI. It cannot accept a linear value until
+                        // dynamic Any carries a checked owner receipt.
+                        self.reject_linear_any_erasure(
+                            &args[2],
+                            &value_ty,
+                            &Type::Name("Any".into(), vec![]),
+                            name,
+                            2,
+                        );
                     }
                     return Type::Name("Record".into(), vec![]);
                 }
@@ -1210,7 +1220,21 @@ impl<'a> Checker<'a> {
                             "map_from_list expects 1 argument (list of (key, value) tuples)",
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
+                        let pairs_ty = self.infer_expr(&args[0], scopes);
+                        let erased_pairs_ty = Type::Name(
+                            "List".into(),
+                            vec![Type::Tuple(vec![
+                                Type::Name("string".into(), vec![]),
+                                Type::Name("Any".into(), vec![]),
+                            ])],
+                        );
+                        self.reject_linear_any_erasure(
+                            &args[0],
+                            &pairs_ty,
+                            &erased_pairs_ty,
+                            name,
+                            0,
+                        );
                     }
                     return Type::Name("Record".into(), vec![]);
                 }
@@ -2806,6 +2830,8 @@ impl<'a> Checker<'a> {
                         for (i, (arg, param_ty)) in args.iter().zip(param_types.iter()).enumerate()
                         {
                             let arg_ty = self.infer_expr(arg, scopes);
+                            let erased_by_any =
+                                self.reject_linear_any_erasure(arg, &arg_ty, param_ty, name, i);
                             // Audit 2026-08-05 (wave-1 fix 5): the E0432
                             // linear-into-generic rejection existed on direct
                             // global calls (below) and turbofish
@@ -2821,7 +2847,7 @@ impl<'a> Checker<'a> {
                             // instantiation). Must run BEFORE unify binds the
                             // binder. Resolution failure is treated as an open
                             // binder (fail-closed).
-                            if self.is_linear_surface_type(&arg_ty) {
+                            if !erased_by_any && self.is_linear_payload_type(&arg_ty) {
                                 let has_unresolved_binder =
                                     match self.unification.resolve_infer(param_ty) {
                                         Ok(resolved) => crate::core::type_folder::type_any(
@@ -2844,7 +2870,10 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             let coerced = is_numeric_coercion(param_ty, &arg_ty);
-                            if !coerced && self.unification.unify(param_ty, &arg_ty).is_err() {
+                            if !erased_by_any
+                                && !coerced
+                                && self.unification.unify(param_ty, &arg_ty).is_err()
+                            {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -3190,6 +3219,15 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|argument| self.infer_expr(argument, scopes))
                     .collect();
+                let erased_by_any: Vec<bool> = args
+                    .iter()
+                    .zip(arg_tys.iter())
+                    .zip(instantiated_params.iter())
+                    .enumerate()
+                    .map(|(index, ((argument, actual), expected))| {
+                        self.reject_linear_any_erasure(argument, actual, expected, name, index)
+                    })
+                    .collect();
 
                 // §2.3 (0.34.21): linear capabilities (Cap/SessionChan/Flow
                 // state) cannot be passed as generic arguments — generic
@@ -3209,7 +3247,10 @@ impl<'a> Checker<'a> {
                 // 追踪，0.36.38 已实证）；否则维持 E0432 fail-closed。SessionChan
                 // 及其任意嵌套走 transfer-only（中途 drop = E0425 弃置）。
                 for (index, argument_ty) in arg_tys.iter().enumerate() {
-                    if self.is_linear_surface_type(argument_ty) {
+                    if erased_by_any.get(index).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    if self.is_linear_payload_type(argument_ty) {
                         // 0.1.9 Phase A: `linear T` 参数 = 显式线性种类，定义时已做
                         // transfer-only 体校验；此处 kind 兼容，直接放行（不再依赖
                         // 调用点 blackbox）。
@@ -3237,7 +3278,11 @@ impl<'a> Checker<'a> {
                         // 一律 E0432（种类不匹配 + 迁移提示），退役调用点体分析。
                         // Free `T` 只可实例化为非线性型；接线性实参须声明
                         // `linear T`（transfer-only）或 `linear drop T`（可 drop）。
-                        self.emit_code(
+                        let argument_span = args
+                            .get(index)
+                            .and_then(|argument| argument.meta().map(|meta| meta.span))
+                            .unwrap_or_else(|| self.diagnostic_span());
+                        self.errors.push(Diagnostic::error_code(
                             crate::diagnostic::codes::E0432,
                             format!(
                                 "linear type '{}' cannot be passed as generic argument {} of function '{}': \
@@ -3249,13 +3294,17 @@ impl<'a> Checker<'a> {
                                 index + 1,
                                 name
                             ),
-                        );
+                            argument_span,
+                        ));
                     }
                 }
 
                 for (i, (actual, expected)) in
                     arg_tys.iter().zip(instantiated_params.iter()).enumerate()
                 {
+                    if erased_by_any.get(i).copied().unwrap_or(false) {
+                        continue;
+                    }
                     let coerced = is_numeric_coercion(expected, actual);
                     let unify_result = if coerced {
                         Ok(())
@@ -3386,10 +3435,14 @@ impl<'a> Checker<'a> {
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                     let at = self.infer_expr(arg, scopes);
+                    let erased_by_any = self.reject_linear_any_erasure(arg, &at, param, name, i);
                     // v0.31.13: passing a session endpoint as a function argument
                     // moves it — consume the residual so scope-exit doesn't fire.
                     if let Some(key) = Self::place_key(arg) {
                         self.session_residuals.remove(&key);
+                    }
+                    if erased_by_any {
+                        continue;
                     }
                     // IF-C1: strict unify at call sites rejects Any/_/Infer escapes.
                     let coerced = is_numeric_coercion(param, &at);

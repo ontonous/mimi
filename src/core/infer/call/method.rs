@@ -175,6 +175,15 @@ impl<'a> Checker<'a> {
                             if widened_recover_reset && index == 0 {
                                 continue;
                             }
+                            if self.reject_linear_any_erasure(
+                                &args[index],
+                                actual,
+                                expected,
+                                &format!("{}::{}", module_name, method_name),
+                                index,
+                            ) {
+                                continue;
+                            }
                             let actual_clean = strip_flow_qualifier(actual);
                             let coerced = is_numeric_coercion(expected, &actual_clean);
                             if !coerced && self.unification.unify(expected, &actual_clean).is_err()
@@ -534,8 +543,17 @@ impl<'a> Checker<'a> {
                                     self.reject_narrow_across_mailbox_arg(arg, scopes);
                                     let declared = self.resolve_type(&param.ty);
                                     let at = self.infer_expr(arg, scopes);
+                                    let erased_by_any = self.reject_linear_any_erasure(
+                                        arg,
+                                        &at,
+                                        &declared,
+                                        method_name,
+                                        i,
+                                    );
                                     // IF-C1/C4: strict unify rejects escape hatches at call sites.
-                                    if self.unification.unify(&at, &declared).is_err() {
+                                    if !erased_by_any
+                                        && self.unification.unify(&at, &declared).is_err()
+                                    {
                                         self.emit_code(
                                             crate::diagnostic::codes::E0211,
                                             format!(
@@ -593,12 +611,15 @@ impl<'a> Checker<'a> {
                                 args.iter().zip(method_params.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
+                                let erased_by_any =
+                                    self.reject_linear_any_erasure(arg, &at, param, method_name, i);
                                 // 0.36.6: qualified flow results unify against
                                 // the unqualified runs_flow param names.
-                                if self
-                                    .unification
-                                    .unify(&strip_flow_qualifier(&at), param)
-                                    .is_err()
+                                if !erased_by_any
+                                    && self
+                                        .unification
+                                        .unify(&strip_flow_qualifier(&at), param)
+                                        .is_err()
                                 {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
@@ -686,8 +707,18 @@ impl<'a> Checker<'a> {
                                 args.iter().zip(expected_types.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
+                                let erased_by_any = self.reject_linear_any_erasure(
+                                    arg,
+                                    &at,
+                                    param,
+                                    &format!("{}.{}", type_name, method_name),
+                                    i,
+                                );
                                 let coerced = is_numeric_coercion(param, &at);
-                                if !coerced && self.unification.unify(param, &at).is_err() {
+                                if !erased_by_any
+                                    && !coerced
+                                    && self.unification.unify(param, &at).is_err()
+                                {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
                                         format!(
@@ -881,11 +912,13 @@ impl<'a> Checker<'a> {
                                 user_args.iter().zip(method_params.iter()).enumerate()
                             {
                                 let at = self.infer_expr(arg, scopes);
+                                let erased_by_any =
+                                    self.reject_linear_any_erasure(arg, &at, param, method_name, i);
                                 // 0.39.62 (Phase C): trait 方法 dispatch 必须与
                                 // simple.rs / impl 方法同款执行线性实参种类检查。
                                 // 此前此路径完全绕过——Free-T 泄漏方法体 + 线性实参
                                 // 静默弃值（pre-existing soundness 洞）。
-                                if self.is_linear_surface_type(&at) {
+                                if !erased_by_any && self.is_linear_payload_type(&at) {
                                     self.check_method_linear_arg_kind(
                                         type_name,
                                         method_name,
@@ -895,7 +928,7 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                                 // IF-C1/C5: strict unify rejects escape hatches at call sites.
-                                if self.unification.unify(&at, param).is_err() {
+                                if !erased_by_any && self.unification.unify(&at, param).is_err() {
                                     self.emit_code(
                                         crate::diagnostic::codes::E0211,
                                         format!(
@@ -948,7 +981,9 @@ impl<'a> Checker<'a> {
                         for (i, (arg, param)) in args.iter().zip(method_params.iter()).enumerate() {
                             self.reject_narrow_across_mailbox_arg(arg, scopes);
                             let at = self.infer_expr(arg, scopes);
-                            if self.unification.unify(&at, param).is_err() {
+                            let erased_by_any =
+                                self.reject_linear_any_erasure(arg, &at, param, method_name, i);
+                            if !erased_by_any && self.unification.unify(&at, param).is_err() {
                                 self.emit_code(
                                     crate::diagnostic::codes::E0211,
                                     format!(
@@ -1099,8 +1134,10 @@ impl<'a> Checker<'a> {
                     for (i, (arg, param)) in user_args.iter().zip(method_params.iter()).enumerate()
                     {
                         let at = self.infer_expr(arg, scopes);
+                        let erased_by_any =
+                            self.reject_linear_any_erasure(arg, &at, param, method_name, i);
                         // IF-C5 residual: unify so TypeVars resolve.
-                        if self.unification.unify(&at, param).is_err() {
+                        if !erased_by_any && self.unification.unify(&at, param).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0211,
                                 format!(
@@ -1410,6 +1447,10 @@ impl<'a> Checker<'a> {
             // Check arguments with substituted types
             for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
                 let at = self.infer_expr(arg, scopes);
+                let erased_by_any = self.reject_linear_any_erasure(arg, &at, param, name, i);
+                if erased_by_any {
+                    continue;
+                }
                 // C2 (audit-type 2026-08-03): the turbofish instantiation path
                 // must enforce the same linear-argument rejection as the
                 // inferred-instantiation path in check_call (simple.rs) —
@@ -1418,7 +1459,7 @@ impl<'a> Checker<'a> {
                 // linear tracking (no rejection).
                 // 0.36.39: 线性黑盒直通豁免（同 simple.rs 全局调用臂）——调体
                 // 对 T 线性性零依赖则放行，否则 E0432；SessionChan 走 transfer-only。
-                let bb_reject = if !generics.is_empty() && self.is_linear_surface_type(&at) {
+                let bb_reject = if !generics.is_empty() && self.is_linear_payload_type(&at) {
                     // 0.1.9 Phase A: `linear T` 参数 kind 兼容，定义时已体校验，放行。
                     if self.param_uses_linear_kind(name, i) {
                         // 0.39.58: `linear drop T` 实例化必须可 drop——SessionChan 拒。

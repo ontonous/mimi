@@ -361,6 +361,7 @@ impl<'a> Checker<'a> {
         // Mirrors `infer_set_literal`, which already carries the element type.
         let mut val_ty: Type = Type::TypeVar(self.unification.fresh_var());
         let mut homogeneous = !entries.is_empty();
+        let mut value_types = Vec::with_capacity(entries.len());
         for (k, v) in entries {
             let key_ty = self.infer_expr(k, scopes);
             if !crate::core::helpers::is_string(&key_ty) {
@@ -373,6 +374,7 @@ impl<'a> Checker<'a> {
                 );
             }
             let val_t = self.infer_expr(v, scopes);
+            value_types.push(val_t.clone());
             // 0.31.17: flow states cannot be map values.
             if self.is_flow_state_type(&val_t) {
                 self.emit_code(
@@ -402,6 +404,24 @@ impl<'a> Checker<'a> {
                 vec![Type::Name("string".into(), vec![]), val_ty],
             )
         } else {
+            // Heterogeneous literals fall back to the erased Record/Any
+            // representation. A homogeneous `Map<string, T>` continues to
+            // preserve `T` and is tracked by the ordinary linear ledger.
+            for ((_, value), value_ty) in entries.iter().zip(value_types.iter()) {
+                if self.is_flow_state_type(value_ty) {
+                    // Keep the dedicated E0427 diagnostic emitted above for
+                    // Flow-state map values; that special prohibition does
+                    // not generalize to every linear type.
+                    continue;
+                }
+                self.reject_linear_any_erasure(
+                    value,
+                    value_ty,
+                    &Type::Name("Any".into(), vec![]),
+                    "map literal entry",
+                    0,
+                );
+            }
             Type::Name("Record".into(), vec![])
         }
     }

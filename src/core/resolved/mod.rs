@@ -8323,28 +8323,82 @@ fn resolved_ty_is_linear(
     program: &CheckedProgram,
     types: &crate::core::ResolvedTypeTable,
     ty: &crate::core::ResolvedTypeId,
+    substitutions: &BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     visiting: &mut BTreeSet<String>,
 ) -> bool {
     match types.get(ty) {
         Some(crate::core::ResolvedType::Capability(_))
         | Some(crate::core::ResolvedType::FlowStateSet { .. }) => true,
+        Some(crate::core::ResolvedType::GenericParameter(parameter)) => {
+            let key = format!("generic:{}", parameter.0);
+            let Some(replacement) = substitutions.get(parameter) else {
+                return false;
+            };
+            if !visiting.insert(key.clone()) {
+                return false;
+            }
+            let linear =
+                resolved_ty_is_linear(program, types, replacement, substitutions, visiting);
+            visiting.remove(&key);
+            linear
+        }
         Some(crate::core::ResolvedType::Nominal { is_linear, .. }) if *is_linear => true,
         Some(crate::core::ResolvedType::Nominal {
             item, arguments, ..
         }) => {
-            if let Some(td) = program.type_def(item.as_str()) {
+            // Nominal identities are `type:<qualified-name>` NodeIds; a
+            // display-name lookup cannot find them and used to skip every
+            // named record/union field walk. Key by the canonical identity.
+            let node_id = NodeId(item.as_str().to_owned());
+            if let Some(td) = program.type_defs().get(&node_id) {
+                if matches!(td.kind, ResolvedTypeKind::Alias) {
+                    if !visiting.insert(item.as_str().to_string()) {
+                        return false;
+                    }
+                    let linear = program
+                        .resolved_type_target(&td.node_id)
+                        .is_some_and(|target| {
+                            let mut alias_substitutions = substitutions.clone();
+                            for ((_, parameter), argument) in
+                                td.generic_parameters.iter().zip(arguments.iter())
+                            {
+                                alias_substitutions.insert(parameter.clone(), argument.clone());
+                            }
+                            resolved_ty_is_linear(
+                                program,
+                                types,
+                                target,
+                                &alias_substitutions,
+                                visiting,
+                            )
+                        });
+                    visiting.remove(item.as_str());
+                    return linear;
+                }
                 if matches!(td.kind, ResolvedTypeKind::Record | ResolvedTypeKind::Union) {
                     if !visiting.insert(item.as_str().to_string()) {
                         // cycle: assume non-linear (self-reference is not
                         // itself the carrier of the linear resource).
                         return false;
                     }
+                    let mut field_substitutions = substitutions.clone();
+                    for ((_, parameter), argument) in
+                        td.generic_parameters.iter().zip(arguments.iter())
+                    {
+                        field_substitutions.insert(parameter.clone(), argument.clone());
+                    }
                     let linear = td.fields.iter().any(|(field_name, _)| {
                         td.field_ids
                             .get(field_name)
                             .and_then(|fid| program.resolved_field_types().get(fid))
                             .is_some_and(|field_ty| {
-                                resolved_ty_is_linear(program, types, field_ty, visiting)
+                                resolved_ty_is_linear(
+                                    program,
+                                    types,
+                                    field_ty,
+                                    &field_substitutions,
+                                    visiting,
+                                )
                             })
                     });
                     visiting.remove(item.as_str());
@@ -8355,56 +8409,74 @@ fn resolved_ty_is_linear(
             // linear iff any type argument is linear.
             arguments
                 .iter()
-                .any(|arg| resolved_ty_is_linear(program, types, arg, visiting))
+                .any(|arg| resolved_ty_is_linear(program, types, arg, substitutions, visiting))
         }
         Some(crate::core::ResolvedType::Newtype { inner, .. }) => {
-            resolved_ty_is_linear(program, types, inner, visiting)
+            resolved_ty_is_linear(program, types, inner, substitutions, visiting)
         }
         Some(crate::core::ResolvedType::Tuple(elements)) => elements
             .iter()
-            .any(|element| resolved_ty_is_linear(program, types, element, visiting)),
+            .any(|element| resolved_ty_is_linear(program, types, element, substitutions, visiting)),
         Some(crate::core::ResolvedType::Option(inner)) => {
-            resolved_ty_is_linear(program, types, inner, visiting)
+            resolved_ty_is_linear(program, types, inner, substitutions, visiting)
         }
         Some(crate::core::ResolvedType::Result { ok, error }) => {
-            resolved_ty_is_linear(program, types, ok, visiting)
-                || resolved_ty_is_linear(program, types, error, visiting)
+            resolved_ty_is_linear(program, types, ok, substitutions, visiting)
+                || resolved_ty_is_linear(program, types, error, substitutions, visiting)
         }
         Some(crate::core::ResolvedType::Array { element, .. }) => {
-            resolved_ty_is_linear(program, types, element, visiting)
+            resolved_ty_is_linear(program, types, element, substitutions, visiting)
         }
         Some(crate::core::ResolvedType::Slice(inner)) => {
-            resolved_ty_is_linear(program, types, inner, visiting)
+            resolved_ty_is_linear(program, types, inner, substitutions, visiting)
         }
         Some(crate::core::ResolvedType::CBuffer(inner)) => {
-            resolved_ty_is_linear(program, types, inner, visiting)
+            resolved_ty_is_linear(program, types, inner, substitutions, visiting)
         }
         _ => false,
     }
 }
 
-/// RECORD-LIN-001: collect qualified names of all user records/unions whose
-/// fields (transitively) contain a linear resource.
+/// RECORD-LIN-001: collect qualified names of user records, unions, and
+/// transparent aliases whose payloads transitively contain a linear resource.
 fn compute_linear_record_names(program: &CheckedProgram) -> BTreeSet<String> {
     let types = program.resolved_types();
     let mut names = BTreeSet::new();
     for type_def in program.type_defs().values() {
         if !matches!(
             type_def.kind,
-            ResolvedTypeKind::Record | ResolvedTypeKind::Union
+            ResolvedTypeKind::Record | ResolvedTypeKind::Union | ResolvedTypeKind::Alias
         ) {
             continue;
         }
         let mut visiting = BTreeSet::new();
-        let linear = type_def.fields.iter().any(|(field_name, _)| {
-            type_def
-                .field_ids
-                .get(field_name)
-                .and_then(|fid| program.resolved_field_types().get(fid))
-                .is_some_and(|field_ty| {
-                    resolved_ty_is_linear(program, types, field_ty, &mut visiting)
-                })
-        });
+        let substitutions = BTreeMap::new();
+        let linear =
+            match type_def.kind {
+                ResolvedTypeKind::Alias => program
+                    .resolved_type_target(&type_def.node_id)
+                    .is_some_and(|target| {
+                        resolved_ty_is_linear(program, types, target, &substitutions, &mut visiting)
+                    }),
+                ResolvedTypeKind::Record | ResolvedTypeKind::Union => {
+                    type_def.fields.iter().any(|(field_name, _)| {
+                        type_def
+                            .field_ids
+                            .get(field_name)
+                            .and_then(|fid| program.resolved_field_types().get(fid))
+                            .is_some_and(|field_ty| {
+                                resolved_ty_is_linear(
+                                    program,
+                                    types,
+                                    field_ty,
+                                    &substitutions,
+                                    &mut visiting,
+                                )
+                            })
+                    })
+                }
+                ResolvedTypeKind::Newtype | ResolvedTypeKind::Enum => false,
+            };
         if linear {
             names.insert(type_def.qualified_name.clone());
         }

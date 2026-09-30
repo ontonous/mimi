@@ -1337,3 +1337,571 @@ func main() -> i32 {
             .collect::<Vec<_>>()
     );
 }
+
+// ─────────────────────────────────────────────────────────────
+// 0.1.11 P0: typed Any ingress cannot erase linear obligations.
+// Map/Any has no production TypeDesc or owner receipt yet, so every
+// linear-to-Any edge fails closed with E0432. Homogeneous typed Maps retain
+// their existing whole-container ledger.
+// ─────────────────────────────────────────────────────────────
+
+fn assert_linear_any_rejection_at_argument(
+    src: &str,
+    line_fragment: &str,
+    argument_text: &str,
+    context: &str,
+) {
+    let checked = if src.contains("use std::maps") {
+        check_source_with_std_maps_import(src)
+    } else {
+        check_source(src)
+    };
+    let errors = checked.expect_err(context);
+    let diagnostic = errors
+        .iter()
+        .find(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0432))
+        .unwrap_or_else(|| panic!("{context}: expected E0432, got {errors:?}"));
+    assert!(
+        !has_code(&errors, crate::diagnostic::codes::E0211),
+        "{context}: E0432 should replace the secondary Any type mismatch, got {errors:?}"
+    );
+    let (line_number, source_line) = src
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(line_fragment))
+        .unwrap_or_else(|| panic!("{context}: source line not found: {line_fragment}"));
+    let expected_col = source_line
+        .find(argument_text)
+        .unwrap_or_else(|| panic!("{context}: argument not found in line: {source_line}"))
+        + 1;
+    assert_eq!(
+        diagnostic.span.start_line,
+        line_number + 1,
+        "{context}: E0432 must point to the actual argument line"
+    );
+    assert_eq!(
+        diagnostic.span.start_col, expected_col,
+        "{context}: E0432 must point to the actual argument expression"
+    );
+}
+
+/// Check std::maps probes through the production module loader. Bare
+/// `check_source` cannot stamp imported declarations with the stdlib source
+/// identity, so it produces undefined-name errors instead of testing the
+/// actual Any-typed wrapper boundary.
+fn check_source_with_std_maps_import(src: &str) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+    let _stdlib_read = super::StdlibEnvGuard::read();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_linear_any_std_maps_{}_{}",
+        std::process::id(),
+        NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create std::maps checker probe directory");
+    let main_path = dir.join("main.mimi");
+    std::fs::write(&main_path, src).expect("write std::maps checker probe source");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("load source with real use std::maps import");
+    let merged = loader
+        .merge_all()
+        .expect("merge source with real std::maps declarations");
+    let result = crate::core::check(&merged);
+    std::fs::remove_dir_all(&dir).ok();
+    result
+}
+
+#[test]
+fn linear_map_set_builtin_rejects_system_token_at_value_span() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+func main() -> i32 {
+    let token = make_token()
+    let m = map_new()
+    let updated = map_set(m, "token", token)
+    0
+}
+"#,
+        "let updated = map_set",
+        "token)",
+        "map_set(SystemToken) must fail closed at the value argument",
+    );
+}
+
+#[test]
+fn linear_map_ext_set_rejects_mutex_guard_without_consuming_it_as_any() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+use std::maps
+func main() -> i32 {
+    let mutex = mutex_new(0)
+    let guard = mutex_lock(mutex)
+    let m = map_new()
+    let updated = m.set("guard", guard)
+    0
+}
+"#,
+        "let updated = m.set",
+        "guard)",
+        "MapExt.set(MutexGuard) must reject the erased Any ingress",
+    );
+}
+
+#[test]
+fn linear_stdlib_map_set_wrapper_rejects_any_ingress() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+use std::maps
+func main() -> i32 {
+    let token = make_token()
+    let m = map_new()
+    let updated = set(m, "token", token)
+    0
+}
+"#,
+        "let updated = set",
+        "token)",
+        "std::maps::set must reject its fixed Any parameter",
+    );
+}
+
+#[test]
+fn linear_map_get_or_default_rejects_any_default() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+use std::maps
+func main() -> i32 {
+    let token = make_token()
+    let m = map_new()
+    let value = m.get_or_default("token", token)
+    0
+}
+"#,
+        "let value = m.get_or_default",
+        "token)",
+        "get_or_default must reject a linear default entering Any",
+    );
+}
+
+#[test]
+fn linear_map_any_ingress_recurses_through_option_list_tuple_and_alias() {
+    let src = r#"
+type TokenAlias = SystemToken
+func main() -> i32 {
+    let m = map_new()
+    let xs: List<SystemToken> = [make_token()]
+    let list_map = map_set(m, "list", xs)
+    let maybe: Option<SystemToken> = Some(make_token())
+    let option_map = map_set(m, "option", maybe)
+    let pair = (make_token(), 1)
+    let tuple_map = map_set(m, "tuple", pair)
+    let result: Result<SystemToken, i32> = Ok(make_token())
+    let result_map = map_set(m, "result", result)
+    let token: TokenAlias = make_token()
+    let alias_map = map_set(m, "alias", token)
+    0
+}
+"#;
+    let errors = check_source(src).expect_err("nested linear Any ingress must be rejected");
+    let any_errors: Vec<_> = errors
+        .iter()
+        .filter(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0432))
+        .collect();
+    assert_eq!(
+        any_errors.len(),
+        5,
+        "List/Option/Tuple/Result/transparent alias must each fail at the Any edge, got {errors:?}"
+    );
+    for (line_fragment, argument_text) in [
+        ("let list_map = map_set", "xs)"),
+        ("let option_map = map_set", "maybe)"),
+        ("let tuple_map = map_set", "pair)"),
+        ("let result_map = map_set", "result)"),
+        ("let alias_map = map_set", "token)"),
+    ] {
+        let (line_number, source_line) = src
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(line_fragment))
+            .expect("the expected argument line must exist");
+        let expected_col = source_line.find(argument_text).unwrap() + 1;
+        let error = any_errors
+            .iter()
+            .find(|error| error.span.start_line == line_number + 1)
+            .unwrap_or_else(|| panic!("expected an E0432 on line {}", line_number + 1));
+        assert_eq!(error.span.start_line, line_number + 1);
+        assert_eq!(error.span.start_col, expected_col);
+    }
+}
+
+#[test]
+fn linear_map_any_ingress_rejects_named_record_payloads() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+type TokenBox { token: SystemToken }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let m = map_new()
+    let updated = map_set(m, "boxed", boxed)
+    0
+}
+"#,
+        "let updated = map_set",
+        "boxed)",
+        "a named record with a linear field cannot enter erased Any",
+    );
+}
+
+#[test]
+fn linear_map_any_ingress_recurses_through_list_and_option_of_records() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+type TokenBox { token: SystemToken }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let boxes: List<TokenBox> = [boxed]
+    let m = map_new()
+    let updated = map_set(m, "boxes", boxes)
+    0
+}
+"#,
+        "let updated = map_set",
+        "boxes)",
+        "List<TokenBox> must carry the record field obligation to Any ingress",
+    );
+
+    assert_linear_any_rejection_at_argument(
+        r#"
+type TokenBox { token: SystemToken }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let maybe: Option<TokenBox> = Some(boxed)
+    let m = map_new()
+    let updated = map_set(m, "maybe", maybe)
+    0
+}
+"#,
+        "let updated = map_set",
+        "maybe)",
+        "Option<TokenBox> must carry the record field obligation to Any ingress",
+    );
+}
+
+#[test]
+fn linear_map_any_ingress_recurses_through_transparent_alias_and_recursive_fields() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+type TokenBox { token: SystemToken }
+type BoxAlias = TokenBox
+type TokenChain { next: List<TokenChain>, item: BoxAlias }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let chain = TokenChain { next: [], item: boxed }
+    let m = map_new()
+    let updated = map_set(m, "chain", chain)
+    0
+}
+"#,
+        "let updated = map_set",
+        "chain)",
+        "Any ingress must recurse through nested records, aliases, and cycle-safe containers",
+    );
+}
+
+#[test]
+fn linear_free_generic_any_wrapper_keeps_scalar_use_and_rejects_record_payload() {
+    check_source_with_std_maps_import(
+        r#"
+use std::maps
+func pack<T>(value: T) -> Record {
+    let m = map_new()
+    set(m, "value", value)
+}
+func main() -> i32 {
+    let packed = pack(7)
+    0
+}
+"#,
+    )
+    .expect("Free T remains usable for non-linear values through the existing Any wrapper");
+
+    assert_linear_any_rejection_at_argument(
+        r#"
+use std::maps
+type TokenBox { token: SystemToken }
+func pack<T>(value: T) -> Record {
+    let m = map_new()
+    set(m, "value", value)
+}
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let packed = pack(boxed)
+    0
+}
+"#,
+        "let packed = pack",
+        "boxed)",
+        "Free T to Any remains rejected when the call-site actual owns a linear record",
+    );
+}
+
+#[test]
+fn linear_named_record_keeps_its_concrete_move_and_drop_contract() {
+    check_source(
+        r#"
+type TokenBox { token: SystemToken }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    drop(boxed)
+    0
+}
+"#,
+    )
+    .expect("concrete TokenBox must retain and discharge its linear field obligation");
+
+    let errors = check_source(
+        r#"
+type TokenBox { token: SystemToken }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    0
+}
+"#,
+    )
+    .expect_err("a concrete TokenBox with an unconsumed linear field must remain rejected");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0256),
+        "TokenBox must retain its concrete ownership ledger, got {errors:?}"
+    );
+}
+
+#[test]
+fn linear_nested_record_keeps_its_concrete_move_and_drop_contract() {
+    check_source(
+        r#"
+type TokenBox { token: SystemToken }
+type BoxAlias = TokenBox
+type OuterBox { inner: BoxAlias }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let outer = OuterBox { inner: boxed }
+    drop(outer)
+    0
+}
+"#,
+    )
+    .expect("nested concrete records must retain and discharge their linear field obligation");
+
+    let errors = check_source(
+        r#"
+type TokenBox { token: SystemToken }
+type BoxAlias = TokenBox
+type OuterBox { inner: BoxAlias }
+func main() -> i32 {
+    let boxed = TokenBox { token: make_token() }
+    let outer = OuterBox { inner: boxed }
+    0
+}
+"#,
+    )
+    .expect_err("a nested concrete record with linear fields must remain rejected if not consumed");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0256),
+        "nested concrete record obligation must reach E0256, got {errors:?}"
+    );
+}
+
+#[test]
+fn linear_map_any_ingress_rejects_named_union_payloads() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+#[repr(C)]
+type TokenUnion = union { token: SystemToken, spare: i64 }
+func store(value: TokenUnion) -> i32 {
+    let m = map_new()
+    let updated = map_set(m, "union", value)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+        "let updated = map_set",
+        "value)",
+        "a named union with a linear field cannot enter erased Any",
+    );
+}
+
+#[test]
+fn linear_named_union_keeps_its_concrete_move_and_drop_contract() {
+    check_source(
+        r#"
+#[repr(C)]
+type TokenUnion = union { token: SystemToken, spare: i64 }
+func consume(value: TokenUnion) -> i32 {
+    drop(value)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+    )
+    .expect("concrete TokenUnion must retain and discharge its linear field obligation");
+
+    let errors = check_source(
+        r#"
+#[repr(C)]
+type TokenUnion = union { token: SystemToken, spare: i64 }
+func leak(value: TokenUnion) -> i32 { 0 }
+func main() -> i32 { 0 }
+"#,
+    )
+    .expect_err("a concrete TokenUnion with an unconsumed linear field must be rejected");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0256),
+        "TokenUnion must retain its concrete ownership ledger, got {errors:?}"
+    );
+}
+
+#[test]
+fn linear_map_any_ingress_rejects_session_endpoint() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+session S = !i32 . ?i32 . end
+func main() -> i32 {
+    let (ch0, ch1) = session_pair::<S>()
+    let m = map_new()
+    let updated = map_set(m, "session", ch0)
+    let value = session_recv(ch1)
+    session_send(ch1, value + 1)
+    session_close(ch1)
+    0
+}
+"#,
+        "let updated = map_set",
+        "ch0)",
+        "SessionChan cannot enter erased Map/Any storage",
+    );
+}
+
+#[test]
+fn linear_map_from_list_rejects_nested_any_ingress() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+func main() -> i32 {
+    let token = make_token()
+    let pairs = [("token", token)]
+    let m = map_from_list(pairs)
+    0
+}
+"#,
+        "let m = map_from_list",
+        "pairs)",
+        "map_from_list must reject linear tuple payloads entering Any",
+    );
+}
+
+#[test]
+fn linear_map_from_list_rejects_transparent_alias_payload_at_argument_span() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+type TokenPairs = List<(string, SystemToken)>
+func main() -> i32 {
+    let pairs: TokenPairs = [("token", make_token())]
+    let m = map_from_list(pairs)
+    0
+}
+"#,
+        "let m = map_from_list",
+        "pairs)",
+        "transparent aliases must not hide linear payloads from nested Any ingress",
+    );
+}
+
+#[test]
+fn linear_stdlib_from_list_wrapper_rejects_nested_any_ingress() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+use std::maps
+func main() -> i32 {
+    let token = make_token()
+    let pairs = [("token", token)]
+    let m = from_list(pairs)
+    0
+}
+"#,
+        "let m = from_list",
+        "pairs)",
+        "std::maps::from_list must reject its nested Any field",
+    );
+}
+
+#[test]
+fn linear_heterogeneous_map_literal_rejects_only_the_erased_linear_entry() {
+    assert_linear_any_rejection_at_argument(
+        r#"
+func main() -> i32 {
+    let token = make_token()
+    let values = {"token": token, "count": 1}
+    0
+}
+"#,
+        "let values =",
+        "token,",
+        "heterogeneous Map literal must reject the entry erased to Record/Any",
+    );
+}
+
+#[test]
+fn linear_map_literal_keeps_typed_container_move_and_drop_contract() {
+    check_source(
+        r#"
+func main() -> i32 {
+    let token = make_token()
+    let m: Map<string, SystemToken> = {"token": token}
+    drop(m)
+    0
+}
+"#,
+    )
+    .expect("concrete Map<string, SystemToken> must retain and discharge its ledger");
+
+    let errors = check_source(
+        r#"
+func main() -> i32 {
+    let token = make_token()
+    let m: Map<string, SystemToken> = {"token": token}
+    0
+}
+"#,
+    )
+    .expect_err("undischarged concrete linear Map must remain E0256");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0256),
+        "typed Map obligation must be preserved, got {errors:?}"
+    );
+}
+
+#[test]
+fn linear_flow_state_map_literal_keeps_its_dedicated_e0427() {
+    let errors = check_source(
+        r#"
+flow Counter {
+    state Zero { count: i32 }
+    state Positive { count: i32 }
+    transition inc(Zero) -> Positive { return Positive { count: self.count + 1 } }
+}
+func main() -> i32 {
+    let flow_value = Zero { count: 0 }
+    let mixed = {"state": flow_value, "count": 1}
+    0
+}
+"#,
+    )
+    .expect_err("Flow states retain the dedicated map literal rejection");
+    assert!(
+        has_code(&errors, crate::diagnostic::codes::E0427),
+        "Flow map values must keep E0427 rather than general Any erasure E0432: {errors:?}"
+    );
+}
