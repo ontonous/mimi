@@ -1641,6 +1641,60 @@ fn recoverable_cross_state_flow_verifier_reports_a_real_counterexample() {
 }
 
 #[test]
+fn flow_vir_bool_result_postconditions_agree_with_resolved() {
+    require_z3!();
+    // Keep this fixture on the explicit export-wrapper compatibility face:
+    // the regression must exercise VIR, even after scalar contracts gain a
+    // canonical production route.
+    let source = r#"
+        extern "C" func compatibility_marker(value: i32) -> i32 { value }
+        func true_value() -> bool { ensures: result == true
+ true }
+        func false_claim() -> bool { ensures: result == true
+ false }
+        func not_false() -> bool { ensures: result != false
+ true }
+        func same(flag: bool) -> bool { ensures: result == flag
+ flag }
+        func flip(flag: bool) -> bool { ensures: result != flag
+ !flag }
+        func integer_claim() -> i32 { ensures: result == 2
+ 1 }
+        func main() -> i32 { 0 }
+    "#;
+    let file = parse_memory_source(source, "bool-result-compatibility").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let mut primary = Verifier::new().expect("resolved verifier");
+    let resolved = primary.verify_checked(&checked);
+    let flow = flow::flow_verify_file_with_hashes(&file, source_hash.clone(), String::new())
+        .expect("Flow/VIR verifier");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let dual = verify_checked_dual(&checked, source_hash).expect("dual verifier");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
+    );
+    for (name, expected) in [
+        ("true_value", VerifStatus::Proven),
+        ("false_claim", VerifStatus::Disproven),
+        ("not_false", VerifStatus::Proven),
+        ("same", VerifStatus::Proven),
+        ("flip", VerifStatus::Proven),
+        ("integer_claim", VerifStatus::Disproven),
+    ] {
+        for results in [&resolved, &flow, &dual] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .expect("contract result");
+            assert_eq!(result.status, expected, "{name}: {}", result.message);
+            assert!(!result.message.contains("E0439"), "{}", result.message);
+        }
+    }
+}
+
+#[test]
 fn compatibility_verifier_access_is_explicitly_tagged() {
     require_z3!();
     let source = r#"

@@ -1968,6 +1968,10 @@ impl VirZ3Ctx {
         match expr {
             VExpr::Var(id) => self.bool_vars.get(id).cloned(),
             VExpr::Old(id) => self.old_bool_vars.get(id).cloned(),
+            // The implicit postcondition result has its own typed slot,
+            // rather than a VarId. Falling back to encode_int here loses
+            // every boolean result equality/inequality.
+            VExpr::Result => self.result_bool.clone(),
             VExpr::BoolConst(b) => Some(z3::ast::Bool::from_bool(*b)),
             _ => None,
         }
