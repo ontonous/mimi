@@ -865,7 +865,7 @@ fn is_generic_variant_predicate_callable(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarCollectionAdmission {
     /// No typed List operation, concrete scalar Set-facade call, or closed
-    /// Copy-scalar stdout effect is present.
+    /// Copy-scalar stdout effect or closed ordinary scalar contract is present.
     OutsideProfile,
     /// A collection candidate exists, but the whole checked program contains
     /// imports, unsupported effects, managed values, or another unresolved
@@ -884,8 +884,8 @@ pub enum ScalarCollectionAdmission {
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
 /// identity/Set facade family, List len/reverse/concat, direct nested List
-/// index projection, or an exact Copy-scalar stdout effect can make them part
-/// of this island.
+/// index projection, an exact Copy-scalar stdout effect, or an acyclic scalar
+/// program with contracts can make them part of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
     let scanner = scan_scalar_collection_admission(program);
     if !scanner.has_candidate {
@@ -1234,6 +1234,199 @@ fn is_owned_string_call_bind_callable(
         })
 }
 
+/// The first ordinary-contract face uses the scalar operations already
+/// shared by all MIR consumers. Requiring every user function to stay in
+/// this expression-only envelope avoids promoting an unrelated loop, math
+/// lemma, mutable body, or unsupported call merely because another function
+/// has an ensures clause. Other collection/stdout admission is unchanged.
+fn has_closed_scalar_contract_candidate(program: &CheckedProgram) -> bool {
+    if !program.callables().iter().any(|(owner, callable)| {
+        owner.0.starts_with("function:")
+            && !is_prelude_origin(program, &callable.body.root.origin)
+            && !callable.contracts.is_empty()
+    }) {
+        return false;
+    }
+
+    fn scalar(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            program.resolved_types().get(ty),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool | PrimitiveType::Unit
+            ))
+        )
+    }
+
+    fn expression(
+        program: &CheckedProgram,
+        value: &ResolvedExpr,
+        contract: bool,
+        callees: &mut BTreeSet<NodeId>,
+    ) -> bool {
+        if !scalar(program, &value.ty) || !value.effects.is_empty() {
+            return false;
+        }
+        match &value.kind {
+            ResolvedExprKind::Literal(
+                ResolvedLiteral::Int(_) | ResolvedLiteral::Bool(_) | ResolvedLiteral::Unit,
+            ) => true,
+            ResolvedExprKind::Load(place) => place.projections.is_empty(),
+            ResolvedExprKind::Old(value) if contract => expression(program, value, true, callees),
+            ResolvedExprKind::Unary { op, operand }
+                if matches!(op, ResolvedUnaryOp::Negate | ResolvedUnaryOp::Not) =>
+            {
+                expression(program, operand, contract, callees)
+            }
+            ResolvedExprKind::Binary { op, left, right }
+                if matches!(
+                    op,
+                    ResolvedBinaryOp::Add
+                        | ResolvedBinaryOp::Subtract
+                        | ResolvedBinaryOp::Multiply
+                        | ResolvedBinaryOp::Divide
+                        | ResolvedBinaryOp::Remainder
+                        | ResolvedBinaryOp::Equal
+                        | ResolvedBinaryOp::NotEqual
+                        | ResolvedBinaryOp::Less
+                        | ResolvedBinaryOp::Greater
+                        | ResolvedBinaryOp::LessEqual
+                        | ResolvedBinaryOp::GreaterEqual
+                        | ResolvedBinaryOp::LogicalAnd
+                        | ResolvedBinaryOp::LogicalOr
+                ) =>
+            {
+                expression(program, left, contract, callees)
+                    && expression(program, right, contract, callees)
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } if !contract => {
+                expression(program, condition, false, callees)
+                    && block(program, then_block, callees)
+                    && block(program, else_block, callees)
+            }
+            ResolvedExprKind::Block(body) if !contract => block(program, body, callees),
+            ResolvedExprKind::Call(call) if !contract => {
+                let ResolvedCallee::Function(owner) = &call.callee else {
+                    return false;
+                };
+                callees.insert(owner.clone());
+                program
+                    .callables()
+                    .get(owner)
+                    .is_some_and(|callee| !is_prelude_origin(program, &callee.body.root.origin))
+                    && call.type_arguments.is_empty()
+                    && call.effects.is_empty()
+                    && call.session.is_empty()
+                    && call
+                        .arguments
+                        .iter()
+                        .all(|argument| expression(program, &argument.value, false, callees))
+            }
+            _ => false,
+        }
+    }
+
+    fn block(
+        program: &CheckedProgram,
+        body: &crate::core::ir::ResolvedBlock,
+        callees: &mut BTreeSet<NodeId>,
+    ) -> bool {
+        body.statements
+            .iter()
+            .all(|statement| match &statement.kind {
+                ResolvedStmtKind::Contract { kind, condition } => {
+                    *kind != crate::core::ir::ContractKind::Invariant
+                        && expression(program, condition, true, callees)
+                }
+                ResolvedStmtKind::Bind {
+                    pattern,
+                    initializer: Some(value),
+                } => {
+                    matches!(
+                        pattern.kind,
+                        ResolvedPatternKind::Binding {
+                            by_reference: None,
+                            ..
+                        }
+                    ) && expression(program, value, false, callees)
+                }
+                _ => false,
+            })
+            && body
+                .result
+                .as_deref()
+                .is_none_or(|value| expression(program, value, false, callees))
+    }
+
+    let mut call_graph = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+    for (owner, callable) in program.callables() {
+        if !owner.0.starts_with("function:")
+            || is_prelude_origin(program, &callable.body.root.origin)
+        {
+            continue;
+        }
+        let mut callees = BTreeSet::new();
+        if !callable.signature.generic_parameters.is_empty()
+            || !callable
+                .signature
+                .parameters
+                .iter()
+                .all(|parameter| scalar(program, &parameter.ty))
+            || !scalar(program, &callable.signature.result)
+            || !block(program, &callable.body.root, &mut callees)
+            || !callable.contracts.iter().all(|contract| {
+                contract.kind != crate::core::ir::ContractKind::Invariant
+                    && expression(program, &contract.condition, true, &mut callees)
+            })
+        {
+            return false;
+        }
+        call_graph.insert(owner.clone(), callees);
+    }
+    // The scalar MIR symbolic evaluator intentionally has no recursive-call
+    // model. Do not promote a previously working recursive program and then
+    // reject it in the consumer gate merely because it has a scalar contract.
+    // Track reverse edges once instead of repeatedly scanning the whole
+    // graph for leaves; long acyclic call chains must not cost quadratic time.
+    let mut remaining = BTreeMap::<NodeId, usize>::new();
+    let mut callers = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    let mut leaves = Vec::new();
+    for (owner, callees) in &call_graph {
+        let mut count = 0;
+        for callee in callees
+            .iter()
+            .filter(|callee| call_graph.contains_key(*callee))
+        {
+            count += 1;
+            callers
+                .entry(callee.clone())
+                .or_default()
+                .push(owner.clone());
+        }
+        remaining.insert(owner.clone(), count);
+        if count == 0 {
+            leaves.push(owner.clone());
+        }
+    }
+    let mut visited = 0;
+    while let Some(leaf) = leaves.pop() {
+        visited += 1;
+        for caller in callers.get(&leaf).into_iter().flatten() {
+            let Some(count) = remaining.get_mut(caller) else {
+                return false;
+            };
+            *count -= 1;
+            if *count == 0 {
+                leaves.push(caller.clone());
+            }
+        }
+    }
+    visited == call_graph.len()
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -1372,7 +1565,7 @@ fn scan_scalar_collection_admission(
         })
         .map(|(owner, _)| owner.clone())
         .collect::<BTreeSet<_>>();
-    scan_scalar_collection_once(
+    let mut scanner = scan_scalar_collection_once(
         program,
         closure.float_print_functions,
         closure.string_print_functions,
@@ -1382,7 +1575,13 @@ fn scan_scalar_collection_admission(
         owned_string_constant_bind_callables,
         owned_string_call_bind_callables,
         owned_string_param_rebind_callables,
-    )
+    );
+    // Scalar contracts only add a candidate. Discovery/closure need the
+    // existing effect faces, so inspect contracts once after the final scan.
+    if !scanner.has_candidate {
+        scanner.has_candidate = has_closed_scalar_contract_candidate(program);
+    }
+    scanner
 }
 
 fn scan_scalar_collection_once(
@@ -5101,7 +5300,7 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 /// `ListOp::Len`/`Reverse`/`Concat`, a receipt-bearing nested List index,
 /// `SetOp::Contains`, or checker-owned scalar Set/List facade instance,
 /// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt`/`PrintlnString`/
-/// `PrintlnFloat`
+/// `PrintlnFloat`, or a materialized ordinary scalar contract
 /// has crossed the S11 production boundary.  R6-1052 admits the owned
 /// StringHandle print face into the stdout receipt so a complete
 /// string-stdout-only graph routes canonical like an integer/bool one; R6-1053
@@ -5111,20 +5310,21 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
     contains_scalar_collection_operation_candidate(program)
         || program.functions().values().any(|function| {
-            function.blocks.values().any(|block| {
-                block.instructions.iter().any(|instruction| {
-                    matches!(
-                        instruction.kind,
-                        MirInstructionKind::BuiltinCall {
-                            kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
-                                | crate::core::mir::types::MirBuiltinKind::PrintlnInt
-                                | crate::core::mir::types::MirBuiltinKind::PrintlnString
-                                | crate::core::mir::types::MirBuiltinKind::PrintlnFloat,
-                            ..
-                        }
-                    )
+            !function.contracts.is_empty()
+                || function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::BuiltinCall {
+                                kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
+                                    | crate::core::mir::types::MirBuiltinKind::PrintlnInt
+                                    | crate::core::mir::types::MirBuiltinKind::PrintlnString
+                                    | crate::core::mir::types::MirBuiltinKind::PrintlnFloat,
+                                ..
+                            }
+                        )
+                    })
                 })
-            })
         })
 }
 
@@ -5677,8 +5877,23 @@ fn function_in_float_print_closure(program: &MirProgram, function: &MirFunction)
 /// finite consumer envelope.  It never reads `CheckedProgram`, `ResolvedBody`,
 /// source names, or a backend ABI.
 pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    validate_scalar_collection_graph_inner(program, true)
+}
+
+/// Validate the same complete consumer graph for a verification request.
+/// A library of callable contracts does not need an executable `main`;
+/// execution continues to use `validate_scalar_collection_island` above.
+pub fn validate_scalar_collection_graph(program: &MirProgram) -> Result<(), Vec<String>> {
+    validate_scalar_collection_graph_inner(program, false)
+}
+
+fn validate_scalar_collection_graph_inner(
+    program: &MirProgram,
+    require_main: bool,
+) -> Result<(), Vec<String>> {
     let mut validator = ScalarCollectionValidator {
         program,
+        require_main,
         errors: BTreeSet::new(),
         checked_types: BTreeSet::new(),
         allow_owned_record_family: contains_owned_record_projection_candidate(program),
@@ -5696,6 +5911,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
 
 struct ScalarCollectionValidator<'a> {
     program: &'a MirProgram,
+    require_main: bool,
     errors: BTreeSet<String>,
     checked_types: BTreeSet<crate::core::ResolvedTypeId>,
     allow_owned_record_family: bool,
@@ -5707,7 +5923,7 @@ struct ScalarCollectionValidator<'a> {
 impl<'a> ScalarCollectionValidator<'a> {
     fn validate(&mut self) {
         let main = NodeId("function:main".into());
-        if !self.program.functions().contains_key(&main) {
+        if self.require_main && !self.program.functions().contains_key(&main) {
             self.error("program has no canonical function:main".into());
         }
         if !self.program.transitions().is_empty() {

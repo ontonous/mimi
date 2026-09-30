@@ -977,6 +977,13 @@ fn scalar_ffi_public_mir_verifier_reports_preconditions_without_function_ensures
             .expect("public checked scalar FFI verifier");
         assert_eq!(checked_results.len(), 1, "{checked_results:?}");
         assert_eq!(checked_results[0].status, expected, "{checked_results:?}");
+        if expected == VerifStatus::Disproven {
+            assert_eq!(
+                checked_results[0].diagnostic.as_ref().unwrap().span,
+                results[0].diagnostic.as_ref().unwrap().span,
+                "the checked adapter must preserve the exact FFI call-site span"
+            );
+        }
         assert_eq!(
             checked_results[0]
                 .artifact
@@ -993,6 +1000,13 @@ fn scalar_ffi_public_mir_verifier_reports_preconditions_without_function_ensures
             .expect("public dual checked scalar FFI verifier");
         assert_eq!(dual_results.len(), 1, "{dual_results:?}");
         assert_eq!(dual_results[0].status, expected, "{dual_results:?}");
+        if expected == VerifStatus::Disproven {
+            assert_eq!(
+                dual_results[0].diagnostic.as_ref().unwrap().span,
+                results[0].diagnostic.as_ref().unwrap().span,
+                "the dual adapter must preserve the exact FFI call-site span"
+            );
+        }
         assert_eq!(
             dual_results[0]
                 .artifact
@@ -1695,9 +1709,552 @@ fn flow_vir_bool_result_postconditions_agree_with_resolved() {
 }
 
 #[test]
+fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
+    require_z3!();
+    let source = r#"
+        func positive(value: i32) -> bool {
+            requires: value > 0
+            ensures: result == true
+            value > 0
+        }
+        func identity(value: i64) -> i64 {
+            ensures: result == old(value)
+            value
+        }
+        func false_claim() -> bool { ensures: result == true
+ false }
+        func checked_increment(value: i32) -> i32 {
+            ensures: result > value
+            value + 1
+        }
+        func main() -> i32 { if positive(1) { 42 } else { 0 } }
+    "#;
+    let file = parse_memory_source(source, "ordinary-scalar-contracts").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("shared scalar-contract materialization");
+    assert!(route.admission.collection_complete());
+    assert!(route.materialized_collection_candidate);
+    assert!(!route.materialized_collection_operation_candidate);
+    let canonical = route.program;
+    let receipt = canonical.route_receipt(crate::core::mir::SCALAR_COLLECTION_ISLAND);
+    crate::core::mir::validate_scalar_collection_island(&canonical).expect("scalar island");
+    crate::verifier::validate_mir_capabilities(&canonical).expect("verifier capability");
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(42)
+    );
+    let bytecode =
+        crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            .expect("AST-free MIR bytecode");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    assert_eq!(vm.run().expect("bytecode execution"), 42);
+    let context = inkwell::context::Context::create();
+    let mut native = crate::codegen::CodeGenerator::new(&context, "ordinary_scalar_contracts");
+    native
+        .compile_mir_native_with_route_receipt(&canonical, &receipt)
+        .expect("native consumes the same MIR receipt");
+    native.module.verify().expect("LLVM verification");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let results = verify_mir_with_route_receipt(&canonical, &receipt, source_hash.clone())
+        .expect("same-MIR verifier");
+    for (name, status) in [
+        ("positive", VerifStatus::Proven),
+        ("identity", VerifStatus::Proven),
+        ("false_claim", VerifStatus::Disproven),
+        ("checked_increment", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name == format!("function:{name}"))
+            .expect("canonical contract verdict");
+        assert_eq!(result.status, status, "{name}: {}", result.message);
+        let artifact = result.artifact.as_ref().expect("canonical proof identity");
+        assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, receipt.mir_digest);
+    }
+    assert!(
+        results
+            .iter()
+            .all(|result| result.func_name != "function:main"),
+        "a no-contract caller must not acquire a proof verdict"
+    );
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("public checked verifier");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        assert!(results.iter().all(|result| result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.engine == ProofArtifact::ENGINE_MIR
+                && artifact.mir_hash == receipt.mir_digest)));
+    }
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let mut direct_native =
+        crate::codegen::CodeGenerator::new(&context, "checked_scalar_contracts");
+    direct_native
+        .compile_checked(&checked)
+        .expect("direct native shared route");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    direct_native
+        .module
+        .verify()
+        .expect("direct native LLVM verification");
+}
+
+#[test]
+fn ordinary_scalar_contract_library_preserves_call_obligations_without_main() {
+    require_z3!();
+    let source = r#"
+func positive(value: i32) -> i32 {
+    requires: value > 0
+    value
+}
+func rejected() -> i32 { positive(-1) }
+func admitted() -> i32 { positive(1) }
+func impossible(value: i32) -> i32 {
+    requires: value > 0 && value < 0
+    ensures: true
+    value
+}
+func false_claim() -> bool {
+    ensures: result == true
+    false
+}
+"#;
+    let file = super::parse_memory_source(source, "scalar-contract-library").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check library without main");
+    let canonical = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize identical library graph")
+        .program;
+    crate::core::mir::validate_scalar_collection_graph(&canonical)
+        .expect("all library functions belong to the scalar graph");
+    let execution_errors = crate::core::mir::validate_scalar_collection_island(&canonical)
+        .expect_err("execution still requires main");
+    assert!(execution_errors
+        .iter()
+        .any(|error| error.contains("function:main")));
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify library without AST fallback");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for (name, status) in [
+            ("positive", VerifStatus::Proven),
+            ("rejected", VerifStatus::Disproven),
+            ("impossible", VerifStatus::Disproven),
+            ("false_claim", VerifStatus::Disproven),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            assert_eq!(result.status, status, "{name}: {}", result.message);
+            let artifact = result.artifact.as_ref().expect("canonical proof artifact");
+            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+            assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+            if name == "rejected" {
+                assert!(result.message.contains("may violate precondition"));
+                let diagnostic = result.diagnostic.as_ref().expect("call diagnostic");
+                assert_eq!(diagnostic.span.start_line, 6);
+                assert!(diagnostic.origin.as_ref().unwrap().parent_node_id.is_some());
+            }
+            if name == "impossible" {
+                assert!(result
+                    .diagnostic
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("unsatisfiable"));
+            }
+            if name == "false_claim" {
+                assert!(result
+                    .diagnostic
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("result = false"));
+            }
+        }
+        assert!(results.iter().all(|result| result.func_name != "admitted"));
+    }
+}
+
+#[test]
+fn ordinary_scalar_contract_library_tracks_preconditions_through_helpers_and_branches() {
+    require_z3!();
+    let source = r#"
+func positive(value: i32) -> i32 {
+    requires: value > 0
+    requires: value < 100
+    value
+}
+func forward(value: i32) -> i32 { positive(value) }
+func bad_lower() -> i32 { forward(-1) }
+func bad_upper() -> i32 { forward(100) }
+func good() -> i32 { forward(42) }
+func guarded(value: i32) -> i32 {
+    ensures: result >= 0
+    if value > 0 && value < 100 { forward(value) } else { 0 }
+}
+"#;
+    let file = parse_memory_source(source, "scalar-contract-helper-obligations")
+        .expect("parse helper graph");
+    let checked = crate::core::check_program(&file).expect("check helper graph");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify canonical helper graph");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for (name, status) in [
+            ("positive", VerifStatus::Proven),
+            ("forward", VerifStatus::Disproven),
+            ("bad_lower", VerifStatus::Disproven),
+            ("bad_upper", VerifStatus::Disproven),
+            ("guarded", VerifStatus::Proven),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            assert_eq!(result.status, status, "{name}: {}", result.message);
+            assert_eq!(
+                result.artifact.as_ref().expect("MIR artifact").engine,
+                ProofArtifact::ENGINE_MIR,
+            );
+            if status == VerifStatus::Disproven {
+                assert!(result.message.contains("may violate precondition"));
+            }
+        }
+        assert!(results.iter().all(|result| result.func_name != "good"));
+    }
+}
+
+#[test]
+fn ordinary_scalar_contract_unit_return_is_proven_without_main() {
+    require_z3!();
+    let source = r#"
+func finished() {
+    ensures: true
+}
+func guarded(flag: bool) {
+    requires: flag
+    ensures: old(flag)
+}
+"#;
+    let file =
+        parse_memory_source(source, "scalar-contract-unit-return").expect("parse unit contracts");
+    let checked = crate::core::check_program(&file).expect("check unit contracts");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify canonical unit returns");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        assert_eq!(results.len(), 2);
+        for result in results {
+            assert_eq!(result.status, VerifStatus::Proven, "{}", result.message);
+            assert_eq!(
+                result.artifact.as_ref().expect("MIR artifact").engine,
+                ProofArtifact::ENGINE_MIR,
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_scalar_contract_arithmetic_uses_checked_expression_width() {
+    require_z3!();
+    let source = r#"
+func safe32(x: i32, y: i32) -> bool {
+    requires: y != 0 && (x != -2147483648 || y != -1)
+    ensures: old(x) / old(y) == x / y
+    true
+}
+func safe64(x: i64, y: i64) -> bool {
+    requires: y != 0 && (x != -9223372036854775808 || y != -1)
+    ensures: old(x) / old(y) == x / y
+    true
+}
+func unsafe_division(x: i32, y: i32) -> bool {
+    ensures: x / y == x / y
+    true
+}
+func unsafe_remainder(x: i32, y: i32) -> bool {
+    requires: y != 0
+    ensures: x % y == x % y
+    true
+}
+func unsafe64(x: i64) -> bool {
+    ensures: x / -1 == x / -1
+    true
+}
+func mixed_width(x: i32, y: i64) -> bool {
+    requires: y != 0
+    ensures: x / y == x / y
+    true
+}
+func wide_literal() -> bool {
+    ensures: 2147483648 / -1 == -2147483648
+    true
+}
+func truncation() -> bool {
+    ensures: -7 / 2 == -3 && -7 % 2 == -1
+    true
+}
+func unsafe_contract_add(x: i32) -> bool {
+    ensures: x + 1 == x + 1
+    true
+}
+func safe_contract_add(x: i32) -> bool {
+    requires: x < 2147483647
+    ensures: x + 1 == x + 1
+    true
+}
+"#;
+    let file = parse_memory_source(source, "typed-contract-arithmetic").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check contract library");
+    let canonical = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("typed arithmetic canonical MIR")
+        .program;
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify actual expression types");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for (name, status) in [
+            ("safe32", VerifStatus::Proven),
+            ("safe64", VerifStatus::Proven),
+            ("unsafe_division", VerifStatus::Disproven),
+            ("unsafe_remainder", VerifStatus::Disproven),
+            ("unsafe64", VerifStatus::Disproven),
+            ("mixed_width", VerifStatus::Proven),
+            ("wide_literal", VerifStatus::Proven),
+            ("truncation", VerifStatus::Proven),
+            ("unsafe_contract_add", VerifStatus::Disproven),
+            ("safe_contract_add", VerifStatus::Proven),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            assert_eq!(result.status, status, "{name}: {}", result.message);
+            let artifact = result.artifact.as_ref().expect("MIR artifact");
+            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+            assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+            if status == VerifStatus::Disproven {
+                assert!(
+                    result
+                        .message
+                        .contains("ensures contract expression is undefined"),
+                    "{name}: {}",
+                    result.message
+                );
+                assert!(result
+                    .diagnostic
+                    .as_ref()
+                    .expect("contract diagnostic")
+                    .origin
+                    .as_ref()
+                    .expect("contract origin")
+                    .parent_node_id
+                    .is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_scalar_contract_definedness_preserves_short_circuit_and_order() {
+    require_z3!();
+    let source = r#"
+func guarded_requires(x: i32, y: i32) -> bool {
+    requires: x >= 0
+    requires: y != 0 && x / y == x / y
+    ensures: true
+    true
+}
+func reversed_requires(x: i32, y: i32) -> bool {
+    requires: x >= 0
+    requires: x / y == x / y && y != 0
+    ensures: true
+    true
+}
+func unsafe_or(x: i32, y: i32) -> bool {
+    requires: y != 0 || x / y == x / y
+    ensures: true
+    true
+}
+func guarded_or(x: i32, y: i32) -> bool {
+    requires: y == 0 || ((x != -2147483648 || y != -1) && x / y == x / y)
+    ensures: true
+    true
+}
+func earlier_guards(x: i32, y: i32) -> bool {
+    requires: y != 0
+    requires: x != -2147483648 || y != -1
+    requires: x / y == x / y
+    ensures: true
+    true
+}
+func later_guards(x: i32, y: i32) -> bool {
+    requires: x / y == x / y
+    requires: y != 0 && (x != -2147483648 || y != -1)
+    ensures: true
+    true
+}
+func skipped_postcondition(x: i32, y: i32) -> i32 {
+    requires: y == 0
+    ensures: y == 0 || x / y == x / y
+    0
+}
+func false_short_circuit(x: i32, y: i32) -> i32 {
+    requires: y == 0
+    ensures: y != 0 && x / y == x / y
+    0
+}
+func return_path_guard(x: i32, y: i32) -> i32 {
+    requires: x >= 0
+    ensures: y == 0 || result == x / y
+    if y == 0 { 0 } else { x / y }
+}
+"#;
+    let file = parse_memory_source(source, "contract-evaluation-order").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check contract library");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify short-circuit guard obligations");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for (name, status) in [
+            ("guarded_requires", VerifStatus::Proven),
+            ("reversed_requires", VerifStatus::Disproven),
+            ("unsafe_or", VerifStatus::Disproven),
+            ("guarded_or", VerifStatus::Proven),
+            ("earlier_guards", VerifStatus::Proven),
+            ("later_guards", VerifStatus::Disproven),
+            ("skipped_postcondition", VerifStatus::Proven),
+            ("false_short_circuit", VerifStatus::Disproven),
+            ("return_path_guard", VerifStatus::Proven),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            assert_eq!(result.status, status, "{name}: {}", result.message);
+            assert_eq!(
+                result.artifact.as_ref().expect("MIR artifact").engine,
+                ProofArtifact::ENGINE_MIR
+            );
+            if matches!(name, "reversed_requires" | "unsafe_or" | "later_guards") {
+                assert!(
+                    result
+                        .message
+                        .contains("requires contract expression is undefined"),
+                    "{}",
+                    result.message
+                );
+            }
+            if name == "false_short_circuit" {
+                assert!(
+                    result.message.contains("counterexample"),
+                    "{}",
+                    result.message
+                );
+                assert!(!result.message.contains("undefined"));
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_scalar_contract_callee_definedness_uses_actual_arguments() {
+    require_z3!();
+    let source = r#"
+func unsafe_gate(x: i32, y: i32) -> i32 {
+    requires: x / y == x / y
+    x
+}
+func rejected_call() -> i32 { unsafe_gate(1, 0) }
+func admitted_call() -> i32 { unsafe_gate(2, 1) }
+func proven_call() -> i32 {
+    ensures: result == 2
+    unsafe_gate(2, 1)
+}
+"#;
+    let file = parse_memory_source(source, "callee-contract-definedness").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check contract call graph");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    for dual in [false, true] {
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = if dual {
+            verify_checked_dual(&checked, source_hash.clone())
+        } else {
+            verify_checked(&checked, source_hash.clone())
+        }
+        .expect("verify argument-specific contract safety");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for (name, status) in [
+            ("unsafe_gate", VerifStatus::Disproven),
+            ("rejected_call", VerifStatus::Disproven),
+            ("proven_call", VerifStatus::Proven),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            assert_eq!(result.status, status, "{name}: {}", result.message);
+            assert_eq!(
+                result.artifact.as_ref().expect("MIR artifact").engine,
+                ProofArtifact::ENGINE_MIR
+            );
+            if status == VerifStatus::Disproven {
+                assert!(result.message.contains("undefined"), "{}", result.message);
+            }
+        }
+        assert!(results
+            .iter()
+            .all(|result| result.func_name != "admitted_call"));
+    }
+}
+
+#[test]
 fn compatibility_verifier_access_is_explicitly_tagged() {
     require_z3!();
     let source = r#"
+        extern "C" func compatibility_marker(value: i32) -> i32 { value }
         func positive(value: i32) -> i32 {
             requires: value > 0
             ensures: result > 0
@@ -1801,7 +2358,9 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
         .find(|result| result.func_name == "main")
         .expect("nested Option tuple contract result");
     assert_eq!(result.status, VerifStatus::Proven);
-    assert_eq!(result.constraint_count, 2);
+    // Each of the two postconditions has a separate definedness proof before
+    // its predicate is checked. Neither obligation may be omitted.
+    assert_eq!(result.constraint_count, 4);
     let artifact = result.artifact.as_ref().expect("MIR proof artifact");
     assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
@@ -1821,7 +2380,7 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
         .find(|result| result.func_name == "main")
         .expect("nested Option tuple dual contract result");
     assert_eq!(dual_result.status, VerifStatus::Proven);
-    assert_eq!(dual_result.constraint_count, 2);
+    assert_eq!(dual_result.constraint_count, 4);
     assert_eq!(
         dual_result
             .artifact
@@ -6110,9 +6669,28 @@ func main() -> i64 { 0 }
             caller.message
         ),
         VerifStatus::Failed => {
+            // The checked MIR route can prove that evaluating x*x in the
+            // precondition itself overflows before the predicate is decided.
+            // That is a concrete failure, and still satisfies the no-proof
+            // contract that an Unknown solver result must also preserve.
+            let undefined_requires = caller
+                .message
+                .contains("callee requires expression is undefined");
+            if undefined_requires {
+                assert_eq!(
+                    caller
+                        .artifact
+                        .as_ref()
+                        .map(|artifact| artifact.engine.as_str()),
+                    Some(ProofArtifact::ENGINE_MIR),
+                    "definedness failure must come from the canonical proof"
+                );
+                assert!(caller.diagnostic.is_some());
+            }
             assert!(
                 caller.message.contains("could not be decided")
-                    || caller.message.contains("may violate precondition"),
+                    || caller.message.contains("may violate precondition")
+                    || undefined_requires,
                 "Unknown path must fail closed: {}",
                 caller.message
             );
@@ -7359,9 +7937,9 @@ func divide(x: i32, y: i32) -> i32 {
     );
 }
 
-/// P1-24: ProofArtifact source_hash and resolved_ir_hash must be non-empty
-/// when verification goes through verify_source (which has source text and
-/// CheckedProgram).
+/// P1-24: A source verification proof retains the source identity and the
+/// actual semantic graph consumed by its engine. Ordinary scalar contracts
+/// now use canonical MIR, so their receipt replaces the old VIR identity.
 #[test]
 fn proof_artifact_hashes_populated() {
     require_z3!();
@@ -7379,19 +7957,29 @@ func double(x: i32) -> i32 {
     let artifact = r
         .artifact
         .as_ref()
-        .expect("VIR-path result should have artifact");
-    assert!(
-        !artifact.source_hash.is_empty(),
-        "source_hash should be non-empty (P1-24)"
+        .expect("MIR-path result should have artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(
+        artifact.source_hash,
+        blake3::hash(src.as_bytes()).to_hex().to_string(),
+        "proof source identity must match the exact source (P1-24)"
     );
-    assert!(
-        !artifact.resolved_ir_hash.is_empty(),
-        "resolved_ir_hash should be non-empty (P1-24)"
-    );
-    assert!(
-        !artifact.vir_hash.is_empty(),
-        "vir_hash should be non-empty"
-    );
+    let file = parse_memory_source(src, "contracts").expect("parse proof source");
+    let checked = crate::core::check_program(&file).expect("check proof source");
+    let canonical = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize the proof's semantic graph")
+        .program;
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+    let receipt = artifact
+        .mir_route_receipt
+        .as_ref()
+        .expect("MIR proof carries its full route receipt");
+    receipt
+        .validate_against_program(&canonical)
+        .expect("proof receipt belongs to this semantic graph");
+    assert_eq!(receipt.mir_digest, artifact.mir_hash);
+    assert!(artifact.vir_hash.is_empty());
+    assert!(artifact.resolved_ir_hash.is_empty());
     // source_hash should be a valid BLAKE3 hex string (64 chars).
     assert_eq!(
         artifact.source_hash.len(),
@@ -7399,9 +7987,9 @@ func double(x: i32) -> i32 {
         "source_hash should be BLAKE3 hex (64 chars)"
     );
     assert_eq!(
-        artifact.resolved_ir_hash.len(),
+        artifact.mir_hash.len(),
         64,
-        "resolved_ir_hash should be BLAKE3 hex (64 chars)"
+        "mir_hash should be BLAKE3 hex (64 chars)"
     );
 }
 
@@ -7427,10 +8015,23 @@ func f(x: i32) -> i32 {
     let r2 = verify_source(src2).expect("src2 should verify");
     let a1 = r1[0].artifact.as_ref().expect("artifact");
     let a2 = r2[0].artifact.as_ref().expect("artifact");
+    assert_eq!(a1.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(a2.engine, ProofArtifact::ENGINE_MIR);
     assert_ne!(
         a1.source_hash, a2.source_hash,
         "different source text should produce different source_hash"
     );
+    assert_ne!(a1.mir_hash, a2.mir_hash, "changed arithmetic changes MIR");
+    assert!(
+        !a1.is_compatible(a2),
+        "changed semantics cannot reuse a proof"
+    );
+    let repeated = verify_source(src1).expect("repeat unchanged verification");
+    let repeated = repeated[0].artifact.as_ref().expect("repeat artifact");
+    assert_eq!(a1.source_hash, repeated.source_hash);
+    assert_eq!(a1.mir_hash, repeated.mir_hash);
+    assert_eq!(a1.mir_route_receipt, repeated.mir_route_receipt);
+    assert!(a1.is_compatible(repeated));
 }
 
 /// 0.31.27+: Callee ensures propagation in VIR path.

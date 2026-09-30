@@ -936,7 +936,7 @@ fn verify_closed_mir_profile(
             )?;
         }
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection => {
-            crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
+            crate::core::mir::validate_scalar_collection_graph(&canonical).map_err(|errors| {
                 format!(
                     "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
                 )
@@ -1042,6 +1042,30 @@ fn verify_closed_mir_profile(
     // names. Keep that display contract at the adapter boundary while proof
     // artifacts retain the canonical `function:` owner and MIR hash.
     for result in &mut results {
+        if let Some(diagnostic) = result
+            .diagnostic
+            .as_mut()
+            .filter(|diagnostic| diagnostic.span == crate::span::Span::UNKNOWN)
+        {
+            let subject = diagnostic
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.parent_node_id.as_ref());
+            if let Some(meta) = subject
+                .and_then(|subject| {
+                    program
+                        .node_meta()
+                        .get(&crate::core::NodeId(subject.clone()))
+                })
+                .or_else(|| {
+                    program
+                        .node_meta()
+                        .get(&crate::core::NodeId(result.func_name.clone()))
+                })
+            {
+                diagnostic.span = meta.origin.user_span();
+            }
+        }
         if let Some(name) = result.func_name.strip_prefix("function:") {
             result.func_name = name.to_string();
         }

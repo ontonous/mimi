@@ -14,9 +14,9 @@ use crate::core::mir::types::{
     MirAbiClass, MirBuiltinKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
-    MirFunction, MirInstructionKind, MirListOperation, MirProjection, MirSwitchCase, MirTerminator,
-    MirValueId,
+    MirAggregateKind, MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind,
+    MirContractUnaryOp, MirFunction, MirInstructionKind, MirListOperation, MirProjection,
+    MirSwitchCase, MirTerminator, MirValueId,
 };
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
@@ -92,6 +92,7 @@ enum SymbolicValue {
 struct SymbolicTrap {
     condition: Vec<Bool>,
     code: String,
+    subject: Option<crate::core::NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +234,7 @@ fn verify_program_inner(
         .collect::<Vec<_>>();
 
     for function in program.functions().values() {
-        if function.contracts.is_empty() {
+        if function.contracts.is_empty() && !has_call_precondition_obligation(function, program) {
             continue;
         }
         // A non-Copy variant in an unrelated callable must not erase a valid
@@ -263,7 +264,8 @@ fn verify_program_inner(
         }
         session.reset();
         let started = Instant::now();
-        let outcome = verify_function(function, program, &mut session);
+        let mut diagnostic = None;
+        let outcome = verify_function(function, program, &mut session, &mut diagnostic);
         let duration_us = started.elapsed().as_micros() as u64;
         let (status, message, constraint_count, domain) = match outcome {
             Ok(outcome) => outcome,
@@ -274,6 +276,11 @@ fn verify_program_inner(
                 Some(TrustedSubsetDomain::Body),
             ),
         };
+        // A successful call-site check does not invent an ensures proof for
+        // an otherwise obligation-free caller. Failures still belong to it.
+        if function.contracts.is_empty() && status == VerifStatus::NoObligations {
+            continue;
+        }
         let artifact = if status.is_definitive() || status == VerifStatus::NoObligations {
             Some(ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
@@ -294,7 +301,7 @@ fn verify_program_inner(
             func_name: function.owner.0.clone(),
             status,
             message,
-            diagnostic: None,
+            diagnostic,
             duration_us,
             constraint_count,
             artifact,
@@ -432,8 +439,20 @@ fn verify_ffi_program_inner(
         for contract in &function.contracts {
             match contract.kind {
                 MirContractKind::Requires => {
-                    let term =
-                        contract_term(&contract.condition, &initial.values, &initial.values, None)?;
+                    let (term, defined) = checked_contract_term(
+                        contract,
+                        program.type_catalog(),
+                        &initial.values,
+                        &initial.values,
+                        None,
+                    )?;
+                    // Retain the failing evaluation path before assuming the
+                    // predicate. Its own truth cannot erase a zero divisor.
+                    add_definedness(
+                        &mut initial,
+                        defined,
+                        "caller requires expression is undefined",
+                    )?;
                     initial
                         .constraints
                         .push(expect_bool(term, "caller requires contract")?);
@@ -626,6 +645,7 @@ fn verify_function(
     function: &MirFunction,
     program: &MirProgram,
     session: &mut SolverSession,
+    diagnostic: &mut Option<crate::diagnostic::Diagnostic>,
 ) -> Result<(VerifStatus, String, usize, Option<TrustedSubsetDomain>), String> {
     let catalog = program.type_catalog();
     validate_map_root_verifier_boundary(function, catalog)?;
@@ -633,8 +653,8 @@ fn verify_function(
     let mut ensures = Vec::new();
     for contract in &function.contracts {
         match contract.kind {
-            MirContractKind::Requires => requires.push(&contract.condition),
-            MirContractKind::Ensures => ensures.push(&contract.condition),
+            MirContractKind::Requires => requires.push(contract),
+            MirContractKind::Ensures => ensures.push(contract),
             MirContractKind::Invariant => {
                 return Ok((
                     VerifStatus::NotInTrustedSubset,
@@ -646,15 +666,6 @@ fn verify_function(
             }
         }
     }
-    if ensures.is_empty() {
-        return Ok((
-            VerifStatus::NoObligations,
-            "canonical MIR verifier: no ensures contract".into(),
-            0,
-            None,
-        ));
-    }
-
     // R6-1036: the multi-target Flow union no longer rejects the whole
     // callable.  Union construction and match distribution have a symbolic
     // domain (tag + per-field payload under the promoted union contract), and
@@ -677,11 +688,63 @@ fn verify_function(
 
     let mut initial = initial_state(function, catalog, session)?;
     let mut require_terms = Vec::with_capacity(requires.len());
-    for condition in &requires {
-        let term = contract_term(condition, &initial.values, &initial.values, None)?;
+    let mut constraint_count = 0;
+    for contract in &requires {
+        let (term, defined) =
+            checked_contract_term(contract, catalog, &initial.values, &initial.values, None)?;
+        // Prove evaluation safety under type bounds and earlier requires
+        // only. Assuming this predicate first would circularly discard the
+        // very input on which evaluating it traps.
+        constraint_count += 1;
+        let undefined = Bool::and(&[&conjunction(&initial.constraints), &defined.not()]);
+        match session.check_scope(undefined).0 {
+            SatResult::Sat => {
+                let message = "canonical MIR requires contract expression is undefined".to_string();
+                *diagnostic = Some(mir_contract_diagnostic(&message, Some(&contract.id)));
+                return Ok((
+                    VerifStatus::Disproven,
+                    message,
+                    constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ));
+            }
+            SatResult::Unknown => {
+                return Ok((
+                    session.unknown_status(),
+                    "canonical MIR requires expression definedness could not be decided".into(),
+                    constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ))
+            }
+            SatResult::Unsat => {}
+        }
         require_terms.push(expect_bool(term, "requires contract")?);
+        initial.constraints.extend(require_terms.last().cloned());
+        constraint_count += 1;
     }
-    initial.constraints.extend(require_terms.iter().cloned());
+    if !requires.is_empty() {
+        match session.check_scope(conjunction(&initial.constraints)).0 {
+            SatResult::Unsat => {
+                let message = "canonical MIR requires are unsatisfiable".to_string();
+                *diagnostic = Some(mir_contract_diagnostic(&message, Some(&function.owner)));
+                return Ok((
+                    VerifStatus::Disproven,
+                    message,
+                    constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ));
+            }
+            SatResult::Unknown => {
+                return Ok((
+                    session.unknown_status(),
+                    "canonical MIR requires satisfiability could not be decided".into(),
+                    constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ));
+            }
+            SatResult::Sat => {}
+        }
+    }
 
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -699,7 +762,6 @@ fn verify_function(
         return Err("canonical MIR body has no non-trapping return path".into());
     }
 
-    let mut constraint_count = require_terms.len();
     let mut saw_unknown = false;
 
     // A trapping arithmetic operation is a real MIR execution path.  It may
@@ -710,12 +772,22 @@ fn verify_function(
         let trap_result = session.check_scope(&condition);
         match trap_result {
             (SatResult::Sat, _) => {
+                let explanation = match trap.code.as_str() {
+                    "E0802" => ": integer overflow; integer operation is undefined",
+                    "E0801" => ": integer operation is undefined",
+                    _ => "",
+                };
+                let message = format!(
+                    "canonical MIR body can reach trap '{}' under requires{explanation}",
+                    trap.code
+                );
+                *diagnostic = Some(mir_contract_diagnostic(
+                    &message,
+                    trap.subject.as_ref().or(Some(&function.owner)),
+                ));
                 return Ok((
                     VerifStatus::Disproven,
-                    format!(
-                        "canonical MIR body can reach trap '{}' under requires",
-                        trap.code
-                    ),
+                    message,
                     constraint_count,
                     Some(TrustedSubsetDomain::Body),
                 ));
@@ -736,20 +808,51 @@ fn verify_function(
     for path in returns {
         let path_condition = conjunction(&path.constraints);
         for ensure in &ensures {
-            let term = contract_term(
+            let (term, defined) = checked_contract_term(
                 ensure,
+                catalog,
                 &path_value_map(&path),
                 &initial.values,
                 Some(&path.value),
             )?;
+            constraint_count += 1;
+            match session
+                .check_scope(Bool::and(&[&path_condition, &defined.not()]))
+                .0
+            {
+                SatResult::Sat => {
+                    let message =
+                        "canonical MIR ensures contract expression is undefined".to_string();
+                    *diagnostic = Some(mir_contract_diagnostic(&message, Some(&ensure.id)));
+                    return Ok((
+                        VerifStatus::Disproven,
+                        message,
+                        constraint_count,
+                        Some(TrustedSubsetDomain::Contract),
+                    ));
+                }
+                SatResult::Unknown => {
+                    saw_unknown = true;
+                    continue;
+                }
+                SatResult::Unsat => {}
+            }
             let condition = expect_bool(term, "ensures contract")?;
             let violation = Bool::and(&[&path_condition, &condition.not()]);
             constraint_count += 1;
             match session.check_scope(violation) {
-                (SatResult::Sat, _) => {
+                (SatResult::Sat, model) => {
+                    let result = model
+                        .as_ref()
+                        .and_then(|model| symbolic_counterexample_value(model, &path.value))
+                        .unwrap_or_else(|| "unknown".into());
+                    let message = format!(
+                        "canonical MIR ensures contract is disproven; counterexample: result = {result}"
+                    );
+                    *diagnostic = Some(mir_contract_diagnostic(&message, Some(&function.owner)));
                     return Ok((
                         VerifStatus::Disproven,
-                        "canonical MIR ensures contract is disproven".into(),
+                        message,
                         constraint_count,
                         Some(TrustedSubsetDomain::Contract),
                     ));
@@ -766,14 +869,85 @@ fn verify_function(
             constraint_count,
             Some(TrustedSubsetDomain::Contract),
         ))
+    } else if ensures.is_empty() && requires.is_empty() {
+        Ok((
+            VerifStatus::NoObligations,
+            "canonical MIR call-site preconditions hold; no ensures contract".into(),
+            constraint_count,
+            None,
+        ))
     } else {
         Ok((
             VerifStatus::Proven,
-            "canonical MIR ensures contract proven".into(),
+            if ensures.is_empty() {
+                "canonical MIR requires are satisfiable and body obligations hold".into()
+            } else {
+                "canonical MIR ensures contract proven".into()
+            },
             constraint_count,
             None,
         ))
     }
+}
+
+fn mir_contract_diagnostic(
+    message: &str,
+    subject: Option<&crate::core::NodeId>,
+) -> crate::diagnostic::Diagnostic {
+    crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN).with_origin(
+        crate::diagnostic::DiagnosticOrigin {
+            kind: crate::diagnostic::DiagnosticOriginKind::Desugared,
+            rule: Some("canonical_mir.contract".into()),
+            parent_node_id: subject.map(|subject| subject.0.clone()),
+        },
+    )
+}
+
+fn symbolic_counterexample_value(model: &z3::Model, value: &SymbolicValue) -> Option<String> {
+    match value {
+        SymbolicValue::Int(value) => model.eval(value, true).map(|value| value.to_string()),
+        SymbolicValue::Bool(value) => model.eval(value, true).map(|value| value.to_string()),
+        SymbolicValue::Float(value) => model.eval(value, true).map(|value| value.to_string()),
+        SymbolicValue::Unit => Some("()".into()),
+        _ => None,
+    }
+}
+
+/// A call-site requires obligation belongs to the caller even when that
+/// caller declares no postcondition. Follow direct calls without assuming
+/// that an uncontracted intermediate helper erases the obligation.
+fn has_call_precondition_obligation(function: &MirFunction, program: &MirProgram) -> bool {
+    let mut pending = vec![function.owner.clone()];
+    let mut seen = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !seen.insert(owner.clone()) {
+            continue;
+        }
+        let Some(caller) = program.functions().get(&owner) else {
+            continue;
+        };
+        for instruction in caller.blocks.values().flat_map(|block| &block.instructions) {
+            let MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(target),
+                ..
+            } = &instruction.kind
+            else {
+                continue;
+            };
+            let Some(callee) = program.functions().get(target) else {
+                continue;
+            };
+            if callee
+                .contracts
+                .iter()
+                .any(|contract| contract.kind == MirContractKind::Requires)
+            {
+                return true;
+            }
+            pending.push(target.clone());
+        }
+    }
+    false
 }
 
 /// Recheck the private receipt and exact opaque-handle ABI at every verifier
@@ -1554,6 +1728,7 @@ fn explore_block(
         .get(block_id)
         .ok_or_else(|| format!("MIR verifier block '{}' is absent", block_id))?;
     for instruction in &block.instructions {
+        let previous_traps = state.traps.len();
         eval_instruction(
             function,
             program,
@@ -1562,6 +1737,16 @@ fn explore_block(
             &instruction.id,
             &instruction.kind,
         )?;
+        for trap in &mut state.traps[previous_traps..] {
+            if trap.subject.is_none() {
+                trap.subject = instruction
+                    .id
+                    .as_str()
+                    .splitn(3, ':')
+                    .nth(2)
+                    .map(|node| crate::core::NodeId(node.to_string()));
+            }
+        }
     }
     match &block.terminator {
         MirTerminator::Goto {
@@ -1623,10 +1808,21 @@ fn explore_block(
             traps,
         )?,
         MirTerminator::Return { value } => {
-            let value = value
-                .as_ref()
-                .and_then(|value| state.values.get(value).cloned())
-                .ok_or_else(|| "MIR verifier return value is absent".to_string())?;
+            let value = match value {
+                Some(value) => state
+                    .values
+                    .get(value)
+                    .cloned()
+                    .ok_or_else(|| "MIR verifier return value is absent".to_string())?,
+                None
+                    if catalog
+                        .get(&function.result)
+                        .is_some_and(crate::core::mir::types::MirTypeDesc::is_canonical_ffi_unit) =>
+                {
+                    SymbolicValue::Unit
+                }
+                None => return Err("MIR verifier non-unit return value is absent".into()),
+            };
             returns.push(ReturnPath {
                 constraints: state.constraints.clone(),
                 values: state.values.clone(),
@@ -1639,6 +1835,7 @@ fn explore_block(
             traps.push(SymbolicTrap {
                 condition: state.constraints.clone(),
                 code: code.clone(),
+                subject: None,
             });
         }
         MirTerminator::Unreachable => {}
@@ -4240,6 +4437,7 @@ fn eval_flow_transition(
         })?;
         target_state.values.insert(parameter.clone(), value);
     }
+
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let ty = target
             .values
@@ -4804,6 +5002,31 @@ fn eval_direct_scalar_call(
             target_state.known_ints.insert(parameter.clone(), value);
         }
         target_state.values.insert(parameter.clone(), value);
+    }
+
+    // A callee's requires is an obligation at this call, never an unchecked
+    // assumption. Its failing path is retained before the successful call
+    // path gains the condition used to execute the callee's body.
+    for contract in &target.contracts {
+        if contract.kind == MirContractKind::Requires {
+            let (condition, defined) = checked_contract_term(
+                contract,
+                catalog,
+                &target_state.values,
+                &target_state.values,
+                None,
+            )?;
+            add_definedness(
+                &mut target_state,
+                defined,
+                "callee requires expression is undefined",
+            )?;
+            add_definedness(
+                &mut target_state,
+                expect_bool(condition, "callee requires contract")?,
+                &format!("call to '{}' may violate precondition", target_owner.0),
+            )?;
+        }
     }
 
     let mut returns = Vec::new();
@@ -7401,28 +7624,10 @@ fn eval_binary(
                     let ScalarKind::Int { bits } = kind else {
                         return Err("MIR integer operation has non-integer result TypeDesc".into());
                     };
-                    let zero = Int::from_i64(0);
-                    let min = Int::from_i64(if bits == 32 {
-                        i32::MIN as i64
-                    } else {
-                        i64::MIN
-                    });
-                    let neg_one = Int::from_i64(-1);
-                    let defined = Bool::and(&[
-                        &right.ne(&zero),
-                        &Bool::and(&[&left.eq(&min), &right.eq(&neg_one)]).not(),
-                    ]);
+                    let (output, defined) =
+                        checked_int_division(&left, &right, bits, op == Op::Remainder);
                     add_definedness(state, defined, "E0802")?;
-                    let abs_left = left.ge(&zero).ite(&left, &left.unary_minus());
-                    let abs_right = right.ge(&zero).ite(&right, &right.unary_minus());
-                    let quotient = abs_left.div(&abs_right);
-                    let remainder = abs_left.modulo(&abs_right);
-                    let same_sign = left.ge(&zero).eq(&right.ge(&zero));
-                    if op == Op::Divide {
-                        same_sign.ite(&quotient, &quotient.unary_minus())
-                    } else {
-                        left.ge(&zero).ite(&remainder, &remainder.unary_minus())
-                    }
+                    output
                 }
                 Op::Equal => return Ok(SymbolicValue::Bool(left.eq(&right))),
                 Op::NotEqual => return Ok(SymbolicValue::Bool(left.eq(&right).not())),
@@ -7523,6 +7728,7 @@ fn add_definedness(state: &mut SymbolicState, defined: Bool, code: &str) -> Resu
     state.traps.push(SymbolicTrap {
         condition: trap_condition,
         code: code.into(),
+        subject: None,
     });
     state.constraints.push(defined);
     Ok(())
@@ -7612,6 +7818,223 @@ fn contract_term(
     }
 }
 
+/// Evaluate an ordinary predicate together with all operations needed to
+/// compute it. The immutable TypeDesc table comes from checked expressions,
+/// including literals; integer width is unrelated to the callable's return
+/// type. Boolean guards model left-to-right short-circuit evaluation.
+fn checked_contract_term(
+    contract: &MirContract,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    values: &BTreeMap<MirValueId, SymbolicValue>,
+    old_values: &BTreeMap<MirValueId, SymbolicValue>,
+    result: Option<&SymbolicValue>,
+) -> Result<(SymbolicValue, Bool), String> {
+    fn arithmetic_abi(
+        contract: &MirContract,
+        path: &[u8],
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+    ) -> Result<MirAbiClass, String> {
+        let ty = contract.expression_types.get(path).ok_or_else(|| {
+            "canonical contract arithmetic has no checked TypeDesc receipt".to_string()
+        })?;
+        let descriptor = catalog
+            .get(ty)
+            .ok_or_else(|| "canonical contract arithmetic TypeDesc is absent".to_string())?;
+        if !descriptor.is_canonical_copy_scalar(true) {
+            return Err(
+                "canonical contract arithmetic TypeDesc has invalid scalar/glue metadata".into(),
+            );
+        }
+        match descriptor.abi {
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            }
+            | MirAbiClass::Float { bits: 64 } => Ok(descriptor.abi),
+            _ => {
+                Err("canonical contract arithmetic TypeDesc is not a supported numeric type".into())
+            }
+        }
+    }
+
+    fn evaluate(
+        expression: &MirContractExpr,
+        path: &mut Vec<u8>,
+        contract: &MirContract,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        values: &BTreeMap<MirValueId, SymbolicValue>,
+        old_values: &BTreeMap<MirValueId, SymbolicValue>,
+        result: Option<&SymbolicValue>,
+    ) -> Result<(SymbolicValue, Bool), String> {
+        use MirContractBinaryOp as Op;
+        match expression {
+            MirContractExpr::Project { base, projection } => {
+                path.push(0);
+                let (value, defined) =
+                    evaluate(base, path, contract, catalog, values, old_values, result)?;
+                path.pop();
+                Ok((symbolic_project(value, projection)?, defined))
+            }
+            MirContractExpr::Unary { op, operand } => {
+                path.push(0);
+                let (operand, defined) =
+                    evaluate(operand, path, contract, catalog, values, old_values, result)?;
+                path.pop();
+                match (op, operand) {
+                    (MirContractUnaryOp::Negate, SymbolicValue::Int(value)) => {
+                        let MirAbiClass::Integer { bits, .. } =
+                            arithmetic_abi(contract, path, catalog)?
+                        else {
+                            return Err(
+                                "canonical contract integer negation has non-integer TypeDesc"
+                                    .into(),
+                            );
+                        };
+                        let output = value.unary_minus();
+                        Ok((
+                            SymbolicValue::Int(output.clone()),
+                            Bool::and(&[&defined, &int_range_constraint(&output, bits)]),
+                        ))
+                    }
+                    (MirContractUnaryOp::Negate, SymbolicValue::Float(value)) => {
+                        if arithmetic_abi(contract, path, catalog)?
+                            != (MirAbiClass::Float { bits: 64 })
+                        {
+                            return Err(
+                                "canonical contract float negation has non-float TypeDesc".into()
+                            );
+                        }
+                        let output = value.unary_neg();
+                        Ok((
+                            SymbolicValue::Float(output.clone()),
+                            Bool::and(&[&defined, &float_is_finite(&output)]),
+                        ))
+                    }
+                    (MirContractUnaryOp::Not, SymbolicValue::Bool(value)) => {
+                        Ok((SymbolicValue::Bool(value.not()), defined))
+                    }
+                    _ => Err(
+                        "canonical contract unary operand has an incompatible symbolic kind".into(),
+                    ),
+                }
+            }
+            MirContractExpr::Binary { op, left, right } => {
+                path.push(0);
+                let (left, left_defined) =
+                    evaluate(left, path, contract, catalog, values, old_values, result)?;
+                path.pop();
+                path.push(1);
+                let (right, right_defined) =
+                    evaluate(right, path, contract, catalog, values, old_values, result)?;
+                path.pop();
+                let mut defined = match (op, &left) {
+                    (Op::LogicalAnd, SymbolicValue::Bool(left)) => {
+                        Bool::and(&[&left_defined, &left.implies(&right_defined)])
+                    }
+                    (Op::LogicalOr, SymbolicValue::Bool(left)) => {
+                        Bool::and(&[&left_defined, &left.not().implies(&right_defined)])
+                    }
+                    _ => Bool::and(&[&left_defined, &right_defined]),
+                };
+                let output = if matches!(op, Op::Divide | Op::Remainder)
+                    && matches!(
+                        (&left, &right),
+                        (SymbolicValue::Int(_), SymbolicValue::Int(_))
+                    ) {
+                    let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right)
+                    else {
+                        return Err("canonical contract division operands must be integers".into());
+                    };
+                    let MirAbiClass::Integer { bits, .. } =
+                        arithmetic_abi(contract, path, catalog)?
+                    else {
+                        return Err(
+                            "canonical contract integer division has non-integer TypeDesc".into(),
+                        );
+                    };
+                    let (output, operation_defined) =
+                        checked_int_division(&left, &right, bits, *op == Op::Remainder);
+                    defined = Bool::and(&[&defined, &operation_defined]);
+                    SymbolicValue::Int(output)
+                } else {
+                    if *op == Op::Divide {
+                        if let SymbolicValue::Float(right) = &right {
+                            defined = Bool::and(&[&defined, &right.is_zero().not()]);
+                        }
+                    }
+                    contract_binary(*op, left, right)?
+                };
+                if matches!(
+                    op,
+                    Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Remainder
+                ) {
+                    match (&output, arithmetic_abi(contract, path, catalog)?) {
+                        (SymbolicValue::Int(output), MirAbiClass::Integer { bits, .. }) => {
+                            defined = Bool::and(&[&defined, &int_range_constraint(output, bits)]);
+                        }
+                        (SymbolicValue::Float(output), MirAbiClass::Float { bits: 64 }) => {
+                            defined = Bool::and(&[&defined, &float_is_finite(output)]);
+                        }
+                        _ => {
+                            return Err(
+                                "canonical contract arithmetic result disagrees with its TypeDesc"
+                                    .into(),
+                            )
+                        }
+                    }
+                }
+                Ok((output, defined))
+            }
+            _ => {
+                let value = contract_term(expression, values, old_values, result)?;
+                let defined = match &value {
+                    SymbolicValue::Float(value) => float_is_finite(value),
+                    _ => Bool::from_bool(true),
+                };
+                Ok((value, defined))
+            }
+        }
+    }
+
+    evaluate(
+        &contract.condition,
+        &mut Vec::new(),
+        contract,
+        catalog,
+        values,
+        old_values,
+        result,
+    )
+}
+
+/// Share signed division/remainder and the zero/MIN/-1 trap predicate with
+/// executable MIR arithmetic. Z3's Euclidean division must be converted to
+/// the language's truncation toward zero before proving a predicate.
+fn checked_int_division(left: &Int, right: &Int, bits: u16, remainder: bool) -> (Int, Bool) {
+    let zero = Int::from_i64(0);
+    let min = Int::from_i64(if bits == 32 {
+        i32::MIN as i64
+    } else {
+        i64::MIN
+    });
+    let defined = Bool::and(&[
+        &right.ne(&zero),
+        &Bool::and(&[&left.eq(&min), &right.eq(Int::from_i64(-1))]).not(),
+    ]);
+    let abs_left = left.ge(&zero).ite(left, &left.unary_minus());
+    let abs_right = right.ge(&zero).ite(right, &right.unary_minus());
+    let output = if remainder {
+        let output = abs_left.modulo(&abs_right);
+        left.ge(&zero).ite(&output, &output.unary_minus())
+    } else {
+        let output = abs_left.div(&abs_right);
+        left.ge(&zero)
+            .eq(right.ge(&zero))
+            .ite(&output, &output.unary_minus())
+    };
+    (output, defined)
+}
+
 /// Runtime FFI predicates use checked i64 arithmetic and short-circuit
 /// boolean evaluation. Prove definedness together with the predicate; the
 /// unbounded mathematical contract encoder alone cannot establish this.
@@ -7658,27 +8081,9 @@ fn ffi_contract_term(
                 let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right) else {
                     return Err(format!("FFI {phase} division requires integers"));
                 };
-                let zero = Int::from_i64(0);
-                defined = Bool::and(&[
-                    &defined,
-                    &right.ne(&zero),
-                    &Bool::and(&[
-                        &left.eq(Int::from_i64(i64::MIN)),
-                        &right.eq(Int::from_i64(-1)),
-                    ])
-                    .not(),
-                ]);
-                let abs_left = left.ge(&zero).ite(&left, &left.unary_minus());
-                let abs_right = right.ge(&zero).ite(&right, &right.unary_minus());
-                let output = if *op == Op::Divide {
-                    let quotient = abs_left.div(&abs_right);
-                    left.ge(&zero)
-                        .eq(right.ge(&zero))
-                        .ite(&quotient, &quotient.unary_minus())
-                } else {
-                    let remainder = abs_left.modulo(&abs_right);
-                    left.ge(&zero).ite(&remainder, &remainder.unary_minus())
-                };
+                let (output, operation_defined) =
+                    checked_int_division(&left, &right, 64, *op == Op::Remainder);
+                defined = Bool::and(&[&defined, &operation_defined]);
                 SymbolicValue::Int(output)
             } else {
                 contract_binary(*op, left, right)?
@@ -7780,6 +8185,52 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn verifier_untyped_handwritten_division_contract_fails_closed() {
+        let source = r#"
+func predicate(x: i32, y: i32) -> bool {
+    requires: y != 0 && (x != -2147483648 || y != -1)
+    ensures: x / y == x / y
+    true
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("typed contracts");
+        let mut functions = program.functions().clone();
+        let function = functions
+            .values_mut()
+            .find(|function| function.owner.0.ends_with("predicate"))
+            .expect("predicate");
+        let contract = function
+            .contracts
+            .iter_mut()
+            .find(|contract| contract.kind == crate::core::mir::MirContractKind::Ensures)
+            .expect("division ensures");
+        contract.expression_types.clear();
+        let owner = function.owner.clone();
+        // Older hand-built predicates retain structural admission, but a
+        // missing checked arithmetic width never receives a proof verdict.
+        let untyped = MirProgram::with_type_catalog(functions, program.type_catalog().clone())
+            .expect("legacy scalar-kind structural admission");
+        let results = verify_program(&untyped, "untyped-div-contract".into())
+            .expect("unsupported proof domain is a verdict");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("predicate verdict");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(
+            result.message.contains("no checked TypeDesc receipt"),
+            "{}",
+            result.message
+        );
+    }
 
     #[test]
     fn verifier_symbolic_unit_shape_requires_copy_ownership() {

@@ -13887,10 +13887,25 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
     assert_eq!(results.len(), 2, "wrapper and extern requires obligations");
     assert!(results
         .iter()
-        .any(|result| result.status == VerifStatus::Proven));
-    assert!(results
-        .iter()
-        .any(|result| result.status == VerifStatus::NoObligations));
+        .all(|result| result.status == VerifStatus::Proven));
+    assert!(
+        results.iter().any(|result| result
+            .message
+            .contains("requires are satisfiable and body obligations hold")),
+        "the wrapper's requires and body obligations must be checked: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.message.contains("extern requires contract proven")),
+        "the extern call must retain its separate proof: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.func_name != "function:main"),
+        "a successful caller with no declared contract has no separate verdict"
+    );
     assert!(results.iter().all(|result| {
         result.artifact.as_ref().is_some_and(|artifact| {
             artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == receipt.mir_digest

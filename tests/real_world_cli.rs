@@ -59,6 +59,89 @@ fn can_link() -> bool {
     *CAN_LINK.get_or_init(|| Command::new("cc").arg("--version").output().is_ok())
 }
 
+#[test]
+fn canonical_scalar_contract_library_verifies_without_executable_main() {
+    if !mimi::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_scalar_contract_library_{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create contract library test directory");
+    for (name, claim, expected_exit) in [("valid", "x + 1", 0), ("invalid", "x + 2", 1)] {
+        let source = dir.join(format!("{name}.mimi"));
+        fs::write(
+            &source,
+            format!(
+                "func increment(x: i32) -> i32 {{\n    requires: x >= 0 && x <= 100\n    ensures: result == {claim}\n    x + 1\n}}\n"
+            ),
+        )
+        .expect("write contract library");
+        let mut digests = Vec::new();
+        for explicit_mir in [false, true] {
+            let mut command = Command::new(mimi_bin());
+            command
+                .current_dir(project_root())
+                .arg("verify")
+                .arg(&source);
+            if explicit_mir {
+                command.arg("--mir");
+            }
+            let output = command
+                .env("MIMI_VERBOSE", "1")
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .expect("verify contract library");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "{name} explicit_mir={explicit_mir}: {stdout}\n{stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "contract library must use MIR: {stderr}"
+            );
+            assert!(
+                !stderr.contains("no canonical function:main"),
+                "verification must not require a process entry: {stderr}"
+            );
+            let marker = "canonical MIR verifier provenance:";
+            let provenance = stderr
+                .lines()
+                .find(|line| line.starts_with(marker))
+                .expect("actual MIR proof provenance");
+            let digest = provenance
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("mir_digest="))
+                .expect("proof MIR digest");
+            assert_eq!(digest.len(), 64);
+            digests.push(digest.to_owned());
+            let transcript = format!("{stdout}\n{stderr}");
+            assert!(
+                transcript.contains(if expected_exit == 0 {
+                    "canonical MIR ensures contract proven"
+                } else {
+                    "canonical MIR ensures contract is disproven"
+                }),
+                "actual contract verdict: {transcript}"
+            );
+        }
+        assert_eq!(digests[0], digests[1], "default and explicit proof graph");
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&source)
+            .output()
+            .expect("attempt execution of a contract library");
+        assert!(!run.status.success(), "execution still needs main");
+    }
+    fs::remove_dir_all(&dir).expect("remove contract library test directory");
+}
+
 /// Files whose expected CLI failures are recorded capability boundaries. Keep
 /// the list minimal and in lockstep with `tests/real_world/run_suite.py` and
 /// `RESULTS.md`; each entry's run/build behavior is still executed by the suite.
@@ -1559,15 +1642,46 @@ fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
                 .env("MIMI_VERBOSE", "1")
                 .output()
                 .unwrap();
-            // A helper's requires is a conditional proof assumption. Runtime
-            // checking must still reject the invalid actual input below.
+            // The helper's own requires is a conditional proof assumption,
+            // but its caller must establish it for the actual argument.
+            // Keep the invalid helper call as a static and runtime negative.
             assert_eq!(
                 verification.status.success(),
-                argument > 0 || helper,
+                argument > 0,
                 "{}",
                 String::from_utf8_lossy(&verification.stderr)
             );
             let verified_stdout = String::from_utf8_lossy(&verification.stdout);
+            let verified_stderr = String::from_utf8_lossy(&verification.stderr);
+            if helper {
+                assert!(
+                    verified_stdout.contains("2/3 verified"),
+                    "{verified_stdout}"
+                );
+                assert!(verified_stdout.contains("function:assume_positive: canonical MIR requires are satisfiable and body obligations hold"), "{verified_stdout}");
+                assert!(
+                    verified_stderr
+                        .contains("call to 'function:assume_positive' may violate precondition"),
+                    "{verified_stderr}"
+                );
+                assert!(
+                    verified_stderr.contains("requires.mimi:4:30-56"),
+                    "{verified_stderr}"
+                );
+                assert!(
+                    verified_stderr.contains("assume_positive(-1 as i64)"),
+                    "{verified_stderr}"
+                );
+            } else if argument < 0 {
+                assert!(
+                    verified_stderr.contains("canonical MIR extern requires contract disproven"),
+                    "{verified_stderr}"
+                );
+                assert!(
+                    verified_stderr.contains("labs(-1 as i64)"),
+                    "{verified_stderr}"
+                );
+            }
             assert!(
                 verified_stdout.contains("canonical MIR extern requires contract")
                     || String::from_utf8_lossy(&verification.stderr)
@@ -1576,6 +1690,9 @@ fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
             );
             assert!(!String::from_utf8_lossy(&verification.stderr)
                 .contains("canonical route disposition: legacy"));
+            // --verify-ffi checks foreign obligations under the declared
+            // helper requires; the separate verify command above also proves
+            // ordinary caller preconditions. Preserve this FFI-only boundary.
             let static_build = Command::new(mimi_bin())
                 .current_dir(project_root())
                 .args(["build", "--verify-ffi", "--emit-ir"])
@@ -6723,7 +6840,16 @@ fn canonical_scalar_ffi_cli_import_graph_mixed_verdict_preserves_manifest_and_so
             Some(1),
             "imported verifier run {index}"
         );
-        assert!(stdout.contains("1/4 verified"));
+        // The two helper requires now have real body proofs in addition to
+        // the one proven FFI receipt; the failed receipt remains unique.
+        assert!(stdout.contains("3/4 verified"), "{stdout}\n{stderr}");
+        for owner in ["imported_ok", "mid_ok"] {
+            assert!(stdout.contains(&format!("function:{owner}: canonical MIR requires are satisfiable and body obligations hold")), "{stdout}");
+        }
+        assert!(
+            !stdout.contains("function:main:"),
+            "a valid uncontracted caller has no separate verdict: {stdout}"
+        );
         assert_eq!(
             stdout
                 .matches("canonical MIR extern requires contract proven")
@@ -6738,7 +6864,7 @@ fn canonical_scalar_ffi_cli_import_graph_mixed_verdict_preserves_manifest_and_so
             1,
             "imported verifier run {index} must report one failed FFI receipt"
         );
-        assert!(stderr.contains("leaf.mimi"));
+        assert!(stderr.contains("leaf.mimi:11:5-16"), "{stderr}");
         assert!(stderr.contains("leaf_bad(x)"));
         assert!(!stderr.contains("canonical route disposition: legacy"));
     }
@@ -13920,11 +14046,10 @@ fn canonical_scalar_ffi_transitive_failure_preserves_side_effect_order() {
             .arg(&main)
             .output()
             .expect("spawn transitive scalar FFI failure verifier");
-        assert!(
-            output.status.success(),
-            "verifier unexpectedly rejected conditional helper preconditions:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "the actual -1 argument violates forward_labs requires"
         );
         let combined = format!(
             "{}{}",
@@ -13932,6 +14057,13 @@ fn canonical_scalar_ffi_transitive_failure_preserves_side_effect_order() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(combined.contains("canonical MIR extern requires contract proven"));
+        assert!(combined.contains("3/4 verified"), "{combined}");
+        assert!(
+            combined.contains("call to 'function:forward_labs' may violate precondition"),
+            "{combined}"
+        );
+        assert!(combined.contains("main.mimi:5:5-28"), "{combined}");
+        assert!(combined.contains("forward_labs(-1 as i64)"), "{combined}");
         assert!(!combined.contains("canonical route disposition: legacy"));
     }
 
@@ -14411,8 +14543,9 @@ fn default_route_nested_tuple_variant_uses_canonical_mir_for_all_cli_consumers()
     let verify_stdout = String::from_utf8_lossy(&verify.stdout);
     assert!(verify_stdout.contains("canonical MIR"), "{verify_stdout}");
     assert!(verify_stdout.contains("1/1 verified"), "{verify_stdout}");
+    // Two ensures now each require definedness and predicate proofs.
     assert!(
-        verify_stdout.contains("2 total constraints"),
+        verify_stdout.contains("4 total constraints"),
         "{verify_stdout}"
     );
 
@@ -14572,7 +14705,12 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
         let verify_stdout = String::from_utf8_lossy(&verify.stdout);
         assert!(verify_stdout.contains("canonical MIR ensures contract proven"));
         assert!(verify_stdout.contains("1/1 verified"));
-        assert!(verify_stdout.contains("[15 constraints]"));
+        // One requires definedness check and two return-path ensures
+        // definedness checks add three obligations to the original fifteen.
+        assert!(
+            verify_stdout.contains("[18 constraints]"),
+            "{verify_stdout}"
+        );
         assert!(verify.stderr.is_empty());
     }
 
@@ -14729,10 +14867,28 @@ fn canonical_flow_failure_verifier_reports_a_real_counterexample() {
             .expect("failed to spawn recoverable cross-state counterexample verifier");
         assert!(!verify.status.success());
         let verify_stdout = String::from_utf8_lossy(&verify.stdout);
-        assert!(verify_stdout.contains("canonical MIR ensures contract is disproven"));
-        assert!(verify_stdout.contains("[15 constraints]"));
-        assert!(!verify_stdout.contains("No contracts to verify"));
-        assert!(!verify_stdout.contains("flow_ast"));
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        let transcript = format!("{verify_stdout}\n{verify_stderr}");
+        assert!(
+            verify_stderr.contains(
+                "canonical MIR ensures contract is disproven; counterexample: result = 0"
+            ),
+            "{transcript}"
+        );
+        assert!(
+            verify_stderr.contains(
+                "flow_state_match_fail_result_failure_disproven_dual_backend.mimi:19:1-35:2"
+            ),
+            "{transcript}"
+        );
+        // Same three added definedness obligations as the positive fixture.
+        assert!(
+            verify_stdout.contains("18 total constraints"),
+            "{transcript}"
+        );
+        assert!(verify_stdout.contains("0/1 verified"), "{transcript}");
+        assert!(!transcript.contains("No contracts to verify"));
+        assert!(!transcript.contains("flow_ast"));
     }
 }
 
@@ -17869,8 +18025,18 @@ fn canonical_default_result_i32_i32_err_unwrap_preserves_active_tag_trap() {
         .expect("failed to spawn default Copy Result Err unwrap verifier");
     assert!(!verify.status.success());
     let verify_stdout = String::from_utf8_lossy(&verify.stdout);
-    assert!(verify_stdout.contains("canonical MIR"), "{verify_stdout}");
-    assert!(verify_stdout.contains("E0800"), "{verify_stdout}");
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    let transcript = format!("{verify_stdout}\n{verify_stderr}");
+    assert!(
+        verify_stderr.contains("canonical MIR body can reach trap 'E0800'"),
+        "{transcript}"
+    );
+    assert!(
+        verify_stderr.contains("mir_native_result_i32_unwrap_err.mimi:5:5-19"),
+        "{transcript}"
+    );
+    assert!(verify_stderr.contains("value.unwrap()"), "{transcript}");
+    assert!(verify_stdout.contains("0/1 verified"), "{transcript}");
 
     let binary = std::env::temp_dir().join(format!(
         "mimi-default-copy-result-i32-i32-err-{}",
@@ -22339,7 +22505,18 @@ fn canonical_mir_record_projection_preserves_checked_trap_class() {
         "reachable record-field trap must fail"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("can reach trap 'E0802'"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let transcript = format!("{stdout}\n{stderr}");
+    assert!(stderr.contains("can reach trap 'E0802'"), "{transcript}");
+    assert!(
+        stderr.contains("mir_verifier_record_trap_contract.mimi:10:16-23"),
+        "{transcript}"
+    );
+    assert!(
+        stderr.contains("Point { x: p.x + 1, enabled: p.enabled }"),
+        "{transcript}"
+    );
+    assert!(stdout.contains("0/1 verified"), "{transcript}");
 }
 
 #[test]
@@ -22357,8 +22534,18 @@ fn canonical_mir_verifier_reports_ensures_counterexample() {
         .expect("failed to spawn canonical MIR verifier");
     assert!(!output.status.success(), "disproven contract must fail CLI");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("canonical MIR ensures contract is disproven"));
-    assert!(!stdout.contains("flow_ast"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let transcript = format!("{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("canonical MIR ensures contract is disproven; counterexample: result = 1"),
+        "{transcript}"
+    );
+    assert!(
+        stderr.contains("mir_verifier_disproven_contract.mimi:2:1-6:2"),
+        "{transcript}"
+    );
+    assert!(stdout.contains("0/1 verified"), "{transcript}");
+    assert!(!transcript.contains("flow_ast"));
 }
 
 #[test]
@@ -22376,7 +22563,15 @@ fn canonical_mir_verifier_reports_reachable_checked_arithmetic_trap() {
         .expect("failed to spawn canonical MIR verifier");
     assert!(!output.status.success(), "reachable trap must fail CLI");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("can reach trap 'E0802'"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let transcript = format!("{stdout}\n{stderr}");
+    assert!(stderr.contains("can reach trap 'E0802'"), "{transcript}");
+    assert!(
+        stderr.contains("mir_verifier_trap_contract.mimi:5:5-10"),
+        "{transcript}"
+    );
+    assert!(stderr.contains("x + 1"), "{transcript}");
+    assert!(stdout.contains("0/1 verified"), "{transcript}");
 }
 
 #[test]
@@ -25041,14 +25236,28 @@ fn canonical_mir_float_contract_negate_verifies_on_mir_entry() {
 // `half` proves unbounded because |x / 2| < |x| for finite x.  Both
 // obligations prove on the direct `mimi verify --mir` entry, the default
 // run keeps its explicit compatibility disposition, and all three
-// consumers agree on the printed 2.5 lines.
+// consumers agree on 1.5 and 2.5 for the legal actual inputs. The original
+// out-of-range 1.25 call remains a CLI precondition counterexample.
 #[test]
 fn canonical_mir_float_contract_mul_div_verifies_on_mir_entry() {
-    let source = project_root()
+    let invalid_source = project_root()
         .join("tests")
         .join("fixtures")
         .join("mir_float_contract_mul_div_face.mimi");
-    let expected = b"2.5\n2.5\n";
+    let original = fs::read_to_string(&invalid_source).expect("read original float contracts");
+    assert_eq!(original.matches("println(doubled(1.25))").count(), 1);
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_float_contract_mul_div_{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create legal float contract directory");
+    let source = dir.join("legal_mul_div.mimi");
+    fs::write(
+        &source,
+        original.replace("println(doubled(1.25))", "println(doubled(0.75))"),
+    )
+    .expect("write legal argument within declared 0..1 bounds");
+    let expected = b"1.5\n2.5\n";
 
     let run = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -25077,7 +25286,11 @@ fn canonical_mir_float_contract_mul_div_verifies_on_mir_entry() {
         .arg(&source)
         .output()
         .unwrap();
-    let verify_out = String::from_utf8_lossy(&verify.stdout).to_string();
+    let verify_out = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
     assert!(
         verify.status.success(),
         "MIR verifier entry must succeed: {verify_out}"
@@ -25086,6 +25299,41 @@ fn canonical_mir_float_contract_mul_div_verifies_on_mir_entry() {
         verify_out.contains("2/2 verified"),
         "both arithmetic obligations must verify on the MIR entry: {verify_out}"
     );
+
+    // The original 1.25 argument violates doubled's x <= 1.0 requires.
+    // Keep it as a concrete CLI negative rather than erasing the call.
+    let invalid_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&invalid_source)
+        .output()
+        .expect("verify original out-of-range float call");
+    let invalid_stdout = String::from_utf8_lossy(&invalid_verify.stdout);
+    let invalid_stderr = String::from_utf8_lossy(&invalid_verify.stderr);
+    let invalid_transcript = format!("{invalid_stdout}\n{invalid_stderr}");
+    assert_eq!(
+        invalid_verify.status.code(),
+        Some(1),
+        "{invalid_transcript}"
+    );
+    assert!(
+        invalid_stdout.contains("2/3 verified"),
+        "{invalid_transcript}"
+    );
+    assert!(
+        invalid_stderr.contains("call to 'function:doubled' may violate precondition"),
+        "{invalid_transcript}"
+    );
+    assert!(
+        invalid_stderr.contains("mir_float_contract_mul_div_face.mimi:18:13-26"),
+        "{invalid_transcript}"
+    );
+    assert!(
+        invalid_stderr.contains("println(doubled(1.25))"),
+        "{invalid_transcript}"
+    );
+    assert!(!invalid_transcript.contains("flow_ast"));
 
     let mir_run = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -25119,6 +25367,7 @@ fn canonical_mir_float_contract_mul_div_verifies_on_mir_entry() {
     assert!(native_run.status.success());
     assert_eq!(native_run.stdout, expected);
     let _ = fs::remove_file(&native);
+    fs::remove_dir_all(&dir).expect("remove legal float contract directory");
 }
 
 // R6-1055 face opening, mirroring the R6-1054 bind pin: a String literal

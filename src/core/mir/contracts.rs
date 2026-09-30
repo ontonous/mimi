@@ -9,6 +9,7 @@
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedProjection};
 use crate::core::NodeId;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::types::{verifier_float_boundary_message, MirAbiClass, MirLayout, MirTypeCatalog};
 use super::{MirFunction, MirProjection, MirValidationError, MirValueId};
@@ -152,6 +153,11 @@ pub struct MirContract {
     pub id: NodeId,
     pub kind: MirContractKind,
     pub condition: MirContractExpr,
+    /// Actual checker-owned TypeDesc for every canonical predicate expression.
+    /// Paths follow the canonical predicate tree: child 0 is a unary/base/
+    /// left operand, child 1 is a right operand. Literal and return types must
+    /// never be guessed when materializing checked arithmetic obligations.
+    pub expression_types: BTreeMap<Vec<u8>, crate::core::ir::ResolvedTypeId>,
 }
 
 impl MirContract {
@@ -161,13 +167,208 @@ impl MirContract {
             MirContractKind::Ensures => "ensures",
             MirContractKind::Invariant => "invariant",
         };
-        format!(
+        let mut text = format!(
             "  contract {} {} = {}",
             self.id.0.as_str(),
             kind,
             self.condition.canonical_text()
-        )
+        );
+        for (path, ty) in &self.expression_types {
+            text.push_str(" expression_type[");
+            text.push_str(&contract_path_text(path));
+            text.push_str("]=");
+            text.push_str(ty.as_str());
+        }
+        text
     }
+}
+
+fn contract_path_text(path: &[u8]) -> String {
+    if path.is_empty() {
+        "root".into()
+    } else {
+        path.iter().map(u8::to_string).collect::<Vec<_>>().join(".")
+    }
+}
+
+fn is_arithmetic_expression(expression: &MirContractExpr) -> bool {
+    matches!(
+        expression,
+        MirContractExpr::Unary {
+            op: MirContractUnaryOp::Negate,
+            ..
+        } | MirContractExpr::Binary {
+            op: MirContractBinaryOp::Add
+                | MirContractBinaryOp::Subtract
+                | MirContractBinaryOp::Multiply
+                | MirContractBinaryOp::Divide
+                | MirContractBinaryOp::Remainder,
+            ..
+        }
+    )
+}
+
+fn validate_expression_types(
+    contract: &MirContract,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+) -> Result<(), String> {
+    fn visit(
+        expression: &MirContractExpr,
+        path: &mut Vec<u8>,
+        contract: &MirContract,
+        function: &MirFunction,
+        catalog: &MirTypeCatalog,
+        visited: &mut BTreeSet<Vec<u8>>,
+    ) -> Result<crate::core::ir::ResolvedTypeId, String> {
+        let ty = contract.expression_types.get(path).ok_or_else(|| {
+            format!(
+                "contract expression at '{}' has no TypeDesc receipt",
+                contract_path_text(path)
+            )
+        })?;
+        visited.insert(path.clone());
+        let kind = type_kind(catalog, ty)?;
+        if !matches!(kind, ContractValueKind::Aggregate(_))
+            && !catalog
+                .get(ty)
+                .is_some_and(|descriptor| descriptor.is_canonical_copy_scalar(true))
+        {
+            return Err("contract scalar TypeDesc has invalid ownership/glue metadata".into());
+        }
+        if kind != expr_kind(expression, function, catalog)? {
+            return Err(
+                "contract expression TypeDesc disagrees with its scalar/aggregate kind".into(),
+            );
+        }
+        match expression {
+            MirContractExpr::Value(_) | MirContractExpr::Old(_) | MirContractExpr::Result => {
+                if expression_type(expression, function, catalog)? != *ty {
+                    return Err(
+                        "contract value TypeDesc disagrees with its canonical MIR value".into(),
+                    );
+                }
+            }
+            MirContractExpr::Int(value) => {
+                let descriptor = catalog
+                    .get(ty)
+                    .ok_or_else(|| "contract literal TypeDesc is absent".to_string())?;
+                match descriptor.abi {
+                    MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    } if i32::try_from(*value).is_err() => {
+                        return Err(
+                            "contract integer literal is outside its recorded i32 TypeDesc".into(),
+                        );
+                    }
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true,
+                    } => {}
+                    _ => return Err("contract integer literal has non-integer TypeDesc".into()),
+                }
+            }
+            MirContractExpr::Bool(_) | MirContractExpr::Float(_) => {}
+            MirContractExpr::Project { base, projection } => {
+                path.push(0);
+                let base_ty = visit(base, path, contract, function, catalog, visited)?;
+                path.pop();
+                if catalog.projection_result_type(&base_ty, projection)? != *ty {
+                    return Err(
+                        "contract projection TypeDesc disagrees with its canonical field".into(),
+                    );
+                }
+            }
+            MirContractExpr::Unary { operand, .. } => {
+                path.push(0);
+                let operand_ty = visit(operand, path, contract, function, catalog, visited)?;
+                path.pop();
+                if operand_ty != *ty {
+                    return Err("contract unary operand TypeDesc disagrees with its result".into());
+                }
+            }
+            MirContractExpr::Binary { op, left, right } => {
+                let mut operands = Vec::new();
+                for (index, operand) in [left, right].into_iter().enumerate() {
+                    path.push(index as u8);
+                    operands.push(visit(operand, path, contract, function, catalog, visited)?);
+                    path.pop();
+                }
+                if is_arithmetic_expression(expression) {
+                    let operand_abis = operands
+                        .iter()
+                        .map(|operand| catalog.get(operand).map(|descriptor| descriptor.abi))
+                        .collect::<Vec<_>>();
+                    // Mirror the checker's numeric promotion using recorded
+                    // operand types. A literal keeps its actual type, and
+                    // widening an i32/i32 result by editing one receipt is
+                    // rejected; mixed i32/i64 operands legitimately use i64.
+                    let promoted = match (&operand_abis[0], &operand_abis[1]) {
+                        (
+                            Some(MirAbiClass::Integer {
+                                bits: left,
+                                signed: true,
+                            }),
+                            Some(MirAbiClass::Integer {
+                                bits: right,
+                                signed: true,
+                            }),
+                        ) => MirAbiClass::Integer {
+                            bits: (*left).max(*right),
+                            signed: true,
+                        },
+                        (
+                            Some(MirAbiClass::Float { bits: 64 }),
+                            Some(MirAbiClass::Float { bits: 64 }),
+                        ) => MirAbiClass::Float { bits: 64 },
+                        _ => {
+                            return Err(
+                                "contract arithmetic operands have invalid numeric TypeDescs"
+                                    .into(),
+                            )
+                        }
+                    };
+                    if catalog.get(ty).map(|descriptor| descriptor.abi) != Some(promoted) {
+                        return Err("contract arithmetic TypeDesc disagrees with recorded operand promotion".into());
+                    }
+                } else if matches!(
+                    op,
+                    MirContractBinaryOp::LogicalAnd | MirContractBinaryOp::LogicalOr
+                ) && (operands[0] != *ty || operands[1] != *ty)
+                {
+                    return Err(
+                        "contract logical operand TypeDesc disagrees with its result".into(),
+                    );
+                }
+            }
+        }
+        Ok(ty.clone())
+    }
+
+    // Hand-authored legacy predicates retain their former scalar-kind gate.
+    // Checked arithmetic evaluation still requires explicit type receipts;
+    // in particular an untyped division cannot acquire a proof verdict.
+    if contract.expression_types.is_empty() {
+        return Ok(());
+    }
+    let mut visited = BTreeSet::new();
+    visit(
+        &contract.condition,
+        &mut Vec::new(),
+        contract,
+        function,
+        catalog,
+        &mut visited,
+    )?;
+    if contract
+        .expression_types
+        .keys()
+        .any(|path| !visited.contains(path))
+    {
+        return Err("contract expression TypeDesc receipt has an absent path".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -704,6 +905,12 @@ pub(crate) fn validate_contracts(
     let mut errors = Vec::new();
     for (index, contract) in function.contracts.iter().enumerate() {
         let subject = format!("contract[{index}] {}", contract.id.0.as_str());
+        if let Err(message) = validate_expression_types(contract, function, catalog) {
+            errors.push(MirValidationError {
+                subject: subject.clone(),
+                message,
+            });
+        }
         let kind = match expr_kind(&contract.condition, function, catalog) {
             Ok(kind) => kind,
             Err(message) => {
@@ -1016,6 +1223,15 @@ pub(crate) fn lower_contract_expr(
             projection: lower_value_projection(projection)?,
         }),
         ResolvedExprKind::Unary { op, operand } => {
+            if *op == ResolvedUnaryOp::Negate && expression.ty != operand.ty {
+                if let ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) = &operand.kind {
+                    if let Some(value) = value.checked_neg() {
+                        // Match executable MIR's contextual MIN literal
+                        // materialization, retaining the checked result type.
+                        return Ok(MirContractExpr::Int(value));
+                    }
+                }
+            }
             let op = match op {
                 ResolvedUnaryOp::Negate => MirContractUnaryOp::Negate,
                 ResolvedUnaryOp::Not => MirContractUnaryOp::Not,
@@ -1064,6 +1280,74 @@ fn lower_value_projection(
     }
 }
 
+fn collect_expression_types(
+    expression: &crate::core::ir::ResolvedExpr,
+    body: &crate::core::ir::ResolvedBody,
+    path: &mut Vec<u8>,
+    types: &mut BTreeMap<Vec<u8>, crate::core::ir::ResolvedTypeId>,
+) -> Result<(), String> {
+    use crate::core::ir::{ResolvedExprKind, ResolvedLiteral, ResolvedUnaryOp};
+    types.insert(path.clone(), expression.ty.clone());
+    if let ResolvedExprKind::Unary {
+        op: ResolvedUnaryOp::Negate,
+        operand,
+    } = &expression.kind
+    {
+        if expression.ty != operand.ty
+            && matches!(&operand.kind, ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) if value.checked_neg().is_some())
+        {
+            return Ok(());
+        }
+    }
+    match &expression.kind {
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::Project { value: operand, .. } => {
+            path.push(0);
+            collect_expression_types(operand, body, path, types)?;
+            path.pop();
+        }
+        ResolvedExprKind::Binary { left, right, .. } => {
+            for (index, operand) in [left, right].into_iter().enumerate() {
+                path.push(index as u8);
+                collect_expression_types(operand, body, path, types)?;
+                path.pop();
+            }
+        }
+        ResolvedExprKind::Load(place) => collect_place_expression_types(place, body, path, types)?,
+        ResolvedExprKind::Old(inner) => {
+            let ResolvedExprKind::Load(place) = &inner.kind else {
+                return Err("old() requires a direct callable parameter load".into());
+            };
+            // Old replaces the Value leaf; it does not add a canonical child.
+            collect_place_expression_types(place, body, path, types)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_place_expression_types(
+    place: &crate::core::ir::ResolvedPlace,
+    body: &crate::core::ir::ResolvedBody,
+    path: &mut Vec<u8>,
+    types: &mut BTreeMap<Vec<u8>, crate::core::ir::ResolvedTypeId>,
+) -> Result<(), String> {
+    let base = body.locals.get(&place.base).ok_or_else(|| {
+        "contract place type is absent from the checked local catalog".to_string()
+    })?;
+    let original_length = path.len();
+    for count in (0..place.projections.len()).rev() {
+        path.push(0);
+        let ty = count
+            .checked_sub(1)
+            .map(|index| place.projections[index].ty())
+            .unwrap_or(&base.ty);
+        types.insert(path.clone(), ty.clone());
+    }
+    path.truncate(original_length);
+    Ok(())
+}
+
 pub(crate) fn lower_contracts(
     callable: &crate::core::ir::ResolvedCallable,
     function: &MirFunction,
@@ -1077,11 +1361,27 @@ pub(crate) fn lower_contracts(
             crate::core::ir::ContractKind::Invariant => MirContractKind::Invariant,
         };
         match lower_contract_expr(&contract.condition, function, &callable.body) {
-            Ok(condition) => contracts.push(MirContract {
-                id: contract.node_id.clone(),
-                kind,
-                condition,
-            }),
+            Ok(condition) => {
+                let mut expression_types = BTreeMap::new();
+                if let Err(message) = collect_expression_types(
+                    &contract.condition,
+                    &callable.body,
+                    &mut Vec::new(),
+                    &mut expression_types,
+                ) {
+                    errors.push(super::lower::MirLoweringError {
+                        node_id: contract.node_id.clone(),
+                        message,
+                    });
+                    continue;
+                }
+                contracts.push(MirContract {
+                    id: contract.node_id.clone(),
+                    kind,
+                    condition,
+                    expression_types,
+                });
+            }
             Err(message) => errors.push(super::lower::MirLoweringError {
                 node_id: contract.node_id.clone(),
                 message,
@@ -1140,6 +1440,84 @@ mod tests {
             assert!(
                 error.contains("outside the canonical Copy aggregate contract"),
                 "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn contract_expression_types_reject_changed_width_and_incomplete_paths() {
+        let source = r#"
+func predicate(x: i32, y: i32) -> bool {
+    ensures: x / y == x / y
+    true
+}
+func wide(value: i64) -> i64 { value }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect("canonical contracts");
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("predicate"))
+            .expect("predicate");
+        let contract = &function.contracts[0];
+        let narrow = contract
+            .expression_types
+            .get(&vec![0])
+            .expect("division type");
+        let wide = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (descriptor.abi
+                    == super::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    })
+                .then_some(ty.clone())
+            })
+            .expect("i64 TypeDesc");
+        assert_ne!(narrow, &wide);
+        assert!(super::validate_contracts(function, program.type_catalog()).is_empty());
+        let original_text = function.canonical_text();
+        for mutation in 0..5 {
+            let mut forged = function.clone();
+            let types = &mut forged.contracts[0].expression_types;
+            match mutation {
+                0 => {
+                    types.insert(vec![0], wide.clone());
+                }
+                1 => {
+                    types.remove(&vec![0]);
+                }
+                2 => {
+                    types.insert(vec![42], wide.clone());
+                }
+                3 => {
+                    types.insert(vec![0, 0], wide.clone());
+                }
+                4 => {
+                    types.insert(vec![0], contract.expression_types[&Vec::new()].clone());
+                }
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                forged.canonical_text(),
+                original_text,
+                "metadata belongs to canonical digest"
+            );
+            let errors = super::validate_contracts(&forged, program.type_catalog());
+            assert!(!errors.is_empty(), "mutation {mutation} was admitted");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("TypeDesc")),
+                "{errors:?}"
             );
         }
     }

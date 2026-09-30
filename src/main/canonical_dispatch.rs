@@ -180,7 +180,31 @@ pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
-    let route = select_default_route_inner(checked, merged_file);
+    select_default_route_for_purpose(checked, merged_file, RoutePurpose::Execution)
+}
+
+/// Contract libraries are valid verification inputs without an executable
+/// main. Keep admission and graph checks shared with execution; only the
+/// entry-dependent consumer preflight differs for such a library.
+pub(crate) fn select_default_verification_route(
+    checked: &CheckedProgram,
+    merged_file: &File,
+) -> DefaultMirRoute {
+    select_default_route_for_purpose(checked, merged_file, RoutePurpose::Verification)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoutePurpose {
+    Execution,
+    Verification,
+}
+
+fn select_default_route_for_purpose(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    let route = select_default_route_inner(checked, merged_file, purpose);
     let verbose = std::env::var_os("MIMI_VERBOSE").is_some();
     let census = std::env::var_os("MIMI_ROUTE_CENSUS").is_some();
     if let DefaultMirRoute::Canonical(program) = &route {
@@ -206,7 +230,11 @@ pub(crate) fn select_default_route(
     route
 }
 
-fn select_default_route_inner(checked: &CheckedProgram, merged_file: &File) -> DefaultMirRoute {
+fn select_default_route_inner(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
     // A called extern declaration that is outside the migrated scalar C ABI
     // is still a canonical FFI boundary.  Reject it before considering any
     // unrelated island or the compatibility route; otherwise default `run`,
@@ -1251,7 +1279,15 @@ fn select_default_route_inner(checked: &CheckedProgram, merged_file: &File) -> D
     // therefore either inside this finite envelope or rejected; it cannot
     // re-enter the legacy route.
     if materialized_collection_candidate {
-        if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(canonical) {
+        let validated = match purpose {
+            RoutePurpose::Execution => {
+                mimi::core::mir::validate_scalar_collection_island(canonical)
+            }
+            RoutePurpose::Verification => {
+                mimi::core::mir::validate_scalar_collection_graph(canonical)
+            }
+        };
+        if let Err(errors) = validated {
             // R6-1052: the plain-scalar stdout face is a route candidacy over
             // a checker-side type scan, not a migrated operation face.  When
             // the island preflight proves the graph carries an operation the
@@ -1502,6 +1538,19 @@ fn select_default_route_inner(checked: &CheckedProgram, merged_file: &File) -> D
             },
             format!("verifier capability gate failed: {error:?}"),
         );
+    }
+
+    // A verified library has no process entry to compile or execute. Its
+    // complete MIR graph has passed the same profile and capability checks;
+    // the actual verifier reports proof failures with source provenance.
+    // Execution never takes this branch and still requires main.
+    if purpose == RoutePurpose::Verification
+        && materialized_collection_candidate
+        && !canonical
+            .functions()
+            .contains_key(&mimi::core::NodeId("function:main".into()))
+    {
+        return DefaultMirRoute::Canonical(route.program);
     }
 
     // Bytecode and native are both checked only after the verifier capability

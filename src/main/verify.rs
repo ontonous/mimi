@@ -129,7 +129,10 @@ pub(crate) fn verify(
     } else if dump_z3 {
         None
     } else {
-        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+        match crate::canonical_dispatch::select_default_verification_route(
+            &checked_program,
+            &merged_file,
+        ) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
             crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
                 crate::canonical_dispatch::report_legacy_route(reason);
@@ -151,9 +154,9 @@ pub(crate) fn verify(
         .map(|program| program.route_receipt("verify-canonical-v1"));
 
     let mut results = if let Some(canonical) = canonical {
-        // The default route is selected only after the shared dispatcher has
-        // preflighted every consumer.  The verifier still validates its own
-        // input at the final consumer boundary and never falls back.
+        // The shared dispatcher checks the complete graph. Executable inputs
+        // also preflight execution consumers; contract libraries need no main.
+        // The verifier validates its own final boundary and never falls back.
         let receipt = canonical.route_receipt("verify-canonical-v1");
         mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?
     } else if dump_z3 {
@@ -192,6 +195,38 @@ pub(crate) fn verify(
             &checked_program,
             blake3::hash(source.as_bytes()).to_hex().to_string(),
         )?);
+    }
+
+    // MIR proof results keep canonical subject identities. Source positions
+    // are presentation metadata from the checked source registry, and do not
+    // participate in the proof. Preserve existing precise FFI diagnostics.
+    if canonical_receipt.is_some() {
+        for result in &mut results {
+            let Some(diagnostic) = result.diagnostic.as_mut() else {
+                continue;
+            };
+            if diagnostic.span != mimi::span::Span::UNKNOWN {
+                continue;
+            }
+            let subject = diagnostic
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.parent_node_id.as_ref());
+            if let Some(meta) = subject
+                .and_then(|subject| {
+                    checked_program
+                        .node_meta()
+                        .get(&mimi::core::NodeId(subject.clone()))
+                })
+                .or_else(|| {
+                    checked_program
+                        .node_meta()
+                        .get(&mimi::core::NodeId(result.func_name.clone()))
+                })
+            {
+                diagnostic.span = meta.origin.user_span();
+            }
+        }
     }
 
     // `verify` historically exposed only human verdict text, which made it

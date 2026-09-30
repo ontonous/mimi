@@ -1601,7 +1601,7 @@ fn float_contract_multiply_and_divide_arithmetic_verify_on_mir() {
             x / 2.0
         }
         func main() -> i32 {
-            println(doubled(1.25))
+            println(doubled(0.75))
             println(half(5.0))
             0
         }
@@ -1610,12 +1610,34 @@ fn float_contract_multiply_and_divide_arithmetic_verify_on_mir() {
     let mir = materialize_float_bind(source, label);
     let results = crate::verifier::verify_mir(&mir, "float-contract-mul-div".into())
         .unwrap_or_else(|error| panic!("{label} verification failed: {error}"));
-    assert_eq!(results.len(), 2, "{label} obligation count");
+    assert_eq!(
+        results.len(),
+        2,
+        "{label} omits a successful caller with no declared contract"
+    );
     assert!(
         results
             .iter()
             .all(|result| matches!(result.status, crate::verifier::VerifStatus::Verified)),
         "{label} every arithmetic obligation must verify: {results:?}"
+    );
+    let invalid_source = source.replace("doubled(0.75)", "doubled(1.25)");
+    let invalid = materialize_float_bind(&invalid_source, "float caller violates upper bound");
+    let invalid_results =
+        crate::verifier::verify_mir(&invalid, "float-contract-invalid-call".into())
+            .expect("verify the invalid caller");
+    let caller = invalid_results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("caller precondition obligation must not be omitted");
+    assert_eq!(caller.status, crate::verifier::VerifStatus::Disproven);
+    assert!(
+        caller.message.contains("may violate precondition"),
+        "{caller:?}"
+    );
+    assert!(
+        caller.artifact.is_some(),
+        "retain the counterexample artifact"
     );
 }
 

@@ -1421,6 +1421,44 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_scalar_contract_admission_preserves_unmigrated_and_no_contract_faces() {
+        let admitted = checked(
+            "func yes(flag: bool) -> bool { ensures: result == flag
+ flag } func main() -> i32 { if yes(true) { 42 } else { 0 } }",
+        );
+        let route =
+            materialize_canonical_mir_route(&admitted, None).expect("scalar contract route");
+        assert!(route.admission.collection_complete());
+        assert!(route.materialized_collection_candidate);
+        assert!(!route.materialized_collection_operation_candidate);
+        for source in [
+            "func main() -> i32 { 42 }",
+            "func recur(value: i32) -> i32 { ensures: result >= 0
+ if value == 0 { 0 } else { recur(value - 1) } } func main() -> i32 { 0 }",
+            "func yes() -> bool { ensures: result == true
+ true } func main() -> i32 { let mut n = 0
+ while n < 2 { n = n + 1 }
+ n }",
+            "func yes() -> bool { ensures: result == true
+ true } func text(value: string) -> string { value } func main() -> i32 { 0 }",
+            "func lemma(value: i32) -> i32 { requires: value > 0
+ math: { value > 0 }
+ ensures: result > 0
+ value } func main() -> i32 { 0 }",
+            "func guarded(value: i32) -> i32 { requires: value > 0
+ invariant: value > 0
+ ensures: result > 0
+ value } func main() -> i32 { 0 }",
+        ] {
+            assert_eq!(
+                classify_canonical_mir_route_admission(&checked(source)).collection,
+                ScalarCollectionAdmission::OutsideProfile,
+                "a contract must not promote an unrelated compatibility body: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn complete_scalar_collection_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_list_len.mimi"
