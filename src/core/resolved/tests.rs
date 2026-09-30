@@ -4167,3 +4167,220 @@ fn check_program_diagnostics_are_source_sorted() {
         "check_program diagnostics must be source sorted"
     );
 }
+
+#[test]
+fn canonical_actor_descriptors_bind_fields_initializers_and_method_owners() {
+    use crate::core::ir::{ResolvedActorInitializerKind, ResolvedLiteral};
+    let file = parse(
+        r#"
+        actor Counter {
+            count: i32 = 7;
+            untouched: i32;
+            func bump(delta: i32) -> i32 {
+                self.count = self.count + delta
+                self.count
+            }
+        }
+        func main() -> i32 { let c = Counter.spawn(); c.bump(5) }
+        "#,
+    );
+    let program = crate::core::check_program(&file).expect("checked actor");
+    let owner = NodeId("actor:Counter".into());
+    let descriptor = program.actor_descriptor(&owner).expect("canonical actor");
+    descriptor
+        .validate_against(&program)
+        .expect("declaration receipt");
+    let receipt = descriptor
+        .scalar_i32_receipt(&program)
+        .expect("scalar state and mailbox receipt");
+    assert_eq!(receipt.descriptor(), descriptor);
+    assert_eq!(descriptor.fields.len(), 2);
+    let initialized = &descriptor.fields[0];
+    assert_eq!(initialized.actor, owner);
+    assert_eq!(initialized.initializer.actor, owner);
+    assert_eq!(initialized.initializer.field, initialized.field);
+    assert_eq!(initialized.initializer.ty, initialized.ty);
+    assert!(initialized.initializer.explicit);
+    assert!(program
+        .node_meta()
+        .contains_key(&initialized.initializer.node_id));
+    assert_eq!(
+        initialized.initializer.kind,
+        ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(7))
+    );
+    let defaulted = &descriptor.fields[1];
+    assert!(!defaulted.initializer.explicit);
+    assert_eq!(
+        defaulted.initializer.node_id.0,
+        format!("{}/actor-default-initializer", defaulted.field.0)
+    );
+    assert_eq!(
+        defaulted.initializer.kind,
+        ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(0))
+    );
+    let method = &descriptor.methods[0];
+    assert_eq!(method.actor, owner);
+    assert_eq!(method.owner.0, "function:Counter::bump");
+    assert_eq!(
+        method.signature,
+        *program
+            .resolved_signature(&method.owner)
+            .expect("typed method signature")
+    );
+    assert_eq!(method.signature.parameters[0].ty, descriptor.handle_type);
+    assert_eq!(method.signature.parameters[1].name, "delta");
+}
+
+#[test]
+fn canonical_actor_descriptor_rejects_forged_owners_types_and_initializers() {
+    use crate::core::ir::{ResolvedActorInitializerKind, ResolvedLiteral};
+    let file = parse(
+        r#"
+        actor Counter {
+            a: i32 = 7;
+            b: i32 = 9;
+            func read() -> i32 { self.a }
+        }
+        actor Other { c: i32 = 7; func read() -> i32 { self.c } }
+        func flag() -> bool { true }
+        func main() -> i32 { 0 }
+        "#,
+    );
+    let program = crate::core::check_program(&file).expect("checked declarations");
+    let descriptor = program
+        .actor_descriptor(&NodeId("actor:Counter".into()))
+        .expect("Counter");
+    let assert_rejected = |forged: crate::core::ir::ResolvedActorDescriptor| {
+        assert!(
+            forged.validate_against(&program).is_err(),
+            "forged descriptor validated: {forged:?}"
+        );
+        assert!(
+            forged.scalar_i32_receipt(&program).is_err(),
+            "forged descriptor acquired a receipt"
+        );
+    };
+    let mut forged = descriptor.clone();
+    forged.schema = "forged-actor-schema";
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].actor = NodeId("actor:Other".into());
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.actor = NodeId("actor:Other".into());
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.field = forged.fields[1].field.clone();
+    assert_rejected(forged);
+    let bool_ty = program
+        .resolved_types()
+        .iter()
+        .find_map(|(ty, shape)| {
+            matches!(
+                shape,
+                crate::core::ResolvedType::Primitive(crate::core::PrimitiveType::Bool)
+            )
+            .then(|| ty.clone())
+        })
+        .expect("bool type");
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.ty = bool_ty.clone();
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].ty = bool_ty;
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.kind =
+        ResolvedActorInitializerKind::Literal(ResolvedLiteral::Bool(true));
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.kind =
+        ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(i64::from(i32::MAX) + 1));
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.kind =
+        ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(8));
+    assert_rejected(forged); // A well-typed value still cannot replace the checked initializer.
+    let mut forged = descriptor.clone();
+    forged.fields[0].initializer.node_id = forged.fields[1].initializer.node_id.clone();
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.fields.swap(0, 1);
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.methods[0].owner = NodeId("function:Other::read".into());
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.methods[0].signature = program
+        .resolved_signature(&NodeId("function:Other::read".into()))
+        .expect("other signature")
+        .clone();
+    assert_rejected(forged);
+    let mut forged = descriptor.clone();
+    forged.handle_type = program
+        .actor_descriptor(&NodeId("actor:Other".into()))
+        .expect("Other")
+        .handle_type
+        .clone();
+    assert_rejected(forged);
+}
+
+#[test]
+fn canonical_actor_complex_initializers_remain_explicitly_unmaterialized() {
+    use crate::core::ir::ResolvedActorInitializerKind;
+    let file = parse(
+        r#"
+        actor Computed { value: i32 = 1 + 2; func read() -> i32 { self.value } }
+        func main() -> i32 { 0 }
+        "#,
+    );
+    let program =
+        crate::core::check_program(&file).expect("existing computed initializer stays checked");
+    let descriptor = program
+        .actor_descriptor(&NodeId("actor:Computed".into()))
+        .expect("Computed");
+    assert!(descriptor.fields[0].initializer.explicit);
+    assert_eq!(
+        descriptor.fields[0].initializer.kind,
+        ResolvedActorInitializerKind::Unmaterialized
+    );
+    descriptor
+        .validate_against(&program)
+        .expect("honest descriptor");
+    assert!(descriptor
+        .scalar_i32_receipt(&program)
+        .expect_err("computed initializer has no scalar receipt")
+        .message
+        .contains("materialized i32"));
+}
+
+#[test]
+fn canonical_actor_unused_empty_declaration_still_owns_a_handle_type() {
+    let file = parse("actor Empty {}\nfunc main() -> i32 { 0 }");
+    let program = crate::core::check_program(&file).expect("empty actor");
+    let descriptor = program
+        .actor_descriptor(&NodeId("actor:Empty".into()))
+        .expect("empty descriptor");
+    descriptor
+        .validate_against(&program)
+        .expect("empty descriptor has an interned handle");
+    assert!(descriptor.fields.is_empty());
+    assert!(descriptor.methods.is_empty());
+}
+
+#[test]
+fn canonical_actor_nested_regressions_have_scalar_declaration_receipts() {
+    for source in [
+        include_str!("../../../tests/real_world/actor_nested_func_capture.mimi"),
+        include_str!("../../../tests/real_world/actor_nested_func_shadow.mimi"),
+    ] {
+        let file = parse(source);
+        let program = crate::core::check_program(&file).expect("actor nested regression check");
+        assert_eq!(program.actor_descriptors().len(), 1);
+        for descriptor in program.actor_descriptors().values() {
+            descriptor
+                .scalar_i32_receipt(&program)
+                .expect("real regression declaration contract");
+        }
+    }
+}

@@ -717,6 +717,7 @@ pub struct CheckedProgram {
     functions: HashMap<NodeId, ResolvedFunction>,
     sessions: HashMap<NodeId, ResolvedSession>,
     actors: HashMap<NodeId, ResolvedActor>,
+    actor_descriptors: BTreeMap<NodeId, crate::core::ir::ResolvedActorDescriptor>,
     capabilities: HashMap<NodeId, ResolvedCapability>,
     constants: HashMap<NodeId, ResolvedConstant>,
     traits: HashMap<NodeId, ResolvedTrait>,
@@ -1169,6 +1170,23 @@ impl CheckedProgram {
             return Err(errors);
         }
         program.callables = callables;
+        program.actor_descriptors =
+            crate::core::ir::build_checked_actor_descriptors(file, &program)?;
+        for descriptor in program.actor_descriptors.values() {
+            if let Err(error) = descriptor.validate_against(&program) {
+                errors.push(Diagnostic::error(
+                    format!("TOOL-RESOLUTION-001: {error}"),
+                    program
+                        .actors
+                        .get(&descriptor.actor)
+                        .map(|actor| actor.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN),
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
 
         program.trait_method_generics = trait_method_generics;
 
@@ -1365,6 +1383,7 @@ impl CheckedProgram {
             functions,
             sessions,
             actors,
+            actor_descriptors: BTreeMap::new(),
             capabilities,
             constants,
             traits,
@@ -1589,6 +1608,19 @@ impl CheckedProgram {
 
     pub fn actors(&self) -> &HashMap<NodeId, ResolvedActor> {
         &self.actors
+    }
+
+    /// Canonical actor declarations with typed initializers and exact method owners.
+    /// Executable consumers do not need the compatibility ActorDef snapshots.
+    pub fn actor_descriptors(&self) -> &BTreeMap<NodeId, crate::core::ir::ResolvedActorDescriptor> {
+        &self.actor_descriptors
+    }
+
+    pub fn actor_descriptor(
+        &self,
+        actor: &NodeId,
+    ) -> Option<&crate::core::ir::ResolvedActorDescriptor> {
+        self.actor_descriptors.get(actor)
     }
 
     pub fn actor(&self, qualified_name: &str) -> Option<&ResolvedActor> {
@@ -10344,6 +10376,22 @@ fn build_canonical_function_signatures(
     let mut actors = program.actors.values().collect::<Vec<_>>();
     actors.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for actor in actors {
+        // The declaration itself owns a handle type even when it has no
+        // methods or spawn expression. Canonical actor descriptors must not
+        // depend on incidental expression/signature interning.
+        match crate::core::NominalTypeId::new(actor.node_id.0.clone()).and_then(|item| {
+            types.intern_resolved(crate::core::ResolvedType::Nominal {
+                item,
+                arguments: Vec::new(),
+                is_linear: false,
+            })
+        }) {
+            Ok(_) => {}
+            Err(error) => errors.push(Diagnostic::error(
+                format!("TOOL-RESOLUTION-001: actor handle type is not canonical: {error}"),
+                actor.origin.user_span(),
+            )),
+        }
         let module = actor
             .qualified_name
             .rsplit_once("::")

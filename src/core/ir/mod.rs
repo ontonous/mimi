@@ -4,11 +4,18 @@
 //! checker constructs these artifacts once; interpreter, native codegen and
 //! verifier consume stable identities rather than re-resolving surface AST.
 
+mod actor;
 mod body;
 mod callable;
 pub mod lower;
 mod types;
 
+pub(crate) use actor::build_checked_actor_descriptors;
+pub use actor::{
+    ResolvedActorDescriptor, ResolvedActorError, ResolvedActorFieldDescriptor,
+    ResolvedActorFieldInitializer, ResolvedActorInitializerKind, ResolvedActorMethodDescriptor,
+    ResolvedScalarActorReceipt, RESOLVED_ACTOR_SCHEMA,
+};
 pub use body::{
     AllocatorKind, BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind,
     ContractKind, EffectId, MatchArm, MethodId, Permission, ResolvedArgument, ResolvedBinaryOp,
