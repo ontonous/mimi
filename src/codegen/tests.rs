@@ -1370,6 +1370,99 @@ fn compile_checked_keeps_map_any_borrowed_access_on_legacy_owner() {
     );
 }
 
+#[test]
+fn compile_checked_map_string_copy_keeps_typed_ingress_and_checks_failure() {
+    let source = r#"
+        func main() -> i32 {
+            let original = map_new()
+            let map = map_set(original, "k", "owned text")
+            println(to_json(map))
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "map_string_owner_ingress");
+    codegen
+        .compile_checked(&program)
+        .expect("compile typed String ingress");
+    codegen
+        .module
+        .verify()
+        .expect("verify typed String ingress IR");
+    let ir = codegen.module.print_to_string().to_string();
+    assert!(ir.contains("call i32 @mimi_map_set_string_copy("), "{ir}");
+    assert!(ir.contains("map_string_copy_succeeded"), "{ir}");
+    assert!(ir.contains("Map String insertion failed"), "{ir}");
+    assert!(!ir.contains("call i64 @mimi_any_string_clone("), "{ir}");
+}
+
+#[test]
+fn legacy_map_set_uses_source_string_type_instead_of_pointer_integer_shape() {
+    for (value, expects_string) in [
+        (r#""A\0雪""#, true),
+        ("aliased", true),
+        ("message()", true),
+        ("(worker, 16 as i64)", false),
+    ] {
+        // Export wrappers retain a real legacy body. The tuple has exactly
+        // the String LLVM layout, but its pointer is an opaque actor handle.
+        // Only inspect generated IR: do not execute a potential pointer read.
+        let source = format!(
+            r#"
+            type InnerText = string
+            type Text = InnerText
+            func message() -> Text {{ "A\0雪" }}
+            actor StringShapeWorker {{ func ping() -> i32 {{ 1 }} }}
+            extern "C" func exercise() -> i32 {{
+                let worker = StringShapeWorker.spawn()
+                let aliased: Text = message()
+                let root = map_new()
+                let saved = map_set(root, "payload", {value})
+                println(map_size(saved))
+                0
+            }}
+            func main() -> i32 {{ exercise() }}
+            "#
+        );
+        let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, "legacy_map_static_string");
+        codegen
+            .compile_checked(&program)
+            .expect("compile legacy body");
+        codegen.module.verify().expect("verify legacy Map IR");
+        let ir = codegen.module.print_to_string().to_string();
+        assert_eq!(
+            ir.contains("call i32 @mimi_map_set_string_copy("),
+            expects_string,
+            "only a source-typed String can enter the owning ABI: {ir}"
+        );
+        assert!(!ir.contains("call i64 @mimi_any_string_clone("), "{ir}");
+        if expects_string {
+            assert!(ir.contains("map_string_copy_succeeded"), "{ir}");
+            assert!(
+                ir.contains("i64 5"),
+                "preserve the exact UTF-8/NUL byte length: {ir}"
+            );
+        } else {
+            assert!(
+                ir.contains("map_set_struct_h"),
+                "tuple must keep its product ABI: {ir}"
+            );
+            assert!(ir.contains("call void @mimi_map_set("), "{ir}");
+        }
+    }
+}
+
 fn checked_with_std_maps(source: &str) -> (std::path::PathBuf, crate::core::CheckedProgram) {
     use std::sync::atomic::{AtomicU64, Ordering};
 

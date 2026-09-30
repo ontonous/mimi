@@ -5473,8 +5473,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Narrowing a hint that heterogeneous chains share would make the last
     /// insertion's type misrender every other entry, so scalar int/string
     /// values intentionally fall back to the bare `Map` hint.
-    pub(super) fn map_value_decodable_by_any(vt: &str) -> bool {
-        vt.is_empty() || matches!(vt, "i32" | "i64" | "int" | "string")
+    pub(super) fn map_value_decodable_by_any(&self, vt: &str) -> bool {
+        vt.is_empty()
+            || matches!(vt, "i32" | "i64" | "int" | "string")
+            || self.map_type_is_statically_string(crate::ast::Type::Name(vt.to_owned(), vec![]))
     }
 
     /// If `name` is a type alias, return its underlying type name string for

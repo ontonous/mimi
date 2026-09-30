@@ -3063,7 +3063,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             name.clone(),
                                                             format!("Map<string, {}>", resolved),
                                                         );
-                                                    } else if !Self::map_value_decodable_by_any(&vt)
+                                                    } else if !self.map_value_decodable_by_any(&vt)
                                                     {
                                                         // 0.39.136: narrow only for kinds the Any
                                                         // renderer cannot decode — see block.rs

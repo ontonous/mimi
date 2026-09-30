@@ -2249,28 +2249,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Strings crossing into Any need an explicit tagged handle with
             // exact provenance and length. Pointer bits alone are ambiguous
             // with numeric values and must never be probed by the runtime.
-            let val_is_string =
-                self.expr_is_string(value) || self.infer_object_type(value, vars) == "string";
-            let val_i64 = if val_is_string {
-                let metadata = BasicMetadataValueEnum::from(val_val);
-                let (ptr, len) = self.extract_raw_str_ptr_len(&metadata)?;
-                let clone_fn = self.get_runtime_fn("mimi_any_string_clone")?;
-                let result = self.build_call(
-                    clone_fn,
-                    &[
-                        BasicMetadataValueEnum::PointerValue(ptr),
-                        BasicMetadataValueEnum::IntValue(len),
-                    ],
-                    "map_literal_any_string",
-                )?;
-                call_try_basic_value(&result)
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("mimi_any_string_clone returned void".into())
-                    })?
-                    .into_int_value()
-            } else {
-                self.any_value_to_handle(val_val)?
-            };
+            let val_is_string = self.map_value_is_statically_string(value);
+            if val_is_string {
+                self.emit_map_string_copy(map_handle, key_ptr, val_val.into())?;
+                continue;
+            }
+            let val_i64 = self.any_value_to_handle(val_val)?;
             self.build_call(
                 map_set,
                 &[

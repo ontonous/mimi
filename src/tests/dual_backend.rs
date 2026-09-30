@@ -21820,6 +21820,55 @@ fn dual_prod_untyped_map_to_json_and_println() {
 }
 
 #[test]
+fn dual_prod_map_string_copy_preserves_persistent_snapshots() {
+    assert_checked_backends_stdout(
+        r#"
+        func make_text() -> string { "A\0雪" }
+        func main() -> i32 {
+            let empty = map_new()
+            let saved = map_set(empty, "text", make_text())
+            let changed = map_set(saved, "text", "new")
+            let removed = map_remove(changed, "text")
+            println(map_size(empty))
+            println(to_json(saved))
+            println(to_json(changed))
+            println(map_size(removed))
+            0
+        }
+        "#,
+        "0\n{\"text\":\"A\\u0000雪\"}\n{\"text\":\"new\"}\n0",
+        "typed Map String copy preserves embedded NUL and persistent roots",
+    );
+}
+
+#[test]
+fn dual_prod_map_string_copy_preserves_transparent_aliases() {
+    for export in ["", "extern \"C\" "] {
+        let source = format!(
+            r#"
+            type InnerText = string
+            type Text = InnerText
+            func message() -> Text {{ "A\0雪" }}
+            {export}func exercise() -> i32 {{
+                let text: Text = message()
+                let first = map_set(map_new(), "text", text)
+                let second = map_set(first, "other", message())
+                println(to_json(first))
+                println(map_size(second))
+                0
+            }}
+            func main() -> i32 {{ exercise() }}
+            "#
+        );
+        assert_checked_backends_stdout(
+            &source,
+            "{\"text\":\"A\\u0000雪\"}\n2",
+            "String aliases preserve owning Map ingress in resolved and exported legacy bodies",
+        );
+    }
+}
+
+#[test]
 fn dual_fn_type_spelling_in_params_and_annotations() {
     // Spec §6.1: `fn(T) -> U` is a function type spelling; only `func(T)->U`
     // parsed before (parse error at type position). Both spellings now lower

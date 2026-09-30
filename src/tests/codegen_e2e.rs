@@ -2698,6 +2698,124 @@ fn e2e_valgrind_explicit_map_clone_destroy_releases_tables() {
 }
 
 #[test]
+fn e2e_valgrind_map_string_copy_reclaims_payloads_after_final_clone() {
+    if !can_link() || !can_valgrind() {
+        eprintln!("SKIP: linker or Valgrind not available");
+        return;
+    }
+    // The same production runtime and Map registry are used in both children.
+    // Both scalar and String ownership must clean up completely. Keep the
+    // control so shared registry/lease regressions remain distinguishable from
+    // payload ownership failures without suppressing either kind of leak.
+    const C_SHIM: &str = r#"
+        #include <stdint.h>
+        #include <string.h>
+        extern int64_t mimi_map_new(void);
+        extern int64_t mimi_map_clone(int64_t);
+        extern int64_t mimi_map_get(int64_t, const char *);
+        extern void mimi_map_set(int64_t, const char *, int64_t);
+        extern int32_t mimi_map_set_string_copy(int64_t, const char *, const char *, int64_t);
+        extern int32_t mimi_map_remove(int64_t, const char *);
+        extern void mimi_map_destroy(int64_t);
+        extern char *mimi_any_to_string(int64_t);
+        extern void mimi_string_free(char *);
+
+        static int exercise(int strings, int source_first) {
+            static const char text[] = {'o','l','d',0,'t','e','x','t'};
+            int64_t source = mimi_map_new();
+            if (!source) return 1;
+            if (strings) {
+                if (mimi_map_set_string_copy(source, "k", text, sizeof(text)) != 1) return 2;
+            } else {
+                mimi_map_set(source, "k", 42);
+            }
+            int64_t original = mimi_map_get(source, "k");
+            int64_t clone = mimi_map_clone(source);
+            if (!clone) return 3;
+            if (strings) {
+                if (mimi_map_set_string_copy(clone, "k", "new", 3) != 1) return 4;
+            } else {
+                mimi_map_set(clone, "k", 43);
+            }
+            if (mimi_map_remove(clone, "k") != 1) return 5;
+            mimi_map_destroy(source_first ? source : clone);
+            if (strings) {
+                char *rendered = mimi_any_to_string(original);
+                if (!rendered || memcmp(rendered, text, sizeof(text))) return 6;
+                mimi_string_free(rendered);
+            }
+            mimi_map_destroy(source_first ? clone : source);
+            return 0;
+        }
+        int map_scalar_control(void) {
+            int result = exercise(0, 0);
+            return result ? result : exercise(0, 1);
+        }
+        int map_string_ownership(void) {
+            int result = exercise(1, 0);
+            return result ? result : exercise(1, 1);
+        }
+    "#;
+    let observe = |symbol: &str| {
+        let source = format!(
+            "extern \"C\" {{ func {symbol}() -> i32; }} func main() -> i32 {{ {symbol}() }}"
+        );
+        checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(
+            &source,
+            [
+                "--tool=memcheck",
+                "--error-exitcode=1",
+                "--leak-check=full",
+                "--show-leak-kinds=all",
+                "--errors-for-leak-kinds=all",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            Some(C_SHIM.to_owned()),
+        )
+        .expect("Map ownership child must build and run under Memcheck")
+    };
+    let control = observe("map_scalar_control");
+    let strings = observe("map_string_ownership");
+    for observation in [&control, &strings] {
+        assert_eq!(observation.exit_code, Some(0), "{}", observation.stderr);
+        assert!(
+            observation.stderr.contains("ERROR SUMMARY: 0 errors"),
+            "{}",
+            observation.stderr
+        );
+    }
+    let summary = regex::Regex::new(r"in use at exit: ([\d,]+) bytes in ([\d,]+) blocks")
+        .expect("Memcheck live allocation pattern");
+    let retained = |text: &str| {
+        let captures = summary.captures(text).expect("Memcheck allocation summary");
+        (captures[1].to_owned(), captures[2].to_owned())
+    };
+    assert_eq!(
+        retained(&strings.stderr),
+        retained(&control.stderr),
+        "String payloads/provenance/owner records must add no residual allocations\nscalar:\n{}\nString:\n{}",
+        control.stderr,
+        strings.stderr,
+    );
+    assert_eq!(
+        retained(&strings.stderr),
+        ("0".to_owned(), "0".to_owned()),
+        "explicit Map destruction must leave no payload or lease identity allocation\n{}",
+        strings.stderr,
+    );
+    if std::env::var_os("MIMI_MAP_ANY_VALGRIND_TRACE").is_some() {
+        eprintln!(
+            "Scalar Map control:\n{}\nTyped String Map:\n{}",
+            control.stderr, strings.stderr
+        );
+    }
+    // This proves explicit root destruction reclaims the typed String slice.
+    // It does not certify automatic cleanup of ordinary Mimi Map locals.
+}
+
+#[test]
 fn e2e_valgrind_recursion() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

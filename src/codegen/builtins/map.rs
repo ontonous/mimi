@@ -200,6 +200,154 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(loaded)
     }
 
+    /// Recognize a String from the legacy emitter's source-type facts only.
+    /// An empty LLVM slot directory prevents infer_object_type's storage-shape
+    /// fallback from mistaking a `(ActorHandle, i64)` product for a String.
+    pub(in crate::codegen) fn map_value_is_statically_string(
+        &self,
+        value: &crate::ast::Expr,
+    ) -> bool {
+        let no_storage_types = std::collections::HashMap::new();
+        let ty = self
+            .expr_type_of(value, &no_storage_types)
+            .unwrap_or_else(|| {
+                crate::ast::Type::Name(self.infer_object_type(value, &no_storage_types), vec![])
+            });
+        self.map_type_is_statically_string(ty)
+    }
+
+    pub(in crate::codegen) fn map_type_is_statically_string(
+        &self,
+        mut ty: crate::ast::Type,
+    ) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let crate::ast::Type::Name(name, arguments) = ty.unlocated() else {
+                return false;
+            };
+            if name == "string" && arguments.is_empty() {
+                return true;
+            }
+            let Some(definition) = self.type_defs.get(name) else {
+                return false;
+            };
+            let crate::ast::TypeDefKind::Alias(target) = &definition.kind else {
+                return false;
+            };
+            if arguments.len() != definition.generics.len() || !seen.insert(name.clone()) {
+                return false;
+            }
+            let substitutions = definition
+                .generics
+                .iter()
+                .zip(arguments.iter())
+                .map(|(generic, argument)| (generic.name.clone(), argument.clone()))
+                .collect();
+            ty = self.resolve_type(&crate::core::helpers::subst_type_params(
+                target,
+                &definition.generics,
+                &substitutions,
+            ));
+        }
+    }
+
+    /// Insert a checker-known String into a Map through the typed owning ABI.
+    /// Raw Any bits must never reach this entry: their owner and layout are unknown.
+    pub(in crate::codegen) fn emit_map_string_copy(
+        &self,
+        map: inkwell::values::IntValue<'ctx>,
+        key: inkwell::values::PointerValue<'ctx>,
+        value: BasicMetadataValueEnum<'ctx>,
+    ) -> MimiResult<()> {
+        let (ptr, len) = self.extract_raw_str_ptr_len(&value)?;
+        let function = self
+            .module
+            .get_function("mimi_map_set_string_copy")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                self.module.add_function(
+                    "mimi_map_set_string_copy",
+                    self.context
+                        .i32_type()
+                        .fn_type(&[i64.into(), ptr.into(), ptr.into(), i64.into()], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let status = self
+            .build_call(
+                function,
+                &[map.into(), key.into(), ptr.into(), len.into()],
+                "map_string_copy",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_map_set_string_copy returned void")?
+            .into_int_value();
+        let success = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                status,
+                self.context.i32_type().const_int(1, false),
+                "map_string_copy_succeeded",
+            )
+            .map_err(|error| format!("Map String copy status: {error}"))?;
+        let current = self
+            .current_function()
+            .ok_or("Map String copy outside a function")?;
+        let ok = self
+            .context
+            .append_basic_block(current, "map_string_copy_ok");
+        let failed = self
+            .context
+            .append_basic_block(current, "map_string_copy_failed");
+        self.build_cond_br(success, ok, failed)?;
+        self.builder.position_at_end(failed);
+        let message = self
+            .builder
+            .build_global_string_ptr(
+                "[E0800] Map String insertion failed",
+                "map_string_copy_error",
+            )
+            .map_err(|error| format!("Map String copy error message: {error}"))?;
+        self.build_call(
+            self.get_or_declare_abort_fn(),
+            &[message.as_pointer_value().into()],
+            "map_string_copy_abort",
+        )?;
+        self.builder
+            .build_unreachable()
+            .map_err(|error| format!("Map String copy trap: {error}"))?;
+        self.builder.position_at_end(ok);
+        Ok(())
+    }
+
+    /// Persistent map_set preserves the source root and copies one typed String
+    /// into the new root's ownership records.
+    pub(in crate::codegen) fn compile_map_set_string(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err("map_set String ingress expects 3 arguments".into());
+        }
+        let BasicMetadataValueEnum::IntValue(source) = args[0] else {
+            return Err("map_set String ingress requires a Map handle".into());
+        };
+        let key = self.extract_string_ptr_from_arg(args[1])?;
+        let cloned = self
+            .build_call(
+                self.get_runtime_fn("mimi_map_clone")?,
+                &[source.into()],
+                "map_string_clone",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or("mimi_map_clone returned void")?
+            .into_int_value();
+        self.emit_map_string_copy(cloned, key, args[2])?;
+        Ok(cloned.into())
+    }
+
     pub(super) fn compile_map_set(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -294,13 +442,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         BasicTypeEnum::PointerType(_)
                     ] if it.get_bit_width() == 64
                 );
-                let is_mimi_string = matches!(
-                    fields.as_slice(),
-                    [
-                        BasicTypeEnum::PointerType(_),
-                        BasicTypeEnum::IntType(it)
-                    ] if it.get_bit_width() == 64
-                );
                 if is_list {
                     let i64_ty = self.context.i64_type();
                     let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sv.get_type()));
@@ -316,35 +457,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_pointer_value();
                     self.build_store(typed, sv)?;
                     self.build_ptr_to_int(typed, i64_ty, "map_set_list_h")?
-                } else if is_mimi_string {
-                    let ptr = self
-                        .build_extract_value(sv.into(), 0, "map_set_str_ptr")?
-                        .into_pointer_value();
-                    // Keep the checker-known byte length: `strlen` would truncate
-                    // embedded NUL bytes and lose the Mimi string ABI contract.
-                    let len = self
-                        .builder
-                        .build_extract_value(sv, 1, "map_set_str_len")
-                        .map_err(|e| format!("map_set string length error: {e}"))?
-                        .into_int_value();
-                    let clone_fn = self
-                        .get_runtime_fn("mimi_any_string_clone")
-                        .map_err(|error| error.to_string())?;
-                    let result = self
-                        .builder
-                        .build_call(
-                            clone_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(ptr),
-                                BasicMetadataValueEnum::IntValue(len),
-                            ],
-                            "str_clone_var",
-                        )
-                        .map_err(|e| format!("mimi_any_string_clone call error: {}", e))?;
-                    call_try_basic_value(&result)
-                        .ok_or("mimi_any_string_clone returned void")?
-                        .into_int_value()
                 } else {
+                    // Statically known Strings have already been routed by
+                    // their call site. `{ptr, i64}` alone is also an ordinary
+                    // product ABI, so it must never trigger String adoption.
                     // Product tuple / multi-field struct: widen int fields to
                     // i64, heap-pack, store ptrtoint as ValueHandle so Map
                     // Display/to_json can decode a uniform i64[n] layout.

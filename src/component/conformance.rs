@@ -524,6 +524,18 @@ mod tests {
                 &[ptr_u8(), prim_i64.clone()],
                 prim_i64.clone(),
             ),
+            // Typed String ingress copies into the Map's owner records and
+            // reports failure explicitly; it never adopts arbitrary Any bits.
+            (
+                "mimi_map_set_string_copy",
+                &[
+                    AbiTypeRef::Opaque("MapHandle".to_string()),
+                    ptr_u8(),
+                    ptr_u8(),
+                    prim_i64.clone(),
+                ],
+                crate::component::gen::prim(crate::component::types::AbiPrimitive::I32),
+            ),
             // runtime/mod.rs: checked Map list bridge uses a repr(C) pair.
             (
                 "mimi_map_keys_pair",

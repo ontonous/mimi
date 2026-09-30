@@ -10,7 +10,7 @@
 //! then frees immediately or after the last outstanding reference drops.
 //! Use of a destroyed / stale handle is a typed [`HandleError`], not UAF.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 /// Per-handle generation. Distinct from Flow `TransitionEpoch`.
@@ -44,6 +44,41 @@ impl HandleError {
 
 thread_local! {
     static LAST_HANDLE_ERROR: std::cell::Cell<i32> = const { std::cell::Cell::new(HANDLE_OK) };
+    static LEASE_THREAD_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Lease ownership needs a stable, never-reused thread identity, but calling
+/// std::thread::current() allocates a Rust Thread on a native C entry thread.
+/// That allocation has no Rust main-runtime shutdown there. A const TLS cell
+/// and monotonic identity provide the same reentry check without allocation
+/// or a destructor, including for foreign threads calling the runtime ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeaseThreadId(u64);
+
+static NEXT_LEASE_THREAD_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_lease_thread_id(counter: &AtomicU64) -> Option<LeaseThreadId> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+        .map(LeaseThreadId)
+}
+
+fn current_lease_thread_id() -> LeaseThreadId {
+    LEASE_THREAD_ID.with(|cached| {
+        let value = cached.get();
+        if value != 0 {
+            return LeaseThreadId(value);
+        }
+        // Identity exhaustion must not wrap and turn a different thread into
+        // a reentrant owner. No handle access occurs after exhaustion.
+        let identity = allocate_lease_thread_id(&NEXT_LEASE_THREAD_ID)
+            .unwrap_or_else(|| std::process::abort());
+        cached.set(identity.0);
+        identity
+    })
 }
 
 pub fn set_handle_error(err: HandleError) {
@@ -65,7 +100,7 @@ struct Slot<T> {
     /// protected by the table mutex; C lifetime pins use `pins` separately.
     leases: AtomicI64,
     /// The thread holding the exclusive internal operation lease, if any.
-    active_owner: Option<std::thread::ThreadId>,
+    active_owner: Option<LeaseThreadId>,
     /// Explicit C ABI lifetime pins. Pins keep the allocation alive but do
     /// not grant access to the contained Map/Set.
     pins: AtomicI64,
@@ -136,7 +171,7 @@ static SET_CONDVAR: std::sync::OnceLock<Condvar> = std::sync::OnceLock::new();
 /// so two recursive serializer walks cannot hold opposite ends of a handle
 /// graph while waiting on each other.
 struct OperationGate {
-    owner_depth: Mutex<Option<(std::thread::ThreadId, usize)>>,
+    owner_depth: Mutex<Option<(LeaseThreadId, usize)>>,
     changed: Condvar,
 }
 
@@ -150,13 +185,13 @@ fn operation_gate() -> &'static OperationGate {
 }
 
 struct SerializerGraphLease {
-    owner: std::thread::ThreadId,
+    owner: LeaseThreadId,
     _not_send_or_sync: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl SerializerGraphLease {
     fn acquire() -> Self {
-        let owner = std::thread::current().id();
+        let owner = current_lease_thread_id();
         let gate = operation_gate();
         let mut state = gate
             .owner_depth
@@ -586,7 +621,7 @@ pub fn set_new_handle(obj: super::MimiSet) -> i64 {
 pub fn map_acquire(handle: i64) -> Result<MapLease, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
-    let current = std::thread::current().id();
+    let current = current_lease_thread_id();
     loop {
         let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
         if slot.generation != gen {
@@ -623,7 +658,7 @@ pub fn map_acquire(handle: i64) -> Result<MapLease, HandleError> {
 pub fn set_acquire(handle: i64) -> Result<SetLease, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_sets();
-    let current = std::thread::current().id();
+    let current = current_lease_thread_id();
     loop {
         let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
         if slot.generation != gen {
@@ -668,7 +703,7 @@ fn map_release(handle: i64) -> Result<i64, HandleError> {
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
-        if slot.active_owner != Some(std::thread::current().id())
+        if slot.active_owner != Some(current_lease_thread_id())
             || slot.leases.load(Ordering::SeqCst) != 1
         {
             return Err(HandleError::Invalid);
@@ -703,7 +738,7 @@ fn set_release(handle: i64) -> Result<i64, HandleError> {
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
-        if slot.active_owner != Some(std::thread::current().id())
+        if slot.active_owner != Some(current_lease_thread_id())
             || slot.leases.load(Ordering::SeqCst) != 1
         {
             return Err(HandleError::Invalid);
@@ -1372,6 +1407,36 @@ mod tests {
     }
 
     #[test]
+    fn lease_thread_identity_is_stable_and_survives_thread_exit_without_reuse() {
+        let current = current_lease_thread_id();
+        assert_eq!(current, current_lease_thread_id());
+        let mut identities = std::collections::BTreeSet::from([current.0]);
+        for _ in 0..32 {
+            let identity = std::thread::spawn(|| {
+                let first = current_lease_thread_id();
+                assert_eq!(first, current_lease_thread_id());
+                first
+            })
+            .join()
+            .expect("lease identity worker");
+            assert_ne!(identity.0, 0);
+            assert!(identities.insert(identity.0), "thread identity was reused");
+        }
+    }
+
+    #[test]
+    fn lease_thread_identity_exhaustion_cannot_wrap() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(
+            allocate_lease_thread_id(&counter),
+            Some(LeaseThreadId(u64::MAX - 1))
+        );
+        assert_eq!(allocate_lease_thread_id(&counter), None);
+        assert_eq!(allocate_lease_thread_id(&counter), None);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
     fn map_root_operations_reject_live_lease_on_another_thread() {
         let handle = map_new_handle(empty_map());
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
@@ -1431,7 +1496,7 @@ mod tests {
         {
             let mut table = lock_maps();
             let slot = &mut table.slots[index as usize];
-            slot.active_owner = Some(std::thread::current().id());
+            slot.active_owner = Some(current_lease_thread_id());
             slot.leases.store(1, Ordering::SeqCst);
         }
         assert_eq!(

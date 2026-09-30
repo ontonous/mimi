@@ -477,6 +477,14 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("key", ptr(prim(U8)))
             .param("value", prim(UIntPtr))
     });
+    gen.export("mimi_map_set_string_copy", |f| {
+        f.param("map", handle("MapHandle"))
+            .param("key", ptr(prim(U8)))
+            .param("value", ptr(prim(U8)))
+            .param("value_len", prim(I64))
+            .returns(prim(I32))
+            .effect("alloc")
+    });
     gen.export("mimi_map_get", |f| {
         f.param("map", handle("MapHandle"))
             .param("key", ptr(prim(U8)))

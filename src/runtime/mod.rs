@@ -3084,11 +3084,11 @@ pub unsafe extern "C" fn mimi_rc_upgrade(ptr: *mut std::ffi::c_void) -> *mut std
 // Map (hash table via std::collections::HashMap)
 // ---------------------------------------------------------------------------
 
-/// §10-#35 (audit 2026-08-05, closed 2026-08-07): shape of a value buffer
-/// the MAP ITSELF allocated (from_json builders). destroy() frees these;
-/// caller-supplied values (mimi_map_set / mimi_map_from_list) are never
-/// registered and thus never freed by the map — the map cannot know their
-/// layout or sharing, and freeing on a guess would trade a leak for UB.
+/// Shape of a payload with an explicit Map owner (for example a from_json
+/// builder allocation or the typed String-copy ingress). Generic caller-
+/// supplied values (mimi_map_set / mimi_map_from_list) are not registered and
+/// are never freed by the Map: it has no descriptor or sharing proof for those
+/// opaque bits, and freeing on a guess would trade a leak for UB.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MapOwnedValueKind {
     /// malloc'd flat i64 pack (product tuple / option / result tagged pack).
@@ -3107,8 +3107,9 @@ pub(super) enum MapOwnedValueKind {
     /// `mimi_list_free(list, /* free_elements */ true)`, which reclaims the
     /// data array and Record element pack bases.
     ListObject,
-    /// Tagged, provenance-registered Any String created for a Checker-owned
-    /// MapRoot String Set. Ordinary `mimi_map_set` values remain external.
+    /// Tagged, provenance-registered Any String created for a typed Map String
+    /// copy or Checker-owned MapRoot String Set. Values passed to ordinary
+    /// `mimi_map_set` remain external.
     TaggedAnyString,
 }
 
@@ -3265,7 +3266,7 @@ fn transfer_map_owned_payload_to_list(payload: std::sync::Arc<MapOwnedPayload>) 
 
 pub(super) struct MimiMap {
     pub(super) inner: HashMap<String, ValueHandle>,
-    /// §10-#35: value buffers this map allocated itself (from_json builders).
+    /// Payload owners established by an explicit runtime ingress or builder.
     /// Cloned persistent maps share these ownership records. The payload is
     /// reclaimed only when the last map carrying the record is destroyed.
     pub(super) owned: HashMap<ValueHandle, std::sync::Arc<MapOwnedPayload>>,
@@ -3416,6 +3417,80 @@ pub unsafe extern "C" fn mimi_map_set(
     {
         map_from_handle(handle).inner.insert(s, value);
     }
+}
+
+/// Copy a Mimi String into a Map-owned tagged Any payload and store it under
+/// `key`. The caller keeps ownership of the input bytes. Each successful call
+/// creates a fresh runtime string owner; persistent Map clones share its
+/// `MapOwnedPayload` record.
+///
+/// Replaced or removed entries keep their registered payload owners until
+/// their Map handle is destroyed. Ordinary Map `map_get`/`values` results are
+/// borrowed opaque handles and the runtime cannot prove when those borrows
+/// end. This deliberately retains detached payloads for the full lifetime of
+/// each Map clone that inherited them.
+///
+/// Returns 1 after storing the new value, or 0 if the handle/input is invalid,
+/// the runtime string clone fails, or a Map table cannot reserve its update.
+/// The Map's entries remain unchanged when this function returns 0.
+///
+/// # Safety
+/// `handle` is treated as an opaque numeric handle; zero, stale, invalid, or
+/// same-thread reentrant handles are rejected without dereferencing caller
+/// memory. A handle leased by another thread is serialized by the runtime.
+/// The caller must not concurrently destroy a live handle during a successful
+/// call. `key` may be null (which is rejected) or point to a live
+/// NUL-terminated C string for the duration of the call. `value_len` outside
+/// `0..=64 MiB` is rejected before reading `value`. For a positive in-range
+/// length, `value` must point to at least that many readable bytes. A null
+/// `value` is accepted only for an empty String (`value_len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_map_set_string_copy(
+    handle: MapHandle,
+    key: *const std::ffi::c_char,
+    value: *const std::ffi::c_char,
+    value_len: i64,
+) -> i32 {
+    const MAX_STRING_COPY: i64 = 64 * 1024 * 1024;
+    if handle == 0
+        || key.is_null()
+        || value_len < 0
+        || value_len > MAX_STRING_COPY
+        || (value.is_null() && value_len != 0)
+    {
+        return 0;
+    }
+
+    // Validate and lease the Map before cloning any payload bytes. The lease
+    // keeps its allocation alive and serializes runtime operations until both
+    // Map tables have been reserved and the entry is committed.
+    let Ok(mut map) = handle::map_acquire(handle) else {
+        return 0;
+    };
+
+    // SAFETY: the caller contract guarantees a readable NUL-terminated key.
+    let key = unsafe { cstr_to_string(key) };
+    if map.inner.try_reserve(1).is_err() || map.owned.try_reserve(1).is_err() {
+        return 0;
+    }
+
+    // SAFETY: the caller contract guarantees `value` is readable for the
+    // explicit byte length; mimi_any_string_clone accepts null only at length 0.
+    let tagged = unsafe { mimi_any_string_clone(value, value_len) };
+    if tagged == 0 {
+        return 0;
+    }
+
+    // A fresh live allocation cannot reuse a still-registered address. Keep
+    // this invariant fail-loud: replacing an existing owner here could free a
+    // payload that is still referenced by the old Map entry.
+    if map.owned.contains_key(&tagged) {
+        std::process::abort();
+    }
+    map.owned
+        .insert(tagged, map_owned_any_string_payload(tagged));
+    map.inner.insert(key, tagged);
+    1
 }
 
 /// Format a type-erased value without probing arbitrary addresses. Strings
@@ -26419,6 +26494,226 @@ mod audit_pkgd_tests {
     #[test]
     fn map_source_keeps_owned_payloads_alive_after_clone_destroy() {
         assert_owned_product_survives_first_map_destroy(false);
+    }
+
+    fn map_set_string_copy_raw_for_test(
+        map: MapHandle,
+        key: *const std::ffi::c_char,
+        value: *const std::ffi::c_char,
+        value_len: i64,
+    ) -> i32 {
+        // SAFETY: callers provide a live key and payload for successful calls;
+        // null pointers or invalid lengths are used only to test operands that
+        // this API rejects before dereferencing them.
+        unsafe { mimi_map_set_string_copy(map, key, value, value_len) }
+    }
+
+    fn map_set_string_copy_for_test(map: MapHandle, key: &std::ffi::CStr, value: &[u8]) -> i32 {
+        let value_ptr = if value.is_empty() {
+            std::ptr::null()
+        } else {
+            value.as_ptr().cast()
+        };
+        map_set_string_copy_raw_for_test(map, key.as_ptr(), value_ptr, value.len() as i64)
+    }
+
+    fn clone_any_string_for_test(value: &[u8]) -> ValueHandle {
+        let value_ptr = if value.is_empty() {
+            std::ptr::null()
+        } else {
+            value.as_ptr().cast()
+        };
+        // SAFETY: the test slice is readable for its explicit byte length.
+        unsafe { mimi_any_string_clone(value_ptr, value.len() as i64) }
+    }
+
+    fn free_any_string_for_test(tagged: ValueHandle) {
+        let address = tagged as usize;
+        assert_ne!(address & 1, 0, "expected a tagged Any String handle");
+        let base = (address & !1) as *mut std::ffi::c_void;
+        // The test owns this fresh unadopted Any String clone.
+        mimi_free(base)
+    }
+
+    fn map_get_for_test(map: MapHandle, key: &std::ffi::CStr) -> ValueHandle {
+        // SAFETY: each test keeps `map` live and the key is a static C string.
+        unsafe { mimi_map_get(map, key.as_ptr()) }
+    }
+
+    fn map_remove_for_test(map: MapHandle, key: &std::ffi::CStr) -> i32 {
+        // SAFETY: each test keeps `map` live and the key is a static C string.
+        unsafe { mimi_map_remove(map, key.as_ptr()) }
+    }
+
+    fn destroy_map_for_test(map: MapHandle) {
+        // SAFETY: each test owns this live Map handle and destroys it once.
+        unsafe { mimi_map_destroy(map) }
+    }
+
+    fn weak_map_owner_for_test(
+        map: MapHandle,
+        tagged: ValueHandle,
+    ) -> std::sync::Weak<MapOwnedPayload> {
+        let map = map_from_handle(map);
+        std::sync::Arc::downgrade(map.owned.get(&tagged).expect("Map owner registered"))
+    }
+
+    fn clone_map_for_test(map: MapHandle) -> MapHandle {
+        // SAFETY: each test keeps the source Map live for this clone call.
+        unsafe { mimi_map_clone(map) }
+    }
+
+    #[test]
+    fn ordinary_map_string_copy_owns_exact_bytes_and_unregisters_on_destroy() {
+        let map = mimi_map_new();
+        let message_key = c"message";
+        let message = "prefix\0snow 雪".as_bytes();
+        assert_eq!(map_set_string_copy_for_test(map, message_key, message), 1);
+        let message_handle = map_get_for_test(map, message_key);
+        assert_ne!(message_handle, 0);
+        assert_eq!(
+            copy_registered_any_string(message_handle),
+            Some(message.to_vec())
+        );
+
+        let empty_key = c"empty";
+        assert_eq!(map_set_string_copy_for_test(map, empty_key, &[]), 1);
+        let empty_handle = map_get_for_test(map, empty_key);
+        assert_ne!(empty_handle, 0);
+        assert_eq!(copy_registered_any_string(empty_handle), Some(Vec::new()));
+        assert_eq!(mimi_map_owned_value_count(map), 2);
+
+        let message_owner = weak_map_owner_for_test(map, message_handle);
+        let empty_owner = weak_map_owner_for_test(map, empty_handle);
+        destroy_map_for_test(map);
+        assert!(message_owner.upgrade().is_none());
+        assert!(empty_owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn ordinary_mimi_map_set_keeps_raw_tagged_string_caller_owned() {
+        let map = mimi_map_new();
+        let key = c"external";
+        let value = b"caller owned";
+        let tagged = clone_any_string_for_test(value);
+        assert_ne!(tagged, 0);
+
+        // SAFETY: `map` is live, `key` is a static C string, and the tagged
+        // value remains caller-owned until after Map destruction below.
+        unsafe { mimi_map_set(map, key.as_ptr(), tagged) };
+        assert_eq!(mimi_map_owned_value_count(map), 0);
+        destroy_map_for_test(map);
+        assert_eq!(copy_registered_any_string(tagged), Some(value.to_vec()));
+
+        free_any_string_for_test(tagged);
+    }
+
+    #[test]
+    fn ordinary_map_string_copy_rejects_invalid_inputs_without_mutating_map() {
+        let map = mimi_map_new();
+        let key = c"key";
+        let bytes = b"must not be copied";
+        let bytes_ptr = bytes.as_ptr().cast();
+        assert_eq!(
+            map_set_string_copy_raw_for_test(0, key.as_ptr(), bytes_ptr, bytes.len() as i64),
+            0
+        );
+        assert_eq!(
+            map_set_string_copy_raw_for_test(map, std::ptr::null(), bytes_ptr, bytes.len() as i64),
+            0
+        );
+        assert_eq!(
+            map_set_string_copy_raw_for_test(map, key.as_ptr(), bytes_ptr, -1),
+            0
+        );
+        assert_eq!(
+            map_set_string_copy_raw_for_test(map, key.as_ptr(), std::ptr::null(), 1),
+            0
+        );
+        assert_eq!(
+            map_set_string_copy_raw_for_test(map, key.as_ptr(), bytes_ptr, 64 * 1024 * 1024 + 1),
+            0
+        );
+        assert_eq!(mimi_map_size(map), 0);
+        assert_eq!(mimi_map_owned_value_count(map), 0);
+        destroy_map_for_test(map);
+        assert_eq!(map_set_string_copy_for_test(map, key, bytes), 0);
+    }
+
+    #[test]
+    fn ordinary_map_string_copy_keeps_overwritten_and_removed_borrows_alive() {
+        let map = mimi_map_new();
+        let key = c"key";
+        let original = b"original";
+        let replacement = b"replacement";
+
+        assert_eq!(map_set_string_copy_for_test(map, key, original), 1);
+        let original_handle = map_get_for_test(map, key);
+        assert_eq!(map_set_string_copy_for_test(map, key, replacement), 1);
+        let replacement_handle = map_get_for_test(map, key);
+        assert_ne!(original_handle, replacement_handle);
+        assert_eq!(
+            copy_registered_any_string(original_handle),
+            Some(original.to_vec())
+        );
+        assert_eq!(
+            copy_registered_any_string(replacement_handle),
+            Some(replacement.to_vec())
+        );
+        assert_eq!(mimi_map_owned_value_count(map), 2);
+        let original_owner = weak_map_owner_for_test(map, original_handle);
+        let replacement_owner = weak_map_owner_for_test(map, replacement_handle);
+
+        assert_eq!(map_remove_for_test(map, key), 1);
+        assert_eq!(mimi_map_owned_value_count(map), 2);
+        assert_eq!(
+            copy_registered_any_string(original_handle),
+            Some(original.to_vec())
+        );
+        assert_eq!(
+            copy_registered_any_string(replacement_handle),
+            Some(replacement.to_vec())
+        );
+
+        destroy_map_for_test(map);
+        assert!(original_owner.upgrade().is_none());
+        assert!(replacement_owner.upgrade().is_none());
+    }
+
+    fn assert_owned_any_string_survives_first_map_destroy(destroy_source_first: bool) {
+        let source = mimi_map_new();
+        let key = c"value";
+        let value = b"survives clone order";
+        assert_eq!(map_set_string_copy_for_test(source, key, value), 1);
+        let tagged = map_get_for_test(source, key);
+        let clone = clone_map_for_test(source);
+        assert_ne!(clone, 0);
+        assert_eq!(mimi_map_owned_value_count(source), 1);
+        assert_eq!(mimi_map_owned_value_count(clone), 1);
+        let owner = weak_map_owner_for_test(source, tagged);
+
+        let (first, survivor) = if destroy_source_first {
+            (source, clone)
+        } else {
+            (clone, source)
+        };
+        destroy_map_for_test(first);
+        assert!(owner.upgrade().is_some());
+        assert_eq!(map_get_for_test(survivor, key), tagged);
+        assert_eq!(copy_registered_any_string(tagged), Some(value.to_vec()));
+
+        destroy_map_for_test(survivor);
+        assert!(owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn ordinary_map_string_owner_survives_source_destroy_before_clone() {
+        assert_owned_any_string_survives_first_map_destroy(true);
+    }
+
+    #[test]
+    fn ordinary_map_string_owner_survives_clone_destroy_before_source() {
+        assert_owned_any_string_survives_first_map_destroy(false);
     }
 
     #[test]

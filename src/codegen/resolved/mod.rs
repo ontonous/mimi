@@ -3458,7 +3458,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .unwrap_or_default(),
                     _ => Vec::new(),
                 };
-                // Evaluate arguments (shared by all callee kinds)
+                // Preserve a checker-known String until Map insertion has
+                // adopted its copy. Erasing it first loses the owner contract.
+                let map_string_ingress = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(id) if id.as_str() == "map_set"
+                ) && call.arguments.len() == 3
+                    && resolved_map_string_type(self.program, &call.arguments[2].value.ty);
+                // Evaluate arguments once, in their original order.
                 let mut arguments = Vec::with_capacity(call.arguments.len());
                 for (index, argument) in call.arguments.iter().enumerate() {
                     if borrow_positions.get(index).copied().unwrap_or(false) {
@@ -3487,7 +3494,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         continue;
                     }
                     let value = self.emit_expr(&argument.value, frame)?;
-                    let value = self.apply_conversion(value, &argument.conversion)?;
+                    let value = if map_string_ingress && index == 2 {
+                        value
+                    } else {
+                        self.apply_conversion(value, &argument.conversion)?
+                    };
                     arguments.push(BasicMetadataValueEnum::from(value));
                 }
                 match &call.callee {
@@ -5308,6 +5319,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // would demand a raw ptr for `len(str_trim(line))`
                             // (mimi-log main) and fail the same way.
                             || name == "len"
+                            // Map String ingress consumes the typed fat string
+                            // through its owning-copy adapter. Coercing to the
+                            // raw mimi_map_set i64 slot here erases that type
+                            // and bypasses the payload's ownership contract.
+                            || map_string_ingress
                         {
                             String::new() // sentinel: no direct runtime call
                         } else {
@@ -5465,7 +5481,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "builtin method '{name}' has no resolved-native emitter"
                             )));
                         }
-                        let result = self.generator.compile_builtin_call(name, &arguments)?;
+                        let result = if map_string_ingress {
+                            self.generator.compile_map_set_string(&arguments)?
+                        } else {
+                            self.generator.compile_builtin_call(name, &arguments)?
+                        };
                         // ABI bridge: builtins return raw ptr for strings, but the
                         // resolved emitter expects {ptr, i64} structs. Wrap if needed.
                         self.wrap_builtin_string_result(result, &call.result)
@@ -14756,6 +14776,51 @@ fn is_signed_integer_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool
                 | PrimitiveType::Isize
         ))
     )
+}
+
+/// Classify String ingress from canonical type identity, including checked
+/// transparent alias targets. Formatting names also call Char "string" and
+/// must not select this owning fat-String ABI.
+fn resolved_map_string_type(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+    let mut ty = ty;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut substitutions = std::collections::BTreeMap::new();
+    while seen.insert(ty.clone()) {
+        match program.resolved_types().get(ty) {
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String)) => return true,
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) => {
+                let Some(definition) = program
+                    .type_defs()
+                    .get(&crate::core::NodeId(item.as_str().to_owned()))
+                    .filter(|definition| {
+                        definition.kind == crate::core::ResolvedTypeKind::Alias
+                            && definition.generic_parameters.len() == arguments.len()
+                    })
+                else {
+                    return false;
+                };
+                for ((_, parameter), argument) in
+                    definition.generic_parameters.iter().zip(arguments.iter())
+                {
+                    substitutions.insert(parameter.clone(), argument);
+                }
+                let Some(target) = program.resolved_type_target(&definition.node_id) else {
+                    return false;
+                };
+                ty = target;
+            }
+            Some(ResolvedType::GenericParameter(parameter)) => {
+                let Some(target) = substitutions.get(parameter) else {
+                    return false;
+                };
+                ty = target;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// is_empty (0.1.9): classify an arg's canonical type display into the

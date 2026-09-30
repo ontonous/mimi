@@ -7042,6 +7042,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .compile_builtin_call(routed, &metadata_args)
                     .map_err(|e| CompileError::Generic(e.to_string()));
             }
+            if name == "map_set" && args.len() == 3 && self.map_value_is_statically_string(&args[2])
+            {
+                return self.compile_map_set_string(&metadata_args);
+            }
             return self
                 .compile_builtin_call(name, &metadata_args)
                 .map_err(|e| CompileError::Generic(e.to_string()));

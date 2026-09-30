@@ -809,7 +809,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                                         resolved
                                                                     ),
                                                                 );
-                                                            } else if !Self::map_value_decodable_by_any(&vt)
+                                                            } else if !self
+                                                                .map_value_decodable_by_any(&vt)
                                                             {
                                                                 // 0.39.136: narrow only for kinds the
                                                                 // Any renderer cannot decode — see the
@@ -2394,7 +2395,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                     name.clone(),
                                                     format!("Map<string, {}>", resolved),
                                                 );
-                                            } else if !Self::map_value_decodable_by_any(&vt) {
+                                            } else if !self.map_value_decodable_by_any(&vt) {
                                                 // 0.39.136: only narrow the hint for value
                                                 // kinds the runtime's heuristic Any renderer
                                                 // cannot decode (floats store bit patterns,
