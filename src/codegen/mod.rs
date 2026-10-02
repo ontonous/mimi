@@ -7,6 +7,8 @@ mod expr;
 mod float_chain;
 mod func;
 pub mod gep;
+#[cfg(feature = "llvm18-host-dynamic")]
+mod llvm_host;
 pub mod mir;
 mod mono_recover;
 mod registry;
@@ -33,9 +35,9 @@ use std::path::Path;
 ///
 /// The normal build keeps the historical all-target/cross-target behavior.
 /// The reproducible `llvm18-host-dynamic` validation profile deliberately
-/// uses only the host X86 target: its llvm-sys all-target C wrapper is
-/// disabled, so calling the wrapper would reintroduce undeclared or
-/// version-mismatched target symbols. Cross compilation is therefore
+/// uses only the host X86 target. Its llvm-sys all-target C wrapper is
+/// disabled; the host native wrappers are supplied by `llvm_host` using
+/// the real LLVM 18 X86 exports. Cross compilation is therefore
 /// rejected explicitly in that profile rather than silently producing an
 /// incomplete target registry.
 pub(crate) fn initialize_codegen_target(target_triple: Option<&str>) -> Result<(), CompileError> {
@@ -56,8 +58,17 @@ pub(crate) fn initialize_codegen_target(target_triple: Option<&str>) -> Result<(
 
     #[cfg(feature = "llvm18-host-dynamic")]
     {
-        Target::initialize_x86(&InitializationConfig::default());
-        return Ok(());
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            Target::initialize_x86(&InitializationConfig::default());
+            return Ok(());
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            return Err(CompileError::LlvmError(
+                "llvm18-host-dynamic supports only X86 hosts; use a matching LLVM development installation for this host".into(),
+            ));
+        }
     }
     #[cfg(not(feature = "llvm18-host-dynamic"))]
     {
