@@ -2124,6 +2124,10 @@ pub(crate) struct E2EConfig {
     /// Wall-clock cap for the native binary. On expiry the child is killed and
     /// the error text identifies a hang/deadlock (0.1.8 Phase 0).
     pub run_timeout: Option<std::time::Duration>,
+    /// Permit this focused test to retain artifacts when MIMI_KEEP_TMP is set.
+    /// The default stays false so a full suite does not accumulate thousands
+    /// of native outputs.
+    pub retain_tmp_if_requested: bool,
 }
 
 impl Default for E2EConfig {
@@ -2140,6 +2144,7 @@ impl Default for E2EConfig {
             ],
             extra_c_src: None,
             run_timeout: None,
+            retain_tmp_if_requested: false,
         }
     }
 }
@@ -2166,10 +2171,57 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
 /// run. Shared by the legacy (`compile_file`) and checked (`compile_checked`)
 /// codegen harnesses since 0.34.30.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeArtifactEvidence {
+    pub role: &'static str,
+    pub path: std::path::PathBuf,
+    pub hash_before_link: Option<String>,
+    pub hash_before_run: Option<String>,
+    pub hash_after_run: Option<String>,
+    /// `Some(true)` proves identical bytes at run start and run completion.
+    pub stable_during_execution: Option<bool>,
+}
+
+impl NativeArtifactEvidence {
+    fn new(role: &'static str, path: std::path::PathBuf) -> Self {
+        Self {
+            role,
+            path,
+            hash_before_link: None,
+            hash_before_run: None,
+            hash_after_run: None,
+            stable_during_execution: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NativeRunObservation {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    /// argv as passed to `Command`, including `cc` as its invoked program.
+    pub actual_link_command: Vec<String>,
+    /// argv for compiling the optional C/FFI shim, when one was supplied.
+    pub ffi_compile_command: Option<Vec<String>>,
+    /// Paths are always reported; content hashes are populated only for an
+    /// explicitly retained focused run.
+    pub artifacts: Vec<NativeArtifactEvidence>,
+    pub kept_tmp_dir: Option<std::path::PathBuf>,
+}
+
+fn native_command_argv(command: &std::process::Command) -> Vec<String> {
+    std::iter::once(command.get_program().to_string_lossy().into_owned())
+        .chain(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        )
+        .collect()
+}
+
+fn native_file_hash(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read artifact {path:?}: {error}"))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
 fn link_and_run_module<'ctx>(
@@ -2221,11 +2273,20 @@ fn link_and_observe_module<'ctx>(
     })?;
 
     let mut object_files = vec![obj_path.clone(), runtime_lib.clone()];
+    let mut artifacts = vec![
+        NativeArtifactEvidence::new("native-object", obj_path.clone()),
+        NativeArtifactEvidence::new("runtime-archive", runtime_lib.clone()),
+    ];
+    let mut ffi_compile_command = None;
 
     // Compile extra C source if provided
     if let Some(extra_c) = &config.extra_c_src {
         let extra_c_path = tmp_dir.join("extra_test.c");
         std::fs::write(&extra_c_path, extra_c).map_err(|e| format!("write extra c: {}", e))?;
+        artifacts.push(NativeArtifactEvidence::new(
+            "ffi-c-source",
+            extra_c_path.clone(),
+        ));
         let extra_o = tmp_dir.join("extra_test.o");
         let mut cc_extra = Command::new("cc");
         cc_extra
@@ -2241,6 +2302,7 @@ fn link_and_observe_module<'ctx>(
                 .arg("-fsanitize=undefined")
                 .arg("-fno-sanitize-recover=all");
         }
+        ffi_compile_command = Some(native_command_argv(&cc_extra));
         let extra_status = cc_extra
             .status()
             .map_err(|e| format!("extra c compile: {}", e))?;
@@ -2251,7 +2313,15 @@ fn link_and_observe_module<'ctx>(
                 extra_status.code()
             ));
         }
+        artifacts.push(NativeArtifactEvidence::new("ffi-object", extra_o.clone()));
         object_files.push(extra_o);
+    }
+
+    let keep_tmp = config.retain_tmp_if_requested && std::env::var_os("MIMI_KEEP_TMP").is_some();
+    if keep_tmp {
+        for artifact in &mut artifacts {
+            artifact.hash_before_link = Some(native_file_hash(&artifact.path)?);
+        }
     }
 
     let mut cc_link = Command::new("cc");
@@ -2271,10 +2341,21 @@ fn link_and_observe_module<'ctx>(
     if config.use_ubsan {
         cc_link.arg("-fsanitize=undefined");
     }
+    let actual_link_command = native_command_argv(&cc_link);
     let status = cc_link.status().map_err(|e| format!("linker: {}", e))?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(format!("linker failed with exit code {:?}", status.code()));
+    }
+
+    artifacts.push(NativeArtifactEvidence::new(
+        "native-binary",
+        bin_path.clone(),
+    ));
+    if keep_tmp {
+        for artifact in &mut artifacts {
+            artifact.hash_before_run = Some(native_file_hash(&artifact.path)?);
+        }
     }
 
     let output = if config.use_valgrind {
@@ -2291,16 +2372,53 @@ fn link_and_observe_module<'ctx>(
             .output()
             .map_err(|e| format!("run: {}", e))?
     };
+    if keep_tmp {
+        for artifact in &mut artifacts {
+            let hash_after_run = native_file_hash(&artifact.path)?;
+            artifact.stable_during_execution = artifact
+                .hash_before_run
+                .as_ref()
+                .map(|hash_before_run| hash_before_run == &hash_after_run);
+            artifact.hash_after_run = Some(hash_after_run);
+        }
+    }
+
     let observation = NativeRunObservation {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code(),
+        actual_link_command,
+        ffi_compile_command,
+        artifacts,
+        kept_tmp_dir: keep_tmp.then(|| tmp_dir.clone()),
     };
 
-    if std::env::var("MIMI_KEEP_TMP").is_err() {
+    if !keep_tmp {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     } else {
         eprintln!("[mimi-test] kept tmp dir: {}", tmp_dir.display());
+        eprintln!(
+            "[mimi-test] native observation exit_code={:?}\nraw stderr follows:\n{}",
+            observation.exit_code, observation.stderr
+        );
+        eprintln!(
+            "[mimi-test] actual link argv: {:?}",
+            observation.actual_link_command
+        );
+        if let Some(command) = &observation.ffi_compile_command {
+            eprintln!("[mimi-test] FFI compile argv: {command:?}");
+        }
+        for artifact in &observation.artifacts {
+            eprintln!(
+                "[mimi-test] artifact role={} path={} hash_before_link={:?} hash_before_run={:?} hash_after_run={:?} stable_during_execution={:?}",
+                artifact.role,
+                artifact.path.display(),
+                artifact.hash_before_link,
+                artifact.hash_before_run,
+                artifact.hash_after_run,
+                artifact.stable_during_execution
+            );
+        }
     }
 
     Ok(observation)
@@ -2314,7 +2432,14 @@ pub(crate) fn link_and_observe_canonical_mir(
     codegen: &crate::codegen::CodeGenerator<'_>,
 ) -> Result<NativeRunObservation, String> {
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    link_and_observe_module(codegen, &E2EConfig::default(), counter)
+    link_and_observe_module(
+        codegen,
+        &E2EConfig {
+            retain_tmp_if_requested: true,
+            ..E2EConfig::default()
+        },
+        counter,
+    )
 }
 
 /// Execute canonical MIR native output with an explicit sanitizer/memory
@@ -2387,6 +2512,20 @@ pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args(
     checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c(src, valgrind_args, None)
 }
 
+/// Focused production Memcheck path whose native inputs are retained only when
+/// both this gate opts in and the caller sets `MIMI_KEEP_TMP`.
+pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args_retaining_if_requested(
+    src: &str,
+    valgrind_args: Vec<String>,
+) -> Result<NativeRunObservation, String> {
+    checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c_with_retention(
+        src,
+        valgrind_args,
+        None,
+        true,
+    )
+}
+
 /// Checked-codegen Memcheck helper with an optional C shim. The shim is useful
 /// for exercising runtime C ABI owner operations that Mimi intentionally does
 /// not admit into the Canonical MIR scalar FFI profile.
@@ -2394,6 +2533,20 @@ pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c
     src: &str,
     valgrind_args: Vec<String>,
     extra_c_src: Option<String>,
+) -> Result<NativeRunObservation, String> {
+    checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c_with_retention(
+        src,
+        valgrind_args,
+        extra_c_src,
+        false,
+    )
+}
+
+fn checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c_with_retention(
+    src: &str,
+    valgrind_args: Vec<String>,
+    extra_c_src: Option<String>,
+    retain_tmp_if_requested: bool,
 ) -> Result<NativeRunObservation, String> {
     let file = parse_prod(src);
     let checked_program = core::check_program(&file).map_err(|diags| {
@@ -2413,6 +2566,7 @@ pub(crate) fn checked_codegen_compile_and_observe_valgrind_with_args_and_extra_c
         use_valgrind: true,
         valgrind_args,
         extra_c_src,
+        retain_tmp_if_requested,
         ..Default::default()
     };
     link_and_observe_module(&codegen, &valgrind_config, counter)

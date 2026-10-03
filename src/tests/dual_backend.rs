@@ -8881,17 +8881,18 @@ fn dual_actor_runtime_value_parameters_and_product_returns_valgrind() {
     let (_, interpreter_stdout) = checked_run_source_with_stdout(ACTOR_RUNTIME_VALUE_ABI_SOURCE);
     assert_eq!(interpreter_stdout.trim(), "42");
 
-    let observation = checked_codegen_compile_and_observe_valgrind_with_args(
-        ACTOR_RUNTIME_VALUE_ABI_SOURCE,
-        vec![
-            "--tool=memcheck".into(),
-            "--error-exitcode=97".into(),
-            "--leak-check=full".into(),
-            "--show-leak-kinds=all".into(),
-            "--errors-for-leak-kinds=definite,indirect".into(),
-        ],
-    )
-    .expect("checked actor-handle tuple program must run under Memcheck");
+    let observation =
+        checked_codegen_compile_and_observe_valgrind_with_args_retaining_if_requested(
+            ACTOR_RUNTIME_VALUE_ABI_SOURCE,
+            vec![
+                "--tool=memcheck".into(),
+                "--error-exitcode=97".into(),
+                "--leak-check=full".into(),
+                "--show-leak-kinds=all".into(),
+                "--errors-for-leak-kinds=definite,indirect,possible".into(),
+            ],
+        )
+        .expect("checked actor-handle tuple program must run under Memcheck");
     assert_eq!(observation.exit_code, Some(0), "{}", observation.stderr);
     assert_eq!(observation.stdout.trim(), "42");
     assert!(
@@ -8899,6 +8900,20 @@ fn dual_actor_runtime_value_parameters_and_product_returns_valgrind() {
         "{}",
         observation.stderr
     );
+    for summary in [
+        "definitely lost: 0 bytes in 0 blocks",
+        "indirectly lost: 0 bytes in 0 blocks",
+        "possibly lost: 0 bytes in 0 blocks",
+    ] {
+        assert!(
+            observation.stderr.contains(summary)
+                || observation
+                    .stderr
+                    .contains("All heap blocks were freed -- no leaks are possible"),
+            "{summary}: {}",
+            observation.stderr
+        );
+    }
 }
 
 // ─── v0.28.19 — Actor real concurrency (5 L1 tests) ──────────────

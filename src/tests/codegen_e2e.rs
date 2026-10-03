@@ -2175,19 +2175,18 @@ fn e2e_valgrind_a2_value_glue_variant_returns() {
             0
         }
     "#;
-    // Rust's std::sync::mpsc initializes a main-thread TLS context on the
-    // first mailbox call. Its 48-byte context is reported by Valgrind as
-    // `possibly lost` until the C process exits, even after the actor worker
-    // and registry have been deterministically torn down. Keep this actor
-    // ownership gate strict for definite/indirect leaks while excluding that
-    // toolchain-owned possible leak; all A2 allocations remain fully checked.
+    // The generated native `main` is C, so Rust cannot run its main-thread TLS
+    // destructor. Actor replies therefore use a TLS-free slot and this gate
+    // checks every Memcheck loss class, including possible loss.
     let actor_valgrind_config = E2EConfig {
         use_valgrind: true,
+        retain_tmp_if_requested: true,
         valgrind_args: vec![
             "--tool=memcheck".into(),
             "--error-exitcode=1".into(),
             "--leak-check=full".into(),
-            "--errors-for-leak-kinds=definite,indirect".into(),
+            "--show-leak-kinds=all".into(),
+            "--errors-for-leak-kinds=definite,indirect,possible".into(),
         ],
         ..Default::default()
     };

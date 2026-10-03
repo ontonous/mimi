@@ -51,8 +51,8 @@ struct ActorMailboxMsg {
     method_id: i32,
     /// Packed argument blob (method params laid out sequentially).
     args: Vec<u8>,
-    /// Channel to send the packed result back to the caller.
-    response: std::sync::mpsc::Sender<ActorMsgResult>,
+    /// TLS-free reply slot for a caller that may be generated C `main`.
+    response: ActorReplySender,
 }
 
 /// Result returned from a mailbox message execution.
@@ -61,6 +61,117 @@ struct ActorMsgResult {
     data: Vec<u8>,
     /// Number of bytes written.
     size: u64,
+}
+
+struct ActorReplyState {
+    receiver_alive: bool,
+    outcome: Option<Result<ActorMsgResult, ()>>,
+}
+
+struct ActorReplyShared {
+    state: Mutex<ActorReplyState>,
+    ready: std::sync::Condvar,
+}
+
+/// One-shot reply sender used by the mailbox worker. Dropping an unsettled
+/// sender wakes the caller with the same disconnected outcome as mpsc::recv.
+struct ActorReplySender {
+    shared: std::sync::Arc<ActorReplyShared>,
+    settled: bool,
+}
+
+/// The caller-side wait avoids std::mpsc's thread-local context because native
+/// Mimi `main` runs as generated C and cannot run Rust's main-thread TLS drop.
+struct ActorReplyReceiver {
+    shared: std::sync::Arc<ActorReplyShared>,
+}
+
+impl ActorReplyReceiver {
+    fn channel() -> (ActorReplySender, Self) {
+        let shared = std::sync::Arc::new(ActorReplyShared {
+            state: Mutex::new(ActorReplyState {
+                receiver_alive: true,
+                outcome: None,
+            }),
+            ready: std::sync::Condvar::new(),
+        });
+        (
+            ActorReplySender {
+                shared: shared.clone(),
+                settled: false,
+            },
+            Self { shared },
+        )
+    }
+
+    fn recv(&self) -> Result<ActorMsgResult, ()> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(outcome) = state.outcome.take() {
+                return outcome;
+            }
+            if !state.receiver_alive {
+                return Err(());
+            }
+            state = self
+                .shared
+                .ready
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+impl ActorReplySender {
+    fn send(mut self, result: ActorMsgResult) -> Result<(), ActorMsgResult> {
+        let mut result = Some(result);
+        {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.receiver_alive && state.outcome.is_none() {
+                state.outcome = Some(Ok(result.take().expect("reply result is present")));
+            }
+        }
+        self.settled = true;
+        self.shared.ready.notify_one();
+        result.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for ActorReplySender {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.receiver_alive && state.outcome.is_none() {
+            state.outcome = Some(Err(()));
+        }
+        self.shared.ready.notify_one();
+    }
+}
+
+impl Drop for ActorReplyReceiver {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.receiver_alive = false;
+        self.shared.ready.notify_one();
+    }
 }
 
 /// Runtime representation of a live actor instance.
@@ -507,7 +618,7 @@ pub unsafe extern "C" fn mimi_actor_call(
         }
     };
 
-    let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ActorMsgResult>();
+    let (resp_tx, resp_rx) = ActorReplyReceiver::channel();
 
     let msg = ActorMailboxMsg {
         method_id,
@@ -931,5 +1042,32 @@ pub unsafe extern "C" fn mimi_broadcast_free(ptr: *mut i64, len: i64) {
     }
     unsafe {
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize));
+    }
+}
+
+#[cfg(test)]
+mod actor_reply_tests {
+    use super::{ActorMsgResult, ActorReplyReceiver};
+
+    #[test]
+    fn reply_slot_delivers_the_worker_result() {
+        let (sender, receiver) = ActorReplyReceiver::channel();
+        assert!(sender
+            .send(ActorMsgResult {
+                data: vec![7],
+                size: 1,
+            })
+            .is_ok());
+        let result = receiver.recv().expect("worker reply");
+        assert_eq!(result.data.as_slice(), &[7]);
+        assert_eq!(result.size, 1);
+    }
+
+    #[test]
+    fn dropped_reply_sender_wakes_a_blocked_caller() {
+        let (sender, receiver) = ActorReplyReceiver::channel();
+        let waiter = std::thread::spawn(move || receiver.recv());
+        drop(sender);
+        assert!(waiter.join().expect("reply wait worker").is_err());
     }
 }
