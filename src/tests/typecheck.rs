@@ -1599,6 +1599,41 @@ func main() -> i32 {
 }
 
 #[test]
+fn typecheck_option_map_err_retains_callback_checked_type() {
+    let src = r#"
+func append_mark(s: string) -> string { s + "!" }
+func main() -> i32 {
+    let present: Option<i32> = Some(7);
+    println(present.map_err(append_mark).unwrap());
+    0
+}
+"#;
+    let file = parse(src);
+    core::check_program(&file)
+        .expect("Option.map_err must retain the callback's checked type for body lowering");
+}
+
+#[test]
+fn typecheck_option_map_err_checks_evaluated_argument() {
+    let src = r#"
+func main() -> i32 {
+    let present: Option<i32> = Some(7);
+    let result = present.map_err(missing_callback);
+    0
+}
+"#;
+    let file = parse(src);
+    let errors = core::check_program(&file)
+        .expect_err("Option.map_err must check the evaluated callback expression");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("missing_callback")),
+        "expected an undefined callback diagnostic, got: {errors:?}"
+    );
+}
+
+#[test]
 fn typecheck_option_map_arg_mismatch_err() {
     // L2: passing a function with the wrong argument type must be rejected.
     let src = r#"

@@ -171,6 +171,12 @@ impl<'a> Checker<'a> {
             "map_err" => {
                 // Option does not have map_err in Rust semantics; keep the legacy
                 // behaviour of returning Option<T> so existing code does not break.
+                // Still check every source argument: checked-body lowering retains
+                // argument expressions (and their evaluation) even though this
+                // legacy Option operation does not invoke the callback.
+                for argument in args {
+                    let _ = self.infer_expr(argument, scopes);
+                }
                 Type::Option(Box::new((*inner).clone()))
             }
             _ => {
