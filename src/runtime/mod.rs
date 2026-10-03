@@ -7,6 +7,7 @@
 // dead_code is suppressed module-wide (see lib.rs): these symbols are called
 // from LLVM IR (invisible to rustc's reachability analysis).
 
+pub mod actor_domain;
 mod epoch;
 mod handle;
 pub(crate) mod list_string;
