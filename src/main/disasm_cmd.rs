@@ -34,7 +34,16 @@ pub fn disasm_file(path: &Path) -> ! {
         }
     };
 
-    let file = match mimi::parser::Parser::new(tokens).parse_file() {
+    // Preserve the same disk source identities used by run/build/verify and
+    // MIR inspection so canonical disassembly observes the same graph receipt.
+    let parser = match mimi::loader::parser_for_path(tokens, path) {
+        Ok(parser) => parser,
+        Err(error) => {
+            eprintln!("error: parse source identity: {error}");
+            process::exit(1);
+        }
+    };
+    let file = match parser.parse_file() {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: parse: {}", e);

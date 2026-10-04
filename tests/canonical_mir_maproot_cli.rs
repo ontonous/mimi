@@ -16,6 +16,44 @@ fn mimi_bin() -> PathBuf {
         .expect("Cargo must provide the mimi binary for CLI route evidence")
 }
 
+#[test]
+fn disasm_and_run_share_disk_source_graph_identity() {
+    let mimi = mimi_bin();
+    let source = fixture("mir_map_root_default_run.mimi");
+    let invoke = |command: &str| {
+        let output = Command::new(&mimi)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .arg(command)
+            .arg(&source)
+            .output()
+            .expect("invoke disk-source CLI consumer");
+        assert!(
+            output.status.success(),
+            "{command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).expect("route diagnostic is UTF-8");
+        let digest = stderr
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("mir_digest="))
+            .expect("consumer must disclose its canonical graph identity")
+            .to_owned();
+        assert_eq!(digest.len(), 64, "complete graph digest: {stderr}");
+        (output.stdout, digest)
+    };
+    let (run_output, run_digest) = invoke("run");
+    let (disasm_output, disasm_digest) = invoke("disasm");
+    assert_eq!(run_output, b"1\n0\n1\n");
+    assert!(
+        !disasm_output.is_empty(),
+        "disassembly must contain bytecode"
+    );
+    assert_eq!(
+        disasm_digest, run_digest,
+        "disasm must retain the same disk source identities as execution"
+    );
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
