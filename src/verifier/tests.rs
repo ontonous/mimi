@@ -1835,6 +1835,13 @@ fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
             .all(|result| result.func_name != "function:main"),
         "a no-contract caller must not acquire a proof verdict"
     );
+    let expected_public = [
+        ("positive", VerifStatus::Proven),
+        ("identity", VerifStatus::Proven),
+        ("false_claim", VerifStatus::Disproven),
+        ("checked_increment", VerifStatus::Disproven),
+    ];
+    let mut public_projections = Vec::new();
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -1844,12 +1851,41 @@ fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
         }
         .expect("public checked verifier");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-        assert!(results.iter().all(|result| result
-            .artifact
-            .as_ref()
-            .is_some_and(|artifact| artifact.engine == ProofArtifact::ENGINE_MIR
-                && artifact.mir_hash == receipt.mir_digest)));
+        assert_eq!(results.len(), expected_public.len());
+        for (name, expected_status) in expected_public.iter() {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == *name)
+                .unwrap_or_else(|| panic!("public verifier omitted {name}: {results:?}"));
+            assert_eq!(
+                &result.status,
+                expected_status,
+                "public {} verifier changed {name}: {}",
+                if dual { "dual" } else { "single" },
+                result.message
+            );
+            let artifact = result
+                .artifact
+                .as_ref()
+                .unwrap_or_else(|| panic!("public verifier omitted MIR artifact for {name}"));
+            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+            assert_eq!(artifact.mir_hash, receipt.mir_digest);
+        }
+        public_projections.push(
+            results
+                .iter()
+                .map(|result| {
+                    (
+                        result.func_name.clone(),
+                        result.status.clone(),
+                        result.message.clone(),
+                        result.constraint_count,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
     }
+    assert_eq!(public_projections[0], public_projections[1]);
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mut direct_native =
         crate::codegen::CodeGenerator::new(&context, "checked_scalar_contracts");
