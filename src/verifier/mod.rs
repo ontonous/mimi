@@ -666,6 +666,18 @@ pub fn verify_ffi_checked_with_source_hash(
         return verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash);
     }
 
+    // A checker-owned declaration whose only call-site obligations are
+    // boolean literals does not need a surface-body walk.  This is a small
+    // but complete typed declaration-root profile for non-scalar ABIs: the
+    // declaration identity and the call-site directory have already been
+    // validated above, and a literal `true`/`false` has no caller state or
+    // ABI-dependent value to encode.  Keep this before the compatibility
+    // adapter so these requests cannot reopen FfiVerifierCompatibility merely
+    // because the foreign parameter/result type is outside ScalarFfi.
+    if let Some(results) = verify_ffi_literal_contracts(program, &source_hash) {
+        return results;
+    }
+
     if !has_extern_call {
         return Ok(Vec::new());
     }
@@ -779,6 +791,128 @@ pub fn verify_ffi_checked_with_source_hash(
         }
         Ok(results)
     }
+}
+
+/// Verify the declaration-root-only FFI profile without reading the retained
+/// source body.  Returning `None` is an explicit admission miss: any
+/// non-literal contract still requires the existing compatibility owner until
+/// a richer typed declaration/call-site receipt is available.
+fn verify_ffi_literal_contracts(
+    program: &crate::core::CheckedProgram,
+    source_hash: &str,
+) -> Option<Result<Vec<VerificationResult>, String>> {
+    use crate::ast::{Expr, Lit};
+
+    fn bool_literal(expression: Option<&Expr>) -> Option<bool> {
+        let expression = expression?.unlocated();
+        match expression {
+            Expr::Literal(Lit::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut saw_called_contract = false;
+    let mut seen_contracts = std::collections::BTreeSet::new();
+    let mut declared_symbols = std::collections::BTreeSet::new();
+    let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
+
+    // Keep the declaration identity gate that the compatibility adapter
+    // performs while constructing its extern directory.  This profile is
+    // allowed to skip the retained body, never the duplicate-symbol check.
+    for block in program.extern_blocks_sorted() {
+        for signature in crate::core::CheckedProgram::extern_signatures_sorted(block) {
+            if !declared_symbols.insert(signature.name.clone()) {
+                return Some(Err(format!(
+                    "TOOL-RESOLUTION-001: duplicate resolved extern symbol '{}'",
+                    signature.name
+                )));
+            }
+        }
+    }
+
+    for site in program.call_sites_sorted() {
+        if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
+        }
+        let Ok(Some(signature)) = program.extern_func_signature_for_call(&site.callee, site.argc)
+        else {
+            return Some(Err(format!(
+                "TOOL-RESOLUTION-001: missing checker-owned extern declaration for call '{}'",
+                site.callee
+            )));
+        };
+        if signature.requires.is_none() && signature.ensures.is_none() {
+            continue;
+        }
+        // The legacy FFI verifier reports one declaration-level obligation,
+        // even when a declaration is called at multiple sites.  Preserve
+        // that API shape so this typed route is a drop-in admission slice.
+        if !seen_contracts.insert(signature.name.clone()) {
+            continue;
+        }
+        saw_called_contract = true;
+
+        let requires = bool_literal(signature.requires.as_ref());
+        let ensures = bool_literal(signature.ensures.as_ref());
+        if (signature.requires.is_some() && requires.is_none())
+            || (signature.ensures.is_some() && ensures.is_none())
+        {
+            // The profile must be whole-request or no-request.  Mixing a
+            // literal declaration with an expression requiring caller state
+            // would otherwise route only part of the request through the
+            // typed path and silently change proof coverage.
+            return None;
+        }
+
+        let status = if requires == Some(false) {
+            VerifStatus::Failed
+        } else if ensures == Some(false) {
+            VerifStatus::Disproven
+        } else {
+            VerifStatus::Proven
+        };
+        let message = if status == VerifStatus::Failed {
+            format!(
+                "extern '{}' has an unsatisfiable literal requires contract",
+                signature.name
+            )
+        } else if status == VerifStatus::Disproven {
+            format!(
+                "extern '{}' literal declaration ensures contract is disproven",
+                signature.name
+            )
+        } else {
+            format!(
+                "extern '{}' literal declaration contract is proven from checker-owned roots",
+                signature.name
+            )
+        };
+        let diagnostic = (status != VerifStatus::Proven).then(|| {
+            crate::diagnostic::Diagnostic::error(message.clone(), site.origin.user_span())
+        });
+        let mut artifact = ProofArtifact::new(
+            "checker-literal-ffi-v1".to_string(),
+            source_hash.to_string(),
+        );
+        artifact.engine = ProofArtifact::ENGINE_RESOLVED.to_string();
+        artifact.resolved_ir_hash = resolved_ir_hash.clone();
+        artifact.integer_model = "literal-boolean".to_string();
+        artifact.float_model = "none".to_string();
+        results.push(VerificationResult {
+            func_name: format!("extern {}", signature.name),
+            status,
+            message,
+            diagnostic,
+            duration_us: 0,
+            constraint_count: usize::from(signature.requires.is_some())
+                + usize::from(signature.ensures.is_some()),
+            artifact: Some(artifact),
+            trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+        });
+    }
+
+    saw_called_contract.then_some(Ok(results))
 }
 
 /// Check whether the Z3 solver is available at runtime.

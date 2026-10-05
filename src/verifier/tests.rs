@@ -722,6 +722,59 @@ extern "C" {
 }
 
 #[test]
+fn verify_ffi_literal_contract_on_non_scalar_abi_is_ast_free() {
+    // The declaration ABI is intentionally outside ScalarFfi (`string`), but
+    // the call-site obligation is a checker-owned boolean literal.  This
+    // admission slice must produce the same declaration-level result shape as
+    // the compatibility verifier without opening FfiVerifierCompatibility.
+    let src = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: true;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_source(src).expect("literal non-scalar FFI contract");
+    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
+    assert_eq!(results[0].func_name, "extern host_text");
+    assert_eq!(results[0].status, VerifStatus::Proven);
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("literal proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_RESOLVED);
+    assert_eq!(artifact.integer_model, "literal-boolean");
+    assert_eq!(artifact.float_model, "none");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "literal declaration root must not read retained source body"
+    );
+}
+
+#[test]
+fn verify_ffi_false_literal_contract_is_failed_without_legacy() {
+    let src = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: false;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_source(src).expect("false literal non-scalar FFI contract");
+    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
+    assert_eq!(results[0].func_name, "extern host_text");
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0]
+        .message
+        .contains("unsatisfiable literal requires"));
+    assert!(results[0].diagnostic.is_some());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn public_checked_verifiers_reject_non_scalar_extern_before_compatibility() {
     let source = r#"
 extern "C" {
