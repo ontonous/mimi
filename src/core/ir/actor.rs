@@ -46,6 +46,9 @@ pub struct ResolvedActorMethodDescriptor {
     pub name: String,
     /// Includes the checker-owned implicit self parameter at position zero.
     pub signature: ResolvedSignature,
+    /// Native mailbox compatibility has an i64 sentinel for an omitted
+    /// result annotation, independent of the checker-inferred body result.
+    pub has_explicit_result: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +413,11 @@ pub(crate) fn build_checked_actor_descriptors(
                     owner,
                     name: name.clone(),
                     signature,
+                    has_explicit_result: syntax
+                        .methods
+                        .iter()
+                        .find(|method| method.name == *name)
+                        .is_some_and(|method| method.ret.is_some()),
                 });
             }
             Ok(ResolvedActorDescriptor {
