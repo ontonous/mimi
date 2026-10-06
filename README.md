@@ -439,7 +439,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status
 
-**Current**: 0.1.11-dev. 0.1.10 (2026-09-29) established the Canonical MIR scalar FFI and island-routing baseline. The 0.1.9 release cut on 2026-08-28 included linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2). The **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11) migrates support island-by-island behind explicit capability gates, and unmodeled shapes fail closed. The 2026-09-06 execution plan milestones **M0–M3 are accepted**, including default-entry migration and scalar FFI execution/verification across the MIR consumers. The scalar FFI profile is deliberately narrow; unsupported string, pointer, aggregate, variadic, parameter-mode, errno, `no_panic`, and non-C declarations are rejected before execution. As of the 2026-09-29 deletion audit, production `raw_ast()` call sites are **0**, while four compatibility owner classes still have remaining dependencies. Ordinary Map/Any and two Actor fallback shapes remain outside MIR admission; default `run`/`build`/`verify` use Canonical MIR only for fully preflighted islands, and this does not claim global VM≡native equivalence. See [FFI limits and linking](readme/10-ffi.md) and [release history](CHANGELOG.md).
+**Current**: 0.2.0-dev. 0.1.11 (2026-10-06) closed the checker-owned ordinary Map/Any ownership profiles, the two original Actor fallback fixtures, and the four production Legacy owner edges behind explicit L1/L2/L3 route gates. The 0.2 line follows the complete V0.2 task and evidence contract; unsupported shapes still fail closed and the project does not claim global VM≡native equivalence. See [FFI limits and linking](readme/10-ffi.md), [release history](CHANGELOG.md), and the local V0.2 handoff record.
 
 
 ### References & External Reviews
@@ -454,15 +454,16 @@ CHANGELOG.md.
 ## Version History
 
 ### 1. Current Version
-- **0.1.11-dev** (current): continuation of island-by-island Canonical MIR admission and
-  owner-safe retirement. **0.1.10** (2026-09-29) delivered scalar FFI closure, default routing,
+- **0.2.0-dev** (current): V0.2 implementation line after the 0.1.11 production route gates
+  closed. **0.1.11** (2026-10-06) delivered ordinary Map/Any ownership, the two original Actor
+  fallback routes, and production Legacy owner closure. **0.1.10** (2026-09-29) delivered scalar FFI closure, default routing,
   and real-world pain-point repairs including FFI component-symbol closure
   (M-004 `extern "C" const` export, M-001 export-prefix); 0.40.x added ownership-metadata
   single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline
   is the Canonical MIR architecture campaign (internal sprint 0.41, targeting 0.1.11);
   M0–M3 execution-plan milestones are accepted and production raw-AST call sites are at zero.
-  Ordinary Map/Any remains fail-closed for native MIR and four compatibility owner classes
-  remain reachable; see the scope and evidence in CHANGELOG.md.
+  V0.2 tasks and decisions remain governed by the local V0.2 evidence contract; see the scope and
+  evidence in CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)
 - **0.1.0 → 0.1.10**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,

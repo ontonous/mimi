@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased] — 0.1.11-dev
+## [Unreleased] — 0.2.0-dev
+
+- 0.1.11-dev 的生产收口已完成：普通 Map/Any 的 checker-owned ownership
+  receipts、两个原始 Actor fallback、以及四类 Legacy owner 的生产可达依赖均已按
+  L1/L2/L3 route gate 收口。复现命令和未通过的全库历史回归保存在本地
+  `devdocs/V0.2/09-0.1.11交接门禁.md`，0.2 工作按 V0.2 任务合同继续推进。
+
+## [0.1.11] — 2026-10-06
 
 - 普通 Map 的 String 写入新增显式复制与 owner 登记：保留字节长度、持久副本共享载荷，
   覆盖或删除后的既有借用保持到最后一个相关 Map 销毁；分配失败显式 trap。编译器依据
